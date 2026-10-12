@@ -16,7 +16,6 @@ use clap::{Args, Subcommand};
 use datafusion::arrow::array::{
     Array, Int64Array, ListArray, StringArray, TimestampMillisecondArray,
 };
-use gage_claude::driver::ClaudeDriver;
 use gage_core::path::shorten_home;
 use gage_core::uuid::short_uuid;
 use gage_query::ContextBuilder;
@@ -38,6 +37,7 @@ use crate::cmd_session::{column, run_query};
 use crate::human::{format_elapsed_ms, format_size};
 use crate::scanner_attach::{self, describe};
 use crate::scanner_spec;
+use crate::source;
 use crate::style::{self, IdKind, styled_id};
 use crate::target::resolve_target;
 
@@ -314,7 +314,7 @@ async fn add_from_scanners(store: &Store, dataset_prefix: &str, names: &[String]
             }
         }
     }
-    let driver = Arc::new(ClaudeDriver::new());
+    let driver = source::default_driver_or_exit("gage attachment add");
     if let Err(e) = scanner_attach::attach_for_scanners(store, &dataset_id, &compiled, driver).await
     {
         eprintln!("gage attachment add: {e}");

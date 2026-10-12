@@ -1,9 +1,9 @@
 //! `gage status` — one-shot health and inventory report.
 //!
-//! Gathers login state, plugin install/version state, corpus item
-//! counts, and disk usage under `~/.gage` behind a spinner, then
-//! prints the whole report at once. Read-only: no dialogs, no session
-//! spawns, no token cost.
+//! Gathers each driver's status (its harness, login, and Gage's
+//! installation), corpus item counts, and disk usage under `~/.gage`
+//! behind a spinner, then prints the whole report at once. Read-only:
+//! no dialogs, no session spawns, no token cost.
 
 use std::fmt::Write as _;
 use std::fs;
@@ -15,14 +15,15 @@ use clap::Args;
 use console::style;
 use datafusion::prelude::SessionContext;
 
-use gage_claude::preflight::{self, AuthStatus, InstalledPlugin, PreflightError};
 use gage_claude::session::SessionListBuilder;
 use gage_core::config::gage_home;
 use gage_query::ContextBuilder;
+use gage_session::{AuthInfo, Driver, DriverStatus, Field, HarnessInfo, InstallInfo};
 use gage_store::Store;
 
 use crate::cmd_note::count_rows;
 use crate::human::format_size;
+use crate::source::driver_registry;
 
 #[derive(Args)]
 pub struct StatusArgs {
@@ -35,10 +36,10 @@ pub async fn run(args: StatusArgs) {
     let spinner = crate::style::spinner("Reading status...");
     let mut out = String::new();
     let mut problems = Vec::new();
-    write_login(&mut out, &mut problems);
-    out.push('\n');
-    write_plugin(&mut out, &mut problems);
-    out.push('\n');
+    for driver in driver_registry().drivers() {
+        write_driver(&mut out, &mut problems, driver.as_ref());
+        out.push('\n');
+    }
     write_counts(&mut out, &mut problems).await;
     out.push('\n');
     write_storage(&mut out, args.verbose);
@@ -50,69 +51,87 @@ pub async fn run(args: StatusArgs) {
     print!("{out}");
 }
 
-fn write_login(out: &mut String, problems: &mut Vec<String>) {
-    w(out, format!("{}", style("Login").bold()));
-    match preflight::auth_status() {
-        Ok(s) if s.logged_in => write_login_ok(out, &s),
-        Ok(_) => {
-            w(out, "  not logged in".to_string());
-            problems.push("Not logged in - run `claude` and complete /login".to_string());
-        }
+/// One driver's block: its harness, login, and Gage installation,
+/// each on a labeled line, with every problem collected for the
+/// closing list.
+fn write_driver(out: &mut String, problems: &mut Vec<String>, driver: &dyn Driver) {
+    w(
+        out,
+        format!("{}", style(format!("Driver {}", driver.name())).bold()),
+    );
+    let status = match driver.status() {
+        Ok(status) => status,
         Err(e) => {
             w(out, "  unavailable".to_string());
-            problems.push(format!("Login status unavailable: {}", pretty_error(&e)));
+            problems.push(format!("Driver {} status unavailable: {e}", driver.name()));
+            return;
         }
+    };
+    let DriverStatus {
+        harness,
+        auth,
+        install,
+    } = status;
+    write_field(out, "Harness", &harness, harness_line);
+    write_field(out, "Login", &auth, auth_line);
+    write_field(out, "Install", &install, install_line);
+    for problem in [harness.problem(), auth.problem(), install.problem()]
+        .into_iter()
+        .flatten()
+    {
+        problems.push(problem_text(problem));
     }
 }
 
-fn write_login_ok(out: &mut String, s: &AuthStatus) {
-    let identity = s.email.as_deref().unwrap_or("unknown account");
-    w(out, format!("  logged in as {identity}"));
-    let mut detail = Vec::new();
-    if let Some(sub) = &s.subscription_type {
-        detail.push(format!("plan {sub}"));
+/// Write `label` and the field's value: the rendered info, a
+/// problem's message, or nothing for an unsupported field.
+fn write_field<T>(out: &mut String, label: &str, field: &Field<T>, render: fn(&T) -> String) {
+    let value = match field {
+        Field::Ok(info) => render(info),
+        Field::Problem { message, .. } => message.clone(),
+        Field::Unsupported => return,
+    };
+    w(out, format!("  {label:<8} {value}"));
+}
+
+fn harness_line(h: &HarnessInfo) -> String {
+    let version = h.version.as_deref().unwrap_or("unknown version");
+    format!("{} {version} {}", h.name, style(h.path.display()).dim())
+}
+
+fn auth_line(a: &AuthInfo) -> String {
+    let mut parts = vec![
+        a.account
+            .clone()
+            .unwrap_or_else(|| "unknown account".into()),
+    ];
+    for (label, value) in [
+        ("plan", &a.plan),
+        ("org", &a.org),
+        ("provider", &a.provider),
+        ("method", &a.method),
+    ] {
+        if let Some(value) = value {
+            parts.push(format!("{}", style(format!("{label} {value}")).dim()));
+        }
     }
-    if let Some(org) = &s.org_name {
-        detail.push(format!("org {org}"));
-    }
-    if let Some(provider) = &s.api_provider {
-        detail.push(format!("provider {provider}"));
-    }
-    if let Some(method) = &s.auth_method {
-        detail.push(format!("method {method}"));
-    }
-    if !detail.is_empty() {
-        w(out, format!("    {}", style(detail.join(" · ")).dim()));
+    parts.join(" · ")
+}
+
+fn install_line(i: &InstallInfo) -> String {
+    let version = i.version.as_deref().unwrap_or("unknown version");
+    let disabled = if i.enabled { "" } else { " (disabled)" };
+    match &i.path {
+        Some(path) => format!("gage v{version}{disabled} {}", style(path.display()).dim()),
+        None => format!("gage v{version}{disabled}"),
     }
 }
 
-fn write_plugin(out: &mut String, problems: &mut Vec<String>) {
-    w(out, format!("{}", style("Plugin").bold()));
-    match preflight::installed_plugin() {
-        Ok(None) => {
-            w(out, "  not installed".to_string());
-            problems.push("Gage plugin not installed - run `gage init`".to_string());
-        }
-        Ok(Some(p)) => write_plugin_entry(out, problems, &p),
-        Err(e) => {
-            w(out, "  unavailable".to_string());
-            problems.push(format!("Plugin status unavailable: {}", pretty_error(&e)));
-        }
-    }
-}
-
-fn write_plugin_entry(out: &mut String, problems: &mut Vec<String>, p: &InstalledPlugin) {
-    let expected = preflight::EXPECTED_VERSION;
-    let disabled = if p.enabled { "" } else { " (disabled)" };
-    w(out, format!("  {} v{}{}", p.id, p.version, disabled));
-    if let Some(path) = &p.install_path {
-        w(out, format!("    {}", style(path).dim()));
-    }
-    if p.version != expected {
-        problems.push(format!(
-            "Gage plugin v{} installed, this gage expects v{} - run `gage init`",
-            p.version, expected,
-        ));
+fn problem_text((message, remedy): (&str, &str)) -> String {
+    if remedy.is_empty() {
+        message.to_string()
+    } else {
+        format!("{message} - {remedy}")
     }
 }
 
@@ -224,11 +243,4 @@ fn write_problems(out: &mut String, problems: &[String]) {
 /// dance without discarding a fallible operation.
 fn w(out: &mut String, line: String) {
     writeln!(out, "{line}").expect("String write is infallible");
-}
-
-fn pretty_error(e: &PreflightError) -> String {
-    match e {
-        PreflightError::Other(m) => m.clone(),
-        other => other.to_string(),
-    }
 }

@@ -18,9 +18,11 @@ use datafusion::datasource::TableProvider;
 
 pub mod agent;
 pub mod filter;
+pub mod status;
 pub mod system_col;
 
 pub use agent::{AgentEvent, AgentMcp, AgentOutcome, AgentSession, AgentSpec, SystemPrompt};
+pub use status::{AuthInfo, DriverStatus, Field, HarnessInfo, InstallInfo};
 pub use system_col::{SYSTEM_META_KEY, is_system, system};
 
 pub trait Driver: Send + Sync {
@@ -80,20 +82,53 @@ pub trait Driver: Send + Sync {
         name.to_string()
     }
 
-    /// Start an agent on this driver's harness. The default is that
-    /// the driver does not run agents.
-    fn run_agent(&self, _spec: AgentSpec) -> Result<Box<dyn AgentSession>, DriverError> {
+    /// Start an agent on this driver's harness and return the handle
+    /// that drives it. The default is that the driver does not start
+    /// agents.
+    fn start_agent(&self, _spec: AgentSpec) -> Result<Box<dyn AgentSession>, DriverError> {
         Err(DriverError::Other(format!(
-            "driver {} does not run agents",
+            "driver {} does not start agents",
             self.name()
         )))
+    }
+
+    /// Verify this driver can serve a scan's support functions, today
+    /// starting agents. A scan checks this before it writes anything.
+    /// The error is the user-facing reason. The default is ready.
+    fn scan_ready(&self) -> Result<(), DriverError> {
+        Ok(())
+    }
+
+    /// Start an interactive session in the harness that resolves
+    /// `issue_ids`, every pending and open issue when empty, with
+    /// Gage's tools available to it. The driver verifies its own
+    /// preconditions before launching. `model` is as the user gave it;
+    /// `None` is the harness's configured model. `extra_args` pass to
+    /// the harness verbatim. The default is that the driver does not
+    /// start resolve sessions.
+    fn start_resolve_session(
+        &self,
+        _issue_ids: &[String],
+        _model: Option<&str>,
+        _extra_args: &[String],
+    ) -> Result<Box<dyn ResolveSession>, DriverError> {
+        Err(DriverError::Other(format!(
+            "driver {} does not start resolve sessions",
+            self.name()
+        )))
+    }
+
+    /// What this driver reports about itself. The default reports
+    /// every field unsupported.
+    fn status(&self) -> Result<DriverStatus, DriverError> {
+        Ok(DriverStatus::default())
     }
 
     /// Install Gage into this driver's harness. `mcp_cmd[0]` is the
     /// Gage executable path; `mcp_cmd[1..]` are the arguments the
     /// harness should launch it with. Progress is reported through
     /// `ui`. The default is that the driver does not install Gage.
-    fn install_gage(
+    fn system_init(
         &self,
         _mcp_cmd: &[&str],
         _ui: &mut dyn InstallUi,
@@ -106,18 +141,23 @@ pub trait Driver: Send + Sync {
 
     /// Remove Gage from this driver's harness. The default is that
     /// the driver does not install Gage.
-    fn uninstall_gage(&self, _ui: &mut dyn InstallUi) -> Result<(), DriverError> {
+    fn system_remove(&self, _ui: &mut dyn InstallUi) -> Result<(), DriverError> {
         Err(DriverError::Other(format!(
             "driver {} does not install Gage",
             self.name()
         )))
     }
+}
 
-    /// Whether Gage is installed in this driver's harness. The
-    /// default is `NotApplicable`.
-    fn gage_install_status(&self) -> Result<GageInstallStatus, DriverError> {
-        Ok(GageInstallStatus::NotApplicable)
-    }
+/// A running interactive resolve session. The session owns the
+/// terminal; the caller waits for it to end.
+pub trait ResolveSession: Send {
+    /// Block until the session ends. Returns the exit code, or -1
+    /// when the process was signaled.
+    fn wait(&mut self) -> std::io::Result<i32>;
+
+    /// Terminate the session.
+    fn kill(&mut self) -> std::io::Result<()>;
 }
 
 /// Progress sink for an install or uninstall. The CLI implements it
@@ -132,29 +172,13 @@ pub trait InstallUi {
     fn warn(&mut self, message: &str);
 }
 
-/// Result of [`Driver::install_gage`].
+/// Result of [`Driver::system_init`].
 #[derive(Debug, Clone)]
 pub struct InstallReport {
     /// The name under which the harness now knows Gage.
     pub registered_as: String,
     /// Human-readable per-step notes for a post-install summary.
     pub notes: Vec<String>,
-}
-
-/// Reported by [`Driver::gage_install_status`].
-#[derive(Debug, Clone)]
-pub enum GageInstallStatus {
-    /// This driver's harness is not present on the machine, or the
-    /// driver does not install Gage.
-    NotApplicable,
-    /// The harness is present but Gage is not installed in it.
-    NotInstalled,
-    /// Gage is installed in the harness under `registered_as`.
-    Installed { registered_as: String },
-    /// Gage is installed but out of sync with this build (e.g. the
-    /// gage binary path recorded in the harness no longer matches
-    /// this binary).
-    Stale { reason: String },
 }
 
 /// A handle over one source of native sessions. Dropping the handle

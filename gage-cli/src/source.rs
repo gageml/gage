@@ -9,9 +9,12 @@ use gage_registry::driver::DriverRegistry;
 use gage_session::{Driver, DriverError, Source};
 
 /// Long help shared by every `--source` option
-pub const SOURCE_HELP: &str = "Agent session directory as SCHEME:PATH. The scheme names the \
-agent whose sessions are read; a value with no scheme uses the default agent. The only scheme \
-today is claude, which defaults to Claude Code's session directory.";
+pub const SOURCE_HELP: &str = "Session directory as SCHEME:PATH. A value with no scheme uses \
+the default driver. Schemes are defined by drivers:
+
+  claude  Claude Code sessions under \
+PATH/projects; without PATH, the
+          Claude Code home directory";
 
 /// The drivers this CLI build registers
 pub fn driver_registry() -> DriverRegistry {
@@ -30,6 +33,17 @@ pub fn resolve_source(
         .driver_for(source)
         .ok_or_else(|| "no default session driver registered".to_string())?;
     Ok((driver, source.to_string()))
+}
+
+/// The default driver, or print `command: <error>` and exit.
+pub fn default_driver_or_exit(command: &str) -> Arc<dyn Driver> {
+    match driver_registry().default() {
+        Some(driver) => driver,
+        None => {
+            eprintln!("{command}: no default session driver registered");
+            std::process::exit(1);
+        }
+    }
 }
 
 /// Open `source` through the registry, or print `command: <error>`

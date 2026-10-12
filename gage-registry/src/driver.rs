@@ -69,6 +69,11 @@ impl DriverRegistry {
         self.default.clone()
     }
 
+    /// Every registered driver, in registration order.
+    pub fn drivers(&self) -> &[Arc<dyn Driver>] {
+        &self.drivers
+    }
+
     /// The driver that handles `source`: the one registered for its
     /// scheme when it has a registered scheme, else the default.
     pub fn driver_for(&self, source: &str) -> Option<Arc<dyn Driver>> {

@@ -15,8 +15,6 @@ const WIDTH_EXCEPTIONS: &[(&str, &str)] = &[("gage attachment add", "-r, --root 
 
 /// Implementation vocabulary that must not reach a user
 const INTERNAL_TERMS: &[&str] = &[
-    "harness",
-    "driver",
     "tree-ish",
     "refs",
     "attach task",

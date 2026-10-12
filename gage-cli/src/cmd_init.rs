@@ -60,7 +60,7 @@ fn install_dialog(args: &InitArgs) -> Result<DialogResult, DialogError> {
 
     let mut ui = SpinnerUi::default();
     driver
-        .install_gage(&[gage_bin_str, "mcp"], &mut ui)
+        .system_init(&[gage_bin_str, "mcp"], &mut ui)
         .map_err(|e| DialogError::Other(anyhow::anyhow!("{e}")))?;
     ui.finish();
 
@@ -103,7 +103,7 @@ fn remove_dialog(args: &InitArgs) -> Result<DialogResult, DialogError> {
 
     let mut ui = SpinnerUi::default();
     driver
-        .uninstall_gage(&mut ui)
+        .system_remove(&mut ui)
         .map_err(|e| DialogError::Other(anyhow::anyhow!("{e}")))?;
     ui.finish();
 

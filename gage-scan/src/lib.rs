@@ -40,7 +40,7 @@ use gage_runtime::{
     AgentPoolDelta, CURRENT_RUNTIME_SCHEME, Fail, Level, OUTPUT_SINK, Output, OutputSink, SCAN_CTX,
     ScanContext, ScanDatasetRef, TaskOutput, is_ignore,
 };
-use gage_session::Driver;
+use gage_session::{Driver, DriverError};
 use gage_store::{
     DatasetStore, IssueStore, NoteStore, ScanAttrs, ScanStore, Store, StoreError, TaskAttrs,
     TaskCounts, TaskStatus,
@@ -321,6 +321,8 @@ pub enum ScanError {
     Store(StoreError),
     /// A planned task needs an attachment the dataset does not have
     MissingAttachments(Vec<MissingAttachment>),
+    /// The driver cannot serve the scan; the message is the driver's
+    NotReady(DriverError),
 }
 
 /// One `attachments.needs` pattern of a planned task that no
@@ -348,6 +350,7 @@ impl fmt::Display for ScanError {
                     .collect();
                 write!(f, "the dataset has no attachment for: {}", needs.join(", "))
             }
+            ScanError::NotReady(e) => write!(f, "{e}"),
         }
     }
 }
@@ -442,6 +445,7 @@ pub async fn scan(
         None => None,
     };
     let attachment_warnings = check_attachments(store, config, scanners, &plan)?;
+    config.driver.scan_ready().map_err(ScanError::NotReady)?;
     let task_names: Vec<Vec<String>> = scanners
         .iter()
         .map(|s| {
@@ -1601,7 +1605,7 @@ mod tests {
         ) -> Result<Box<dyn StoredSession>, DriverError> {
             Err(DriverError::Other("read_stored not used".into()))
         }
-        fn run_agent(&self, spec: AgentSpec) -> Result<Box<dyn AgentSession>, DriverError> {
+        fn start_agent(&self, spec: AgentSpec) -> Result<Box<dyn AgentSession>, DriverError> {
             assert_eq!(spec.prompt, "hello");
             assert_eq!(spec.model.as_deref(), Some("medium"));
             *self.mcp_seen.lock().unwrap() = spec.mcp.clone();
@@ -1670,7 +1674,7 @@ mod tests {
         ) -> Result<Box<dyn StoredSession>, DriverError> {
             Err(DriverError::Other("read_stored not used".into()))
         }
-        fn run_agent(&self, spec: AgentSpec) -> Result<Box<dyn AgentSession>, DriverError> {
+        fn start_agent(&self, spec: AgentSpec) -> Result<Box<dyn AgentSession>, DriverError> {
             Ok(Box::new(echo_agent(spec, Arc::clone(&self.cleaned_up))))
         }
     }
@@ -1784,7 +1788,7 @@ mod tests {
         ) -> Result<Box<dyn StoredSession>, DriverError> {
             Err(DriverError::Other("read_stored not used".into()))
         }
-        fn run_agent(&self, spec: AgentSpec) -> Result<Box<dyn AgentSession>, DriverError> {
+        fn start_agent(&self, spec: AgentSpec) -> Result<Box<dyn AgentSession>, DriverError> {
             use std::sync::atomic::Ordering::SeqCst;
             let live = self.live.fetch_add(1, SeqCst) + 1;
             self.max_live.fetch_max(live, SeqCst);
@@ -4532,6 +4536,75 @@ mod tests {
         .unwrap();
         assert_eq!(outcome.attrs.tasks.completed, 1);
         assert!(warnings(&events).is_empty(), "{:?}", warnings(&events));
+    }
+
+    /// A driver that cannot serve a scan stops it before anything is
+    /// written, with the driver's own reason.
+    #[tokio::test]
+    async fn a_driver_that_is_not_ready_stops_the_scan_before_it_starts() {
+        struct NotReadyDriver;
+
+        impl Driver for NotReadyDriver {
+            fn name(&self) -> &'static str {
+                "unready"
+            }
+            fn version(&self) -> &'static str {
+                "0"
+            }
+            fn schemes(&self) -> &'static [&'static str] {
+                &["unready"]
+            }
+            fn open_source(&self, _source: &str) -> Result<Box<dyn Source>, DriverError> {
+                Err(DriverError::Other("not used".into()))
+            }
+            fn write_native(
+                &self,
+                _session: &mut dyn NativeSession,
+                _sink: &mut dyn ContentSink,
+            ) -> Result<String, DriverError> {
+                Err(DriverError::Other("not used".into()))
+            }
+            fn read_stored(
+                &self,
+                _native_id: String,
+                _content_format: &str,
+                _source: Box<dyn ContentSource>,
+            ) -> Result<Box<dyn StoredSession>, DriverError> {
+                Err(DriverError::Other("not used".into()))
+            }
+            fn scan_ready(&self) -> Result<(), DriverError> {
+                Err(DriverError::Other(
+                    "Not logged in. Run `login` first.".into(),
+                ))
+            }
+        }
+
+        let (_dir, compiled) = compile_source(HELLO);
+        let (tmp, store) = open_store();
+        let scans_dir = tmp.path().join("scans");
+        let config = ScanConfig {
+            scans_dir: &scans_dir,
+            gage_version: "test-version",
+            dataset: None,
+            jobs: 1,
+            agent_jobs: 1,
+            driver: Arc::new(NotReadyDriver),
+            invalidate: false,
+            ignore_missing_attachments: false,
+        };
+        let mut events = Vec::new();
+        let err = scan(
+            &store,
+            &config,
+            &[compiled.unwrap()],
+            &CancellationToken::new(),
+            |e| events.push(e),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.to_string(), "Not logged in. Run `login` first.");
+        assert!(!scans_dir.exists(), "nothing is written before the check");
+        assert!(events.is_empty(), "{events:?}");
     }
 
     /// `key(k).once()` writes once: a second scan finds the issue live

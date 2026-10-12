@@ -1,15 +1,14 @@
-//! `gage resolve` — resolve issues in an interactive Claude Code session.
+//! `gage resolve` — resolve issues in an interactive session the
+//! default driver starts in its harness.
 
 use clap::Args;
 use cliclack as cli;
 use console::{Term, style};
-use gage_claude::model::{configured_model, resolve_model};
-use gage_claude::preflight;
-use gage_claude::resolve::resolve_command;
 use gage_store::{IssueStore, Store};
 
 use crate::dialog::{self, DialogError, DialogResult};
-use crate::model_prompt::{self, DefaultModel};
+use crate::model_prompt;
+use crate::source;
 
 #[derive(Args)]
 pub struct ResolveArgs {
@@ -28,9 +27,9 @@ pub struct ResolveArgs {
     #[arg(short, long)]
     yes: bool,
 
-    /// Additional arguments passed to claude
-    #[arg(last = true, value_name = "CLAUDE_ARGS")]
-    claude_args: Vec<String>,
+    /// Additional arguments passed through to harness
+    #[arg(last = true, value_name = "ARGS")]
+    extra_args: Vec<String>,
 }
 
 pub fn run(args: ResolveArgs) {
@@ -59,22 +58,19 @@ fn run_dialog(args: &ResolveArgs) -> Result<DialogResult, DialogError> {
         }
     }
 
-    preflight::check().map_err(|e| DialogError::Failed(e.to_string()))?;
-
     cli::log::info(dialog::wrap_text(
         &Term::stdout(),
-        "You are about to start an interactive Claude Code session to resolve issues. \
+        "You are about to start an interactive session to resolve issues. \
          Standard token usage applies for the selected model.",
     ))?;
     cli::log::step(format!("Issues\n{}", style(issues_label(&ids)).dim()))?;
 
     let model = match &args.model {
         Some(m) => {
-            let model = resolve_model(m).to_string();
-            cli::log::step(format!("Model\n{}", style(&model).dim()))?;
-            model
+            cli::log::step(format!("Model\n{}", style(m).dim()))?;
+            Some(m.clone())
         }
-        None => prompt_model()?,
+        None => model_prompt::prompt_model_ranked()?,
     };
 
     if !args.yes {
@@ -86,13 +82,16 @@ fn run_dialog(args: &ResolveArgs) -> Result<DialogResult, DialogError> {
         }
     }
 
-    let status = resolve_command(&ids, &model, &args.claude_args)?
-        .status()
-        .map_err(|e| DialogError::Other(anyhow::anyhow!("failed to run claude: {e}")))?;
-    if !status.success() {
+    let driver = source::default_driver_or_exit("gage resolve");
+    let mut session = driver
+        .start_resolve_session(&ids, model.as_deref(), &args.extra_args)
+        .map_err(|e| DialogError::Failed(e.to_string()))?;
+    let code = session
+        .wait()
+        .map_err(|e| DialogError::Other(anyhow::anyhow!("waiting for the session: {e}")))?;
+    if code != 0 {
         return Err(DialogError::Failed(format!(
-            "claude exited with status {}",
-            status.code().unwrap_or(1)
+            "resolve session exited with status {code}"
         )));
     }
     Ok(DialogResult::from("Resolve session ended"))
@@ -114,15 +113,4 @@ fn open_store(command: &str) -> Store {
             std::process::exit(1);
         }
     }
-}
-
-fn prompt_model() -> Result<String, DialogError> {
-    let configured = std::env::current_dir()
-        .ok()
-        .and_then(|cwd| configured_model(&cwd));
-    let default = configured.map(|m| DefaultModel {
-        model: m,
-        note: "from settings",
-    });
-    model_prompt::prompt_model_ranked(default)
 }

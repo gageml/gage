@@ -14,7 +14,6 @@ use datafusion::arrow::array::{
 };
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::prelude::SessionContext;
-use gage_claude::driver::ClaudeDriver;
 use gage_claude::session::SessionInfo;
 use gage_core::config::Config;
 use gage_core::stopwatch::Stopwatch;
@@ -26,7 +25,7 @@ use gage_runtime::{LOG_TARGET, Output, TaskOutput};
 use gage_scan::recover::{self, Recovered};
 use gage_scan::scan_dir::scans_dir;
 use gage_scan::{CompiledScanner, Event, ScanConfig, ScanError, ScanOutput, summary_line};
-use gage_session::Driver;
+use gage_session::{Driver, ResolveSession};
 use gage_store::ScanDirLayout;
 use gage_store::{
     DatasetStore, IssueStatus, IssueStore, SCAN_TYPE, ScanStore, StatusReason, Store, StoreError,
@@ -66,6 +65,7 @@ use crate::human::{format_duration, format_elapsed_ms};
 use crate::scanner_attach;
 use crate::scanner_spec::{self, ResolvedSpec};
 use crate::session_filter::{FILTER_ARG_NAMES, SessionFilterArgs, select_sessions};
+use crate::source;
 use crate::style as s;
 
 /// Install the `tracing` subscriber for a scan: warnings and above to
@@ -572,6 +572,16 @@ impl ScanHost for StoreHost {
             .comment(issue_id, author, message)
             .map(|_| ())
             .map_err(|e| e.to_string())
+    }
+
+    fn start_resolve_session(&self, issue_ids: &[String]) -> io::Result<Box<dyn ResolveSession>> {
+        let driver = self
+            .registry
+            .default()
+            .ok_or_else(|| io::Error::other("no default session driver registered"))?;
+        driver
+            .start_resolve_session(issue_ids, None, &[])
+            .map_err(|e| io::Error::other(e.to_string()))
     }
 }
 
@@ -1708,7 +1718,7 @@ async fn prepare_scan_dialog(
 /// the progress view, and print its summary line. A canceled scan or
 /// one with a failed task exits with status 1.
 async fn run_prepared(prep: ScanPrep, store: &Store) {
-    let driver: Arc<dyn Driver> = Arc::new(ClaudeDriver::new());
+    let driver = source::default_driver_or_exit("gage scan");
     let dataset_sha = match materialize_dataset(
         prep.plan,
         store,

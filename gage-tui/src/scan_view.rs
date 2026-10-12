@@ -21,10 +21,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use gage_claude::model::resolved_model;
-use gage_claude::resolve::resolve_command;
 use gage_core::stopwatch::Stopwatch;
 use gage_core::task::{task_display, task_name_display};
+use gage_session::ResolveSession;
 use gage_store::{IssueStatus, StatusReason, url};
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{
@@ -77,6 +76,10 @@ pub trait ScanHost: Send + Sync {
         message: Option<&str>,
     ) -> Result<(), String>;
     fn add_issue_comment(&self, issue_id: &str, author: &str, message: &str) -> Result<(), String>;
+    /// Start the interactive resolve session for `issue_ids` in the
+    /// default driver's harness; the session owns the terminal until
+    /// it ends
+    fn start_resolve_session(&self, issue_ids: &[String]) -> io::Result<Box<dyn ResolveSession>>;
 }
 
 /// One row of the open-scan picker.
@@ -762,24 +765,23 @@ async fn run_resolve_session(
         ClearTerm(ClearType::All),
         cursor::MoveTo(0, 0)
     )?;
-    println!("Starting Claude Code…");
+    println!("Starting resolve session…");
     let issue_ids: &[String] = match &scope {
         ResolveScope::Issue(id) => std::slice::from_ref(id),
         ResolveScope::Issues(ids) => ids,
     };
-    let result =
-        resolve_command(issue_ids, &resolved_model(None), &[]).and_then(|mut cmd| cmd.status());
+    let result = state
+        .host
+        .start_resolve_session(issue_ids)
+        .and_then(|mut session| session.wait());
     *terminal = ratatui::init();
     push_keyboard_enhancements();
     terminal.clear()?;
     *stop_input = Arc::new(AtomicBool::new(false));
     *input = spawn_input_thread(Arc::clone(stop_input));
     match result {
-        Ok(status) if status.success() => {}
-        Ok(status) => state.push_log(format!(
-            "Resolve session exited with status {}",
-            status.code().unwrap_or(1)
-        )),
+        Ok(0) => {}
+        Ok(code) => state.push_log(format!("Resolve session exited with status {code}")),
         Err(e) => state.push_log(format!("Resolve session failed: {e}")),
     }
     match &scope {
@@ -3639,6 +3641,13 @@ mod tests {
             _message: &str,
         ) -> Result<(), String> {
             Err(format!("no issue {issue_id}"))
+        }
+
+        fn start_resolve_session(
+            &self,
+            _issue_ids: &[String],
+        ) -> io::Result<Box<dyn ResolveSession>> {
+            Err(io::Error::other("no host"))
         }
     }
 

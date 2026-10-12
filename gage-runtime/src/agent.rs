@@ -239,7 +239,7 @@ async fn start_in_span(c: CallAgent, span: Span) -> Result<Agent, Error> {
     let permit = acquire_permit(&ctx, sink).await;
     let session = ctx
         .driver
-        .run_agent(spec)
+        .start_agent(spec)
         .map_err(|e| Error::agent(format!("call_agent: {e}")))?;
     tracing::info!(tools, "agent started");
     Ok(Agent {

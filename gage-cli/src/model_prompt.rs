@@ -4,42 +4,33 @@ use cliclack as cli;
 
 use crate::dialog::DialogError;
 
-/// The "Default" option shown at the top of the resolve Model prompt.
-/// The caller supplies the model that would be used if the user did
-/// not pick a model explicitly, plus a short note describing where
-/// that default came from.
-pub struct DefaultModel {
-    pub model: String,
-    pub note: &'static str,
-}
-
-/// Prompt for a `claude --model` value, ordered from best to worst.
-/// Used by `gage resolve` where a quality ranking helps the user pick.
-/// When `default` is provided, a "Default (MODEL)" entry sits at the
-/// top and is preselected.
-pub fn prompt_model_ranked(default: Option<DefaultModel>) -> Result<String, DialogError> {
-    let mut select = cli::select("Model");
-    let initial = default
-        .as_ref()
-        .map(|d| d.model.clone())
-        .unwrap_or_else(|| "sonnet".into());
-    if let Some(d) = &default {
-        select = select.item(d.model.clone(), format!("Default ({})", d.model), d.note);
-    }
+/// Prompt for a model, ordered from best to worst. Used by `gage
+/// resolve` where a quality ranking helps the user pick. The
+/// preselected "Default" entry returns `None`: the harness's
+/// configured model, as the driver resolves it.
+pub fn prompt_model_ranked() -> Result<Option<String>, DialogError> {
+    let mut select = cli::select("Model").item(
+        DEFAULT.into(),
+        "Default",
+        "the model the harness is configured with",
+    );
     for (value, label, hint) in ranked_items() {
         select = select.item(value.into(), label, hint);
     }
     let model = select
         .item(CUSTOM.into(), "Other", "enter a model name")
-        .initial_value(initial)
+        .initial_value(DEFAULT.into())
         .interact()?;
+    if model == DEFAULT {
+        return Ok(None);
+    }
     if model == CUSTOM {
         let custom: String = cli::input("Model")
             .placeholder("e.g. claude-sonnet-4-6")
             .interact()?;
-        return Ok(custom);
+        return Ok(Some(custom));
     }
-    Ok(model)
+    Ok(Some(model))
 }
 
 fn ranked_items() -> [(&'static str, &'static str, &'static str); 6] {
@@ -66,3 +57,5 @@ fn model_entries() -> (Entry, Entry, Entry, Entry, Entry, Entry) {
 
 /// Select sentinel for the custom entry of the model prompt.
 const CUSTOM: &str = "\0custom";
+/// Select sentinel for the default entry of the model prompt.
+const DEFAULT: &str = "\0default";

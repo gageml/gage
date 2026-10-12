@@ -13,7 +13,7 @@ use crate::proc::find_claude;
 /// `--model` and is required — a claude session never starts on the
 /// user's default model; `extra_args` pass to claude verbatim, ahead
 /// of the prompt.
-pub fn resolve_command(
+pub(crate) fn resolve_command(
     issue_ids: &[String],
     model: &str,
     extra_args: &[String],

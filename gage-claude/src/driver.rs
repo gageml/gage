@@ -15,20 +15,25 @@ use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::process::Child;
 use std::sync::{Arc, OnceLock};
 use std::time::SystemTime;
 
 use gage_core::config::plugin_marketplace_dir;
 use gage_session::{
-    AgentSession, AgentSpec, ContentSink, ContentSource, Driver, DriverError, DriverTables, Entry,
-    GageInstallStatus, InstallReport, InstallUi, NativeLookupError, NativeSession, SessionAttrs,
-    Source, StoredSession, split_scheme,
+    AgentSession, AgentSpec, AuthInfo, ContentSink, ContentSource, Driver, DriverError,
+    DriverStatus, DriverTables, Entry, Field, HarnessInfo, InstallInfo, InstallReport, InstallUi,
+    NativeLookupError, NativeSession, ResolveSession, SessionAttrs, Source, StoredSession,
+    split_scheme,
 };
 
 use crate::home::ClaudeHome;
 use crate::index::{IndexStore, SessionSummary, cache_dir_for, derive_entry, derive_session};
+use crate::model::{configured_model, resolve_model, resolved_model};
 use crate::plugin;
+use crate::preflight;
 use crate::proc::find_claude;
+use crate::resolve::resolve_command;
 use crate::session::{
     SESSION_RE, SessionInfo, SessionListBuilder, delete_session, encode_project_dir,
     is_agent_tmp_slug, projects_dir,
@@ -42,6 +47,8 @@ const MCP_SERVER_NAME: &str = "gage";
 const PLUGIN_ID: &str = "gage@gage";
 
 const NAME: &str = "claude";
+/// The harness's display name
+const HARNESS_NAME: &str = "Claude Code";
 const SCHEMES: &[&str] = &["claude"];
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const SESSION_TYPE: &str = "claude";
@@ -137,18 +144,56 @@ impl Driver for ClaudeDriver {
 
     /// Spawn a `claude -p` child; see [`crate::agent`]. Requires a
     /// tokio runtime.
-    fn run_agent(&self, spec: AgentSpec) -> Result<Box<dyn AgentSession>, DriverError> {
+    fn start_agent(&self, spec: AgentSpec) -> Result<Box<dyn AgentSession>, DriverError> {
         Ok(Box::new(crate::agent::start(spec)?))
     }
 
-    fn install_gage(
+    /// An agent starts when `claude` is on PATH and logged in.
+    fn scan_ready(&self) -> Result<(), DriverError> {
+        preflight::check_auth().map_err(|e| DriverError::Other(e.to_string()))
+    }
+
+    /// Start the interactive `/gage:resolve` session. The plugin must
+    /// be installed at this build's version and the user logged in.
+    /// `None` for the model is the model Claude Code is configured
+    /// with from the current directory, else the driver's default;
+    /// a given model has its size alias resolved.
+    fn start_resolve_session(
+        &self,
+        issue_ids: &[String],
+        model: Option<&str>,
+        extra_args: &[String],
+    ) -> Result<Box<dyn ResolveSession>, DriverError> {
+        preflight::check().map_err(|e| DriverError::Other(e.to_string()))?;
+        let model = match model {
+            Some(m) => resolve_model(m).to_string(),
+            None => std::env::current_dir()
+                .ok()
+                .and_then(|cwd| configured_model(&cwd))
+                .unwrap_or_else(|| resolved_model(None)),
+        };
+        let child = resolve_command(issue_ids, &model, extra_args)?
+            .spawn()
+            .map_err(DriverError::Io)?;
+        Ok(Box::new(ClaudeResolveSession(child)))
+    }
+
+    fn status(&self) -> Result<DriverStatus, DriverError> {
+        Ok(DriverStatus {
+            harness: harness_status(),
+            auth: auth_status(),
+            install: install_status(),
+        })
+    }
+
+    fn system_init(
         &self,
         mcp_cmd: &[&str],
         ui: &mut dyn InstallUi,
     ) -> Result<InstallReport, DriverError> {
         if mcp_cmd.is_empty() {
             return Err(DriverError::Other(
-                "install_gage: mcp_cmd must name an executable".into(),
+                "system_init: mcp_cmd must name an executable".into(),
             ));
         }
         let claude_bin = find_claude().map_err(DriverError::Io)?;
@@ -191,7 +236,7 @@ impl Driver for ClaudeDriver {
         })
     }
 
-    fn uninstall_gage(&self, ui: &mut dyn InstallUi) -> Result<(), DriverError> {
+    fn system_remove(&self, ui: &mut dyn InstallUi) -> Result<(), DriverError> {
         let claude_bin = find_claude().map_err(DriverError::Io)?;
         ui.step("Uninstalling plugin");
         run_claude_best_effort(&claude_bin, &["plugin", "uninstall", PLUGIN_ID], ui);
@@ -205,19 +250,121 @@ impl Driver for ClaudeDriver {
         ui.step_done();
         Ok(())
     }
+}
 
-    fn gage_install_status(&self) -> Result<GageInstallStatus, DriverError> {
-        if find_claude().is_err() {
-            return Ok(GageInstallStatus::NotApplicable);
+/// The resolve session's `claude` process.
+struct ClaudeResolveSession(Child);
+
+impl ResolveSession for ClaudeResolveSession {
+    fn wait(&mut self) -> io::Result<i32> {
+        Ok(self.0.wait()?.code().unwrap_or(-1))
+    }
+
+    fn kill(&mut self) -> io::Result<()> {
+        self.0.kill()
+    }
+}
+
+/// The `claude` binary on PATH and its version from `claude --version`,
+/// whose first token is the version.
+fn harness_status() -> Field<HarnessInfo> {
+    let path = match find_claude() {
+        Ok(path) => path,
+        Err(_) => {
+            return Field::Problem {
+                info: None,
+                message: format!("{HARNESS_NAME} not found on PATH"),
+                remedy: format!("Install {HARNESS_NAME}"),
+            };
         }
-        let marketplace = plugin_marketplace_dir();
-        let mcp_file = marketplace.join(".mcp.json");
-        if !mcp_file.exists() {
-            return Ok(GageInstallStatus::NotInstalled);
+    };
+    let version = std::process::Command::new(&path)
+        .arg("--version")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .split_whitespace()
+                .next()
+                .map(String::from)
+        });
+    Field::Ok(HarnessInfo {
+        name: HARNESS_NAME.to_string(),
+        version,
+        path,
+    })
+}
+
+fn auth_status() -> Field<AuthInfo> {
+    match preflight::auth_status() {
+        Ok(s) => {
+            let info = AuthInfo {
+                logged_in: s.logged_in,
+                account: s.email,
+                plan: s.subscription_type,
+                org: s.org_name,
+                provider: s.api_provider,
+                method: s.auth_method,
+            };
+            if info.logged_in {
+                Field::Ok(info)
+            } else {
+                Field::Problem {
+                    info: Some(info),
+                    message: "not logged in".to_string(),
+                    remedy: "run `claude` and complete /login".to_string(),
+                }
+            }
         }
-        Ok(GageInstallStatus::Installed {
-            registered_as: MCP_SERVER_NAME.to_string(),
-        })
+        Err(e) => Field::Problem {
+            info: None,
+            message: format!("login status unavailable: {e}"),
+            remedy: String::new(),
+        },
+    }
+}
+
+fn install_status() -> Field<InstallInfo> {
+    let expected_version = preflight::EXPECTED_VERSION.to_string();
+    match preflight::installed_plugin() {
+        Ok(Some(p)) => {
+            let info = InstallInfo {
+                installed: true,
+                version: Some(p.version.clone()),
+                expected_version: expected_version.clone(),
+                enabled: p.enabled,
+                path: p.install_path.map(PathBuf::from),
+            };
+            if p.version == expected_version {
+                Field::Ok(info)
+            } else {
+                Field::Problem {
+                    info: Some(info),
+                    message: format!(
+                        "Gage plugin v{} installed, this gage expects v{expected_version}",
+                        p.version
+                    ),
+                    remedy: "run `gage init`".to_string(),
+                }
+            }
+        }
+        Ok(None) => Field::Problem {
+            info: Some(InstallInfo {
+                installed: false,
+                version: None,
+                expected_version,
+                enabled: false,
+                path: None,
+            }),
+            message: "Gage plugin not installed".to_string(),
+            remedy: "run `gage init`".to_string(),
+        },
+        Err(e) => Field::Problem {
+            info: None,
+            message: format!("plugin status unavailable: {e}"),
+            remedy: String::new(),
+        },
     }
 }
 
