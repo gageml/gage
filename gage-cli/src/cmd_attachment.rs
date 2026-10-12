@@ -82,43 +82,15 @@ pub struct AttachmentAddArgs {
     #[arg(required_unless_present_any = ["stored", "scanners"], value_name = "INCLUDE")]
     pub includes: Vec<String>,
 
-    /// Attachment name
-    ///
-    /// Scanners select attachments by name. A name is letters,
-    /// digits, `-`, `_`, and `.`
-    #[arg(short, long, value_name = "NAME")]
-    pub name: Option<String>,
-
-    /// Attachment key
-    ///
-    /// A later add under the same key updates this attachment instead
-    /// of creating one. Without --key, a named add is keyed by its
-    /// name, root, and patterns
-    #[arg(short, long, value_name = "KEY")]
-    pub key: Option<String>,
-
-    /// Files to exclude (glob; repeatable)
-    #[arg(short, long, value_name = "PATTERN")]
-    pub exclude: Vec<String>,
-
     /// Where to select files from (default current directory)
     ///
     /// Stored file paths are relative to it
     #[arg(short, long, value_name = "DIR")]
     pub root: Option<PathBuf>,
 
-    /// Target object (ID or prefix; repeatable)
-    ///
-    /// ID (or prefix) of any stored object, such as a session or note
-    #[arg(short, long = "target", value_name = "OBJECT")]
-    pub targets: Vec<String>,
-
-    /// Add attachment to dataset (ID or prefix)
-    ///
-    /// Dataset ID (or prefix). The attachment is stored and added to
-    /// the dataset in one step
-    #[arg(short, long, value_name = "DATASET")]
-    pub dataset: Option<String>,
+    /// Files to exclude (glob; repeatable)
+    #[arg(short, long, value_name = "PATTERN")]
+    pub exclude: Vec<String>,
 
     /// Add stored attachment (name, ID, or prefix)
     ///
@@ -147,18 +119,46 @@ pub struct AttachmentAddArgs {
         conflicts_with_all = ["includes", "name", "key", "root", "exclude", "targets"]
     )]
     pub scanners: Vec<String>,
+
+    /// Add attachment to dataset (ID or prefix)
+    ///
+    /// Dataset ID (or prefix). The attachment is stored and added to
+    /// the dataset in one step
+    #[arg(short, long, value_name = "DATASET")]
+    pub dataset: Option<String>,
+
+    /// Target object (ID or prefix; repeatable)
+    ///
+    /// ID (or prefix) of any stored object, such as a session or note
+    #[arg(short, long = "target", value_name = "OBJECT")]
+    pub targets: Vec<String>,
+
+    /// Attachment name
+    ///
+    /// Scanners select attachments by name. A name is letters,
+    /// digits, `-`, `_`, and `.`
+    #[arg(short, long, value_name = "NAME")]
+    pub name: Option<String>,
+
+    /// Attachment key
+    ///
+    /// A later add under the same key updates this attachment instead
+    /// of creating one. Without --key, a named add is keyed by its
+    /// name, root, and patterns
+    #[arg(short, long, value_name = "KEY")]
+    pub key: Option<String>,
 }
 
 #[derive(Args)]
 pub struct AttachmentListArgs {
-    #[command(flatten)]
-    pub limit: crate::limit::LimitArgs,
-
     /// List attachments in dataset (ID or prefix)
     ///
     /// Dataset ID (or prefix). Rows are in dataset order
     #[arg(short, long, value_name = "DATASET")]
     pub dataset: Option<String>,
+
+    #[command(flatten)]
+    pub limit: crate::limit::LimitArgs,
 
     /// Show full attachment ID
     #[arg(long)]

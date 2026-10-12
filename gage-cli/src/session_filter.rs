@@ -21,10 +21,29 @@ use rand::seq::SliceRandom;
 /// help layout shows them. A wrapping args struct uses this list to
 /// make its positional session list conflict with every filter, and
 /// to build an `ArgGroup` when at least one selection is required.
-pub const FILTER_ARG_NAMES: &[&str] = &["limit", "sample", "days", "today", "all", "project"];
+pub const FILTER_ARG_NAMES: &[&str] = &["project", "days", "today", "all", "limit", "sample"];
 
 #[derive(Args)]
 pub struct SessionFilterArgs {
+    /// Limit sessions to project (path or name)
+    ///
+    /// PROJECT is a project directory path (absolute, relative, or
+    /// ~-prefixed) or a project slug as shown by 'gage session list'.
+    #[arg(short, long, value_name = "PROJECT", allow_hyphen_values = true)]
+    pub project: Option<String>,
+
+    /// Select sessions modified in past N days
+    #[arg(long, value_name = "N", conflicts_with = "all")]
+    pub days: Option<u32>,
+
+    /// Select sessions modified since 00:00 today
+    #[arg(long, conflicts_with_all = ["days", "all"])]
+    pub today: bool,
+
+    /// Select every available session
+    #[arg(short, long)]
+    pub all: bool,
+
     /// Select latest N sessions
     ///
     /// Combines with --days or --today to cap the sessions selected
@@ -43,25 +62,6 @@ pub struct SessionFilterArgs {
     /// window given with --days or --today.
     #[arg(short = 'r', long, value_name = "N", conflicts_with = "all")]
     pub sample: Option<usize>,
-
-    /// Select sessions modified in past N days
-    #[arg(long, value_name = "N", conflicts_with = "all")]
-    pub days: Option<u32>,
-
-    /// Select sessions modified since 00:00 today
-    #[arg(long, conflicts_with_all = ["days", "all"])]
-    pub today: bool,
-
-    /// Select every available session
-    #[arg(short, long)]
-    pub all: bool,
-
-    /// Limit sessions to project (path or name)
-    ///
-    /// PROJECT is a project directory path (absolute, relative, or
-    /// ~-prefixed) or a project slug as shown by 'gage session list'.
-    #[arg(short, long, value_name = "PROJECT", allow_hyphen_values = true)]
-    pub project: Option<String>,
 }
 
 /// The failure modes of `select_sessions`.

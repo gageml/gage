@@ -62,16 +62,16 @@ pub struct TagAddArgs {
 
 #[derive(Args)]
 pub struct TagListArgs {
-    /// Show only tags whose object is deleted
+    /// Show tags whose object is deleted
     #[arg(long)]
-    dangling: bool,
+    orphaned: bool,
+
+    #[command(flatten)]
+    limit: crate::limit::LimitArgs,
 
     /// Show full object ID
     #[arg(long)]
     full_id: bool,
-
-    #[command(flatten)]
-    limit: crate::limit::LimitArgs,
 }
 
 #[derive(Args)]
@@ -129,12 +129,12 @@ pub fn list(args: TagListArgs) {
     };
     let tags: Vec<_> = tags
         .into_iter()
-        .filter(|t| !args.dangling || t.deleted)
+        .filter(|t| !args.orphaned || t.deleted)
         .collect();
     let total = tags.len();
     if total == 0 {
-        if args.dangling {
-            println!("No dangling tags found");
+        if args.orphaned {
+            println!("No orphaned tags found");
         } else {
             println!("No tags found");
         }

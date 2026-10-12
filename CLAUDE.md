@@ -242,6 +242,15 @@ These rules apply to ALL Rust code in this workspace. They are non-negotiable.
     the command's object is declared per command.
   - A text value is `<TEXT>` and accepts `@PATH` to read a file.
   - `short` and `long` take no value unless the default letter is wrong.
+  - Options are declared in the order they render, most central first:
+    source, then destination (the container, then what the object refers
+    to), then the object's own properties, then how the work runs, then
+    output, then utility flags, with `--yes` last. A modifier follows the
+    option it modifies: `--tag` then `--force-tag`.
+  - Shared blocks keep their place: scope options (`--source`, `--stored`)
+    lead; the session filter block orders which-filters before how-many
+    limiters; a list command puts its own filters first, then `--more`,
+    `--all`, `--limit`, and `--full-id` last.
 
 References for the Rust rules:
 

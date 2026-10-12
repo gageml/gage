@@ -14,25 +14,15 @@ pub struct SizeLimitArgs {
     /// exceed this is refused.
     #[arg(long, value_name = "SIZE", value_parser = parse_byte_size)]
     pub max_size: Option<ByteSize>,
-
-    /// Add regardless of size
-    ///
-    /// Stores the session even when it exceeds the size limit.
-    #[arg(long)]
-    pub force: bool,
 }
 
 impl SizeLimitArgs {
-    /// The cap in bytes, or `None` when --force lifts it. The flag
-    /// overrides the configured default.
-    pub fn max_bytes(&self) -> Option<u64> {
-        if self.force {
-            return None;
-        }
+    /// The cap in bytes: the flag, else the configured default
+    pub fn max_bytes(&self) -> u64 {
         let configured = Config::load_user()
             .map(|c| c.storage.max_session_size)
             .unwrap_or_else(|_| ByteSize(256 * 1024 * 1024));
-        Some(self.max_size.unwrap_or(configured).bytes())
+        self.max_size.unwrap_or(configured).bytes()
     }
 }
 

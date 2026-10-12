@@ -68,9 +68,6 @@ pub enum SessionCommand {
 #[derive(Args)]
 #[command(next_display_order = 3)]
 pub struct SessionListArgs {
-    #[command(flatten)]
-    pub limit: crate::limit::LimitArgs,
-
     /// Filter by project (path or name)
     #[arg(short, long, value_name = "PROJECT", allow_hyphen_values = true)]
     pub project: Option<String>,
@@ -83,16 +80,19 @@ pub struct SessionListArgs {
     #[arg(long)]
     pub empty: bool,
 
-    /// Show full session ID
-    #[arg(long)]
-    pub full_id: bool,
-
     /// List sessions in dataset (ID or prefix)
     ///
     /// Dataset ID (or prefix). Implies --stored; rows are in dataset
     /// member order
     #[arg(short, long, value_name = "DATASET")]
     pub dataset: Option<String>,
+
+    #[command(flatten)]
+    pub limit: crate::limit::LimitArgs,
+
+    /// Show full session ID
+    #[arg(long)]
+    pub full_id: bool,
 }
 
 #[derive(Args)]
@@ -116,10 +116,10 @@ pub struct SessionAddArgs {
     pub dataset: Option<String>,
 
     #[command(flatten)]
-    pub size: SizeLimitArgs,
+    pub filter: SessionFilterArgs,
 
     #[command(flatten)]
-    pub filter: SessionFilterArgs,
+    pub size: SizeLimitArgs,
 }
 
 #[derive(Args)]
@@ -664,7 +664,7 @@ async fn add_dialog(
         ),
         None => None,
     };
-    let max_bytes = args.size.max_bytes();
+    let max_bytes = Some(args.size.max_bytes());
     let mut view = DialogAddView::new(io::stdout().is_terminal());
     match dataset_id {
         Some(dataset_id) if stored => {

@@ -228,6 +228,13 @@ pub struct ScanRunArgs {
     #[arg(long, value_name = "N", default_value_t = 8, hide_default_value = true)]
     agent_jobs: usize,
 
+    /// Ignore prior work
+    ///
+    /// Every session is scanned in full regardless of earlier scans,
+    /// and no notes from earlier scans are carried forward.
+    #[arg(long)]
+    invalidate: bool,
+
     /// Tag new scan run
     #[arg(long, value_name = "NAME", long_help = format!("Tag new scan run\n\n{TAG_HELP}"))]
     tag: Option<String>,
@@ -235,6 +242,14 @@ pub struct ScanRunArgs {
     /// Move tag if it exists
     #[arg(long, requires = "tag")]
     force_tag: bool,
+
+    /// Don't show progress
+    ///
+    /// Task output and the scan's own lines print as they happen
+    /// instead of the progress view. This is the output when stdout
+    /// is not a terminal.
+    #[arg(long)]
+    no_progress: bool,
 
     /// Run scan without a dataset
     ///
@@ -247,12 +262,9 @@ pub struct ScanRunArgs {
     )]
     no_dataset: bool,
 
-    /// Ignore prior work
-    ///
-    /// Every session is scanned in full regardless of earlier scans,
-    /// and no notes from earlier scans are carried forward.
-    #[arg(long)]
-    invalidate: bool,
+    /// Show available scanners and exit
+    #[arg(long, exclusive = true)]
+    list_scanners: bool,
 
     /// Skip prompts and confirmation
     ///
@@ -262,18 +274,6 @@ pub struct ScanRunArgs {
     /// session selection or dataset option is set.
     #[arg(short, long)]
     yes: bool,
-
-    /// Don't show progress
-    ///
-    /// Task output and the scan's own lines print as they happen
-    /// instead of the progress view. This is the output when stdout
-    /// is not a terminal.
-    #[arg(long)]
-    no_progress: bool,
-
-    /// Show available scanners and exit
-    #[arg(long, exclusive = true)]
-    list_scanners: bool,
 }
 
 #[derive(Args)]

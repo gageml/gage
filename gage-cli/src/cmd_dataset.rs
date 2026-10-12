@@ -65,23 +65,23 @@ pub struct DatasetAddArgs {
     #[arg(short, long, value_name = "SOURCE", long_help = format!("Session source\n\n{SOURCE_HELP}"))]
     pub source: Option<String>,
 
-    /// Tag new dataset
-    #[arg(long, value_name = "NAME", long_help = format!("Tag new dataset\n\n{TAG_HELP}"))]
-    pub tag: Option<String>,
-
-    #[command(flatten)]
-    pub size: SizeLimitArgs,
-
-    /// Move tag if it exists
-    #[arg(long, requires = "tag")]
-    pub force_tag: bool,
-
     /// Sessions to add (ID or prefix)
     #[arg(value_name = "SESSION", conflicts_with_all = FILTER_ARG_NAMES)]
     pub sessions: Vec<String>,
 
     #[command(flatten)]
     pub filter: SessionFilterArgs,
+
+    #[command(flatten)]
+    pub size: SizeLimitArgs,
+
+    /// Tag new dataset
+    #[arg(long, value_name = "NAME", long_help = format!("Tag new dataset\n\n{TAG_HELP}"))]
+    pub tag: Option<String>,
+
+    /// Move tag if it exists
+    #[arg(long, requires = "tag")]
+    pub force_tag: bool,
 }
 
 #[derive(Args)]
@@ -172,7 +172,7 @@ pub async fn add(args: DatasetAddArgs) {
         return;
     }
 
-    let max_bytes = args.size.max_bytes();
+    let max_bytes = Some(args.size.max_bytes());
 
     populate_dataset(
         "gage dataset add",
@@ -229,7 +229,7 @@ pub async fn refresh(args: DatasetRefreshArgs) {
         std::process::exit(1);
     }
 
-    let max_bytes = args.size.max_bytes();
+    let max_bytes = Some(args.size.max_bytes());
 
     if let Err(e) = add_native_to_dataset(
         &store,

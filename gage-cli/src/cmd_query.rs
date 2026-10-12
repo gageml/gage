@@ -40,14 +40,6 @@ pub struct QueryArgs {
     #[arg(long)]
     stats: bool,
 
-    /// Include system columns
-    ///
-    /// Columns Gage uses to display and address rows, such as
-    /// id_prefix, locator, and commit, are hidden by default. This
-    /// option includes them.
-    #[arg(long)]
-    system: bool,
-
     /// Query within scan (ID or prefix)
     ///
     /// Scan ID (or prefix). The session tables hold the scan's
@@ -55,6 +47,14 @@ pub struct QueryArgs {
     /// only that scan's tasks, notes, and issues
     #[arg(long, value_name = "SCAN")]
     scan: Option<String>,
+
+    /// Include system columns
+    ///
+    /// Columns Gage uses to display and address rows, such as
+    /// id_prefix, locator, and commit, are hidden by default. This
+    /// option includes them.
+    #[arg(long)]
+    system: bool,
 }
 
 pub async fn main(args: QueryArgs) {

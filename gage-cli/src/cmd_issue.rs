@@ -60,9 +60,6 @@ pub enum IssueCommand {
 
 #[derive(Args)]
 pub struct IssueListArgs {
-    #[command(flatten)]
-    limit: crate::limit::LimitArgs,
-
     /// Filter by issue name
     #[arg(long)]
     name: Option<String>,
@@ -70,6 +67,9 @@ pub struct IssueListArgs {
     /// Show closed issues
     #[arg(short, long)]
     closed: bool,
+
+    #[command(flatten)]
+    limit: crate::limit::LimitArgs,
 
     /// Show full issue ID
     #[arg(long)]

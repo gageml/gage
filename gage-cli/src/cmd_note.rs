@@ -76,10 +76,6 @@ pub struct NoteAddArgs {
     #[arg(short, long)]
     name: Option<String>,
 
-    /// Author username (default $USER)
-    #[arg(short, long)]
-    user: Option<String>,
-
     /// Store text as JSON
     #[arg(long)]
     json: bool,
@@ -87,6 +83,10 @@ pub struct NoteAddArgs {
     /// Note metadata as a JSON object
     #[arg(short, long, value_name = "JSON")]
     metadata: Option<String>,
+
+    /// Author username (default $USER)
+    #[arg(short, long)]
+    user: Option<String>,
 
     /// Skip prompts
     ///
@@ -115,16 +115,16 @@ pub struct NoteEditArgs {
     /// Text cannot begin with a literal @
     text: Option<String>,
 
-    /// New note name
-    #[arg(short, long)]
-    name: Option<String>,
-
     /// New note target (ID or prefix)
     ///
     /// An object ID (or unique prefix), optionally followed by '#' and
     /// a line selection
     #[arg(short, long)]
     target: Option<String>,
+
+    /// New note name
+    #[arg(short, long)]
+    name: Option<String>,
 
     /// Store text as JSON
     #[arg(long)]

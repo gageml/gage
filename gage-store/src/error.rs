@@ -167,7 +167,7 @@ impl fmt::Display for StoreError {
             StoreError::SessionTooLarge { size, max } => write!(
                 f,
                 "session content reached {size} bytes, over the {max}-byte limit \
-                 (raise it with --max-session-size or override with --force)"
+                 (raise it with --max-size)"
             ),
             StoreError::IssueInput(what) => write!(f, "invalid issue input: {what}"),
             StoreError::IssueStatusUnchanged { id, status } => {

@@ -154,7 +154,7 @@ pub struct Config {
 pub struct StorageConfig {
     /// The largest total content a single session may write to the
     /// store. `gage session add` refuses a session whose stored files
-    /// exceed this, unless `--force` is given.
+    /// exceed this; `--max-size` overrides it for one run.
     #[serde(default = "default_max_session_size")]
     pub max_session_size: ByteSize,
 }
