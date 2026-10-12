@@ -1,6 +1,5 @@
 use clap::Args;
 use cliclack as cli;
-use gage_db::db::{db_path, open_db};
 use gage_session::InstallUi;
 use gage_store::{Store, StoreError};
 use indicatif::ProgressBar;
@@ -45,16 +44,6 @@ fn install_dialog(args: &InitArgs) -> Result<DialogResult, DialogError> {
             return Err(DialogError::Canceled);
         }
     }
-
-    let db_spinner = crate::style::spinner("Initializing database");
-    let db_result = open_db();
-    db_spinner.finish_and_clear();
-    db_result.map_err(|e| {
-        DialogError::Other(anyhow::anyhow!(
-            "failed to initialize database at {}: {e}",
-            db_path().display()
-        ))
-    })?;
 
     let store_spinner = crate::style::spinner("Initializing store");
     let store_result = init_store();

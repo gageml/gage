@@ -9,18 +9,19 @@ use std::fmt::Write as _;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use clap::Args;
 use console::style;
+use datafusion::prelude::SessionContext;
 
 use gage_claude::preflight::{self, AuthStatus, InstalledPlugin, PreflightError};
 use gage_claude::session::SessionListBuilder;
 use gage_core::config::gage_home;
-use gage_db::db::open_db;
-use gage_db::issue::{self, IssueFilters, IssueStatusFilter};
-use gage_db::note;
-use gage_db::scan;
+use gage_query::ContextBuilder;
+use gage_store::Store;
 
+use crate::cmd_note::count_rows;
 use crate::human::format_size;
 
 #[derive(Args)]
@@ -30,7 +31,7 @@ pub struct StatusArgs {
     pub verbose: bool,
 }
 
-pub fn run(args: StatusArgs) {
+pub async fn run(args: StatusArgs) {
     let spinner = crate::style::spinner("Reading status...");
     let mut out = String::new();
     let mut problems = Vec::new();
@@ -38,7 +39,7 @@ pub fn run(args: StatusArgs) {
     out.push('\n');
     write_plugin(&mut out, &mut problems);
     out.push('\n');
-    write_counts(&mut out);
+    write_counts(&mut out, &mut problems).await;
     out.push('\n');
     write_storage(&mut out, args.verbose);
     if !problems.is_empty() {
@@ -115,37 +116,41 @@ fn write_plugin_entry(out: &mut String, problems: &mut Vec<String>, p: &Installe
     }
 }
 
-fn write_counts(out: &mut String) {
+async fn write_counts(out: &mut String, problems: &mut Vec<String>) {
     w(out, format!("{}", style("Data").bold()));
 
-    let conn = open_db().unwrap();
-    let open_ct = issue_count(&conn, IssueStatusFilter::Open);
-    let pending_ct = issue_count(&conn, IssueStatusFilter::Pending);
-    let closed_ct = issue_count(&conn, IssueStatusFilter::Closed);
-    w(
-        out,
-        format!("  Issues:   {open_ct} open, {pending_ct} pending, {closed_ct} closed"),
-    );
-
-    let notes = note::count(&conn).unwrap();
-    w(out, format!("  Notes:    {notes}"));
-
-    let scans = scan::all(&conn).unwrap().len();
-    w(out, format!("  Scans:    {scans}"));
+    let path = gage_store::store_path();
+    match Store::open(&path) {
+        Ok(store) => {
+            let ctx = ContextBuilder::new(Some(Arc::new(Mutex::new(store))))
+                .build()
+                .await;
+            write_store_counts(out, &ctx).await;
+        }
+        Err(e) => {
+            w(out, "  store unavailable".to_string());
+            problems.push(format!("Store at {} unavailable: {e}", path.display()));
+        }
+    }
 
     let sessions = SessionListBuilder::new().build().len();
     w(out, format!("  Sessions: {sessions}"));
 }
 
-fn issue_count(conn: &gage_db::rusqlite::Connection, status: IssueStatusFilter) -> u32 {
-    issue::count(
-        conn,
-        &IssueFilters {
-            status,
-            ..IssueFilters::default()
-        },
-    )
-    .unwrap()
+async fn write_store_counts(out: &mut String, ctx: &SessionContext) {
+    let open_ct = count_rows(ctx, "SELECT COUNT(*) FROM issue WHERE status = 'open'").await;
+    let pending_ct = count_rows(ctx, "SELECT COUNT(*) FROM issue WHERE status = 'pending'").await;
+    let closed_ct = count_rows(ctx, "SELECT COUNT(*) FROM issue WHERE status = 'closed'").await;
+    w(
+        out,
+        format!("  Issues:   {open_ct} open, {pending_ct} pending, {closed_ct} closed"),
+    );
+
+    let notes = count_rows(ctx, "SELECT COUNT(*) FROM note").await;
+    w(out, format!("  Notes:    {notes}"));
+
+    let scans = count_rows(ctx, "SELECT COUNT(*) FROM scan").await;
+    w(out, format!("  Scans:    {scans}"));
 }
 
 fn write_storage(out: &mut String, verbose: bool) {

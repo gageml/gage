@@ -15,7 +15,6 @@ cliclack = "0.3"
 clap = { version = "4", features = ["derive", "wrap_help"] }
 datafusion = { workspace = true }
 gage-core = { path = "../gage-core" }
-gage-db = { path = "../gage-db" }
 gage-mcp = { path = "../gage-mcp" }
 gage-tui = { path = "../gage-tui" }
 gage-claude = { path = "../gage-claude" }

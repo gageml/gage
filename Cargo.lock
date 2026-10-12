@@ -2289,7 +2289,6 @@ dependencies = [
  "datafusion",
  "gage-claude",
  "gage-core",
- "gage-db",
  "gage-log",
  "gage-mcp",
  "gage-query",
@@ -2327,18 +2326,6 @@ dependencies = [
  "serde_json",
  "toml 0.8.23",
  "uuid",
-]
-
-[[package]]
-name = "gage-db"
-version = "0.2.0-dev"
-dependencies = [
- "chrono",
- "gage-core",
- "rusqlite",
- "serde",
- "serde_json",
- "tracing",
 ]
 
 [[package]]
@@ -2509,7 +2496,6 @@ dependencies = [
  "datafusion",
  "gage-claude",
  "gage-core",
- "gage-db",
  "gage-query",
  "gage-registry",
  "gage-session",

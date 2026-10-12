@@ -80,7 +80,6 @@ const GAGE_LOG_TARGETS: &[&str] = &[
     "gage_claude",
     "gage_cli",
     "gage_core",
-    "gage_db",
     "gage_index",
     "gage_log",
     "gage_lsp",
@@ -283,7 +282,7 @@ async fn main() {
             Command::Config { command } => cmd_config::run(command),
             Command::Store { command } => cmd_store::run(command),
             Command::Init(args) => cmd_init::run(args),
-            Command::Status(args) => cmd_status::run(args),
+            Command::Status(args) => cmd_status::run(args).await,
             Command::Note { command } => match command {
                 cmd_note::NoteCommand::List(args) => cmd_note::list(args).await,
                 cmd_note::NoteCommand::Add(args) => cmd_note::add(args),
