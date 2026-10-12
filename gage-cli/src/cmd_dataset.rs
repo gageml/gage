@@ -459,19 +459,22 @@ pub async fn list(args: DatasetListArgs) {
     let sql = format!(
         "SELECT d.id, d.id_prefix, d.created, \
          COALESCE(a.n, 0) AS attachments, COALESCE(m.n, 0) AS sessions, \
+         COALESCE(sc.n, 0) AS scans, \
          arrow_cast(COALESCE(t.names, ''), 'Utf8') AS tags \
          FROM dataset d \
          LEFT JOIN (SELECT dataset_id, COUNT(*) AS n FROM dataset_attachment \
                     GROUP BY dataset_id) a ON a.dataset_id = d.id \
          LEFT JOIN (SELECT dataset_id, COUNT(*) AS n FROM dataset_session \
                     GROUP BY dataset_id) m ON m.dataset_id = d.id \
+         LEFT JOIN (SELECT dataset, COUNT(*) AS n FROM scan \
+                    WHERE dataset IS NOT NULL GROUP BY dataset) sc ON sc.dataset = d.id \
          LEFT JOIN (SELECT id, string_agg(name, ', ' ORDER BY name) AS names FROM tag \
                     GROUP BY id) t ON t.id = d.id \
          ORDER BY d.modified DESC LIMIT {show}"
     );
     let batches = run_query(&ctx, &sql).await;
 
-    let header: Vec<String> = ["Id", "Sessions", "Attachments", "Tags", "Created"]
+    let header: Vec<String> = ["Id", "Sessions", "Attachments", "Scans", "Tags", "Created"]
         .iter()
         .map(|s| s.to_string())
         .collect();
@@ -482,7 +485,8 @@ pub async fn list(args: DatasetListArgs) {
         let createds = column::<TimestampMillisecondArray>(batch, 2);
         let attachments = column::<Int64Array>(batch, 3);
         let sessions = column::<Int64Array>(batch, 4);
-        let tags = column::<StringArray>(batch, 5);
+        let scans = column::<Int64Array>(batch, 5);
+        let tags = column::<StringArray>(batch, 6);
         for i in 0..batch.num_rows() {
             let id = ids.value(i);
             let shown = if args.full_id { id } else { short_uuid(id) };
@@ -490,6 +494,7 @@ pub async fn list(args: DatasetListArgs) {
                 styled_id(shown, prefixes.value(i), IdKind::Gage),
                 sessions.value(i).to_string(),
                 attachments.value(i).to_string(),
+                scans.value(i).to_string(),
                 tags.value(i).to_string(),
                 format_elapsed_ms(createds.value(i)),
             ]);
@@ -499,38 +504,57 @@ pub async fn list(args: DatasetListArgs) {
     let table = Table::from_iter(std::iter::once(header).chain(rows))
         .with(Style::rounded())
         .modify(Rows::first(), style::tty(Color::FG_BRIGHT_YELLOW))
-        .modify(Columns::new(1..3), Alignment::right())
+        .modify(Columns::new(1..4), Alignment::right())
         .modify(
-            Columns::one(3).not(Rows::first()),
+            Columns::one(4).not(Rows::first()),
             style::tty(Color::FG_BRIGHT_CYAN),
         )
-        .modify(Columns::new(1..3).not(Rows::first()), style::dim())
-        .modify(Columns::one(4).not(Rows::first()), style::dim())
+        .modify(Columns::new(1..4).not(Rows::first()), style::dim())
+        .modify(Columns::one(5).not(Rows::first()), style::dim())
         .to_string();
     println!("{table}");
     args.limit.print_summary(shown, total, "dataset");
 }
 
-pub fn show(args: DatasetShowArgs) {
-    let store = open_store("gage dataset show");
-    let datasets = DatasetStore::from(&store);
-    let record = match datasets.get(&args.dataset) {
-        Ok(record) => record,
-        Err(e) => {
-            eprintln!("gage dataset show: {}: {e}", args.dataset);
-            std::process::exit(1);
-        }
-    };
-    fn or_exit<T>(result: Result<T, gage_store::StoreError>) -> T {
+pub async fn show(args: DatasetShowArgs) {
+    let store = Arc::new(Mutex::new(open_store("gage dataset show")));
+    fn or_exit<T>(result: Result<T, StoreError>) -> T {
         result.unwrap_or_else(|e| {
             eprintln!("gage dataset show: {e}");
             std::process::exit(1)
         })
     }
-    let sessions = or_exit(datasets.sessions(&record.id));
-    let attachments = or_exit(datasets.attachments(&record.id));
-    let tags = or_exit(TagStore::from(&store).targets());
-    let header = or_exit(store.read_header(&record.commit_sha));
+    let (record, sessions, attachments, tags, header) = {
+        let store = store.lock().unwrap();
+        let datasets = DatasetStore::from(&*store);
+        let record = match datasets.get(&args.dataset) {
+            Ok(record) => record,
+            Err(e) => {
+                eprintln!("gage dataset show: {}: {e}", args.dataset);
+                std::process::exit(1);
+            }
+        };
+        let sessions = or_exit(datasets.sessions(&record.id));
+        let attachments = or_exit(datasets.attachments(&record.id));
+        let tags = or_exit(TagStore::from(&*store).targets());
+        let header = or_exit(store.read_header(&record.commit_sha));
+        (record, sessions, attachments, tags, header)
+    };
+    let ctx = ContextBuilder::new(Some(store)).build().await;
+    let sql = format!(
+        "SELECT id FROM scan WHERE dataset = '{}' ORDER BY modified DESC",
+        record.id
+    );
+    let scans: Vec<String> = run_query(&ctx, &sql)
+        .await
+        .iter()
+        .flat_map(|batch| {
+            let ids = column::<StringArray>(batch, 0);
+            (0..batch.num_rows())
+                .map(|i| ids.value(i).to_string())
+                .collect::<Vec<_>>()
+        })
+        .collect();
     let iso = |ms: Option<i64>| ms.map(ms_to_iso8601).unwrap_or_default();
 
     let sessions_cell = sessions
@@ -543,6 +567,7 @@ pub fn show(args: DatasetShowArgs) {
         .map(|a| format!("{} {}", a.id, a.attrs.name.as_deref().unwrap_or_default()))
         .collect::<Vec<_>>()
         .join("\n");
+    let scans_cell = scans.join("\n");
     let tags_cell = tags
         .iter()
         .filter(|t| t.id == record.id)
@@ -553,6 +578,7 @@ pub fn show(args: DatasetShowArgs) {
         ("id", record.id.clone()),
         ("sessions", sessions_cell),
         ("attachments", attachments_cell),
+        ("scans", scans_cell),
         ("tags", tags_cell),
         ("created", iso(Some(record.created_ms))),
         ("modified", iso(header.modified_ms)),
