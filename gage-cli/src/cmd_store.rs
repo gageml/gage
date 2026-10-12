@@ -28,9 +28,9 @@ pub enum StoreCommand {
 
     /// Show object index status
     ///
-    /// The object index is a cache over the store's refs, kept current
-    /// on every open and safe to delete at any time. `--rebuild`
-    /// deletes it and builds it again from every ref.
+    /// The object index is a cache over the stored objects, kept
+    /// current on every open and safe to delete at any time. --rebuild
+    /// deletes it and builds it again from the store.
     Index(IndexArgs),
 
     /// Garbage collect store
@@ -52,20 +52,17 @@ pub enum StoreCommand {
 
     /// Delete objects of any type
     ///
-    /// Writes a tombstone over each object, as the typed remove and
-    /// delete commands do, without their cleanup: a dataset that
-    /// links a deleted object keeps its link, and a dataset's members
-    /// are left in place. Use this on an object its own command
-    /// cannot read.
+    /// Deletes each object as its own delete command would, without
+    /// that command's cleanup: a dataset that links a deleted object
+    /// keeps its link, and a dataset's members are left in place. Use
+    /// this on an object its own command cannot read.
     Delete(DeleteArgs),
 
-    /// Browse store object graph
+    /// Browse stored objects
     ///
-    /// Opens an interactive view of the object refs: refs listing
-    /// on the left, per-commit detail (header, parents classified as
-    /// first-parent vs link, tree, resolved link files, and the
-    /// first-parent chain) on the right. Payload agnostic --- object
-    /// type names are shown but no `attrs.json` is interpreted.
+    /// Opens an interactive view: objects on the left, and on the
+    /// right the selected object's versions, the objects it links,
+    /// and its files.
     View(ViewArgs),
 }
 
@@ -104,14 +101,14 @@ pub struct CatArgs {
 
 #[derive(Args)]
 pub struct IndexArgs {
-    /// Delete and rebuild index from store refs
+    /// Delete and rebuild index from store
     #[arg(long)]
     rebuild: bool,
 }
 
 #[derive(Args)]
 pub struct StatusArgs {
-    /// Run git fsck --strict after showing status
+    /// Verify store integrity after showing status
     #[arg(long)]
     check: bool,
 }

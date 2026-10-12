@@ -4,7 +4,6 @@ use std::sync::{Arc, Mutex};
 use clap::{Args, Subcommand};
 use cliclack as cli;
 use datafusion::arrow::array::{Int64Array, StringArray, TimestampMillisecondArray};
-use gage_core::config::{ByteSize, Config};
 use gage_core::datetime::ms_to_iso8601;
 use gage_core::uuid::short_uuid;
 use gage_query::ContextBuilder;
@@ -21,10 +20,13 @@ use tabled::{
 };
 
 use crate::cmd_note::count_rows;
-use crate::cmd_session::{column, parse_byte_size, run_query};
+use crate::cmd_session::{column, run_query};
+use crate::cmd_tag::TAG_HELP;
 use crate::dialog::{self, DialogError};
 use crate::human::format_elapsed_ms;
 use crate::session_filter::{FILTER_ARG_NAMES, SessionFilterArgs, select_sessions};
+use crate::size_limit::SizeLimitArgs;
+use crate::source::SOURCE_HELP;
 use crate::style::{self, IdKind, styled_id};
 
 #[derive(Subcommand)]
@@ -39,10 +41,9 @@ pub enum DatasetCommand {
     /// Re-add each dataset session from its source
     ///
     /// Every member is re-read from the source and re-added: a
-    /// session whose native content is unchanged is a no-op, and a
     /// session whose native content grew is updated in place.
-    /// Equivalent to running 'gage session add -d DATASET' against
-    /// every member's native id.
+    /// Equivalent to running gage session add -d DATASET on every
+    /// member's native id.
     Refresh(DatasetRefreshArgs),
 
     /// List datasets
@@ -61,33 +62,15 @@ pub enum DatasetCommand {
 #[derive(Args)]
 pub struct DatasetAddArgs {
     /// Session source
-    ///
-    /// A driver scheme selects the driver (`claude:<path>`); a value
-    /// with no scheme goes to the default driver (`<path>`). Defaults
-    /// to the default driver's default location.
-    #[arg(short, long, value_name = "SOURCE")]
+    #[arg(short, long, value_name = "SOURCE", long_help = format!("Session source\n\n{SOURCE_HELP}"))]
     pub source: Option<String>,
 
     /// Tag new dataset
-    ///
-    /// Follows git's ref naming rules. An existing tag is an error
-    /// unless --force-tag is given.
-    #[arg(long, value_name = "NAME")]
+    #[arg(long, value_name = "NAME", long_help = format!("Tag new dataset\n\n{TAG_HELP}"))]
     pub tag: Option<String>,
 
-    /// Maximum stored size per session
-    ///
-    /// Overrides the configured default. Accepts a byte count or a
-    /// unit suffix, such as 256MB or 1GB. A session whose stored files
-    /// exceed this is refused.
-    #[arg(long, value_name = "SIZE", value_parser = parse_byte_size)]
-    pub max_size: Option<ByteSize>,
-
-    /// Add regardless of size
-    ///
-    /// Stores the session even when it exceeds the size limit.
-    #[arg(long)]
-    pub force: bool,
+    #[command(flatten)]
+    pub size: SizeLimitArgs,
 
     /// Move tag if it exists
     #[arg(long, requires = "tag")]
@@ -107,26 +90,11 @@ pub struct DatasetRefreshArgs {
     pub dataset: String,
 
     /// Session source
-    ///
-    /// A driver scheme selects the driver (`claude:<path>`); a value
-    /// with no scheme goes to the default driver (`<path>`). Defaults
-    /// to the default driver's default location.
-    #[arg(short, long, value_name = "SOURCE")]
+    #[arg(short, long, value_name = "SOURCE", long_help = format!("Session source\n\n{SOURCE_HELP}"))]
     pub source: Option<String>,
 
-    /// Maximum stored size per session
-    ///
-    /// Overrides the configured default. Accepts a byte count or a
-    /// unit suffix, such as 256MB or 1GB. A session whose stored files
-    /// exceed this is refused.
-    #[arg(long, value_name = "SIZE", value_parser = parse_byte_size)]
-    pub max_size: Option<ByteSize>,
-
-    /// Add regardless of size
-    ///
-    /// Stores the session even when it exceeds the size limit.
-    #[arg(long)]
-    pub force: bool,
+    #[command(flatten)]
+    pub size: SizeLimitArgs,
 }
 
 #[derive(Args)]
@@ -204,16 +172,7 @@ pub async fn add(args: DatasetAddArgs) {
         return;
     }
 
-    // --force lifts the cap; otherwise the flag overrides the
-    // configured default.
-    let max_bytes = if args.force {
-        None
-    } else {
-        let configured = Config::load_user()
-            .map(|c| c.storage.max_session_size)
-            .unwrap_or_else(|_| ByteSize(256 * 1024 * 1024));
-        Some(args.max_size.unwrap_or(configured).bytes())
-    };
+    let max_bytes = args.size.max_bytes();
 
     populate_dataset(
         "gage dataset add",
@@ -270,16 +229,7 @@ pub async fn refresh(args: DatasetRefreshArgs) {
         std::process::exit(1);
     }
 
-    // --force lifts the cap; otherwise the flag overrides the
-    // configured default.
-    let max_bytes = if args.force {
-        None
-    } else {
-        let configured = Config::load_user()
-            .map(|c| c.storage.max_session_size)
-            .unwrap_or_else(|_| ByteSize(256 * 1024 * 1024));
-        Some(args.max_size.unwrap_or(configured).bytes())
-    };
+    let max_bytes = args.size.max_bytes();
 
     if let Err(e) = add_native_to_dataset(
         &store,

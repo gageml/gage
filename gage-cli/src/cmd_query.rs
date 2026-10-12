@@ -42,8 +42,9 @@ pub struct QueryArgs {
 
     /// Include system columns
     ///
-    /// Session tables hide `id_display`, `id_prefix`, and the row
-    /// locator by default. This option adds them to the schema.
+    /// Columns Gage uses to display and address rows, such as
+    /// id_prefix, locator, and commit, are hidden by default. This
+    /// option includes them.
     #[arg(long)]
     system: bool,
 

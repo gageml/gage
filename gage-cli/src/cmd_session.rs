@@ -13,7 +13,6 @@ use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::prelude::SessionContext;
 use gage_claude::home::claude_home;
 use gage_claude::session::{encode_project_dir, one_session};
-use gage_core::config::{ByteSize, Config};
 use gage_core::uuid::short_uuid;
 use gage_query::ContextBuilder;
 use gage_registry::driver::DriverRegistry;
@@ -34,6 +33,7 @@ use tabled::{
 use crate::cmd_dataset::{AddEvent, add_native_to_dataset};
 use crate::dialog::{self, DialogError};
 use crate::session_filter::{FILTER_ARG_NAMES, SessionFilterArgs, select_sessions};
+use crate::size_limit::SizeLimitArgs;
 use crate::source;
 use crate::style::{self, IdKind, styled_id};
 
@@ -46,7 +46,7 @@ pub enum SessionCommand {
     ///
     /// Each session is read from the selected source and written as a
     /// session object. Adding a session already in the store updates
-    /// it when its content changed and is otherwise a no-op.
+    /// it when its content changed.
     Add(SessionAddArgs),
 
     /// Remove sessions from store or from a dataset
@@ -121,26 +121,11 @@ pub struct SessionAddArgs {
     #[arg(short, long, value_name = "DATASET")]
     pub dataset: Option<String>,
 
-    /// Maximum stored size per session
-    ///
-    /// Overrides the configured default. Accepts a byte count or a
-    /// unit suffix, such as 256MB or 1GB. A session whose stored files
-    /// exceed this is refused.
-    #[arg(long, value_name = "SIZE", value_parser = parse_byte_size)]
-    pub max_size: Option<ByteSize>,
-
-    /// Add regardless of size
-    ///
-    /// Stores the session even when it exceeds the size limit.
-    #[arg(long)]
-    pub force: bool,
+    #[command(flatten)]
+    pub size: SizeLimitArgs,
 
     #[command(flatten)]
     pub filter: SessionFilterArgs,
-}
-
-pub(crate) fn parse_byte_size(s: &str) -> Result<ByteSize, String> {
-    s.parse()
 }
 
 #[derive(Args)]
@@ -180,9 +165,9 @@ pub struct SessionViewArgs {
     /// Comma separated list of view options
     ///
     /// Options:
-    ///   turns  - show model turns in outline
-    ///   detail - show all entries (default hides low-signal entries)
-    #[arg(short = 'v', long, value_delimiter = ',')]
+    ///   turns   show model turns in outline
+    ///   detail  show all entries, not only high-signal ones
+    #[arg(short = 'v', long, value_delimiter = ',', verbatim_doc_comment)]
     pub options: Vec<String>,
 }
 
@@ -699,16 +684,7 @@ async fn add_dialog(
         ),
         None => None,
     };
-    // --force lifts the cap; otherwise the flag overrides the
-    // configured default.
-    let max_bytes = if args.force {
-        None
-    } else {
-        let configured = Config::load_user()
-            .map(|c| c.storage.max_session_size)
-            .unwrap_or_else(|_| ByteSize(256 * 1024 * 1024));
-        Some(args.max_size.unwrap_or(configured).bytes())
-    };
+    let max_bytes = args.size.max_bytes();
     let mut view = DialogAddView::new(io::stdout().is_terminal());
     match dataset_id {
         Some(dataset_id) if stored => {

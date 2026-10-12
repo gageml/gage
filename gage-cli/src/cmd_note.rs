@@ -22,6 +22,7 @@ use crate::cmd_session::run_query;
 use crate::dialog::{self, DialogError};
 use crate::style::{self, IdKind, styled_id};
 use crate::target::resolve_target;
+use crate::text_arg::text_value;
 
 #[derive(Subcommand)]
 pub enum NoteCommand {
@@ -57,7 +58,9 @@ pub struct NoteListArgs {
 
 #[derive(Args)]
 pub struct NoteAddArgs {
-    /// Note text
+    /// Note text or @PATH to read a file
+    ///
+    /// Text cannot begin with a literal @
     text: Option<String>,
 
     /// Note target (ID or prefix)
@@ -107,7 +110,9 @@ pub struct NoteEditArgs {
     /// Note to edit (ID or prefix)
     id: String,
 
-    /// New note text
+    /// New note text or @PATH to read a file
+    ///
+    /// Text cannot begin with a literal @
     text: Option<String>,
 
     /// New note name
@@ -332,7 +337,11 @@ pub fn add(args: NoteAddArgs) {
             cli::log::step(format!("Metadata\n{}", style(m).dim()))?;
         }
         let label = if args.json { "JSON" } else { "Text" };
-        let text: String = match args.text {
+        let given = args
+            .text
+            .as_deref()
+            .map(|value| text_value("gage note add", "TEXT", value));
+        let text: String = match given {
             Some(ref t) => {
                 cli::log::step(format!("{label}\n{}", style(t).dim()))?;
                 t.clone()
@@ -595,7 +604,11 @@ pub fn edit(args: NoteEditArgs) {
             NoteValue::Text(text) => text.clone(),
             NoteValue::Json(json) => json.to_string(),
         };
-        let text: String = match args.text {
+        let given = args
+            .text
+            .as_deref()
+            .map(|value| text_value("gage note edit", "TEXT", value));
+        let text: String = match given {
             Some(ref t) => {
                 cli::log::step(format!("{label}\n{}", style(t).dim()))?;
                 t.clone()

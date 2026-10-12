@@ -48,7 +48,7 @@ pub struct SessionFilterArgs {
     #[arg(long, value_name = "N", conflicts_with = "all")]
     pub days: Option<u32>,
 
-    /// Select sessions modified since midnight local time
+    /// Select sessions modified since 00:00 today
     #[arg(long, conflicts_with_all = ["days", "all"])]
     pub today: bool,
 

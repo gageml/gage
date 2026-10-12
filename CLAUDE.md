@@ -215,22 +215,33 @@ These rules apply to ALL Rust code in this workspace. They are non-negotiable.
     asserting the caller's value is still readable afterwards (see
     `parse_sessions_leaves_caller_values_readable` in gage-runtime).
 
-- When writing clap command or arg text:
-  - Look for and follow existing conventions --- this is a user interface and
-    should be consistent throughout the CLI
-  - Do not include trailing periods in the first line. Clap strips these to
-    enforce their style convention and we should never include them.
-  - Always use a short and to-the-point first time - never a full contiguous
-    paragraph --- this is important as it makes the short help much easier to
-    read
-  - To provide additional detail, separate the first line with an empty line and
-    provide detail as needed.
-  - Do not specify the default short or long value: use `short` and `long` when
-    possible and only specify a value when the default is incorrect (e.g. for
-    option `prompt` DO NOT use `short = 'p'` just use `short`, assuming user
-    wants the short form)
-  - When describing content DO NOT describe implementation details. This is user
-    facing help text, NOT code docs.
+- Clap help text. `gage-cli/src/help_lint.rs` enforces the mechanical rules;
+  `cargo test -p gage-cli help_text` reports every violation.
+  - Short help is one line, and a rendered line is 79 columns or fewer. Detail
+    goes in long help after a blank line, and long help opens with the short
+    line.
+  - No trailing period, no backticks, no single quotes. A literal value takes
+    double quotes: `Close issue as "wontfix"`.
+  - No `the`. A noun already in context stands bare: `Add sessions to dataset`.
+    `a`/`an` stays when the noun is new: `Read message from a file`.
+  - A positional that names the command's object reads `Xxx to yyy`: `Issues
+    to close`, `Dataset to show`.
+  - Qualifiers go in one trailing parenthetical, topics separated by `; `, in
+    this order: value type, `repeatable`, `default x`. The types are `ID or
+    prefix`, `name, ID, or prefix`, `tag, ID, or prefix`, `path or name`, `name
+    or path`, and `glob`. Nothing else goes in a parenthetical.
+    `Scanner to run (name or path; repeatable)`, `Number of items to show
+    (default 20)`.
+  - A default is stated in the text, never by clap: set `hide_default_value`
+    and `hide_possible_values`, and list enum values in long help.
+  - No implementation vocabulary. A Git term appears only as the public spec,
+    spelled out: `Git ref naming rules`.
+  - A paragraph used by more than one arg is one `const` referenced through
+    `long_help`, prefixed with that arg's own short line. Options shared by
+    several commands are one flattened `Args` struct; a positional that names
+    the command's object is declared per command.
+  - A text value is `<TEXT>` and accepts `@PATH` to read a file.
+  - `short` and `long` take no value unless the default letter is wrong.
 
 References for the Rust rules:
 

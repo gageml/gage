@@ -8,6 +8,11 @@ use gage_claude::index::IndexStore;
 use gage_registry::driver::DriverRegistry;
 use gage_session::{Driver, DriverError, Source};
 
+/// Long help shared by every `--source` option
+pub const SOURCE_HELP: &str = "Agent session directory as SCHEME:PATH. The scheme names the \
+agent whose sessions are read; a value with no scheme uses the default agent. The only scheme \
+today is claude, which defaults to Claude Code's session directory.";
+
 /// The drivers this CLI build registers
 pub fn driver_registry() -> DriverRegistry {
     DriverRegistry::builtin()

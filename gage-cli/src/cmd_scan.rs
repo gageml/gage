@@ -59,6 +59,7 @@ use crate::cmd_dataset::{self, AddEvent};
 use crate::cmd_issue::event_label;
 use crate::cmd_note::{count_rows, target_cell, value_cell};
 use crate::cmd_session::{column, run_query};
+use crate::cmd_tag::TAG_HELP;
 use crate::dialog::{self, DialogError};
 use crate::human::{format_duration, format_elapsed_ms};
 use crate::scanner_attach;
@@ -228,10 +229,7 @@ pub struct ScanRunArgs {
     agent_jobs: usize,
 
     /// Tag new scan run
-    ///
-    /// Follows git's ref naming rules. An existing tag is an error
-    /// unless --force-tag is given.
-    #[arg(long, value_name = "NAME")]
+    #[arg(long, value_name = "NAME", long_help = format!("Tag new scan run\n\n{TAG_HELP}"))]
     tag: Option<String>,
 
     /// Move tag if it exists

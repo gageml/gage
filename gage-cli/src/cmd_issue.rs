@@ -5,11 +5,10 @@
 //! [`IssueStore`]. An issue has no target; the sessions it concerns
 //! are reached through the notes it cites.
 
-use std::fs;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use clap::{Args, Subcommand, ValueEnum};
+use clap::{ArgGroup, Args, Subcommand};
 use cliclack as cli;
 use console::style;
 use datafusion::arrow::array::{Array, StringArray, TimestampMillisecondArray};
@@ -33,6 +32,7 @@ use crate::cmd_note::{count_rows, target_cell, value_cell};
 use crate::cmd_session::{column, run_query};
 use crate::dialog::{self, DialogError};
 use crate::style::{self, IdKind, styled_id};
+use crate::text_arg::text_value;
 
 #[derive(Subcommand)]
 pub enum IssueCommand {
@@ -56,23 +56,6 @@ pub enum IssueCommand {
 
     /// Comment on issues
     Comment(IssueCommentArgs),
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum CloseReason {
-    Completed,
-    Wontfix,
-    Duplicate,
-}
-
-impl From<CloseReason> for StatusReason {
-    fn from(reason: CloseReason) -> Self {
-        match reason {
-            CloseReason::Completed => StatusReason::Completed,
-            CloseReason::Wontfix => StatusReason::WontFix,
-            CloseReason::Duplicate => StatusReason::Duplicate,
-        }
-    }
 }
 
 #[derive(Args)]
@@ -105,13 +88,11 @@ pub struct IssueAddArgs {
     #[arg(short, long)]
     title: Option<String>,
 
-    /// Issue description
-    #[arg(short, long, conflicts_with = "description_file")]
+    /// Issue description or @PATH to read a file
+    ///
+    /// Text cannot begin with a literal @
+    #[arg(short, long, value_name = "TEXT")]
     description: Option<String>,
-
-    /// Read description from a file
-    #[arg(long, value_name = "PATH")]
-    description_file: Option<PathBuf>,
 
     /// Issue name (default "user-issue")
     #[arg(short, long)]
@@ -148,22 +129,23 @@ pub struct IssueDeleteArgs {
 }
 
 #[derive(Args)]
+#[command(group = ArgGroup::new("reason").args(["completed", "wontfix", "duplicate"]))]
 pub struct IssueCloseArgs {
     /// Issues to close (ID or prefix)
     #[arg(required = true)]
     ids: Vec<String>,
 
-    /// Close reason (default completed)
-    ///
-    /// One of completed, wontfix, or duplicate
-    #[arg(short, long, value_enum, hide_possible_values = true)]
-    reason: Option<CloseReason>,
+    /// Close issue as "completed"
+    #[arg(short, long)]
+    completed: bool,
 
-    /// Surviving issue a duplicate closes against (ID or prefix)
-    ///
-    /// Requires --reason duplicate
-    #[arg(long, value_name = "ISSUE")]
-    of: Option<String>,
+    /// Close issue as "wontfix"
+    #[arg(short, long)]
+    wontfix: bool,
+
+    /// Close issue as "duplicate" of issue (ID or prefix)
+    #[arg(short, long, value_name = "ISSUE")]
+    duplicate: Option<String>,
 
     #[command(flatten)]
     message: MessageArgs,
@@ -198,7 +180,7 @@ pub struct IssueCommentArgs {
 
     /// Skip confirmation prompt
     ///
-    /// Requires --message or --message-file
+    /// Requires --message
     #[arg(short, long)]
     yes: bool,
 }
@@ -206,37 +188,23 @@ pub struct IssueCommentArgs {
 /// A message body given on the command line or read from a file.
 #[derive(Args)]
 pub struct MessageArgs {
-    /// Message text
-    #[arg(short, long, conflicts_with = "message_file")]
+    /// Message text or @PATH to read a file
+    ///
+    /// Text cannot begin with a literal @
+    #[arg(short, long, value_name = "TEXT")]
     message: Option<String>,
-
-    /// Read message from a file
-    #[arg(long, value_name = "PATH")]
-    message_file: Option<PathBuf>,
 }
 
 impl MessageArgs {
-    /// The message as given, or `None` when neither option was used.
+    /// The message as given, or `None` when the option was not used.
     fn resolve(&self, command: &str) -> Option<String> {
-        if let Some(text) = &self.message {
-            return Some(text.clone());
-        }
-        let path = self.message_file.as_ref()?;
-        Some(read_text_file(command, "--message-file", path))
+        self.message
+            .as_deref()
+            .map(|value| text_value(command, "--message", value))
     }
 
     fn given(&self) -> bool {
-        self.message.is_some() || self.message_file.is_some()
-    }
-}
-
-fn read_text_file(command: &str, option: &str, path: &PathBuf) -> String {
-    match fs::read_to_string(path) {
-        Ok(text) => text,
-        Err(e) => {
-            eprintln!("{command}: {option} {}: {e}", path.display());
-            std::process::exit(1);
-        }
+        self.message.is_some()
     }
 }
 
@@ -644,10 +612,10 @@ pub fn add(args: IssueAddArgs) {
     }
     let store = open_store("gage issue add");
     let issues = IssueStore::from(&store);
-    let file_description = args
-        .description_file
-        .as_ref()
-        .map(|path| read_text_file("gage issue add", "--description-file", path));
+    let description = args.description.as_deref().map(|value| {
+        let path = value.strip_prefix('@').map(PathBuf::from);
+        (path, text_value("gage issue add", "--description", value))
+    });
 
     // Resolve every cited note before any prompt, so a bad argument
     // fails first
@@ -681,28 +649,20 @@ pub fn add(args: IssueAddArgs) {
             }
             None => cli::input("Title").placeholder("Issue title").interact()?,
         };
-        let description: Option<String> = match (&args.description, &file_description) {
-            (Some(d), _) => {
+        let description: Option<String> = match &description {
+            Some((None, d)) => {
                 cli::log::step(format!("Description\n{}", style(d).dim()))?;
                 Some(d.clone())
             }
-            (None, Some(d)) => {
+            Some((Some(path), d)) => {
                 cli::log::step(format!(
                     "Description\n{}",
-                    style(format!(
-                        "{} ({} bytes)",
-                        args.description_file
-                            .as_ref()
-                            .map(|p| p.display().to_string())
-                            .unwrap_or_default(),
-                        d.len()
-                    ))
-                    .dim()
+                    style(format!("{} ({} bytes)", path.display(), d.len())).dim()
                 ))?;
                 Some(d.clone())
             }
-            (None, None) if args.yes => None,
-            (None, None) => Some(
+            None if args.yes => None,
+            None => Some(
                 cli::input("Description")
                     .placeholder("Type a description (optional)")
                     .required(false)
@@ -862,25 +822,22 @@ pub fn close(args: IssueCloseArgs) {
             Ok(())
         }
     });
-    let reason: StatusReason = args.reason.unwrap_or(CloseReason::Completed).into();
-    // A duplicate close names its survivor, and nothing else does
-    let survivor = match (reason, &args.of) {
-        (StatusReason::Duplicate, Some(of)) => match issues.get(of) {
+    let reason = if args.wontfix {
+        StatusReason::WontFix
+    } else if args.duplicate.is_some() {
+        StatusReason::Duplicate
+    } else {
+        StatusReason::Completed
+    };
+    let survivor = match &args.duplicate {
+        Some(duplicate) => match issues.get(duplicate) {
             Ok(survivor) => Some(survivor),
             Err(e) => {
-                eprintln!("gage issue close: --of {of}: {e}");
+                eprintln!("gage issue close: --duplicate {duplicate}: {e}");
                 std::process::exit(1);
             }
         },
-        (StatusReason::Duplicate, None) => {
-            eprintln!("gage issue close: --reason duplicate requires --of ISSUE");
-            std::process::exit(1);
-        }
-        (_, Some(_)) => {
-            eprintln!("gage issue close: --of applies to --reason duplicate");
-            std::process::exit(1);
-        }
-        (_, None) => None,
+        None => None,
     };
     let given_message = args.message.resolve("gage issue close");
     let count = targets.len();
@@ -979,7 +936,7 @@ pub fn open(args: IssueOpenArgs) {
 
 pub fn comment(args: IssueCommentArgs) {
     if args.yes && !args.message.given() {
-        eprintln!("gage issue comment: --yes requires --message or --message-file");
+        eprintln!("gage issue comment: --yes requires --message");
         std::process::exit(1);
     }
     let store = open_store("gage issue comment");

@@ -5,6 +5,8 @@ use clap::{Parser, Subcommand};
 use humantime::DurationError;
 use tokio_util::sync::CancellationToken;
 
+use crate::source::SOURCE_HELP;
+
 static PANIC_TOKEN: OnceLock<CancellationToken> = OnceLock::new();
 
 pub fn panic_token() -> &'static CancellationToken {
@@ -54,9 +56,11 @@ mod model_prompt;
 mod scanner_attach;
 mod scanner_spec;
 mod session_filter;
+mod size_limit;
 mod source;
 mod style;
 mod target;
+mod text_arg;
 
 /// Version string baked at build time: a real semver for official release
 /// builds, otherwise `git-<hash>` for source builds. See build.rs.
@@ -113,14 +117,11 @@ enum Command {
     /// Manage sessions
     Session {
         /// Session source
-        ///
-        /// A driver scheme selects the driver (`claude:<path>`); a value
-        /// with no scheme goes to the default driver (`<path>`). Defaults
-        /// to the default driver's default location.
         #[arg(
             short = 's',
             long,
             value_name = "SOURCE",
+            long_help = format!("Session source\n\n{SOURCE_HELP}"),
             global = true,
             display_order = 1
         )]

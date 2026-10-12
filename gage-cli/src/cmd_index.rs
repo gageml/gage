@@ -11,11 +11,7 @@ use crate::style;
 #[derive(Args)]
 pub struct IndexArgs {
     /// Session source whose index to maintain
-    ///
-    /// A driver scheme selects the driver (`claude:<path>`); a value
-    /// with no scheme goes to the default driver (`<path>`). Defaults
-    /// to the default driver's default location.
-    #[arg(short, long, value_name = "SOURCE")]
+    #[arg(short, long, value_name = "SOURCE", long_help = format!("Session source whose index to maintain\n\n{}", source::SOURCE_HELP))]
     source: Option<String>,
 
     /// Rebuild index

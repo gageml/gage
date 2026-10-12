@@ -19,8 +19,9 @@ use crate::style;
 pub enum RemoteCommand {
     /// Add a remote
     ///
-    /// Any Git URL or path. A project's source repository is a valid
-    /// remote: Gage refs sit outside the namespaces a clone transfers.
+    /// Any Git URL or path. A project's own repository is a valid
+    /// remote: what Gage stores there is not transferred by a clone or
+    /// seen by a checkout.
     Add(RemoteAddArgs),
 
     /// List remotes

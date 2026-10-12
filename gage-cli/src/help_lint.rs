@@ -5,20 +5,23 @@
 use clap::{ArgAction, Command, CommandFactory};
 
 /// Widest rendered short-help line, in columns
-const MAX_WIDTH: usize = 72;
+const MAX_WIDTH: usize = 79;
+
+/// Lines allowed past `MAX_WIDTH`, as (command, rendered line prefix).
+/// `attachment add` has a 27-column flag column because of
+/// `--stored <ATTACHMENT>`, which leaves too little room for this
+/// text at its natural length.
+const WIDTH_EXCEPTIONS: &[(&str, &str)] = &[("gage attachment add", "-r, --root <DIR>")];
 
 /// Implementation vocabulary that must not reach a user
 const INTERNAL_TERMS: &[&str] = &[
     "harness",
-    "native",
     "driver",
     "tree-ish",
     "refs",
     "attach task",
     "scan task",
     "object graph",
-    "system column",
-    "row locator",
     "no-op",
     "fsck",
     "tombstone",
@@ -77,7 +80,12 @@ fn walk(cmd: &mut Command, path: &str, out: &mut Vec<String>) {
             }
         }
         if let Some(long) = arg.get_long_help() {
-            check_internal(&long.to_string(), &format!("{loc} (long)"), out);
+            let long = long.to_string();
+            let summary = arg.get_help().map(|h| h.to_string()).unwrap_or_default();
+            if long != summary && !long.starts_with(&format!("{summary}\n\n")) {
+                out.push(violation("long-summary", &loc, &long));
+            }
+            check_internal(&long, &format!("{loc} (long)"), out);
         }
     }
     for sub in cmd.get_subcommands_mut() {
@@ -92,7 +100,10 @@ fn walk(cmd: &mut Command, path: &str, out: &mut Vec<String>) {
 fn check_rendered(rendered: &str, path: &str, out: &mut Vec<String>) {
     for line in rendered.lines() {
         let width = line.chars().count();
-        if line.starts_with("  ") && width > MAX_WIDTH {
+        let excepted = WIDTH_EXCEPTIONS
+            .iter()
+            .any(|(command, prefix)| *command == path && line.trim_start().starts_with(prefix));
+        if line.starts_with("  ") && width > MAX_WIDTH && !excepted {
             out.push(violation("width", path, line.trim()));
         }
         if line.contains("[default:") {

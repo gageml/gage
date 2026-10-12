@@ -52,8 +52,8 @@ pub enum AttachmentCommand {
     /// use the same form, and a directory an exclude matches is not
     /// entered. An attachment holds at most 10 MiB and 1000 files.
     /// Adding again under the same key updates the attachment, with
-    /// any new targets added to it, and is a no-op when nothing
-    /// changed; a named add without --key is keyed by its name and
+    /// any new targets added to it; a named add without --key is
+    /// keyed by its name and
     /// selection, and an unnamed add without --key always creates a
     /// new attachment. With --stored, an attachment already in the
     /// store is added to a dataset without reading the file system.
@@ -101,7 +101,7 @@ pub struct AttachmentAddArgs {
     #[arg(short, long, value_name = "PATTERN")]
     pub exclude: Vec<String>,
 
-    /// Directory to select files under (default current directory)
+    /// Where to select files from (default current directory)
     ///
     /// Stored file paths are relative to it
     #[arg(short, long, value_name = "DIR")]
@@ -120,7 +120,7 @@ pub struct AttachmentAddArgs {
     #[arg(short, long, value_name = "DATASET")]
     pub dataset: Option<String>,
 
-    /// Add stored attachment to dataset (name, ID, or prefix)
+    /// Add stored attachment (name, ID, or prefix)
     ///
     /// Attachment name, ID, or ID prefix. Takes the attachment from
     /// the store instead of the file system. Requires --dataset
@@ -133,11 +133,11 @@ pub struct AttachmentAddArgs {
     )]
     pub stored: Option<String>,
 
-    /// Run a scanner's attach tasks against a dataset (name or path; repeatable)
+    /// Attach scanner inputs (name or path; repeatable)
     ///
     /// A scanner name, or when no scanner has that name, a path: a
     /// directory holding a scanner.rn, or a scanner file. Each scanner
-    /// attaches what its scan tasks read, preparing the dataset for a
+    /// attaches the files its scan reads, preparing the dataset for a
     /// scan by those scanners. Requires --dataset
     #[arg(
         short,

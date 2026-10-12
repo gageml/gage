@@ -21,6 +21,10 @@ use crate::dialog::{self, DialogError};
 use crate::human::format_elapsed_ms;
 use crate::style;
 
+/// Long help shared by every option that names a new tag
+pub const TAG_HELP: &str = "A tag name follows Git ref naming rules. An existing tag is an \
+error unless --force-tag is given.";
+
 #[derive(Subcommand)]
 pub enum TagCommand {
     /// Add a tag
