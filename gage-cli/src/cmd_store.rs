@@ -41,17 +41,13 @@ pub enum StoreCommand {
     /// immediately) and `2.weeks.ago` (the git default).
     Gc(GcArgs),
 
-    /// List entries under a tree-ish
-    ///
-    /// Runs `git ls-tree -l <REF>`. `<REF>` is any git tree-ish: a full
-    /// ref path (`refs/gage/1/object/<id>`), an object sha, or
-    /// `<ref>:<path>`.
+    /// List files stored for an object
     Ls(LsArgs),
 
-    /// Dump object content
+    /// Print a file stored for an object
     ///
-    /// Runs `git cat-file -p <REF>`. `<REF>` is any git tree-ish or
-    /// object sha.
+    /// Prints the file's bytes as stored. Without FILE, prints the
+    /// object's attributes.
     Cat(CatArgs),
 
     /// Delete objects of any type
@@ -93,18 +89,17 @@ pub struct DeleteArgs {
 
 #[derive(Args)]
 pub struct LsArgs {
-    /// Git tree-ish
-    reference: String,
-
-    /// Include object sha column
-    #[arg(long)]
-    sha: bool,
+    /// Object to list (tag, ID, or prefix)
+    object: String,
 }
 
 #[derive(Args)]
 pub struct CatArgs {
-    /// Git object reference
-    reference: String,
+    /// Object to read (tag, ID, or prefix)
+    object: String,
+
+    /// File to print (default attrs.json)
+    file: Option<String>,
 }
 
 #[derive(Args)]
@@ -413,7 +408,8 @@ fn gc_summary_rows(outcome: &gage_store::GcOutcome) -> Vec<Vec<String>> {
 }
 
 fn ls(store: &Store, args: LsArgs) {
-    let entries = match store.ls(&args.reference) {
+    let tip = resolve_tip(store, "gage store ls", &args.object);
+    let entries = match store.ls(&tip) {
         Ok(entries) => entries,
         Err(e) => {
             eprintln!("gage store ls: {e}");
@@ -423,11 +419,8 @@ fn ls(store: &Store, args: LsArgs) {
     if entries.is_empty() {
         return;
     }
-    let mut header: Vec<String> = vec!["Name".into(), "Type".into(), "Size".into()];
-    if args.sha {
-        header.push("Sha".into());
-    }
-    let rows = std::iter::once(header).chain(entries.iter().map(|e| ls_row(e, args.sha)));
+    let header: Vec<String> = vec!["Name".into(), "Type".into(), "Size".into()];
+    let rows = std::iter::once(header).chain(entries.iter().map(ls_row));
     let table = Table::from_iter(rows)
         .with(Style::rounded())
         .modify(Rows::first(), style::tty(Color::FG_BRIGHT_YELLOW))
@@ -440,7 +433,7 @@ fn ls(store: &Store, args: LsArgs) {
     println!("{table}");
 }
 
-fn ls_row(entry: &TreeEntry, include_sha: bool) -> Vec<String> {
+fn ls_row(entry: &TreeEntry) -> Vec<String> {
     let size = match entry.size {
         Some(bytes) => format_size(bytes as i64),
         None => "-".to_string(),
@@ -450,16 +443,39 @@ fn ls_row(entry: &TreeEntry, include_sha: bool) -> Vec<String> {
         EntryKind::Tree => format!("{}/", entry.name),
         _ => entry.name.clone(),
     };
-    let mut row = vec![name, kind, size];
-    if include_sha {
-        row.push(entry.sha.clone());
-    }
-    row
+    vec![name, kind, size]
 }
 
 fn cat(store: &Store, args: CatArgs) {
-    if let Err(e) = store.cat(&args.reference) {
+    use std::io::Write;
+
+    let tip = resolve_tip(store, "gage store cat", &args.object);
+    let file = args.file.as_deref().unwrap_or("attrs.json");
+    let bytes = match store.read_blob_bytes(&format!("{tip}:{file}")) {
+        Ok(bytes) => bytes,
+        Err(StoreError::MissingObject(_)) => {
+            eprintln!("gage store cat: {}: no such file: {file}", args.object);
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("gage store cat: {e}");
+            std::process::exit(1);
+        }
+    };
+    if let Err(e) = std::io::stdout().write_all(&bytes) {
         eprintln!("gage store cat: {e}");
         std::process::exit(1);
+    }
+}
+
+/// The stored version an object name resolves to, or print
+/// `command: <error>` and exit
+fn resolve_tip(store: &Store, command: &str, object: &str) -> String {
+    match store.resolve_in(object, None) {
+        Ok(found) => found.tip_sha,
+        Err(e) => {
+            eprintln!("{command}: {e}");
+            std::process::exit(1);
+        }
     }
 }

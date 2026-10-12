@@ -478,20 +478,6 @@ impl Store {
         Ok(())
     }
 
-    /// Dump the pretty-printed content of `reference` to the process's
-    /// stdout by running `git cat-file -p <reference>`.
-    pub fn cat(&self, reference: &str) -> Result<(), StoreError> {
-        let mut cmd = git_in(self.path(), ["cat-file", "-p", reference]);
-        let status = cmd.status().map_err(StoreError::Spawn)?;
-        if !status.success() {
-            return Err(StoreError::Git {
-                status,
-                stderr: String::new(),
-            });
-        }
-        Ok(())
-    }
-
     /// Read one commit's metadata. `reference` is any name that
     /// resolves to a commit.
     pub fn read_commit(&self, reference: &str) -> Result<CommitMeta, StoreError> {
