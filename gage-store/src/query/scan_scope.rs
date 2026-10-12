@@ -346,7 +346,6 @@ impl ScanSource {
                     tasks: counts.0,
                     completed: counts.1,
                     failed: counts.2,
-                    skipped: counts.3,
                     dataset,
                     commit: None,
                 })
@@ -365,16 +364,14 @@ impl ScanSource {
     }
 }
 
-/// `(total, completed, failed, skipped)` over an active scan's task
-/// records.
-fn task_counts(tasks: &[ScanTask]) -> (i64, i64, i64, i64) {
-    let mut counts = (0, 0, 0, 0);
+/// `(total, completed, failed)` over an active scan's task records.
+fn task_counts(tasks: &[ScanTask]) -> (i64, i64, i64) {
+    let mut counts = (0, 0, 0);
     for t in tasks {
         counts.0 += 1;
         match t.attrs.status {
             TaskStatus::Completed => counts.1 += 1,
             TaskStatus::Failed => counts.2 += 1,
-            TaskStatus::Skipped => counts.3 += 1,
             TaskStatus::Pending | TaskStatus::Started | TaskStatus::Canceled => {}
         }
     }

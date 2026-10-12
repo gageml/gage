@@ -90,7 +90,6 @@ pub struct TaskCounts {
     pub total: usize,
     pub completed: usize,
     pub failed: usize,
-    pub skipped: usize,
 }
 
 /// A task's `status`. `Pending` and `Started` occur only in the scan
@@ -103,7 +102,6 @@ pub enum TaskStatus {
     Started,
     Completed,
     Failed,
-    Skipped,
     Canceled,
 }
 
@@ -114,7 +112,6 @@ impl TaskStatus {
             TaskStatus::Started => "started",
             TaskStatus::Completed => "completed",
             TaskStatus::Failed => "failed",
-            TaskStatus::Skipped => "skipped",
             TaskStatus::Canceled => "canceled",
         }
     }
@@ -140,18 +137,6 @@ pub struct TaskAttrs {
     /// the agent pool. Present once the task has started.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worked_ms: Option<u64>,
-    /// Why the task was skipped; present only for `skipped`
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub skipped: Option<SkipReason>,
-}
-
-/// Why a task was skipped: a `needs` pattern that no completed upstream
-/// task satisfied, and the upstream tasks that were to write it, as
-/// `<scanner>:<task>`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SkipReason {
-    pub needs: String,
-    pub upstream: Vec<String>,
 }
 
 /// One task of a scan, decoded from `tasks/<scanner>/<task>/`.
@@ -1142,7 +1127,8 @@ mod tests {
     }
 
     /// A scan directory's `scan/` tree with one completed and one
-    /// failed task.
+    /// failed task. The attrs carry the `skipped` count an earlier
+    /// runtime wrote; a reader ignores it.
     fn new_scan_dir(dir: &Path) -> PathBuf {
         let scan = dir.join("scan");
         write(
@@ -1238,7 +1224,6 @@ mod tests {
                     total: 2,
                     completed: 1,
                     failed: 1,
-                    skipped: 0,
                 },
             }
         );
@@ -1457,7 +1442,7 @@ mod tests {
         let scan_dir = tmp.path().join("scan");
         write(
             &scan_dir.join("attrs.json"),
-            r#"{"runtime":"gage 0.2.0","started":1,"stopped":2,"canceled":false,"tasks":{"total":0,"completed":0,"failed":0,"skipped":0}}"#,
+            r#"{"runtime":"gage 0.2.0","started":1,"stopped":2,"canceled":false,"tasks":{"total":0,"completed":0,"failed":0}}"#,
         );
         let scans = ScanStore::from(&store);
         let commit = scans.create("SCAN2", &scan_dir).unwrap();

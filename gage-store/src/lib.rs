@@ -103,8 +103,8 @@ pub use refs::{GENERATION, KEY_REFS, OBJECT_REFS, ROOT as REFS_ROOT, TAG_REFS};
 pub use remote::{FetchSource, Remote, RemoteStore, Repository, tracking_prefix};
 pub use scan::{
     AgentAttrs, DirFiles, LOG_NAMES, OBJECT_TYPE as SCAN_TYPE, ScanAttrs, ScanContent, ScanDeleted,
-    ScanFiles, ScanQuery, ScanRecord, ScanStore, ScanTask, SkipReason, TaskAgent, TaskAttrs,
-    TaskCounts, TaskStatus, Watermark, agent_file_path, read_tasks,
+    ScanFiles, ScanQuery, ScanRecord, ScanStore, ScanTask, TaskAgent, TaskAttrs, TaskCounts,
+    TaskStatus, Watermark, agent_file_path, read_tasks,
 };
 pub use scan_dir::ScanDirLayout;
 pub use session::{

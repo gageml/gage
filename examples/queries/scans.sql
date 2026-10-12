@@ -1,6 +1,6 @@
 -- Recent scans: when they ran, how their tasks ended, and what they produced
 SELECT s.id, s.started, s.stopped, s.canceled,
-       s.tasks, s.completed, s.failed, s.skipped,
+       s.tasks, s.completed, s.failed,
        COALESCE(ss.sessions, 0) AS sessions,
        COALESCE(sn.notes, 0) AS notes,
        COALESCE(sn.carried, 0) AS carried,

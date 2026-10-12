@@ -264,7 +264,6 @@ pub enum TaskState {
     Running,
     Completed,
     Error,
-    Skipped,
     Canceled,
 }
 
@@ -274,7 +273,7 @@ impl TaskState {
         match self {
             TaskState::Running => 0,
             TaskState::Pending => 1,
-            TaskState::Completed | TaskState::Error | TaskState::Skipped | TaskState::Canceled => 2,
+            TaskState::Completed | TaskState::Error | TaskState::Canceled => 2,
         }
     }
 }
@@ -3084,8 +3083,7 @@ fn draw_tasks(frame: &mut Frame, area: Rect, state: &mut ViewState) {
                     TaskState::Running => ("running", styles::RunStatus::running()),
                     TaskState::Completed => ("done", styles::RunStatus::completed()),
                     TaskState::Error => ("error", styles::RunStatus::error()),
-                    TaskState::Skipped => ("skipped", styles::RunStatus::skipped()),
-                    TaskState::Canceled => ("canceled", styles::RunStatus::skipped()),
+                    TaskState::Canceled => ("canceled", styles::RunStatus::canceled()),
                 };
                 // Time working: the stopwatch runs while the task has
                 // the pool's attention and holds still while blocked,
@@ -3115,13 +3113,11 @@ fn draw_tasks(frame: &mut Frame, area: Rect, state: &mut ViewState) {
     // the labels on screen, so the column doesn't jitter as states
     // change. One space each side: the label aligns under the padded
     // header and the time doesn't touch the panel border.
-    let label_width = [
-        "pending", "waiting", "running", "done", "error", "skipped", "canceled",
-    ]
-    .iter()
-    .map(|l| l.width())
-    .max()
-    .unwrap();
+    let label_width = ["pending", "waiting", "running", "done", "error", "canceled"]
+        .iter()
+        .map(|l| l.width())
+        .max()
+        .unwrap();
     // Time field floor: room for sub-hour durations ("59m59s") so the
     // column doesn't widen as times tick up; longer runs still grow it
     let min_time_width = "59m59s".width();
@@ -3204,7 +3200,7 @@ fn draw_tasks(frame: &mut Frame, area: Rect, state: &mut ViewState) {
                         TaskState::Running => spinner,
                         TaskState::Completed => "✓",
                         TaskState::Error => "✗",
-                        TaskState::Skipped | TaskState::Canceled => "⊘",
+                        TaskState::Canceled => "⊘",
                     };
                     Cell::from(format!(
                         "{fold}{glyph} {}:{}",
@@ -3273,7 +3269,7 @@ fn agent_status(
         AgentState::Error => ("error", styles::RunStatus::error(), "✗"),
         AgentState::Running if !finished => ("running", styles::RunStatus::running(), "•"),
         AgentState::Running if parent.state == TaskState::Canceled => {
-            ("canceled", styles::RunStatus::skipped(), "⊘")
+            ("canceled", styles::RunStatus::canceled(), "⊘")
         }
         AgentState::Running => ("error", styles::RunStatus::error(), "✗"),
     }

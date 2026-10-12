@@ -34,8 +34,7 @@ Tables:
   (issue_id, event_id, timestamp, author, event, from_status, to_status,
   reason, of, message); issue_evidence (issue_id, note_id); session_issue
   (session_id, issue_id)
-- scan (id, started, stopped, canceled, tasks, completed, failed, skipped,
-  dataset); scan_session (scan_id, session_num, session_id); scan_note
+- scan (id, started, stopped, canceled, tasks, completed, failed, dataset); scan_session (scan_id, session_num, session_id); scan_note
   (scan_id, note_id, carried); scan_issue (scan_id, issue_id)
 - dataset (id); dataset_session (dataset_id, session_num, session_id)
 - attachment (id, name, root, includes, excludes, file_count, size);

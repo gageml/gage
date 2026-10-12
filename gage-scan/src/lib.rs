@@ -739,7 +739,7 @@ impl<F: FnMut(Event)> Run<'_, F> {
             };
             self.finish(plan, i, status, error, d, logs)?;
         }
-        let canceled = d.counts.completed + d.counts.failed + d.counts.skipped < total;
+        let canceled = d.counts.completed + d.counts.failed < total;
         if canceled {
             let unstarted = d.status.iter().filter(|s| s.is_none()).count() - d.running.len();
             tracing::info!(aborted = d.running.len(), unstarted, "scan canceled");
@@ -925,8 +925,7 @@ impl<F: FnMut(Event)> Run<'_, F> {
 }
 
 /// The scan's closing line: `Scan <shown id> completed: 3 tasks: 2
-/// completed, 1 failed`, with skipped and canceled counts when
-/// nonzero. `shown_id` is the id as the caller displays it: the plain
+/// completed, 1 failed`, with a canceled count when nonzero. `shown_id` is the id as the caller displays it: the plain
 /// short id in the scan log, a styled one on a terminal.
 pub fn summary_line(shown_id: &str, attrs: &ScanAttrs) -> String {
     let state = if attrs.canceled {
@@ -939,10 +938,7 @@ pub fn summary_line(shown_id: &str, attrs: &ScanAttrs) -> String {
         format!("{} completed", counts.completed),
         format!("{} failed", counts.failed),
     ];
-    if counts.skipped > 0 {
-        parts.push(format!("{} skipped", counts.skipped));
-    }
-    let canceled = counts.total - counts.completed - counts.failed - counts.skipped;
+    let canceled = counts.total - counts.completed - counts.failed;
     if canceled > 0 {
         parts.push(format!("{canceled} canceled"));
     }
@@ -964,7 +960,6 @@ fn task_attrs(
         started,
         stopped,
         worked_ms,
-        skipped: None,
     }
 }
 
@@ -2248,7 +2243,6 @@ mod tests {
                 total: 1,
                 completed: 1,
                 failed: 0,
-                skipped: 0,
             }
         );
         assert!(!outcome.attrs.canceled);
@@ -2444,7 +2438,6 @@ mod tests {
                 total: 2,
                 completed: 1,
                 failed: 1,
-                skipped: 0,
             }
         );
         assert!(outcome.attrs.started <= outcome.attrs.stopped);
@@ -5268,7 +5261,6 @@ mod tests {
                 total: 3,
                 completed: 2,
                 failed: 1,
-                skipped: 0,
             }
         );
         assert_eq!(
@@ -5491,7 +5483,6 @@ mod tests {
                 total: 2,
                 completed: 2,
                 failed: 0,
-                skipped: 0,
             },
             "{events:?}"
         );

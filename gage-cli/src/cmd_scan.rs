@@ -612,7 +612,7 @@ impl StoreHost {
         let ctx = self.scoped(ScanScope::stored(&id)).await;
 
         let (scan_elapsed, counts) = {
-            let sql = "SELECT started, stopped, tasks, completed, failed, skipped FROM scan";
+            let sql = "SELECT started, stopped, tasks, completed, failed FROM scan";
             let batches = query(&ctx, sql).await?;
             let batch = batches
                 .iter()
@@ -621,7 +621,7 @@ impl StoreHost {
             let started = column::<TimestampMillisecondArray>(batch, 0);
             let stopped = column::<TimestampMillisecondArray>(batch, 1);
             let n = |idx: usize| column::<Int64Array>(batch, idx).value(0) as usize;
-            (elapsed(started, stopped, 0), (n(2), n(3) + n(4) + n(5)))
+            (elapsed(started, stopped, 0), (n(2), n(3) + n(4)))
         };
 
         let results = self.load_results(&ctx).await?;
@@ -667,7 +667,6 @@ impl StoreHost {
                         "started" => TaskState::Running,
                         "completed" => TaskState::Completed,
                         "failed" => TaskState::Error,
-                        "skipped" => TaskState::Skipped,
                         _ => TaskState::Canceled,
                     },
                     id,

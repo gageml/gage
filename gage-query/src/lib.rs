@@ -890,10 +890,7 @@ mod tests {
             "tasks/hello/fail/attrs.json",
             r#"{"status":"failed","started":1200,"stopped":1500}"#,
         );
-        write(
-            "tasks/hello/after/attrs.json",
-            r#"{"status":"skipped","skipped":{"needs":"greeting","upstream":["hello:fail"]}}"#,
-        );
+        write("tasks/hello/after/attrs.json", r#"{"status":"canceled"}"#);
         write(
             "tasks/hello/greet/agents/AGENT1/attrs.json",
             r#"{"exit_code":0}"#,
@@ -923,19 +920,11 @@ mod tests {
         );
         assert_eq!(
             strings(&ctx, "SELECT status FROM scan_task ORDER BY num").await,
-            ["completed", "failed", "skipped"]
+            ["completed", "failed", "canceled"]
         );
         assert_eq!(
             strings(&ctx, "SELECT selected FROM scan_task ORDER BY num").await,
             ["explicit", "group:default", "group:eval"]
-        );
-        assert_eq!(
-            strings(
-                &ctx,
-                "SELECT skipped_upstream FROM scan_task WHERE skipped_needs = 'greeting'"
-            )
-            .await,
-            [r#"["hello:fail"]"#]
         );
         assert_eq!(
             strings(
@@ -965,7 +954,7 @@ mod tests {
         let root = write_scan_dir(tmp.path());
         std::fs::write(
             root.join("scan").join("attrs.json"),
-            r#"{"runtime":"gage 1","started":1000,"stopped":1500,"canceled":false,"tasks":{"total":3,"completed":1,"failed":1,"skipped":1}}"#,
+            r#"{"runtime":"gage 1","started":1000,"stopped":1500,"canceled":false,"tasks":{"total":3,"completed":1,"failed":1}}"#,
         )
         .unwrap();
         let commit = {

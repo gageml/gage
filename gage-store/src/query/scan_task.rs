@@ -43,12 +43,6 @@ pub(crate) fn scan_task_schema() -> SchemaRef {
         // How the task entered the plan: `explicit` or `group:<name>`;
         // null without a plan
         Field::new("selected", DataType::Utf8, true),
-        // For a skipped task, the `needs` pattern no completed
-        // upstream task satisfied
-        Field::new("skipped_needs", DataType::Utf8, true),
-        // For a skipped task, the upstream tasks that were to write
-        // it, as a JSON array of `<scanner>:<task>`
-        Field::new("skipped_upstream", DataType::Utf8, true),
         // System
         // Null for an active scan
         system(Field::new("scan_commit", DataType::Utf8, true)),
@@ -84,8 +78,6 @@ pub(crate) struct ScanTaskRow {
     pub stopped_ms: Option<i64>,
     pub worked_ms: Option<i64>,
     pub selected: Option<String>,
-    pub skipped_needs: Option<String>,
-    pub skipped_upstream: Option<String>,
     pub scan_commit: Option<String>,
 }
 
@@ -128,12 +120,6 @@ pub(crate) fn task_rows_of(
                 stopped_ms: t.attrs.stopped,
                 worked_ms: t.attrs.worked_ms.map(|w| w as i64),
                 selected,
-                skipped_needs: t.attrs.skipped.as_ref().map(|s| s.needs.clone()),
-                skipped_upstream: t
-                    .attrs
-                    .skipped
-                    .as_ref()
-                    .map(|s| Value::from(s.upstream.clone()).to_string()),
                 scan_commit: scan_commit.map(String::from),
             }
         })
@@ -202,8 +188,6 @@ pub(crate) fn scan_task_rows(rows: &[ScanTaskRow]) -> Result<RecordBatch> {
     let mut stoppeds = TimestampMillisecondBuilder::with_capacity(len);
     let mut workeds = Int64Builder::with_capacity(len);
     let mut selecteds = StringBuilder::new();
-    let mut needs = StringBuilder::new();
-    let mut upstreams = StringBuilder::new();
     let mut commits = StringBuilder::new();
     for row in rows {
         scan_ids.append_value(&row.scan_id);
@@ -215,8 +199,6 @@ pub(crate) fn scan_task_rows(rows: &[ScanTaskRow]) -> Result<RecordBatch> {
         stoppeds.append_option(row.stopped_ms);
         workeds.append_option(row.worked_ms);
         selecteds.append_option(row.selected.as_deref());
-        needs.append_option(row.skipped_needs.as_deref());
-        upstreams.append_option(row.skipped_upstream.as_deref());
         commits.append_option(row.scan_commit.as_deref());
     }
     Ok(RecordBatch::try_new(
@@ -231,8 +213,6 @@ pub(crate) fn scan_task_rows(rows: &[ScanTaskRow]) -> Result<RecordBatch> {
             Arc::new(stoppeds.finish().with_timezone("UTC")),
             Arc::new(workeds.finish()),
             Arc::new(selecteds.finish()),
-            Arc::new(needs.finish()),
-            Arc::new(upstreams.finish()),
             Arc::new(commits.finish()),
         ],
     )?)

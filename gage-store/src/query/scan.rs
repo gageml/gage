@@ -39,7 +39,6 @@ pub(crate) fn scan_schema() -> SchemaRef {
         Field::new("tasks", DataType::Int64, false),
         Field::new("completed", DataType::Int64, false),
         Field::new("failed", DataType::Int64, false),
-        Field::new("skipped", DataType::Int64, false),
         // The dataset scanned; null when the scan had none
         Field::new("dataset", DataType::Utf8, true),
         // System
@@ -65,7 +64,6 @@ pub(crate) struct ScanRow {
     pub tasks: i64,
     pub completed: i64,
     pub failed: i64,
-    pub skipped: i64,
     /// The dataset's id and the commit the scan read
     pub dataset: Option<(String, String)>,
     pub id_prefix: String,
@@ -92,7 +90,6 @@ impl ScanRow {
             tasks: attrs.tasks.total as i64,
             completed: attrs.tasks.completed as i64,
             failed: attrs.tasks.failed as i64,
-            skipped: attrs.tasks.skipped as i64,
             dataset: dataset_id.zip(record.content.dataset.clone()),
             id_prefix,
             commit: Some(record.commit_sha.clone()),
@@ -113,7 +110,6 @@ pub(crate) fn scan_rows(rows: &[ScanRow]) -> Result<RecordBatch> {
     let mut tasks = Int64Builder::with_capacity(len);
     let mut completeds = Int64Builder::with_capacity(len);
     let mut faileds = Int64Builder::with_capacity(len);
-    let mut skippeds = Int64Builder::with_capacity(len);
     let mut datasets = StringBuilder::new();
     let mut id_displays = StringBuilder::with_capacity(len, len * 8);
     let mut id_prefixes = StringBuilder::with_capacity(len, len * 4);
@@ -131,7 +127,6 @@ pub(crate) fn scan_rows(rows: &[ScanRow]) -> Result<RecordBatch> {
         tasks.append_value(row.tasks);
         completeds.append_value(row.completed);
         faileds.append_value(row.failed);
-        skippeds.append_value(row.skipped);
         datasets.append_option(row.dataset.as_ref().map(|(id, _)| id.as_str()));
         dataset_commits.append_option(row.dataset.as_ref().map(|(_, sha)| sha.as_str()));
         id_displays.append_value(short_uuid(&row.id));
@@ -152,7 +147,6 @@ pub(crate) fn scan_rows(rows: &[ScanRow]) -> Result<RecordBatch> {
             Arc::new(tasks.finish()),
             Arc::new(completeds.finish()),
             Arc::new(faileds.finish()),
-            Arc::new(skippeds.finish()),
             Arc::new(datasets.finish()),
             Arc::new(id_displays.finish()),
             Arc::new(id_prefixes.finish()),

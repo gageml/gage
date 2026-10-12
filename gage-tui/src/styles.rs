@@ -164,7 +164,7 @@ impl RunStatus {
         Style::new().add_modifier(Modifier::DIM)
     }
 
-    pub fn skipped() -> Style {
+    pub fn canceled() -> Style {
         Style::new().add_modifier(Modifier::DIM)
     }
 

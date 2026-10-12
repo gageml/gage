@@ -129,7 +129,6 @@ impl ScanDir {
                         started: None,
                         stopped: None,
                         worked_ms: None,
-                        skipped: None,
                     },
                 )?;
             }
@@ -451,7 +450,6 @@ mod tests {
                     started: Some(1),
                     stopped: Some(2),
                     worked_ms: None,
-                    skipped: None,
                 },
             )
             .unwrap();
@@ -484,7 +482,6 @@ mod tests {
                 total: 2,
                 completed: 0,
                 failed: 1,
-                skipped: 0,
             },
         };
         scan_dir.write_scan(&attrs).unwrap();
