@@ -23,7 +23,7 @@ pub struct IndexArgs {
     status: bool,
 }
 
-/// Run the reconcile pass (columnar store and text index) and exit.
+/// Run the reconcile pass over the session summary cache and exit.
 /// For post-install setup, cron, and bulk imports — keeps the
 /// first-build cost out of interactive queries. Progress is reported
 /// via `tracing` (set GAGE_LOG=info to see per-session output).
@@ -95,13 +95,7 @@ fn print_status(s: &Status) {
     let rows = [
         [
             "index".to_string(),
-            format!(
-                "v{} ({} sessions indexed, {}, tokenizer {})",
-                s.index_version,
-                s.indexed,
-                s.index_bytes_display(),
-                s.tokenizer_chain,
-            ),
+            format!("v{} ({} sessions indexed)", s.cache_version, s.indexed),
         ],
         [
             "sessions".to_string(),

@@ -304,7 +304,7 @@ impl ClaudeSource {
     }
 
     /// The index store for this source's projects directory: the
-    /// summary cache and the text index.
+    /// summary cache.
     pub fn index_store(&self) -> Arc<IndexStore> {
         Arc::clone(&self.store)
     }

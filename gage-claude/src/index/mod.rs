@@ -1,9 +1,9 @@
 //! Derived data layer for Claude session files.
 //!
 //! One artifact shadows the session corpus, maintained by one
-//! reconcile pass: a Tantivy full-text index over message text. The
-//! index lives under a cache directory and is ephemeral: deleting the
-//! cache is a complete reset.
+//! reconcile pass: a per-session summary cache. The cache lives under
+//! a cache directory and is ephemeral: deleting it is a complete
+//! reset.
 //!
 //! Layering: [`crate::session`] and [`crate::entry`] (source reading)
 //! feed this module (derived artifacts); the DataFusion table
@@ -12,7 +12,6 @@
 mod derive;
 mod reconcile;
 mod summary_cache;
-mod text_index;
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -29,9 +28,8 @@ pub use derive::{
 pub use reconcile::{
     IndexStore, LockMode, ReconcileEvent, ReconcileOutcome, SOURCE_MARKER, Status,
 };
-pub use text_index::{DEFAULT_SNIPPET_CHARS, Hit, INDEX_FORMAT_VERSION, TOKENIZER_CHAIN};
 
-/// Cache directory for the index artifacts of one projects directory:
+/// Cache directory for the cache artifacts of one projects directory:
 /// `<gage_home>/cache/<slug>`, where the slug is the canonical projects
 /// path with every non-alphanumeric character replaced by `-`. Every
 /// source is keyed the same way; the default Claude location is not
@@ -51,8 +49,6 @@ pub fn cache_dir_for(projects_dir: &Path) -> PathBuf {
 pub enum IndexError {
     Io(std::io::Error),
     Arrow(arrow::error::ArrowError),
-    Tantivy(tantivy::TantivyError),
-    QueryParse(String),
     Json(serde_json::Error),
 }
 
@@ -61,8 +57,6 @@ impl fmt::Display for IndexError {
         match self {
             IndexError::Io(e) => write!(f, "io error: {e}"),
             IndexError::Arrow(e) => write!(f, "arrow error: {e}"),
-            IndexError::Tantivy(e) => write!(f, "index error: {e}"),
-            IndexError::QueryParse(e) => write!(f, "invalid text search query: {e}"),
             IndexError::Json(e) => write!(f, "json error: {e}"),
         }
     }
@@ -79,12 +73,6 @@ impl From<std::io::Error> for IndexError {
 impl From<arrow::error::ArrowError> for IndexError {
     fn from(e: arrow::error::ArrowError) -> Self {
         IndexError::Arrow(e)
-    }
-}
-
-impl From<tantivy::TantivyError> for IndexError {
-    fn from(e: tantivy::TantivyError) -> Self {
-        IndexError::Tantivy(e)
     }
 }
 

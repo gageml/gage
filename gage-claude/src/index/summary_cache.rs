@@ -79,7 +79,7 @@ pub(crate) fn remove_all(cache_dir: &Path) -> std::io::Result<()> {
 }
 
 /// Remove `session/v{N}` directories whose `N` is not the current
-/// `VERSION`. Mirrors the text-index version cleanup.
+/// `VERSION`.
 pub(crate) fn remove_stale_versions(cache_dir: &Path) {
     let parent = cache_dir.join("session");
     let current = format!("v{VERSION}");

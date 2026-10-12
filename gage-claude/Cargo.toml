@@ -22,7 +22,6 @@ rust-embed = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
-tantivy = { workspace = true }
 tokio = { workspace = true, features = ["sync", "process", "time", "io-util", "rt"] }
 tracing = { workspace = true }
 uuid = { workspace = true }
