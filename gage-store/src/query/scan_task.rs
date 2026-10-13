@@ -22,7 +22,7 @@ use datafusion::error::Result;
 use gage_session::system;
 use serde_json::Value;
 
-use super::batch::{BatchSource, BatchTable, external};
+use super::batch::{BatchSource, BatchTable, external, readable};
 use crate::{Order, ScanStore, ScanTask, Store};
 
 fn timestamp() -> DataType {
@@ -318,7 +318,9 @@ impl BatchSource for Source {
         let mut task_rows = Vec::new();
         let mut agent_rows = Vec::new();
         for tip in &tips {
-            let record = scans.at_commit(&tip.sha).map_err(external)?;
+            let Some(record) = readable(scans.at_commit(&tip.sha))? else {
+                continue;
+            };
             let content = &record.content;
             match self.0 {
                 Kind::Task => task_rows.extend(task_rows_of(

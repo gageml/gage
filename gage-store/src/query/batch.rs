@@ -76,6 +76,21 @@ pub(crate) fn external(e: StoreError) -> DataFusionError {
     DataFusionError::External(Box::new(e))
 }
 
+/// The decoded object, or `None` after a warning when its `type`
+/// version is newer than this build reads. A listing shows every
+/// object it can read and names the one it cannot; the object is not
+/// a reason to fail the table. Any other error is returned.
+pub(crate) fn readable<T>(result: std::result::Result<T, StoreError>) -> Result<Option<T>> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(e @ StoreError::ObjectVersion { .. }) => {
+            tracing::warn!("{e}; not listed");
+            Ok(None)
+        }
+        Err(e) => Err(external(e)),
+    }
+}
+
 /// A table function argument given as a string literal
 pub(crate) fn string_literal(e: &Expr) -> Option<String> {
     match e {

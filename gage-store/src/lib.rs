@@ -65,7 +65,9 @@ pub(crate) mod test_support;
 pub mod url;
 mod writer;
 
-pub use admin::{GcOutcome, InitOutcome, STORE_VERSION, StoreStatus, init, store_path};
+pub use admin::{
+    GcOutcome, HOOK_VERSION, InitOutcome, STORE_VERSION, StoreStatus, init, store_path,
+};
 pub use attachment::{
     AttachmentAddOutcome, AttachmentAttrs, AttachmentFile, AttachmentOutcome, AttachmentQuery,
     AttachmentRecord, AttachmentRemoveOutcome, AttachmentSpec, AttachmentStore,

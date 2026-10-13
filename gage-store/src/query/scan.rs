@@ -17,7 +17,7 @@ use datafusion::error::Result;
 use gage_core::uuid::short_uuid;
 use gage_session::system;
 
-use super::batch::{BatchSource, BatchTable, external, marker, unique_prefix_lens};
+use super::batch::{BatchSource, BatchTable, external, marker, readable, unique_prefix_lens};
 use crate::{Order, SCAN_TYPE, ScanRecord, ScanStore, Store};
 
 fn timestamp() -> DataType {
@@ -176,7 +176,9 @@ impl BatchSource for Source {
             unique_prefix_lens(store.short_prefix_ids(Some(SCAN_TYPE)).map_err(external)?);
         let mut rows = Vec::with_capacity(tips.len());
         for tip in &tips {
-            let record = scans.at_commit(&tip.sha).map_err(external)?;
+            let Some(record) = readable(scans.at_commit(&tip.sha))? else {
+                continue;
+            };
             let dataset_id = match &record.content.dataset {
                 Some(sha) => Some(store.read_header(sha).map_err(external)?.id),
                 None => None,

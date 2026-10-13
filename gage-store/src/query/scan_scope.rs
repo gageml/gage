@@ -372,7 +372,10 @@ fn task_counts(tasks: &[ScanTask]) -> (i64, i64, i64) {
         match t.attrs.status {
             TaskStatus::Completed => counts.1 += 1,
             TaskStatus::Failed => counts.2 += 1,
-            TaskStatus::Pending | TaskStatus::Started | TaskStatus::Canceled => {}
+            TaskStatus::Pending
+            | TaskStatus::Started
+            | TaskStatus::Canceled
+            | TaskStatus::Unknown => {}
         }
     }
     counts

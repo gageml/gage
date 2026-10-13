@@ -13,7 +13,7 @@ use datafusion::datasource::TableProvider;
 use datafusion::error::Result;
 use gage_session::system;
 
-use super::batch::{BatchSource, BatchTable, external};
+use super::batch::{BatchSource, BatchTable, external, readable};
 use crate::{ScanStore, Store};
 
 fn schema() -> SchemaRef {
@@ -49,7 +49,9 @@ impl BatchSource for Source {
         let mut versions = StringBuilder::new();
         let mut marks = UInt64Builder::new();
         for tip in scans.query().tips().map_err(external)? {
-            let record = scans.at_commit(&tip.sha).map_err(external)?;
+            let Some(record) = readable(scans.at_commit(&tip.sha))? else {
+                continue;
+            };
             for w in &record.content.watermarks {
                 scan_ids.append_value(&tip.id);
                 scan_commits.append_value(&tip.sha);

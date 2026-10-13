@@ -275,6 +275,13 @@ fn validate(issues: &IssueStore<'_>, resolutions: &[Resolution]) -> Result<Vec<P
                 ));
             }
             IssueStatus::Closed => {}
+            IssueStatus::Unknown => {
+                return Err(format!(
+                    "issue {} closes against issue {}, whose status this build does not read",
+                    short_uuid(issue),
+                    short_uuid(of)
+                ));
+            }
         }
     }
     Ok(plan)

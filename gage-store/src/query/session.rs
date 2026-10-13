@@ -44,6 +44,7 @@ use gage_core::uuid::short_uuid;
 use gage_session::filter::{self, IdFilter};
 use gage_session::system;
 
+use super::batch::readable;
 use crate::{Order, SESSION_TYPE, SelectedTip, SessionStore, Store, StoreError};
 
 /// Columns read from the object's `attrs.json` rather than the index.
@@ -383,6 +384,16 @@ impl StoredSessionExec {
         let mut projects = StringBuilder::new();
 
         for tip in &tips {
+            // Read before any column is appended, so a skipped object
+            // leaves every column the same length
+            let record = if needs_attrs {
+                match readable(sessions.at_commit(&tip.sha))? {
+                    Some(record) => Some(record),
+                    None => continue,
+                }
+            } else {
+                None
+            };
             ids.append_value(&tip.id);
             id_displays.append_value(short_uuid(&tip.id));
             let n = prefix_len
@@ -396,7 +407,7 @@ impl StoredSessionExec {
             modifieds.append_value(marker(tip, "modified", tip.modified_ms)?);
             createds.append_value(marker(tip, "created", tip.created_ms)?);
 
-            if !needs_attrs {
+            let Some(record) = record else {
                 native_ids.append_value("");
                 native_sources.append_value("");
                 session_types.append_value("");
@@ -411,8 +422,7 @@ impl StoredSessionExec {
                 line_counts.append_null();
                 projects.append_null();
                 continue;
-            }
-            let record = sessions.at_commit(&tip.sha).map_err(external)?;
+            };
             let attrs = &record.attrs;
             native_ids.append_value(&attrs.native_id);
             native_sources.append_value(&attrs.native_source);

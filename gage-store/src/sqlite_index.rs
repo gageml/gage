@@ -28,9 +28,17 @@ use crate::StoreError;
 use crate::index::{IdMatch, IndexCounts, ObjectIndex, ObjectQuery, Order, SelectedTip};
 use crate::object::{LinkFile, Object};
 
-/// Bumped when the schema changes. A mismatch discards the file and
-/// rebuilds from an empty ref table.
+/// Bumped when the schema changes, or when any type's `INDEXED_ATTRS`
+/// changes: the `attr` rows are extracted at write time, so a list
+/// change reaches existing objects only through a rebuild. A mismatch
+/// discards the file and rebuilds from an empty ref table.
 pub const INDEX_SCHEMA_VERSION: u32 = 4;
+
+/// Every type's `INDEXED_ATTRS` on one line, kept beside the version
+/// the lists are bound to. A test compares it to the live lists, so a
+/// list change fails until both this line and the version move.
+#[cfg(test)]
+pub(crate) const INDEXED_ATTRS_SNAPSHOT: &str = "attachment=name,key;dataset=;issue=name,status,key;note=name,work_id;scan=;session=summary.model";
 
 const SCHEMA: &str = "
 CREATE TABLE meta (schema_version INTEGER NOT NULL);
@@ -294,7 +302,7 @@ impl ObjectIndex for SqliteIndex {
 
     fn select(&self, query: &ObjectQuery) -> Result<Vec<SelectedTip>, StoreError> {
         let mut sql = String::from(
-            "SELECT o.id, o.sha, o.created, o.modified FROM ref r JOIN object o ON o.sha = r.tip_sha",
+            "SELECT o.id, o.sha, o.version, o.created, o.modified FROM ref r JOIN object o ON o.sha = r.tip_sha",
         );
         let mut args: Vec<String> = Vec::new();
         for (i, (key, value)) in query.attrs.iter().enumerate() {
@@ -326,8 +334,9 @@ impl ObjectIndex for SqliteIndex {
                 Ok(SelectedTip {
                     id: row.get(0)?,
                     sha: row.get(1)?,
-                    created_ms: row.get(2)?,
-                    modified_ms: row.get(3)?,
+                    version: row.get(2)?,
+                    created_ms: row.get(3)?,
+                    modified_ms: row.get(4)?,
                 })
             })
             .map_err(sql_err)?;

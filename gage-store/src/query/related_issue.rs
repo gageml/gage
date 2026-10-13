@@ -17,7 +17,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use super::batch::{BatchSource, BatchTable, external, string_literal, usize_literal};
+use super::batch::{BatchSource, BatchTable, external, readable, string_literal, usize_literal};
 use crate::{IssueFull, IssueStore, Store, StoreError};
 use datafusion::arrow::array::{Float64Builder, StringBuilder};
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
@@ -93,11 +93,12 @@ impl BatchSource for RelatedIssueSource {
             Err(StoreError::ObjectNotFound(_)) => return Ok(RecordBatch::new_empty(schema())),
             Err(e) => return Err(external(e)),
         };
-        let docket = issues
-            .iter()
-            .map_err(external)?
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(external)?;
+        let mut docket = Vec::new();
+        for tip in issues.query().tips().map_err(external)? {
+            if let Some(issue) = readable(issues.at_commit(&tip.sha))? {
+                docket.push(issue);
+            }
+        }
         let related = related(&subject, &docket, self.limit);
         let mut ids = StringBuilder::new();
         let mut scores = Float64Builder::new();

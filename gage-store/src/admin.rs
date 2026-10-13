@@ -3,7 +3,7 @@
 //! the store as a Git repository; the Gage-object concepts they do
 //! not depend on live in [`crate::object`].
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -11,13 +11,20 @@ use gage_core::config::gage_home;
 
 use crate::git::{git_cmd, git_in, run};
 use crate::remote::{Remote, RemoteStore};
-use crate::store::remove_index_file;
+use crate::store::{read_config_u32, remove_index_file};
 use crate::{Store, StoreError};
 
 /// The ref generation stamped into `gage.version` at init, the
 /// repository's own record of the layout it was created for. The refs
 /// themselves carry it in their names; see [`crate::refs`].
 pub const STORE_VERSION: u32 = crate::refs::GENERATION;
+
+/// The hook scripts' version, recorded in the store as
+/// `gage.hookVersion`. Bumped with any change to either script; a
+/// store whose recorded version differs has its hooks rewritten at
+/// open, so an upgraded build repairs every store it touches.
+pub const HOOK_VERSION: u32 = 1;
+const HOOK_VERSION_KEY: &str = "gage.hookVersion";
 
 /// Settings every store carries. `denyDeletes` and `denyNonFastForwards`
 /// cover `refs/heads/*` and are branch-scoped by git; the Gage refs
@@ -71,15 +78,19 @@ pub enum InitOutcome {
 ///
 /// A newly created store has no objects, so any object index already
 /// under its parent belongs to a store that was removed or replaced,
-/// and is deleted. A reinitialized store keeps its index.
+/// and is deleted. A reinitialized store keeps its index, and must be
+/// at this build's version: see [`check_generation`].
 /// Leading directories are created as needed. The empty template keeps
 /// sample hooks and `description` out of the store and ignores any
 /// `init.templateDir` in the user's Git config; the store's own
-/// hooks are written afterwards by [`write_hook`]. The
+/// hooks are written afterwards by [`write_hooks`]. The
 /// initial branch is fixed so `HEAD` does not depend on
 /// `init.defaultBranch`.
 pub fn init(path: &Path) -> Result<InitOutcome, StoreError> {
     let existing = exists(path);
+    if existing {
+        check_generation(path)?;
+    }
     let mut cmd = git_cmd();
     cmd.args([
         "init",
@@ -97,13 +108,114 @@ pub fn init(path: &Path) -> Result<InitOutcome, StoreError> {
         path,
         ["config", "gage.version", &STORE_VERSION.to_string()],
     ))?;
-    write_hook(path, UPDATE_HOOK_PATH, UPDATE_HOOK)?;
-    write_hook(path, PRE_PUSH_HOOK_PATH, PRE_PUSH_HOOK)?;
+    write_hooks(path)?;
     if existing {
         return Ok(InitOutcome::Reinitialized);
     }
     remove_index_file(path)?;
     Ok(InitOutcome::Created)
+}
+
+/// A repository being reinitialized is stamped with this build's
+/// version, so it must already be at that version. A stamped store at
+/// another version is refused: init is not a migration, and `open`
+/// is where one runs. An unstamped repository, such as a clone of a
+/// backup, is accepted when every `refs/gage/<n>/` it holds is this
+/// generation, so the stamp never misnames the refs under it.
+fn check_generation(path: &Path) -> Result<(), StoreError> {
+    let found = match read_config_u32(path, "gage.version")? {
+        Some(version) => version,
+        None => match ref_generations(path)?
+            .into_iter()
+            .find(|g| *g != STORE_VERSION)
+        {
+            Some(other) => other,
+            None => return Ok(()),
+        },
+    };
+    if found != STORE_VERSION {
+        return Err(StoreError::VersionMismatch {
+            found,
+            supported: STORE_VERSION,
+        });
+    }
+    Ok(())
+}
+
+/// The generations named by the refs under `refs/gage/`.
+fn ref_generations(path: &Path) -> Result<BTreeSet<u32>, StoreError> {
+    let out = run(git_in(
+        path,
+        ["for-each-ref", "--format=%(refname)", "refs/gage/"],
+    ))?;
+    let mut generations = BTreeSet::new();
+    for name in out.lines() {
+        let segment = name
+            .strip_prefix("refs/gage/")
+            .and_then(|rest| rest.split('/').next())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| StoreError::Parse(format!("ref outside refs/gage/: {name}")))?;
+        let generation = segment
+            .parse()
+            .map_err(|e| StoreError::Parse(format!("ref generation in {name}: {e}")))?;
+        generations.insert(generation);
+    }
+    Ok(generations)
+}
+
+/// One store upgrade: a store at `from` becomes a store at `to`. A
+/// step uses git and the store's own primitives only. [`migrate`]
+/// applies the steps in order before anything reads the store.
+pub(crate) struct Migration {
+    pub(crate) from: u32,
+    pub(crate) to: u32,
+    pub(crate) apply: fn(&Path) -> Result<(), StoreError>,
+}
+
+/// Every upgrade step, in order. Empty at generation 1.
+pub(crate) const MIGRATIONS: &[Migration] = &[];
+
+/// Upgrade the store at `path` from version `found` toward
+/// [`STORE_VERSION`], stamping `gage.version` after each step so an
+/// interrupted upgrade resumes where it stopped. Returns the version
+/// reached, which is below `STORE_VERSION` when no step starts there.
+pub(crate) fn migrate(path: &Path, found: u32) -> Result<u32, StoreError> {
+    let mut version = found;
+    while version < STORE_VERSION {
+        let Some(step) = MIGRATIONS.iter().find(|m| m.from == version) else {
+            break;
+        };
+        (step.apply)(path)?;
+        run(git_in(
+            path,
+            ["config", "gage.version", &step.to.to_string()],
+        ))?;
+        version = step.to;
+    }
+    Ok(version)
+}
+
+/// Write both hook scripts and record their version. Overwrites any
+/// existing file, so a reinit or a refresh restores the shipped
+/// scripts.
+pub(crate) fn write_hooks(path: &Path) -> Result<(), StoreError> {
+    write_hook(path, UPDATE_HOOK_PATH, UPDATE_HOOK)?;
+    write_hook(path, PRE_PUSH_HOOK_PATH, PRE_PUSH_HOOK)?;
+    run(git_in(
+        path,
+        ["config", HOOK_VERSION_KEY, &HOOK_VERSION.to_string()],
+    ))?;
+    Ok(())
+}
+
+/// Rewrite the hooks unless the store records this build's
+/// [`HOOK_VERSION`]. Returns whether a rewrite happened.
+pub(crate) fn refresh_hooks(path: &Path) -> Result<bool, StoreError> {
+    if read_config_u32(path, HOOK_VERSION_KEY)? == Some(HOOK_VERSION) {
+        return Ok(false);
+    }
+    write_hooks(path)?;
+    Ok(true)
 }
 
 /// Writes a hook script to `<path>/<rel>` and marks it executable on
@@ -305,7 +417,7 @@ mod tests {
     use crate::git::{git_in, run};
     use crate::note::{NoteEdit, NoteInput, NoteStore, NoteValue};
     use crate::object::object_ref;
-    use crate::test_support::init_for_test;
+    use crate::test_support::{init_for_test, plant_blob, reopen};
     use crate::writer::{TreeInput, commit_tree, mktree};
 
     #[test]
@@ -718,5 +830,125 @@ refs/heads/main\n";
     #[test]
     fn ref_prefixes_of_empty_input_is_empty() {
         assert_eq!(compute_ref_prefixes(""), Vec::<(String, u64)>::new());
+    }
+
+    /// An edit that stamps a new `type` blob is a fast-forward, and the
+    /// tombstone and resurrection that follow copy the stamped entry,
+    /// so the hook's identity check compares like with like.
+    #[test]
+    fn update_hook_accepts_delete_and_resurrection_after_a_version_stamp() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source_path = tmp.path().join("source.git");
+        let target_path = tmp.path().join("target.git");
+        init_for_test(&source_path);
+        init_for_test(&target_path);
+        let source = Store::open(&source_path).unwrap();
+        let a = note(&NoteStore::from(&source), "a");
+        plant_blob(&source, &a, "type", "gage::note 0\n");
+        let source = reopen(source);
+        let notes = NoteStore::from(&source);
+        let tip = |id: &str| source.rev_parse(&object_ref(id)).unwrap().unwrap();
+        let type_blob = |commit: &str| {
+            run(git_in(
+                &source_path,
+                ["rev-parse", &format!("{commit}:type")],
+            ))
+            .unwrap()
+        };
+
+        let first = tip(&a);
+        notes
+            .edit(
+                &a,
+                NoteEdit {
+                    value: Some(NoteValue::Text("v2".into())),
+                    ..NoteEdit::default()
+                },
+            )
+            .unwrap();
+        let second = tip(&a);
+        assert_ne!(type_blob(&first), type_blob(&second));
+
+        let a_ref = object_ref(&a);
+        let push = |sha: &str| push(&source_path, &target_path, sha, &a_ref);
+        push(&first).unwrap();
+        push(&second).unwrap();
+        notes.delete(&a).unwrap();
+        let tomb = tip(&a);
+        assert_eq!(type_blob(&tomb), type_blob(&second));
+        push(&tomb).unwrap();
+        let live_tree = tree_without(&source, &source_path, &tomb, "deleted");
+        let live = commit_tree(&source_path, &live_tree, "live", &[]).unwrap();
+        push(&live).unwrap();
+
+        let target = Store::open(&target_path).unwrap();
+        assert_eq!(target.rev_parse(&a_ref).unwrap().unwrap(), live);
+    }
+
+    /// A bare repository that received a backup's refs and carries no
+    /// store config is the restore case: init stamps it when every ref
+    /// generation is this build's, and the objects read.
+    #[test]
+    fn init_accepts_an_unstamped_repository_holding_this_generation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let origin = tmp.path().join("origin.git");
+        init_for_test(&origin);
+        let a = note(&NoteStore::from(&Store::open(&origin).unwrap()), "a");
+
+        let restored = tmp.path().join("restored.git");
+        let mut cmd = git_cmd();
+        cmd.args(["init", "--bare", "--quiet"]).arg(&restored);
+        run(cmd).unwrap();
+        run(git_in(
+            &restored,
+            [
+                "fetch",
+                "--quiet",
+                origin.to_str().unwrap(),
+                "+refs/gage/*:refs/gage/*",
+            ],
+        ))
+        .unwrap();
+        assert!(matches!(
+            Store::open(&restored).unwrap_err(),
+            StoreError::VersionMissing(_)
+        ));
+
+        assert_eq!(init(&restored).unwrap(), InitOutcome::Reinitialized);
+        let store = Store::open(&restored).unwrap();
+        assert_eq!(NoteStore::from(&store).get(&a).unwrap().name, "a");
+    }
+
+    /// Init is not a migration: a repository at another generation,
+    /// stamped or not, is refused rather than restamped.
+    #[test]
+    fn init_refuses_a_repository_at_another_generation() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let unstamped = tmp.path().join("unstamped.git");
+        let mut cmd = git_cmd();
+        cmd.args(["init", "--bare", "--quiet"]).arg(&unstamped);
+        run(cmd).unwrap();
+        let tree = mktree(&unstamped, &[]).unwrap();
+        let commit = commit_tree(&unstamped, &tree, "x", &[]).unwrap();
+        run(git_in(
+            &unstamped,
+            ["update-ref", "refs/gage/7/object/x", &commit],
+        ))
+        .unwrap();
+        let err = init(&unstamped).unwrap_err();
+        assert!(
+            matches!(err, StoreError::VersionMismatch { found: 7, supported } if supported == STORE_VERSION),
+            "{err}"
+        );
+
+        let stamped = tmp.path().join("stamped.git");
+        init_for_test(&stamped);
+        run(git_in(&stamped, ["config", "gage.version", "0"])).unwrap();
+        let err = init(&stamped).unwrap_err();
+        assert!(
+            matches!(err, StoreError::VersionMismatch { found: 0, supported } if supported == STORE_VERSION),
+            "{err}"
+        );
     }
 }

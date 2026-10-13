@@ -26,7 +26,7 @@ use crate::session::{SessionAddOutcome, SessionOutcome, SessionRecord, SessionSt
 use crate::{Store, StoreError};
 
 pub const OBJECT_TYPE: &str = "gage::dataset";
-const OBJECT_VERSION: &str = "1";
+pub(crate) const OBJECT_VERSION: &str = "1";
 /// Datasets declare no indexed attributes.
 pub(crate) const INDEXED_ATTRS: &[&str] = &[];
 pub(crate) const SESSIONS_LINK: &str = "sessions.link";
@@ -1713,5 +1713,55 @@ mod tests {
                 .unwrap();
             assert_eq!(text, content, "{path:?}");
         }
+    }
+
+    /// The exact tree a dataset writes: no `attrs.json` without an
+    /// origin, one with. A change here is a change to the stored
+    /// format and is reviewed as one.
+    #[test]
+    fn layout_snapshot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let datasets = DatasetStore::from(&store);
+        let names = |sha: &str| -> Vec<String> {
+            store.ls(sha).unwrap().into_iter().map(|e| e.name).collect()
+        };
+        let cat_file = |spec: &str| run(git_in(store.path(), ["cat-file", "-p", spec])).unwrap();
+
+        let plain = datasets.create().unwrap();
+        let plain_sha = rev_parse(&store, &plain);
+        assert_eq!(names(&plain_sha), ["created", "id", "modified", "type"]);
+        assert_eq!(cat_file(&format!("{plain_sha}:type")), "gage::dataset 1\n");
+
+        let id = datasets
+            .create_with_origin(&DatasetOrigin::Scan("SCANX".into()))
+            .unwrap();
+        let s1 = SessionStore::from(&store)
+            .add(&FakeDriver, &mut fake("s1", "a\n"))
+            .unwrap()
+            .id;
+        let s1_sha = rev_parse(&store, &s1);
+        datasets.sessions_link(&id, slice::from_ref(&s1)).unwrap();
+        let sha = rev_parse(&store, &id);
+        assert_eq!(
+            names(&sha),
+            [
+                "attrs.json",
+                "created",
+                "first-parent",
+                "id",
+                "modified",
+                "sessions.link",
+                "type"
+            ]
+        );
+        assert_eq!(
+            cat_file(&format!("{sha}:attrs.json")),
+            "{\"origin\":\"scan:SCANX\"}\n"
+        );
+        assert_eq!(
+            cat_file(&format!("{sha}:sessions.link")),
+            format!("{s1_sha}\n")
+        );
     }
 }

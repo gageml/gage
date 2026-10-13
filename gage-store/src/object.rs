@@ -37,7 +37,7 @@ use crate::refs::OBJECT_REFS;
 pub(crate) use crate::refs::object_ref;
 use crate::url;
 use crate::writer::{TreeInput, commit_tree, mktree, write_blob};
-use crate::{Store, StoreError, TagStore};
+use crate::{Store, StoreError, TagStore, attachment, dataset, issue, note, scan, session};
 
 /// Size of the short-prefix set; see [`Store::resolve_in`].
 pub const SHORT_PREFIX_SET_SIZE: usize = 10_000;
@@ -360,8 +360,9 @@ impl Store {
         let now = now_ms();
         let modified_sha = write_blob(path, format!("{now}\n").as_bytes())?;
         let parent_sha = write_blob(path, format!("{}\n", current.commit_sha).as_bytes())?;
+        let (type_entry, version) = self.stamped_type(current)?;
         let mut entries = content.entries;
-        entries.insert("type".to_string(), current.marker("type")?);
+        entries.insert("type".to_string(), type_entry);
         entries.insert("id".to_string(), current.marker("id")?);
         entries.insert("created".to_string(), current.marker("created")?);
         entries.insert("modified".to_string(), blob_entry(&modified_sha));
@@ -382,6 +383,7 @@ impl Store {
         let object = Object {
             commit_sha: commit_sha.clone(),
             header: ObjectHeader {
+                version,
                 modified_ms: Some(now),
                 deleted_ms: None,
                 first_parent: Some(current.commit_sha.clone()),
@@ -421,8 +423,9 @@ impl Store {
         let now = now_ms();
         let modified_sha = write_blob(path, format!("{now}\n").as_bytes())?;
         let parent_sha = write_blob(path, format!("{}\n", onto.commit_sha).as_bytes())?;
+        let (type_entry, version) = self.stamped_type(onto)?;
         let mut entries = content.entries;
-        entries.insert("type".to_string(), onto.marker("type")?);
+        entries.insert("type".to_string(), type_entry);
         entries.insert("id".to_string(), onto.marker("id")?);
         entries.insert("created".to_string(), onto.marker("created")?);
         entries.insert("modified".to_string(), blob_entry(&modified_sha));
@@ -442,6 +445,7 @@ impl Store {
         let object = Object {
             commit_sha: commit_sha.clone(),
             header: ObjectHeader {
+                version,
                 modified_ms: Some(now),
                 deleted_ms: None,
                 first_parent: Some(onto.commit_sha.clone()),
@@ -469,6 +473,22 @@ impl Store {
         self.record_write(object, &links, expected_tip, None)?;
         // The adopted commit may bring ancestors the index has not seen
         self.in_index_transaction(|| self.index_from(&object.commit_sha))
+    }
+
+    /// The `type` entry an edit writes: the type at the version this
+    /// build writes, so the blob names the shape of the content beside
+    /// it. Tombstones and resurrections copy the entry instead, which
+    /// is what the `update` hook's identity check compares. A type this
+    /// build does not know keeps the entry it has.
+    fn stamped_type(&self, current: &Object) -> Result<(TreeEntryRef, String), StoreError> {
+        let object_type = &current.header.object_type;
+        match object_version(object_type) {
+            Some(version) => {
+                let sha = write_blob(self.path(), format!("{object_type} {version}\n").as_bytes())?;
+                Ok((blob_entry(&sha), version.to_string()))
+            }
+            None => Ok((current.marker("type")?, current.header.version.clone())),
+        }
     }
 
     /// Delete the object `id_or_prefix` names, whatever its type, by
@@ -910,16 +930,53 @@ pub(crate) fn resolve_target(store: &Store, raw: &str) -> Result<String, StoreEr
     Ok(sha)
 }
 
-/// Fail unless the object's `type` is `expected`.
+/// Fail unless the object's `type` is `expected` at a version this
+/// build reads: the name must match, and the version must not exceed
+/// the one this build writes for the type. An older version passes;
+/// each type's decoder reads every version up to its own.
 pub(crate) fn require_type(object: &Object, expected: &str) -> Result<(), StoreError> {
-    if object.header.object_type == expected {
-        return Ok(());
+    if object.header.object_type != expected {
+        return Err(StoreError::WrongType {
+            id: object.header.id.clone(),
+            expected: expected.to_string(),
+            actual: object.header.object_type.clone(),
+        });
     }
-    Err(StoreError::WrongType {
-        id: object.header.id.clone(),
-        expected: expected.to_string(),
-        actual: object.header.object_type.clone(),
-    })
+    let Some(supported) = object_version(expected) else {
+        return Ok(());
+    };
+    let id = &object.header.id;
+    let found = parse_version(&object.header.version, id)?;
+    let supported = parse_version(supported, id)?;
+    if found > supported {
+        return Err(StoreError::ObjectVersion {
+            id: id.clone(),
+            object_type: expected.to_string(),
+            found,
+            supported,
+        });
+    }
+    Ok(())
+}
+
+/// The `type` version this build writes for objects of `object_type`,
+/// or `None` for a type it does not know.
+pub(crate) fn object_version(object_type: &str) -> Option<&'static str> {
+    match object_type {
+        note::OBJECT_TYPE => Some(note::OBJECT_VERSION),
+        issue::OBJECT_TYPE => Some(issue::OBJECT_VERSION),
+        dataset::OBJECT_TYPE => Some(dataset::OBJECT_VERSION),
+        session::OBJECT_TYPE => Some(session::OBJECT_VERSION),
+        attachment::OBJECT_TYPE => Some(attachment::OBJECT_VERSION),
+        scan::OBJECT_TYPE => Some(scan::OBJECT_VERSION),
+        _ => None,
+    }
+}
+
+fn parse_version(version: &str, id: &str) -> Result<u32, StoreError> {
+    version
+        .parse()
+        .map_err(|e| StoreError::Parse(format!("object {id}: type version {version:?}: {e}")))
 }
 
 impl Object {
@@ -1113,7 +1170,7 @@ mod tests {
     use super::*;
     use crate::DatasetStore;
     use crate::note::{NoteEdit, NoteInput, NoteStore, NoteValue};
-    use crate::test_support::open_store;
+    use crate::test_support::{open_store, reopen};
     use serde_json::json;
 
     fn tree_names(store: &Store, commit: &str) -> Vec<String> {
@@ -1918,5 +1975,61 @@ mod tests {
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].path, "target.link");
         assert_eq!(files[0].shas, vec![root_commit]);
+    }
+
+    /// A `type` version above this build's is refused by the type's
+    /// reader with an error naming the upgrade, while the object model
+    /// still reads its markers and tombstones it.
+    #[test]
+    fn a_newer_type_version_is_refused_by_the_type_reader() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let id = note(&store, "n", None);
+        let planted = plant_blob(&store, &id, "type", "gage::note 2\n");
+        let store = reopen(store);
+
+        assert_eq!(store.read_header(&planted).unwrap().version, "2");
+        let err = NoteStore::from(&store).get(&id).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                StoreError::ObjectVersion { id: i, found: 2, supported: 1, .. } if *i == id
+            ),
+            "{err}"
+        );
+        assert!(err.to_string().contains("upgrade gage"), "{err}");
+        let (header, _) = store.delete_object(&id).unwrap();
+        assert_eq!(header.version, "2");
+    }
+
+    /// An edit writes the `type` blob at this build's version, so the
+    /// blob names the content beside it; a tombstone copies the
+    /// stamped entry.
+    #[test]
+    fn an_edit_stamps_the_version_this_build_writes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let id = note(&store, "n", None);
+        plant_blob(&store, &id, "type", "gage::note 0\n");
+        let store = reopen(store);
+        let notes = NoteStore::from(&store);
+        assert_eq!(notes.get(&id).unwrap().name, "n");
+
+        notes
+            .edit(
+                &id,
+                NoteEdit {
+                    value: Some(NoteValue::Text("v2".into())),
+                    ..NoteEdit::default()
+                },
+            )
+            .unwrap();
+        let (_, edited) = store.resolve_id(&id).unwrap();
+        assert_eq!(cat(&store, &format!("{edited}:type")), "gage::note 1\n");
+        assert_eq!(store.read_header(&edited).unwrap().version, "1");
+
+        store.delete_object(&id).unwrap();
+        let (_, tomb) = store.resolve_id(&id).unwrap();
+        assert_eq!(cat(&store, &format!("{tomb}:type")), "gage::note 1\n");
     }
 }

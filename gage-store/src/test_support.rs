@@ -7,6 +7,8 @@
 use std::path::{Path, PathBuf};
 
 use crate::git::{git_in, run};
+use crate::object::object_ref;
+use crate::writer::{TreeInput, commit_tree, mktree, write_blob};
 use crate::{Store, init};
 
 /// Runs `git fsck --strict` on the store at `path` when dropped and
@@ -48,4 +50,41 @@ pub(crate) fn fsck_guard(path: &Path) -> FsckGuard {
     FsckGuard {
         path: path.to_path_buf(),
     }
+}
+
+/// Rewrite the object `id` so its tip carries `name` as a blob with
+/// `content`, as a parentless commit written around the writer: the
+/// way a newer build's object, or a damaged one, arrives. The index
+/// sees the move at the next open; see [`reopen`].
+pub(crate) fn plant_blob(store: &Store, id: &str, name: &str, content: &str) -> String {
+    let tip = store.rev_parse(&object_ref(id)).unwrap().unwrap();
+    let mut entries: Vec<(String, String, String)> = store
+        .list_tree(&tip)
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.name != name)
+        .map(|e| (e.mode, e.sha, e.name))
+        .collect();
+    let blob = write_blob(store.path(), content.as_bytes()).unwrap();
+    entries.push(("100644".to_string(), blob, name.to_string()));
+    let inputs: Vec<TreeInput<'_>> = entries
+        .iter()
+        .map(|(mode, sha, name)| TreeInput { mode, sha, name })
+        .collect();
+    let tree = mktree(store.path(), &inputs).unwrap();
+    let commit = commit_tree(store.path(), &tree, "planted", &[]).unwrap();
+    run(git_in(
+        store.path(),
+        ["update-ref", &object_ref(id), &commit],
+    ))
+    .unwrap();
+    commit
+}
+
+/// Close `store` and open it again, so the index reconciles with refs
+/// moved around the writer.
+pub(crate) fn reopen(store: Store) -> Store {
+    let path = store.path().to_path_buf();
+    drop(store);
+    Store::open(&path).unwrap()
 }

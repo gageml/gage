@@ -21,7 +21,7 @@ use datafusion::error::Result;
 
 use gage_session::system;
 
-use super::batch::{BatchSource, BatchTable, external, marker, unique_prefix_lens};
+use super::batch::{BatchSource, BatchTable, external, marker, readable, unique_prefix_lens};
 use crate::{AttachmentRecord, AttachmentStore, Order, Store, StoreError};
 
 fn timestamp() -> DataType {
@@ -177,14 +177,21 @@ pub(crate) fn attachment_file_rows(
     )?)
 }
 
-/// Every live attachment, newest modified first.
+/// Every live attachment this build reads, newest modified first.
 fn live_attachments(store: &Store) -> Result<Vec<AttachmentRecord>> {
-    AttachmentStore::from(store)
+    let attachments = AttachmentStore::from(store);
+    let tips = attachments
         .query()
         .order(Order::ModifiedDesc)
-        .iter()
-        .and_then(|iter| iter.collect())
-        .map_err(external)
+        .tips()
+        .map_err(external)?;
+    let mut out = Vec::with_capacity(tips.len());
+    for tip in &tips {
+        if let Some(record) = readable(attachments.at_commit(&tip.sha))? {
+            out.push(record);
+        }
+    }
+    Ok(out)
 }
 
 #[derive(Debug)]

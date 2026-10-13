@@ -58,9 +58,9 @@ These rules apply to ALL Rust code in this workspace. They are non-negotiable.
   - RIGHT: `fs::create_dir_all(p).unwrap()` - if the filesystem is read-only the
     panic location alone is sufficient - no `expect` message would add value
 
-  This is the "expect as precondition" style recommended by [std::error
-  Common Message Styles]. Keep `expect` messages as short as possible while
-  still naming the precondition.
+  This is the "expect as precondition" style recommended by
+  [std::error Common Message Styles]. Keep `expect` messages as short as
+  possible while still naming the precondition.
   - Good: `"splitn should yield >= one substr"`
   - Bad:
     `"splitn(2, ' ') always yields at least one element per the API contract"`
@@ -98,8 +98,8 @@ These rules apply to ALL Rust code in this workspace. They are non-negotiable.
   priority over grouping by visibility.
 
 - Constructor naming - Match the prefix to what the function does. Sources:
-  [Rust API Guidelines C-CTOR] and the constructor rows of [Rust API
-  Guidelines C-CASE].
+  [Rust API Guidelines C-CTOR] and the constructor rows of
+  [Rust API Guidelines C-CASE].
   - `new(...)` - primary constructor; minimal/required arguments only. When a
     type has both `new()` and `Default`, they must produce the same value
     (C-CTOR; clippy `new_without_default`).
@@ -115,8 +115,8 @@ These rules apply to ALL Rust code in this workspace. They are non-negotiable.
     qualifies; `MessageTable::from_session(id, path)` does not, because the
     arguments locate the data rather than being the data. Clippy
     `wrong_self_convention` requires `from_` functions to take no `self`.
-  - Domain verbs (`open`, `connect`, `bind`) are accepted by C-CTOR for
-    resource types where the verb is clearer than `new`.
+  - Domain verbs (`open`, `connect`, `bind`) are accepted by C-CTOR for resource
+    types where the verb is clearer than `new`.
   - Avoid `for_xxx` - prefer `with_xxx` for the same role. This is a project
     convention with no counterpart in the API Guidelines.
   - Do not define an inherent `from_str(&str)`; implement `FromStr` (clippy
@@ -134,25 +134,25 @@ These rules apply to ALL Rust code in this workspace. They are non-negotiable.
   documentation. Design notes, plans, READMEs, footnotes, and files under
   `.local.*` are not kept in sync with the code and are stale on arrival. A
   comment never directs the reader to a markdown file, a design document, a
-  section title, or a footnote. A comment that has something to say states it
-  in place.
+  section title, or a footnote. A comment that has something to say states it in
+  place.
   - WRONG: `// see watermarks.md`
   - WRONG: `/// See footnote 2 of gage-bench/results/store/README.md.`
   - WRONG: `// (see PLAN.md "After implementation")`
-  - RIGHT: `/// The whole diff is one index transaction. One commit per
-    object took 11.6 s on the bench population; one transaction takes 251 ms.`
+  - RIGHT:
+    `/// The whole diff is one index transaction. One commit per object took 11.6 s on the bench population; one transaction takes 251 ms.`
 
   Functional references are not comments and are unaffected: `include_str!`
   paths, config-file discovery (`CLAUDE.md`, `SKILL.md`), and test fixtures.
 
 - **Comment only what the code cannot say.** A comment is warranted when the
-  code is non-obvious and cannot be simplified without a cost to performance
-  or correctness: a performance optimization and its measured effect, a
-  non-trivial algorithm, an invariant the type system does not enforce, a
-  workaround for an external behavior. Clear, well-named, conceptually sound
-  code needs no comment. A comment that restates what readable code already
-  says is removed. The remedy for unclear code is clearer code, not a
-  description of the unclear code.
+  code is non-obvious and cannot be simplified without a cost to performance or
+  correctness: a performance optimization and its measured effect, a non-trivial
+  algorithm, an invariant the type system does not enforce, a workaround for an
+  external behavior. Clear, well-named, conceptually sound code needs no
+  comment. A comment that restates what readable code already says is removed.
+  The remedy for unclear code is clearer code, not a description of the unclear
+  code.
 
 - Comment punctuation rules:
   - Sentences that provide background or details not obvious in the code should
@@ -224,16 +224,16 @@ These rules apply to ALL Rust code in this workspace. They are non-negotiable.
     double quotes: `Close issue as "wontfix"`.
   - No `the`. A noun already in context stands bare: `Add sessions to dataset`.
     `a`/`an` stays when the noun is new: `Read message from a file`.
-  - A positional that names the command's object reads `Xxx to yyy`: `Issues
-    to close`, `Dataset to show`.
+  - A positional that names the command's object reads `Xxx to yyy`:
+    `Issues to close`, `Dataset to show`.
   - Qualifiers go in one trailing parenthetical, topics separated by `; `, in
-    this order: value type, `repeatable`, `default x`. The types are `ID or
-    prefix`, `name, ID, or prefix`, `tag, ID, or prefix`, `path or name`, `name
-    or path`, and `glob`. Nothing else goes in a parenthetical.
-    `Scanner to run (name or path; repeatable)`, `Number of items to show
-    (default 20)`.
-  - A default is stated in the text, never by clap: set `hide_default_value`
-    and `hide_possible_values`, and list enum values in long help.
+    this order: value type, `repeatable`, `default x`. The types are
+    `ID or prefix`, `name, ID, or prefix`, `tag, ID, or prefix`, `path or name`,
+    `name or path`, and `glob`. Nothing else goes in a parenthetical.
+    `Scanner to run (name or path; repeatable)`,
+    `Number of items to show (default 20)`.
+  - A default is stated in the text, never by clap: set `hide_default_value` and
+    `hide_possible_values`, and list enum values in long help.
   - No implementation vocabulary. A Git term appears only as the public spec,
     spelled out: `Git ref naming rules`.
   - A paragraph used by more than one arg is one `const` referenced through
@@ -242,23 +242,22 @@ These rules apply to ALL Rust code in this workspace. They are non-negotiable.
     the command's object is declared per command.
   - A text value is `<TEXT>` and accepts `@PATH` to read a file.
   - `short` and `long` take no value unless the default letter is wrong.
-  - Options are declared in the order they render, most central first:
-    source, then destination (the container, then what the object refers
-    to), then the object's own properties, then how the work runs, then
-    output, then utility flags, with `--yes` last. A modifier follows the
-    option it modifies: `--tag` then `--force-tag`.
-  - Shared blocks keep their place: scope options (`--source`, `--stored`)
-    lead; the session filter block orders which-filters before how-many
-    limiters; a list command puts its own filters first, then `--more`,
-    `--all`, `--limit`, and `--full-id` last.
+  - Options are declared in the order they render, most central first: source,
+    then destination (the container, then what the object refers to), then the
+    object's own properties, then how the work runs, then output, then utility
+    flags, with `--yes` last. A modifier follows the option it modifies: `--tag`
+    then `--force-tag`.
+  - Shared blocks keep their place: scope options (`--source`, `--stored`) lead;
+    the session filter block orders which-filters before how-many limiters; a
+    list command puts its own filters first, then `--more`, `--all`, `--limit`,
+    and `--full-id` last.
 
 References for the Rust rules:
 
 - [Rust API Guidelines C-CTOR] - constructors: `new`, `_with_foo`, `from_`,
   domain verbs, `new`/`Default` parity
 - [Rust API Guidelines C-CASE] - casing and constructor name forms (RFC 430)
-- [Rust API Guidelines C-CONV] - ad-hoc conversion methods `as_`, `to_`,
-  `into_`
+- [Rust API Guidelines C-CONV] - ad-hoc conversion methods `as_`, `to_`, `into_`
 - [Rust API Guidelines C-GETTER] - no `get_` prefix; `_mut` suffix
 - [std::error Common Message Styles] - `expect` message style
 - [Rust Style Guide comments] - comment formatting and punctuation
@@ -278,16 +277,53 @@ References for the Rust rules:
 [should_implement_trait]: https://rust-lang.github.io/rust-clippy/master/index.html#should_implement_trait
 [new_without_default]: https://rust-lang.github.io/rust-clippy/master/index.html#new_without_default
 
-## Database rules
+## Store schema rules
 
-- **Schema parity between fresh and migrated databases.** A fresh database
-  (created by `init_schema` in `gage-db/src/db.rs`) and a migrated database
-  (produced by the version steps in `migrate`) must end up with the IDENTICAL
-  schema: same tables, same columns, same column order. SQLite's
-  `ALTER TABLE ADD COLUMN` always appends, so when adding a column, add it at
-  the END of the table's DDL in `init_schema` — never in the middle. Mismatched
-  column order resulting from misalignment between the DDL and the migration
-  steps is not acceptable.
+These rules keep a store readable by every Gage build that touches it. A store
+is shared: `gage fetch` brings in objects other builds wrote, so an older build
+reading a newer object is a normal condition, not an upgrade-window edge case.
+
+- **An attribute added to an existing type is optional and defaulted forever.**
+  The field carries `#[serde(default, skip_serializing_if = ..)]` and every
+  reader handles its absence. A required attribute, a rename, a removal, or a
+  change of meaning is a `type` version bump, never an in-place change.
+
+- **An enum stored in `attrs.json` tolerates unknown values.** It carries an
+  `#[serde(other)] Unknown` variant. A reader degrades the one field; a writer
+  rejects `Unknown` as input. One newer value never fails a listing.
+
+- **A `type` version bump ships a reader for every prior version.** Decode is
+  dispatched on `header.version` for versions at or below the type's
+  `OBJECT_VERSION`. `require_type` refuses a version above it with
+  `StoreError::ObjectVersion`, and `Store::select` leaves such objects out of
+  listings with a warning.
+
+- **An edit stamps the writer's `OBJECT_VERSION` into the `type` blob.** The
+  blob names the shape of the content beside it. Tombstones and resurrections
+  copy the entry from the commit they supersede; the `update` hook's identity
+  check depends on that.
+
+- **A change to any `INDEXED_ATTRS` bumps `INDEX_SCHEMA_VERSION` and updates
+  `INDEXED_ATTRS_SNAPSHOT`.** Attribute rows are extracted at write time, so a
+  list change reaches existing objects only through a rebuild. The test
+  `indexed_attrs_match_the_snapshot_beside_the_index_version` enforces it.
+
+- **A driver refuses a `content_format` it does not write.** `read_stored`
+  returns an error naming the stored format and the upgrade.
+
+- **A hook change bumps `HOOK_VERSION`.** `Store::open` rewrites the hooks of a
+  store whose recorded version is behind.
+
+- **A generation bump is the last resort.** It is for a change to the ref
+  layout, the marker set, the link convention, or the tombstone rule only. It
+  ships with a step in `MIGRATIONS`, a rewrite of every remote's fetch refspec
+  (pinned to the generation by `RemoteStore::add`), and a hook update on every
+  Gage store used as a remote.
+
+- **Every type has a `layout_snapshot` test, and the generation has a fixture.**
+  The snapshot pins the exact tree and `attrs.json` text a type writes;
+  `gage-store/tests/fixture.rs` reads a bundle an earlier build wrote. A change
+  to either is a format change and is reviewed as one.
 
 ## Data access rules
 

@@ -57,6 +57,13 @@ pub enum StoreError {
         expected: String,
         actual: String,
     },
+    /// The object's `type` version is newer than the one this build reads
+    ObjectVersion {
+        id: String,
+        object_type: String,
+        found: u32,
+        supported: u32,
+    },
     /// No session in the dataset matched the given id
     SessionNotFound(String),
     /// The object index could not be opened, written, or queried
@@ -162,6 +169,19 @@ impl fmt::Display for StoreError {
                 expected,
                 actual,
             } => write!(f, "{id} is a {actual}, not a {expected}"),
+            StoreError::ObjectVersion {
+                id,
+                object_type,
+                found,
+                supported,
+            } => {
+                let type_name = object_type.strip_prefix("gage::").unwrap_or(object_type);
+                write!(
+                    f,
+                    "{id} is a {type_name} at version {found}; this build reads version \
+                     {supported} (upgrade gage)"
+                )
+            }
             StoreError::SessionNotFound(s) => write!(f, "session not found: {s}"),
             StoreError::Index(what) => write!(f, "object index: {what}"),
             StoreError::SessionTooLarge { size, max } => write!(
@@ -232,6 +252,7 @@ impl std::error::Error for StoreError {
             | StoreError::ObjectLive(_)
             | StoreError::InvalidPath { .. }
             | StoreError::WrongType { .. }
+            | StoreError::ObjectVersion { .. }
             | StoreError::SessionNotFound(_)
             | StoreError::Index(_)
             | StoreError::SessionTooLarge { .. }

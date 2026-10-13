@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::StoreError;
-use crate::admin::{STORE_VERSION, exists};
+use crate::admin::{STORE_VERSION, exists, migrate, refresh_hooks};
 use crate::git::{CatFile, CatFileCell, git_cmd, git_in, run};
 use crate::index::ObjectIndex;
 use crate::sqlite_index::SqliteIndex;
@@ -95,8 +95,10 @@ impl Store {
     /// Open the store at `path`. Fails with [`StoreError::NotFound`]
     /// when no repository is there, [`StoreError::VersionMissing`] when
     /// the repository carries no `gage.version`, and
-    /// [`StoreError::VersionMismatch`] when the version is not the one
-    /// this build supports. Opens the object index beside the store
+    /// [`StoreError::VersionMismatch`] when the version is newer than
+    /// this build's, or older with no migration step from it. An older
+    /// version with steps is migrated first. Hooks behind this build's
+    /// are rewritten. Opens the object index beside the store
     /// (`cache/object-index.sqlite` under the store's parent) and
     /// reconciles it with the repository's refs.
     pub fn open(path: &Path) -> Result<Store, StoreError> {
@@ -108,13 +110,19 @@ impl Store {
         {
             return Err(StoreError::UnsupportedObjectFormat(format));
         }
-        let version = read_version(path)?;
+        let found = read_version(path)?;
+        let version = if found < STORE_VERSION {
+            migrate(path, found)?
+        } else {
+            found
+        };
         if version != STORE_VERSION {
             return Err(StoreError::VersionMismatch {
                 found: version,
                 supported: STORE_VERSION,
             });
         }
+        refresh_hooks(path)?;
         let store = Store {
             path: path.to_path_buf(),
             version,
@@ -166,22 +174,29 @@ fn read_object_format(path: &Path) -> Result<Option<String>, StoreError> {
 }
 
 fn read_version(path: &Path) -> Result<u32, StoreError> {
-    let text = match run(git_in(path, ["config", "--get", "gage.version"])) {
+    read_config_u32(path, "gage.version")?
+        .ok_or_else(|| StoreError::VersionMissing(path.to_path_buf()))
+}
+
+/// The integer at `key` in the store's config, or `None` when the key
+/// is absent.
+pub(crate) fn read_config_u32(path: &Path, key: &str) -> Result<Option<u32>, StoreError> {
+    let text = match run(git_in(path, ["config", "--get", key])) {
         Ok(text) => text,
         // `git config --get` exits 1 when the key is absent.
-        Err(StoreError::Git { status, .. }) if status.code() == Some(1) => {
-            return Err(StoreError::VersionMissing(path.to_path_buf()));
-        }
+        Err(StoreError::Git { status, .. }) if status.code() == Some(1) => return Ok(None),
         Err(e) => return Err(e),
     };
     text.trim()
         .parse()
-        .map_err(|e| StoreError::Parse(format!("gage.version {text:?}: {e}")))
+        .map(Some)
+        .map_err(|e| StoreError::Parse(format!("{key} {text:?}: {e}")))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::admin::{HOOK_VERSION, UPDATE_HOOK, UPDATE_HOOK_PATH};
     use crate::init;
 
     #[test]
@@ -291,5 +306,49 @@ mod tests {
             Store::open(&path).unwrap_err(),
             StoreError::VersionMissing(_)
         ));
+    }
+
+    #[test]
+    fn open_refuses_an_older_version_with_no_migration_step() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("store.git");
+        init(&path).unwrap();
+        run(git_in(&path, ["config", "gage.version", "0"])).unwrap();
+        let err = Store::open(&path).unwrap_err();
+        assert!(
+            matches!(err, StoreError::VersionMismatch { found: 0, supported } if supported == STORE_VERSION),
+            "{err}"
+        );
+        assert!(
+            err.to_string().contains("no migration is available"),
+            "{err}"
+        );
+    }
+
+    /// A store whose recorded hook version is behind this build's has
+    /// both hooks rewritten at open; one at this build's version is
+    /// left as it is.
+    #[test]
+    fn open_rewrites_hooks_behind_this_build() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("store.git");
+        init(&path).unwrap();
+        let hook = path.join(UPDATE_HOOK_PATH);
+        let stale = "#!/bin/sh\nexit 0\n";
+
+        fs::write(&hook, stale).unwrap();
+        run(git_in(&path, ["config", "--unset", "gage.hookVersion"])).unwrap();
+        drop(Store::open(&path).unwrap());
+        assert_eq!(fs::read_to_string(&hook).unwrap(), UPDATE_HOOK);
+        assert_eq!(
+            run(git_in(&path, ["config", "--get", "gage.hookVersion"]))
+                .unwrap()
+                .trim(),
+            HOOK_VERSION.to_string()
+        );
+
+        fs::write(&hook, stale).unwrap();
+        drop(Store::open(&path).unwrap());
+        assert_eq!(fs::read_to_string(&hook).unwrap(), stale);
     }
 }

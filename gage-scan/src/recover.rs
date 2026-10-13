@@ -143,7 +143,7 @@ fn cancel_dead_run(
         match task.attrs.status {
             TaskStatus::Completed => counts.completed += 1,
             TaskStatus::Failed => counts.failed += 1,
-            TaskStatus::Canceled => {}
+            TaskStatus::Canceled | TaskStatus::Unknown => {}
             TaskStatus::Pending | TaskStatus::Started => {
                 scan_dir.write_task(
                     &task.scanner,

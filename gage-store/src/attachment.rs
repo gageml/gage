@@ -55,7 +55,7 @@ use crate::writer::write_blob;
 use crate::{Store, StoreError};
 
 pub const OBJECT_TYPE: &str = "gage::attachment";
-const OBJECT_VERSION: &str = "1";
+pub(crate) const OBJECT_VERSION: &str = "1";
 /// Attribute paths the index extracts from an attachment's `attrs.json`.
 pub(crate) const INDEXED_ATTRS: &[&str] = &["name", "key"];
 const FILES_TREE: &str = "files.d";
@@ -1367,5 +1367,62 @@ mod tests {
             })
             .unwrap_err();
         assert!(matches!(err, StoreError::AttachmentInput(_)), "{err}");
+    }
+
+    /// The exact tree an attachment writes. The root and the default
+    /// key depend on the machine, so `attrs.json` is compared as a
+    /// value with those two taken from the record.
+    #[test]
+    fn layout_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(dir.path());
+        let root = fixture_root(dir.path());
+        let pats = patterns(&["CLAUDE.md", "settings.json"]);
+        let spec = AttachmentSpec {
+            name: Some("cfg"),
+            key: None,
+            targets: &[],
+            root: &root,
+            includes: &pats,
+            excludes: &[],
+        };
+        let added = AttachmentStore::from(&store).add(&spec).unwrap();
+        let record = AttachmentStore::from(&store).get(&added.id).unwrap();
+        let sha = &added.commit_sha;
+
+        let paths: Vec<String> = store.ls(sha).unwrap().into_iter().map(|e| e.name).collect();
+        assert_eq!(
+            paths,
+            [
+                "attrs.json",
+                "created",
+                "files.d",
+                "files.d/CLAUDE.md",
+                "files.d/settings.json",
+                "id",
+                "modified",
+                "type"
+            ]
+        );
+        let cat = |spec: &str| {
+            crate::git::run(crate::git::git_in(store.path(), ["cat-file", "-p", spec])).unwrap()
+        };
+        assert_eq!(cat(&format!("{sha}:type")), "gage::attachment 1\n");
+        let attrs: serde_json::Value =
+            serde_json::from_str(&cat(&format!("{sha}:attrs.json"))).unwrap();
+        assert_eq!(
+            attrs,
+            serde_json::json!({
+                "name": "cfg",
+                "key": record.attrs.key,
+                "root": root,
+                "includes": ["CLAUDE.md", "settings.json"],
+                "excludes": [],
+                "file_count": 2,
+                "size": 12,
+                "digest": record.attrs.digest,
+            })
+        );
+        assert_eq!(cat(&format!("{sha}:files.d/CLAUDE.md")), "rules");
     }
 }

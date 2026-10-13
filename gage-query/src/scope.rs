@@ -103,6 +103,8 @@ pub struct StoredSessionRef {
     pub id: String,
     /// Commit of the version read; the row cache key
     pub commit: String,
+    /// The `type` blob version at that commit
+    pub type_version: String,
     /// The version's `created` and `modified` markers, UNIX millis
     pub created_ms: i64,
     pub modified_ms: i64,
@@ -128,6 +130,7 @@ impl StoredSessionRef {
             modified_ms: marker("modified", record.modified_ms)?,
             id: record.id,
             commit: record.commit_sha,
+            type_version: record.type_version,
             native_id: record.attrs.native_id,
             content_format: record.attrs.content_format,
             driver_name: record.driver_name,
@@ -139,6 +142,7 @@ impl StoredSessionRef {
         SelectedTip {
             id: self.id.clone(),
             sha: self.commit.clone(),
+            version: self.type_version.clone(),
             created_ms: Some(self.created_ms),
             modified_ms: Some(self.modified_ms),
         }

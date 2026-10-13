@@ -7,7 +7,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use super::batch::{BatchSource, BatchTable, external, unique_prefix_lens};
+use super::batch::{BatchSource, BatchTable, external, readable, unique_prefix_lens};
 use crate::{ISSUE_TYPE, IssueChange, IssueFull, IssueStore, Order, Store};
 use datafusion::arrow::array::{StringBuilder, TimestampMillisecondBuilder};
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
@@ -76,17 +76,21 @@ pub(crate) fn issue_event_schema() -> SchemaRef {
     ]))
 }
 
-/// Every live issue, newest modified first.
+/// Every live issue this build reads, newest modified first.
 fn live_issues(store: &Store) -> Result<Vec<IssueFull>> {
     let issues = IssueStore::from(store);
-    issues
+    let tips = issues
         .query()
         .order(Order::ModifiedDesc)
         .tips()
-        .map_err(external)?
-        .iter()
-        .map(|tip| issues.at_commit(&tip.sha).map_err(external))
-        .collect()
+        .map_err(external)?;
+    let mut out = Vec::with_capacity(tips.len());
+    for tip in &tips {
+        if let Some(issue) = readable(issues.at_commit(&tip.sha))? {
+            out.push(issue);
+        }
+    }
+    Ok(out)
 }
 
 #[derive(Debug)]

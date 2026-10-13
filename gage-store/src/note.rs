@@ -15,11 +15,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
 use crate::index::{ObjectQuery, Order, SelectedTip};
-use crate::object::{EditOutcome, Object, ObjectTree, object_ref, resolve_target};
+use crate::object::{EditOutcome, Object, ObjectTree, object_ref, require_type, resolve_target};
 use crate::{Store, StoreError};
 
 pub const OBJECT_TYPE: &str = "gage::note";
-const OBJECT_VERSION: &str = "1";
+pub(crate) const OBJECT_VERSION: &str = "1";
 /// Attribute paths the index extracts from a note's `attrs.json`.
 pub(crate) const INDEXED_ATTRS: &[&str] = &["name", "work_id"];
 const TEXT_VALUE_FILE: &str = "value.txt";
@@ -534,6 +534,7 @@ fn decode_full(object: &Object) -> Result<NoteFull, StoreError> {
 }
 
 fn decode_content(object: &Object) -> Result<(NoteAttrs, NoteValue), StoreError> {
+    require_type(object, OBJECT_TYPE)?;
     let id = &object.header.id;
     let attrs_value = object
         .tree
@@ -1358,5 +1359,64 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, StoreError::TargetNotFound(_)), "{err}");
         assert!(!dir.exists());
+    }
+
+    /// The exact tree a note writes. A change here is a change to the
+    /// stored format and is reviewed as one.
+    #[test]
+    fn layout_snapshot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let target = note(&store, "t", "v", None);
+        let target_sha = rev_parse(&store, &target);
+        let target_url = format!("note:{target}");
+        let id = NoteStore::from(&store)
+            .create(NoteInput {
+                name: "n",
+                value: NoteValue::Json(serde_json::json!({"k": 1})),
+                author: "user:test",
+                target: Some(&target_url),
+                metadata: Some(serde_json::json!({"m": true})),
+                work_id: Some("w"),
+            })
+            .unwrap();
+        let sha = rev_parse(&store, &id);
+
+        let paths: Vec<String> = store
+            .ls(&sha)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        assert_eq!(
+            paths,
+            [
+                "attrs.json",
+                "created",
+                "id",
+                "modified",
+                "target.link",
+                "type",
+                "value.json"
+            ]
+        );
+        assert_eq!(cat_file(&store, &format!("{sha}:type")), "gage::note 1\n");
+        assert_eq!(cat_file(&store, &format!("{sha}:id")), format!("{id}\n"));
+        assert_eq!(
+            cat_file(&store, &format!("{sha}:attrs.json")),
+            format!(
+                "{{\"author\":\"user:test\",\"metadata\":{{\"m\":true}},\"name\":\"n\",\"target\":\"{target_url}\",\"work_id\":\"w\"}}\n"
+            )
+        );
+        assert_eq!(
+            cat_file(&store, &format!("{sha}:target.link")),
+            format!("{target_sha}\n")
+        );
+        assert_eq!(
+            cat_file(&store, &format!("{sha}:value.json")),
+            "{\"k\":1}\n"
+        );
+        let text_sha = rev_parse(&store, &target);
+        assert_eq!(cat_file(&store, &format!("{text_sha}:value.txt")), "v");
     }
 }

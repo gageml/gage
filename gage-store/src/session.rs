@@ -27,7 +27,7 @@ use crate::writer::{TreeInput, is_dot_git, mktree, write_blob_stream};
 use crate::{Store, StoreError};
 
 pub const OBJECT_TYPE: &str = "gage::session";
-const OBJECT_VERSION: &str = "1";
+pub(crate) const OBJECT_VERSION: &str = "1";
 /// Attribute paths the index extracts from a session's `attrs.json`.
 pub(crate) const INDEXED_ATTRS: &[&str] = &["summary.model"];
 /// Top-level subtree name for the session's opaque file content. The
@@ -154,6 +154,8 @@ pub struct SessionRemoveOutcome {
 pub struct SessionRecord {
     pub id: String,
     pub commit_sha: String,
+    /// The `<version>` half of the `type` blob at this commit
+    pub type_version: String,
     /// UNIX time millis of the object's `created` marker
     pub created_ms: Option<i64>,
     /// UNIX time millis of the version's `modified` marker
@@ -444,6 +446,7 @@ fn decode(object: Object) -> Result<SessionRecord, StoreError> {
         None => (attrs.driver.clone(), String::new()),
     };
     Ok(SessionRecord {
+        type_version: object.header.version.clone(),
         id: object.header.id,
         commit_sha: object.commit_sha.clone(),
         created_ms: object.header.created_ms,

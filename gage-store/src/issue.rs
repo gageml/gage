@@ -33,12 +33,12 @@ use crate::git::{EntryKind, TreeEntry};
 use crate::index::{ObjectQuery, Order, SelectedTip};
 use crate::key::{resolve_key, validate_key};
 use crate::note::OBJECT_TYPE as NOTE_TYPE;
-use crate::object::{EditOutcome, FIRST_PARENT_FILE, Object, ObjectTree, object_ref};
+use crate::object::{EditOutcome, FIRST_PARENT_FILE, Object, ObjectTree, object_ref, require_type};
 use crate::writer::{TreeInput, mktree, write_blob};
 use crate::{Store, StoreError};
 
 pub const OBJECT_TYPE: &str = "gage::issue";
-const OBJECT_VERSION: &str = "1";
+pub(crate) const OBJECT_VERSION: &str = "1";
 /// Attribute paths the index extracts from an issue's `attrs.json`.
 pub(crate) const INDEXED_ATTRS: &[&str] = &["name", "status", "key"];
 const ATTRS_FILE: &str = "attrs.json";
@@ -71,6 +71,10 @@ pub enum IssueStatus {
     Pending,
     Open,
     Closed,
+    /// A status this build does not know, written by a newer build.
+    /// Read only: no writer accepts it.
+    #[serde(other)]
+    Unknown,
 }
 
 impl IssueStatus {
@@ -82,6 +86,7 @@ impl IssueStatus {
             IssueStatus::Pending => "pending",
             IssueStatus::Open => "open",
             IssueStatus::Closed => "closed",
+            IssueStatus::Unknown => "unknown",
         }
     }
 }
@@ -111,6 +116,10 @@ pub enum StatusReason {
     Completed,
     WontFix,
     Duplicate,
+    /// A reason this build does not know, written by a newer build.
+    /// Read only: no writer accepts it.
+    #[serde(other)]
+    Unknown,
 }
 
 impl StatusReason {
@@ -125,6 +134,7 @@ impl StatusReason {
             StatusReason::Completed => "completed",
             StatusReason::WontFix => "wontfix",
             StatusReason::Duplicate => "duplicate",
+            StatusReason::Unknown => "unknown",
         }
     }
 }
@@ -158,6 +168,9 @@ pub enum ChangeEvent {
     Comment,
     /// The title or description changed
     Edit,
+    /// An event this build does not know, written by a newer build
+    #[serde(other)]
+    Unknown,
 }
 
 impl ChangeEvent {
@@ -167,6 +180,7 @@ impl ChangeEvent {
             ChangeEvent::Status => "status",
             ChangeEvent::Comment => "comment",
             ChangeEvent::Edit => "edit",
+            ChangeEvent::Unknown => "unknown",
         }
     }
 }
@@ -541,6 +555,11 @@ impl IssueStore<'_> {
         author: &str,
         message: Option<&str>,
     ) -> Result<String, StoreError> {
+        if status == IssueStatus::Unknown || reason == Some(StatusReason::Unknown) {
+            return Err(StoreError::IssueInput(
+                "status and reason must be values this build knows".to_string(),
+            ));
+        }
         let object = self.store.resolve_typed(id_or_prefix, OBJECT_TYPE)?;
         let mut attrs = decode_attrs(&object)?;
         if attrs.status == status {
@@ -994,7 +1013,7 @@ fn build_tree(
 
 /// Reject input the store cannot record as a new issue.
 fn validate_input(input: &IssueInput) -> Result<(), StoreError> {
-    if input.status == IssueStatus::Closed {
+    if !matches!(input.status, IssueStatus::Pending | IssueStatus::Open) {
         return Err(StoreError::IssueInput(
             "an issue is created pending or open, not closed".to_string(),
         ));
@@ -1280,6 +1299,7 @@ fn status_label(status: &(IssueStatus, Option<StatusReason>)) -> String {
 }
 
 fn decode_attrs(object: &Object) -> Result<IssueAttrs, StoreError> {
+    require_type(object, OBJECT_TYPE)?;
     let id = &object.header.id;
     let value = object
         .tree
@@ -1299,7 +1319,7 @@ mod tests {
     use super::*;
     use crate::git::{git_in, run};
     use crate::object::object_ref;
-    use crate::test_support::open_store;
+    use crate::test_support::{open_store, plant_blob, reopen};
     use crate::{NoteInput, NoteStore, NoteValue};
     use std::slice;
 
@@ -1852,5 +1872,105 @@ mod tests {
         ));
         let names: Vec<String> = issues.iter().unwrap().map(|r| r.unwrap().name).collect();
         assert_eq!(names, vec!["user-issue", "user-issue"]);
+    }
+
+    /// Enum values a newer build wrote read as `Unknown`, so the issue
+    /// shows and lists; no writer produces the value.
+    #[test]
+    fn unknown_enum_values_from_a_newer_build_read_as_unknown() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let id = issue(&store, IssueStatus::Open, &[]);
+        plant_blob(
+            &store,
+            &id,
+            "attrs.json",
+            r#"{"name":"user-issue","title":"T","author":"user:test","status":"triaged","status_reason":"deferred"}"#,
+        );
+        let store = reopen(store);
+        let issues = IssueStore::from(&store);
+
+        let full = issues.get(&id).unwrap();
+        assert_eq!(full.status, IssueStatus::Unknown);
+        assert_eq!(full.status_reason, Some(StatusReason::Unknown));
+        assert_eq!(full.status.as_str(), "unknown");
+        let listed: Vec<IssueFull> = issues.iter().unwrap().map(|r| r.unwrap()).collect();
+        assert_eq!(listed.len(), 1);
+
+        let err = issues
+            .set_status(&id, IssueStatus::Unknown, None, "user:test", None)
+            .unwrap_err();
+        assert!(matches!(err, StoreError::IssueInput(_)), "{err}");
+        let err = issues
+            .set_status(
+                &id,
+                IssueStatus::Closed,
+                Some(StatusReason::Unknown),
+                "user:test",
+                None,
+            )
+            .unwrap_err();
+        assert!(matches!(err, StoreError::IssueInput(_)), "{err}");
+        assert!("unknown".parse::<IssueStatus>().is_err());
+
+        issues
+            .set_status(&id, IssueStatus::Closed, None, "user:test", None)
+            .unwrap();
+        assert_eq!(issues.get(&id).unwrap().status, IssueStatus::Closed);
+    }
+
+    /// The exact tree an issue writes. A change here is a change to the
+    /// stored format and is reviewed as one.
+    #[test]
+    fn layout_snapshot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let note_id = note(&store, "n");
+        let note_sha = rev_parse(&store, &note_id);
+        let id = issue(&store, IssueStatus::Pending, slice::from_ref(&note_id));
+        let sha = rev_parse(&store, &id);
+        let ulid = IssueStore::from(&store).get(&id).unwrap().changes[0]
+            .id
+            .clone();
+
+        let paths: Vec<String> = store
+            .ls(&sha)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        assert_eq!(
+            paths,
+            [
+                "attrs.json".to_string(),
+                "changes".to_string(),
+                format!("changes/{ulid}"),
+                format!("changes/{ulid}/attrs.json"),
+                "created".to_string(),
+                "description.txt".to_string(),
+                "evidence.link".to_string(),
+                "id".to_string(),
+                "modified".to_string(),
+                "type".to_string(),
+            ]
+        );
+        assert_eq!(cat_file(&store, &format!("{sha}:type")), "gage::issue 1\n");
+        assert_eq!(cat_file(&store, &format!("{sha}:id")), format!("{id}\n"));
+        assert_eq!(
+            cat_file(&store, &format!("{sha}:attrs.json")),
+            "{\"author\":\"user:test\",\"name\":\"user-issue\",\"status\":\"pending\",\"title\":\"Something is off\"}\n"
+        );
+        assert_eq!(
+            cat_file(&store, &format!("{sha}:description.txt")),
+            "## Summary\n\nDetails.\n"
+        );
+        assert_eq!(
+            cat_file(&store, &format!("{sha}:evidence.link")),
+            format!("{note_sha}\n")
+        );
+        assert_eq!(
+            cat_file(&store, &format!("{sha}:changes/{ulid}/attrs.json")),
+            "{\"author\":\"user:test\",\"event\":\"create\",\"to_status\":\"pending\"}\n"
+        );
     }
 }

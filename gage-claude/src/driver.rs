@@ -132,12 +132,20 @@ impl Driver for ClaudeDriver {
         Ok(CONTENT_FORMAT.to_string())
     }
 
+    /// A stored session is read under the format this build writes;
+    /// any other value names bytes this build cannot interpret.
     fn read_stored(
         &self,
         native_id: String,
         content_format: &str,
         source: Box<dyn ContentSource>,
     ) -> Result<Box<dyn StoredSession>, DriverError> {
+        if content_format != CONTENT_FORMAT {
+            return Err(DriverError::Other(format!(
+                "stored session {native_id} has content format {content_format:?}; \
+                 this build reads {CONTENT_FORMAT:?} (upgrade gage)"
+            )));
+        }
         Ok(Box::new(ClaudeStoredSession {
             native_id,
             content_format: content_format.to_string(),
@@ -1206,5 +1214,32 @@ mod tests {
         let slug = encode_project_dir(&cwd);
         assert_eq!(source.project_path(&slug).unwrap(), Some(cwd));
         assert_eq!(source.project_path("-no-such").unwrap(), None);
+    }
+
+    struct NoContent;
+
+    impl ContentSource for NoContent {
+        fn paths(&self) -> io::Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+        fn open(&self, _path: &str) -> io::Result<Box<dyn io::Read + Send>> {
+            Err(io::Error::other("no content"))
+        }
+    }
+
+    #[test]
+    fn read_stored_refuses_a_content_format_this_build_does_not_write() {
+        let driver = ClaudeDriver::new();
+        let text = match driver.read_stored("s1".into(), "claude-jsonl 2", Box::new(NoContent)) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("a format this build does not write was accepted"),
+        };
+        assert!(text.contains("claude-jsonl 2"), "{text}");
+        assert!(text.contains("upgrade gage"), "{text}");
+        let accepted = driver.read_stored("s1".into(), CONTENT_FORMAT, Box::new(NoContent));
+        assert_eq!(
+            accepted.map(|s| s.content_format().to_string()).unwrap(),
+            CONTENT_FORMAT
+        );
     }
 }

@@ -36,7 +36,7 @@ use crate::writer::{TreeInput, mktree, write_blob};
 use crate::{Store, StoreError};
 
 pub const OBJECT_TYPE: &str = "gage::scan";
-const OBJECT_VERSION: &str = "1";
+pub(crate) const OBJECT_VERSION: &str = "1";
 pub(crate) const INDEXED_ATTRS: &[&str] = &[];
 const TASKS_DIR: &str = "tasks";
 const SCANNERS_DIR: &str = "scanners";
@@ -103,6 +103,10 @@ pub enum TaskStatus {
     Completed,
     Failed,
     Canceled,
+    /// A status this build does not know, written by a newer build.
+    /// Read only: no writer accepts it, and it is not terminal.
+    #[serde(other)]
+    Unknown,
 }
 
 impl TaskStatus {
@@ -113,12 +117,16 @@ impl TaskStatus {
             TaskStatus::Completed => "completed",
             TaskStatus::Failed => "failed",
             TaskStatus::Canceled => "canceled",
+            TaskStatus::Unknown => "unknown",
         }
     }
 
     /// True for a status a stored scan may carry.
     pub fn is_terminal(self) -> bool {
-        !matches!(self, TaskStatus::Pending | TaskStatus::Started)
+        !matches!(
+            self,
+            TaskStatus::Pending | TaskStatus::Started | TaskStatus::Unknown
+        )
     }
 }
 

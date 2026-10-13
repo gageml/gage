@@ -38,6 +38,7 @@ use gage_core::style::IdHighlighter;
 use gage_session::filter::{self, IdFilter};
 use gage_session::system;
 
+use super::batch::readable;
 use crate::{NOTE_TYPE, NoteStore, NoteValue, Order, SelectedTip, Store, StoreError};
 
 /// Columns read from the object rather than the index. A projection
@@ -303,6 +304,16 @@ impl StoredNoteExec {
         let mut commits = StringBuilder::with_capacity(len, len * 40);
 
         for tip in &tips {
+            // Read before any column is appended, so a skipped object
+            // leaves every column the same length
+            let note = if needs_attrs {
+                match readable(notes.at_commit(&tip.sha))? {
+                    Some(note) => Some(note),
+                    None => continue,
+                }
+            } else {
+                None
+            };
             ids.append_value(&tip.id);
             createds.append_option(tip.created_ms);
             modifieds.append_option(tip.modified_ms);
@@ -314,7 +325,7 @@ impl StoredNoteExec {
             locators.append_value(format!("git:{}", tip.sha));
             commits.append_value(&tip.sha);
 
-            if !needs_attrs {
+            let Some(note) = note else {
                 names.append_value("");
                 targets.append_null();
                 authors.append_value("");
@@ -324,8 +335,7 @@ impl StoredNoteExec {
                 scans.append_null();
                 work_ids.append_null();
                 continue;
-            }
-            let note = notes.at_commit(&tip.sha).map_err(external)?;
+            };
             names.append_value(&note.name);
             targets.append_option(note.target.as_deref());
             authors.append_value(&note.author);
@@ -526,7 +536,7 @@ mod tests {
     use datafusion::prelude::SessionContext;
 
     use super::StoredNoteTable;
-    use crate::test_support::open_store;
+    use crate::test_support::{open_store, plant_blob, reopen};
     use crate::{NoteInput, NoteStore, NoteValue};
 
     fn column(batch: &RecordBatch, i: usize) -> Vec<Option<String>> {
@@ -607,5 +617,46 @@ mod tests {
         let batch = batches.first().unwrap();
         assert_eq!(batch.num_rows(), 1);
         assert!(column(batch, 1)[0].as_deref().unwrap().starts_with("git:"));
+    }
+
+    /// A note at a type version this build does not read is left out
+    /// of every projection, so counts agree whether or not attributes
+    /// are read; the others list.
+    #[tokio::test]
+    async fn note_table_leaves_out_a_newer_type_version() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let create = |name: &str| {
+            NoteStore::from(&store)
+                .create(NoteInput {
+                    name,
+                    value: NoteValue::Text("v".into()),
+                    author: "user:test",
+                    target: None,
+                    metadata: None,
+                    work_id: None,
+                })
+                .unwrap()
+        };
+        let newer = create("newer");
+        let kept = create("kept");
+        plant_blob(&store, &newer, "type", "gage::note 2\n");
+        let store = reopen(store);
+        assert_eq!(NoteStore::from(&store).query().count().unwrap(), 1);
+
+        let ctx = SessionContext::new();
+        ctx.register_table(
+            "note",
+            Arc::new(StoredNoteTable::new(Arc::new(Mutex::new(store)))),
+        )
+        .unwrap();
+        for sql in [
+            "SELECT id FROM note",
+            "SELECT id FROM note WHERE name IS NOT NULL",
+        ] {
+            let batches = ctx.sql(sql).await.unwrap().collect().await.unwrap();
+            let ids: Vec<Option<String>> = batches.iter().flat_map(|b| column(b, 0)).collect();
+            assert_eq!(ids, [Some(kept.clone())], "{sql}");
+        }
     }
 }

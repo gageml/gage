@@ -141,7 +141,7 @@ fn parse_update(params: &JsonObject) -> Result<Update, McpError> {
         (IssueStatus::Closed, reason, None) => {
             Ok(Update::Close(reason.unwrap_or(StatusReason::Completed)))
         }
-        (IssueStatus::Pending, _, _) => Err(McpError::invalid_params(
+        (IssueStatus::Pending | IssueStatus::Unknown, _, _) => Err(McpError::invalid_params(
             "`status` must be open or closed",
             None,
         )),

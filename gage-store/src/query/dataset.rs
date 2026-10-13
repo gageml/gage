@@ -12,7 +12,7 @@ use datafusion::error::Result;
 use gage_core::uuid::short_uuid;
 use gage_session::system;
 
-use super::batch::{BatchSource, BatchTable, external, marker, unique_prefix_lens};
+use super::batch::{BatchSource, BatchTable, external, marker, readable, unique_prefix_lens};
 use crate::{DATASET_TYPE, DatasetStore, Order, Store};
 
 pub(crate) fn dataset_schema() -> SchemaRef {
@@ -63,8 +63,11 @@ impl BatchSource for Source {
         let datasets = DatasetStore::from(store);
         let mut rows = Vec::with_capacity(tips.len());
         for tip in &tips {
+            let Some(record) = readable(datasets.at_commit(&tip.sha))? else {
+                continue;
+            };
             let n = prefix_len.get(&tip.id).copied().unwrap_or(tip.id.len());
-            let origin = datasets.at_commit(&tip.sha).map_err(external)?.origin;
+            let origin = record.origin;
             rows.push(DatasetRow {
                 id: tip.id.clone(),
                 modified_ms: marker(&tip.id, "modified", tip.modified_ms)?,

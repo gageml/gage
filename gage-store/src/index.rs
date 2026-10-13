@@ -29,7 +29,7 @@ use serde_json::Value as JsonValue;
 
 use crate::git::{git_in, run};
 use crate::key::KeyRefUpdate;
-use crate::object::{LinkFile, Object, object_ref};
+use crate::object::{LinkFile, Object, object_ref, object_version};
 use crate::sqlite_index::INDEX_SCHEMA_VERSION;
 use crate::store::index_path;
 use crate::{Store, StoreError, attachment, dataset, issue, note, scan, session};
@@ -88,6 +88,8 @@ pub enum Order {
 pub struct SelectedTip {
     pub id: String,
     pub sha: String,
+    /// The `<version>` half of the `type` blob at the tip
+    pub version: String,
     pub created_ms: Option<i64>,
     pub modified_ms: Option<i64>,
 }
@@ -345,9 +347,34 @@ impl Store {
         })
     }
 
-    /// Tips selected by `query`, in query order.
+    /// Tips selected by `query`, in query order, less any tip whose
+    /// `type` version is newer than this build reads. Each one left
+    /// out is reported once, so a listing shows every object it can
+    /// read and names the ones it cannot.
     pub(crate) fn select(&self, query: &ObjectQuery) -> Result<Vec<SelectedTip>, StoreError> {
-        self.index.select(query)
+        let tips = self.index.select(query)?;
+        let Some(supported) = object_version(query.object_type) else {
+            return Ok(tips);
+        };
+        let supported: u32 = supported
+            .parse()
+            .expect("OBJECT_VERSION constants are decimal integers");
+        let mut readable = Vec::with_capacity(tips.len());
+        for tip in tips {
+            match tip.version.parse::<u32>() {
+                Ok(found) if found > supported => {
+                    let unread = StoreError::ObjectVersion {
+                        id: tip.id,
+                        object_type: query.object_type.to_string(),
+                        found,
+                        supported,
+                    };
+                    tracing::warn!("{unread}; not listed");
+                }
+                _ => readable.push(tip),
+            }
+        }
+        Ok(readable)
     }
 }
 
@@ -358,7 +385,7 @@ mod tests {
     use crate::note::{NoteEdit, NoteInput, NoteStore, NoteValue};
     use crate::object::ObjectTree;
     use crate::session::SessionStore;
-    use crate::sqlite_index::INDEX_SCHEMA_VERSION;
+    use crate::sqlite_index::{INDEX_SCHEMA_VERSION, INDEXED_ATTRS_SNAPSHOT};
     use crate::test_support::{FsckGuard, fsck_guard, init_for_test, open_store};
     use crate::writer::{TreeInput, mktree, write_blob};
     use gage_session::{
@@ -1107,5 +1134,30 @@ mod tests {
         assert!(extract_attrs(&object).is_empty());
         let object = object_with("gage::unknown", json!({ "name": "n" }));
         assert!(extract_attrs(&object).is_empty());
+    }
+
+    /// The lists each type opts into the index are bound to
+    /// `INDEX_SCHEMA_VERSION`: rows are extracted at write time, so a
+    /// list change reaches existing objects only through a rebuild.
+    /// Changing a list fails here until the version is bumped and the
+    /// snapshot updated.
+    #[test]
+    fn indexed_attrs_match_the_snapshot_beside_the_index_version() {
+        let live = [
+            ("attachment", attachment::INDEXED_ATTRS),
+            ("dataset", dataset::INDEXED_ATTRS),
+            ("issue", issue::INDEXED_ATTRS),
+            ("note", note::INDEXED_ATTRS),
+            ("scan", scan::INDEXED_ATTRS),
+            ("session", session::INDEXED_ATTRS),
+        ]
+        .iter()
+        .map(|(type_name, attrs)| format!("{type_name}={}", attrs.join(",")))
+        .collect::<Vec<_>>()
+        .join(";");
+        assert_eq!(
+            live, INDEXED_ATTRS_SNAPSHOT,
+            "INDEXED_ATTRS changed: bump INDEX_SCHEMA_VERSION and update INDEXED_ATTRS_SNAPSHOT"
+        );
     }
 }
