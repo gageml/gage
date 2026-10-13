@@ -33,7 +33,7 @@ fn install_dialog(args: &InitArgs) -> Result<DialogResult, DialogError> {
 
     cli::log::step("Gage store")?;
     cli::log::step(format!(
-        "Plugin\ngage (MCP server + skills) via driver {}",
+        "Plugin\ngage (MCP server + skills) via {} driver",
         driver.name()
     ))?;
 
