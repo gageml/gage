@@ -8,7 +8,8 @@ use gage_core::datetime::ms_to_iso8601;
 use gage_core::uuid::short_uuid;
 use gage_query::ContextBuilder;
 use gage_store::{
-    AddStep, DatasetOrigin, DatasetSessionAddOutcome, DatasetStore, SessionOutcome, SessionSpec,
+    StoreError,
+    AddStep, DatasetOrigin, DatasetSessionAddOutcome, DatasetStore, SessionOutcome,
     Store, StoreError, TagStore,
 };
 use tabled::{
@@ -395,49 +396,55 @@ pub(crate) fn add_native_to_dataset(
         return Err(errors.join("\n"));
     }
 
-    let mut natives = Vec::with_capacity(ids.len());
-    for id in &ids {
-        let native = source_handle
-            .open_native(id)
-            .map_err(|e| format!("{id}: {e}"))?;
-        natives.push(native);
-    }
-
-    let specs: Vec<SessionSpec<'_>> = natives
-        .iter_mut()
-        .map(|session| SessionSpec {
-            driver: driver.as_ref(),
-            session: session.as_mut(),
-        })
-        .collect();
     let datasets = match max_bytes {
         Some(max) => DatasetStore::from(store).with_max_session_size(max),
         None => DatasetStore::from(store),
     };
     let total = ids.len();
-    // The specs are written in `ids` order; the index of the session
-    // being written names its native id for the outcome event
+    // The sessions are written in `ids` order; the index of the
+    // session being written names its native id for the outcome event
     let mut current = 0;
     let outcomes = datasets
-        .sessions_add_with_progress(dataset_id, specs, &mut |step| match step {
-            AddStep::Starting { index, native_id } => {
-                current = index;
-                on_event(AddEvent::Starting { total, native_id });
-            }
-            AddStep::Added(outcome) => on_event(AddEvent::Added {
-                outcome: outcome.outcome,
-                id: &outcome.id,
-                native_id: ids.get(current).map_or("", String::as_str),
-                dataset: Some(dataset_id),
-            }),
-        })
+        .sessions_add_opening(
+            dataset_id,
+            driver.as_ref(),
+            &ids,
+            &mut |native_id| {
+                if dialog::interrupted() {
+                    return Ok(None);
+                }
+                source_handle
+                    .open_native(native_id)
+                    .map(Some)
+                    .map_err(|e| StoreError::Parse(format!("{native_id}: {e}")))
+            },
+            &mut |step| match step {
+                AddStep::Starting { index, native_id } => {
+                    current = index;
+                    on_event(AddEvent::Starting { total, native_id });
+                }
+                AddStep::Added(outcome) => on_event(AddEvent::Added {
+                    outcome: outcome.outcome,
+                    id: &outcome.id,
+                    native_id: ids.get(current).map_or("", String::as_str),
+                    dataset: Some(dataset_id),
+                }),
+            },
+        )
         .map_err(|e| e.to_string())?;
+    let placed = outcomes.len();
     on_event(AddEvent::Done {
-        placed: outcomes.len(),
+        placed,
         dataset: Some(dataset_id),
     });
 
     source_handle.close().map_err(|e| format!("{spec}: {e}"))?;
+    if placed < total {
+        return Err(format!(
+            "Interrupted after {placed} of {}",
+            count(total, "session")
+        ));
+    }
     Ok(outcomes)
 }
 

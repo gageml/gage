@@ -1,4 +1,5 @@
 use std::io::{self, ErrorKind};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use cliclack as cli;
 use console::{Term, style};
@@ -78,19 +79,44 @@ pub fn install_theme() {
     cli::set_theme(GageTheme);
 }
 
-/// RAII guard that ignores SIGINT for its lifetime and restores the
-/// previous disposition on drop. The console crate detects Ctrl+C as a
-/// 0x03 byte in raw mode and then calls `libc::raise(SIGINT)`; without
-/// this guard the raised signal terminates the process before the
-/// caller can act on the `ErrorKind::Interrupted` returned by the
-/// prompt.
+/// Set by the first Ctrl+C a dialog receives
+static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+
+/// True once Ctrl+C was pressed during the dialog. A loop that writes
+/// one object per iteration checks this between objects and stops with
+/// the store consistent.
+pub fn interrupted() -> bool {
+    INTERRUPTED.load(Ordering::Relaxed)
+}
+
+/// The dialog's SIGINT handler. The first Ctrl+C records the request
+/// and returns, so a prompt can surface `ErrorKind::Interrupted` and
+/// a loop can stop at an object boundary. A second Ctrl+C restores the
+/// default disposition and re-raises, which terminates the process.
+extern "C" fn on_sigint(_: libc::c_int) {
+    if INTERRUPTED.swap(true, Ordering::Relaxed) {
+        // SAFETY: signal and raise are async-signal-safe
+        unsafe {
+            libc::signal(libc::SIGINT, libc::SIG_DFL);
+            libc::raise(libc::SIGINT);
+        }
+    }
+}
+
+/// RAII guard that routes SIGINT to [`on_sigint`] for its lifetime and
+/// restores the previous disposition on drop. The console crate
+/// detects Ctrl+C as a 0x03 byte in raw mode and then calls
+/// `libc::raise(SIGINT)`; under the default disposition the raised
+/// signal terminates the process before the caller can act on the
+/// `ErrorKind::Interrupted` returned by the prompt.
 pub struct SigintGuard {
     prev: libc::sighandler_t,
 }
 
 impl SigintGuard {
     pub fn new() -> Self {
-        let prev = unsafe { libc::signal(libc::SIGINT, libc::SIG_IGN) };
+        let handler = on_sigint as extern "C" fn(libc::c_int) as libc::sighandler_t;
+        let prev = unsafe { libc::signal(libc::SIGINT, handler) };
         Self { prev }
     }
 }

@@ -865,24 +865,23 @@ fn add_native(
         return Err(DialogError::Failed(errors.join("\n")));
     }
 
-    let mut natives = Vec::with_capacity(ids.len());
-    for id in &ids {
-        let native = opened
-            .open_native(id)
-            .map_err(|e| DialogError::Failed(format!("{id}: {e}")))?;
-        natives.push(native);
-    }
-
     let sessions = match max_bytes {
         Some(max) => SessionStore::from(store).with_max_session_size(max),
         None => SessionStore::from(store),
     };
     let total = ids.len();
-    for (session, id) in natives.iter_mut().zip(&ids) {
+    let mut placed = 0;
+    for id in &ids {
+        if dialog::interrupted() {
+            break;
+        }
         on_event(AddEvent::Starting {
             total,
             native_id: id,
         });
+        let mut session = opened
+            .open_native(id)
+            .map_err(|e| DialogError::Failed(format!("{id}: {e}")))?;
         let outcome = sessions
             .add(driver.as_ref(), session.as_mut())
             .map_err(|e| DialogError::Failed(format!("{id}: {e}")))?;
@@ -892,14 +891,18 @@ fn add_native(
             native_id: id,
             dataset: None,
         });
+        placed += 1;
     }
     on_event(AddEvent::Done {
-        placed: total,
+        placed,
         dataset: None,
     });
     opened
         .close()
         .map_err(|e| DialogError::Failed(format!("{spec}: {e}")))?;
+    if placed < total {
+        return Err(dialog::partial("Interrupted after", placed, total, "session"));
+    }
     Ok(())
 }
 

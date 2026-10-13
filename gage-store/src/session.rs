@@ -227,6 +227,44 @@ impl<'a> SessionStore<'a> {
         let id = session_object_id(driver.name(), &native_id);
         let session_type = session.session_type().to_string();
         let summary = collect_summary(session.attrs());
+        let attrs = |content_format: String| SessionAttrsRecord {
+            driver: format!("{} {}", driver.name(), driver.version()),
+            native_source: native_source.clone(),
+            native_id: native_id.clone(),
+            native_mtime,
+            native_size,
+            session_type: session_type.clone(),
+            content_format,
+            project: project.clone(),
+            summary: summary.clone(),
+        };
+
+        let current = match self.store.rev_parse(&object_ref(&id))? {
+            None => None,
+            Some(sha) => {
+                let current = self.store.read_object(&sha)?;
+                require_type(&current, OBJECT_TYPE)?;
+                Some(current)
+            }
+        };
+
+        // A native file with the same mtime and size as the one the
+        // live object was written from holds the same bytes, so an
+        // attrs match means the content match that `edit` would find
+        // after reading and hashing the whole transcript. A re-add of
+        // 1,600 unchanged sessions read 1.3 GB to learn nothing.
+        if let Some(current) = &current
+            && !current.header.is_tombstone()
+        {
+            let stored = decode_attrs(current)?;
+            if stored == attrs(stored.content_format.clone()) {
+                return Ok(SessionAddOutcome {
+                    id,
+                    commit_sha: current.commit_sha.clone(),
+                    outcome: SessionOutcome::Unchanged,
+                });
+            }
+        }
 
         let mut sink = GitContentSink::new(path.to_path_buf(), self.max_session_bytes);
         let content_format = match driver.write_native(session, &mut sink) {
@@ -241,18 +279,7 @@ impl<'a> SessionStore<'a> {
         };
         let file_entries = sink.into_entries()?;
         let files_tree_sha = build_files_tree(path, file_entries)?;
-
-        let attrs = SessionAttrsRecord {
-            driver: format!("{} {}", driver.name(), driver.version()),
-            native_source,
-            native_id,
-            native_mtime,
-            native_size,
-            session_type,
-            content_format,
-            project,
-            summary,
-        };
+        let attrs = attrs(content_format);
 
         let mut tree = ObjectTree {
             attrs: Some(
@@ -264,7 +291,7 @@ impl<'a> SessionStore<'a> {
         tree.subtrees.insert(FILES_TREE.to_string(), files_tree_sha);
 
         let subject = format!("{}:{}", driver.name(), attrs.native_id);
-        match self.store.rev_parse(&object_ref(&id))? {
+        match current {
             None => {
                 let message = format!("session: {subject}");
                 let commit_sha =
@@ -276,9 +303,7 @@ impl<'a> SessionStore<'a> {
                     outcome: SessionOutcome::Added,
                 })
             }
-            Some(sha) => {
-                let current = self.store.read_object(&sha)?;
-                require_type(&current, OBJECT_TYPE)?;
+            Some(current) => {
                 if current.header.is_tombstone() {
                     // Re-add after remove: the derived id names the
                     // same object, so a live commit supersedes the
@@ -433,14 +458,8 @@ impl<'a> SessionQuery<'a> {
 }
 
 fn decode(object: Object) -> Result<SessionRecord, StoreError> {
-    let commit_sha = object.commit_sha.as_str();
     require_type(&object, OBJECT_TYPE)?;
-    let attrs_value = object
-        .tree
-        .attrs
-        .ok_or_else(|| StoreError::Parse(format!("session {commit_sha}: missing attrs.json")))?;
-    let attrs: SessionAttrsRecord = serde_json::from_value(attrs_value)
-        .map_err(|e| StoreError::Parse(format!("session attrs {commit_sha}: {e}")))?;
+    let attrs = decode_attrs(&object)?;
     let (driver_name, driver_version) = match attrs.driver.split_once(' ') {
         Some((n, v)) => (n.to_string(), v.to_string()),
         None => (attrs.driver.clone(), String::new()),
@@ -455,6 +474,16 @@ fn decode(object: Object) -> Result<SessionRecord, StoreError> {
         driver_name,
         driver_version,
     })
+}
+
+fn decode_attrs(object: &Object) -> Result<SessionAttrsRecord, StoreError> {
+    let commit_sha = object.commit_sha.as_str();
+    let attrs_value =
+        object.tree.attrs.as_ref().ok_or_else(|| {
+            StoreError::Parse(format!("session {commit_sha}: missing attrs.json"))
+        })?;
+    serde_json::from_value(attrs_value.clone())
+        .map_err(|e| StoreError::Parse(format!("session attrs {commit_sha}: {e}")))
 }
 
 /// A [`ContentSink`] that captures each `create` call into a git blob
@@ -868,6 +897,66 @@ pub(crate) mod tests {
             cat(&store, &format!("{}:first-parent", grown.commit_sha)),
             format!("{}\n", first.commit_sha)
         );
+    }
+
+    /// `write_native` fails, so an add that reaches it errors out
+    struct UnreadableDriver;
+
+    impl DriverTrait for UnreadableDriver {
+        fn name(&self) -> &'static str {
+            FakeDriver.name()
+        }
+        fn version(&self) -> &'static str {
+            FakeDriver.version()
+        }
+        fn schemes(&self) -> &'static [&'static str] {
+            FakeDriver.schemes()
+        }
+        fn open_source(&self, _source: &str) -> Result<Box<dyn Source>, DriverError> {
+            Err(DriverError::Other("open_source not used".into()))
+        }
+        fn write_native(
+            &self,
+            _session: &mut dyn NativeSession,
+            _sink: &mut dyn ContentSink,
+        ) -> Result<String, DriverError> {
+            Err(DriverError::Other("content was read".into()))
+        }
+        fn read_stored(
+            &self,
+            _native_id: String,
+            _content_format: &str,
+            _source: Box<dyn ContentSource>,
+        ) -> Result<Box<dyn StoredSession>, DriverError> {
+            Err(DriverError::Other("read_stored not used in tests".into()))
+        }
+    }
+
+    #[test]
+    fn re_add_with_matching_attrs_skips_content_read() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let sessions = SessionStore::from(&store);
+
+        let first = sessions
+            .add(&FakeDriver, &mut fake("s1", &[("session.jsonl", "{}\n")]))
+            .unwrap();
+        let again = sessions
+            .add(
+                &UnreadableDriver,
+                &mut fake("s1", &[("session.jsonl", "{}\n")]),
+            )
+            .unwrap();
+        assert_eq!(again.outcome, SessionOutcome::Unchanged);
+        assert_eq!(again.commit_sha, first.commit_sha);
+
+        let err = sessions
+            .add(
+                &UnreadableDriver,
+                &mut fake("s1", &[("session.jsonl", "{}\n{}\n")]),
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("content was read"), "{err}");
     }
 
     #[test]

@@ -66,6 +66,13 @@ map_err_ignore = "warn"
 unused_result_ok = "warn"
 indexing_slicing = "warn"
 
+# Dependencies are built optimized in the dev profile. The hot paths
+# of a session add (zlib, SHA-1, JSON parsing) run in dependency code:
+# compressing the 874 MB session corpus took 69 s unoptimized and 5 s
+# at opt-level 3. Workspace crates stay unoptimized and incremental.
+[profile.dev.package."*"]
+opt-level = 3
+
 [profile.release]
 debug = "line-tables-only"
 panic = "abort"

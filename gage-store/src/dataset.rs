@@ -603,7 +603,68 @@ impl DatasetStore<'_> {
         mut specs: Vec<SessionSpec<'_>>,
         progress: &mut dyn FnMut(AddStep<'_>),
     ) -> Result<Vec<DatasetSessionAddOutcome>, StoreError> {
-        if specs.is_empty() {
+        self.sessions_add_each(
+            dataset_id,
+            specs.len(),
+            &mut |index, sessions, progress| {
+                let spec = specs.get_mut(index).expect("index is below the spec count");
+                progress(AddStep::Starting {
+                    index,
+                    native_id: spec.session.id(),
+                });
+                sessions.add(spec.driver, spec.session).map(Some)
+            },
+            progress,
+        )
+    }
+
+    /// [`Self::sessions_add_with_progress`] for sessions `open` opens
+    /// as the add reaches them, so a slow open shows under the same
+    /// progress as the write. `open` returning `None` stops the add
+    /// before that session; the members placed so far are committed
+    /// and returned, and the caller sees the shortfall in the outcome
+    /// count.
+    pub fn sessions_add_opening(
+        &self,
+        dataset_id: &str,
+        driver: &dyn Driver,
+        native_ids: &[String],
+        open: &mut dyn FnMut(&str) -> Result<Option<Box<dyn NativeSession>>, StoreError>,
+        progress: &mut dyn FnMut(AddStep<'_>),
+    ) -> Result<Vec<DatasetSessionAddOutcome>, StoreError> {
+        self.sessions_add_each(
+            dataset_id,
+            native_ids.len(),
+            &mut |index, sessions, progress| {
+                let native_id = native_ids
+                    .get(index)
+                    .expect("index is below the native id count");
+                progress(AddStep::Starting { index, native_id });
+                match open(native_id)? {
+                    Some(mut session) => sessions.add(driver, session.as_mut()).map(Some),
+                    None => Ok(None),
+                }
+            },
+            progress,
+        )
+    }
+
+    /// Write `count` sessions through `add`, one call per index, and
+    /// link the outcomes as members in one dataset commit. `add`
+    /// reports its own [`AddStep::Starting`]; `None` from it ends the
+    /// loop early.
+    fn sessions_add_each(
+        &self,
+        dataset_id: &str,
+        count: usize,
+        add: &mut dyn FnMut(
+            usize,
+            &SessionStore<'_>,
+            &mut dyn FnMut(AddStep<'_>),
+        ) -> Result<Option<SessionAddOutcome>, StoreError>,
+        progress: &mut dyn FnMut(AddStep<'_>),
+    ) -> Result<Vec<DatasetSessionAddOutcome>, StoreError> {
+        if count == 0 {
             return Ok(Vec::new());
         }
         let dataset = self.current(dataset_id)?;
@@ -620,17 +681,16 @@ impl DatasetStore<'_> {
             Some(max) => SessionStore::from(self.store).with_max_session_size(max),
             None => SessionStore::from(self.store),
         };
-        let mut outcomes: Vec<DatasetSessionAddOutcome> = Vec::with_capacity(specs.len());
-        for (index, spec) in specs.iter_mut().enumerate() {
-            progress(AddStep::Starting {
-                index,
-                native_id: spec.session.id(),
-            });
-            let SessionAddOutcome {
+        let mut outcomes: Vec<DatasetSessionAddOutcome> = Vec::with_capacity(count);
+        for index in 0..count {
+            let Some(SessionAddOutcome {
                 id,
                 commit_sha,
                 outcome,
-            } = sessions.add(spec.driver, spec.session)?;
+            }) = add(index, &sessions, progress)?
+            else {
+                break;
+            };
             let session_num = place_member(&mut members, &mut member_ids, &id, commit_sha);
             outcomes.push(DatasetSessionAddOutcome {
                 session_num,
@@ -1318,6 +1378,40 @@ mod tests {
         let outcomes = add(&store, &dataset, &mut [fake("s1", "a\n")]);
         assert_eq!(outcomes[0].outcome, SessionOutcome::Unchanged);
         assert_eq!(rev_parse(&store, &dataset), tip);
+    }
+
+    #[test]
+    fn sessions_add_opening_stops_where_open_returns_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let datasets = DatasetStore::from(&store);
+        let dataset = datasets.create().unwrap();
+        let ids: Vec<String> = ["s1", "s2", "s3"].map(String::from).to_vec();
+
+        let mut started = Vec::new();
+        let outcomes = datasets
+            .sessions_add_opening(
+                &dataset,
+                &FakeDriver,
+                &ids,
+                &mut |native_id| {
+                    Ok((native_id != "s3")
+                        .then(|| Box::new(fake(native_id, "x\n")) as Box<dyn NativeSession>))
+                },
+                &mut |step| {
+                    if let AddStep::Starting { index, .. } = step {
+                        started.push(index);
+                    }
+                },
+            )
+            .unwrap();
+        assert_eq!(started, vec![0, 1, 2]);
+        assert_eq!(outcomes.len(), 2);
+        assert!(outcomes.iter().all(|o| o.outcome == SessionOutcome::Added));
+
+        let listed = datasets.sessions_list(&dataset).unwrap();
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[1].native_id, "s2");
     }
 
     #[test]

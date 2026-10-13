@@ -443,6 +443,10 @@ pub struct ClaudeSource {
     /// Project slug to recorded cwd, loaded once. The error string is
     /// kept so every later call reports the same failure.
     projects: OnceLock<Result<HashMap<String, PathBuf>, String>>,
+    /// Native id to transcript path, walked once. A lookup per
+    /// selected session over 1,600 files walked the tree 3,000 times
+    /// for one `session add --all`; one walk serves every lookup.
+    files: OnceLock<Result<HashMap<String, PathBuf>, String>>,
 }
 
 impl ClaudeSource {
@@ -464,6 +468,7 @@ impl ClaudeSource {
             root,
             store,
             projects: OnceLock::new(),
+            files: OnceLock::new(),
         })
     }
 
@@ -477,6 +482,18 @@ impl ClaudeSource {
             .get_or_init(|| load_projects(&self.root).map_err(|e| e.to_string()))
             .as_ref()
             .map_err(|e| DriverError::Other(format!("reading project registry: {e}")))
+    }
+
+    fn files(&self) -> Result<&HashMap<String, PathBuf>, DriverError> {
+        self.files
+            .get_or_init(|| {
+                walk_session_files(&self.projects_dir)
+                    .map(|hit| hit.map(|(id, path, _meta)| (id, path)))
+                    .collect::<io::Result<HashMap<_, _>>>()
+                    .map_err(|e| e.to_string())
+            })
+            .as_ref()
+            .map_err(|e| DriverError::Other(format!("reading sessions: {e}")))
     }
 }
 
@@ -575,16 +592,12 @@ impl Source for ClaudeSource {
     }
 
     fn find_native(&self, prefix: &str) -> Result<String, NativeLookupError> {
-        let mut matches = Vec::new();
-        for hit in walk_session_files(&self.projects_dir) {
-            let (id, _path, _meta) = match hit {
-                Ok(h) => h,
-                Err(e) => return Err(NativeLookupError::Driver(DriverError::Io(e))),
-            };
-            if id.starts_with(prefix) {
-                matches.push(id);
-            }
-        }
+        let files = self.files().map_err(NativeLookupError::Driver)?;
+        let mut matches: Vec<String> = files
+            .keys()
+            .filter(|id| id.starts_with(prefix))
+            .cloned()
+            .collect();
         match matches.len() {
             0 => Err(NativeLookupError::NoMatch(prefix.to_string())),
             1 => Ok(matches.pop().unwrap()),
@@ -673,16 +686,18 @@ fn shorten_project_name(name: &str, max_chars: usize) -> String {
 
 impl ClaudeSource {
     /// The session file for `native_id` and its metadata
+    /// The transcript path and a fresh stat of it. The stat is taken
+    /// per call so a file removed after the walk reports not found and
+    /// the mtime reflects the file as it is now.
     fn session_file(&self, native_id: &str) -> Result<(PathBuf, fs::Metadata), DriverError> {
-        for hit in walk_session_files(&self.projects_dir) {
-            let (id, path, meta) = hit?;
-            if id == native_id {
-                return Ok((path, meta));
-            }
+        let not_found =
+            || DriverError::Other(format!("native session not found: {NAME}:{native_id}"));
+        let path = self.files()?.get(native_id).ok_or_else(not_found)?;
+        match path.metadata() {
+            Ok(meta) => Ok((path.clone(), meta)),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Err(not_found()),
+            Err(e) => Err(DriverError::Io(e)),
         }
-        Err(DriverError::Other(format!(
-            "native session not found: {NAME}:{native_id}"
-        )))
     }
 }
 
