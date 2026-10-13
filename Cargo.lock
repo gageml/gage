@@ -2274,7 +2274,6 @@ dependencies = [
  "clap",
  "datafusion",
  "futures",
- "gage-claude",
  "gage-core",
  "gage-registry",
  "gage-session",

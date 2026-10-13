@@ -1,10 +1,11 @@
 use clap::Args;
-use gage_claude::index::{LockMode, ReconcileEvent, Status};
+use gage_session::MaintenanceStatus;
 use tabled::{
     Table,
     settings::{Style, object::Columns},
 };
 
+use crate::human::format_size;
 use crate::source;
 use crate::style;
 
@@ -23,19 +24,23 @@ pub struct IndexArgs {
     status: bool,
 }
 
-/// Run the reconcile pass over the session summary cache and exit.
-/// For post-install setup, cron, and bulk imports — keeps the
-/// first-build cost out of interactive queries. Progress is reported
-/// via `tracing` (set GAGE_LOG=info to see per-session output).
+/// Run the source's reconcile pass and exit. For post-install setup,
+/// cron, and bulk imports — keeps the first-build cost out of
+/// interactive queries.
 pub async fn run(args: IndexArgs) {
     let source = source::open_source_or_exit("gage index", args.source.as_deref().unwrap_or(""));
-    let store = source::index_store_or_exit("gage index", source.as_ref());
 
     if args.status {
-        let status = tokio::task::spawn_blocking(move || store.status())
+        let status = tokio::task::spawn_blocking(move || source.maintenance_status())
             .await
             .unwrap();
-        print_status(&status);
+        match status {
+            Ok(status) => print_status(&status),
+            Err(e) => {
+                eprintln!("gage index: {e}");
+                std::process::exit(1);
+            }
+        }
         return;
     }
 
@@ -44,20 +49,12 @@ pub async fn run(args: IndexArgs) {
     bar.set_message("Building index");
     let bar_for_task = bar.clone();
     let result = tokio::task::spawn_blocking(move || {
-        let on_event = |event: ReconcileEvent| match event {
-            ReconcileEvent::Start { total } => {
-                bar_for_task.set_length(total);
-                bar_for_task.set_position(0);
+        source.reconcile(rebuild, &mut |done, total| {
+            if done == 0 {
+                bar_for_task.set_length(total as u64);
             }
-            ReconcileEvent::Advance => {
-                bar_for_task.inc(1);
-            }
-        };
-        if rebuild {
-            store.rebuild_with_progress(on_event)
-        } else {
-            store.reconcile_with_progress(LockMode::Wait, on_event)
-        }
+            bar_for_task.set_position(done as u64);
+        })
     })
     .await
     .unwrap();
@@ -69,7 +66,7 @@ pub async fn run(args: IndexArgs) {
                 "{} sessions ({}): {} indexed, {} removed",
                 outcome.discovered,
                 format_elapsed(outcome.elapsed_ms),
-                outcome.indexed,
+                outcome.prepared,
                 outcome.removed,
             );
         }
@@ -91,21 +88,28 @@ fn format_elapsed(ms: u64) -> String {
     }
 }
 
-fn print_status(s: &Status) {
+fn print_status(s: &MaintenanceStatus) {
+    let last = match s
+        .last_reconcile_ms
+        .and_then(chrono::DateTime::from_timestamp_millis)
+    {
+        Some(dt) => dt.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+        None => "never".to_string(),
+    };
+    let dir = match &s.state_dir {
+        Some(dir) => format!("{} ({})", dir.display(), format_size(s.state_bytes as i64)),
+        None => "none".to_string(),
+    };
     let rows = [
         [
-            "index".to_string(),
-            format!("v{} ({} sessions indexed)", s.cache_version, s.indexed),
-        ],
-        [
             "sessions".to_string(),
-            format!("{} discovered, {} dirty", s.discovered, s.dirty),
+            format!(
+                "{} discovered, {} indexed, {} stale",
+                s.discovered, s.prepared, s.stale
+            ),
         ],
-        ["last reconcile".to_string(), s.last_reconcile_display()],
-        [
-            "cache dir".to_string(),
-            format!("{} ({})", s.cache_dir.display(), s.cache_bytes_display()),
-        ],
+        ["last reconcile".to_string(), last],
+        ["cache dir".to_string(), dir],
     ];
     let table = Table::from_iter(rows)
         .with(Style::rounded().horizontals([]))

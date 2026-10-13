@@ -183,6 +183,34 @@ pub struct InstallReport {
     pub notes: Vec<String>,
 }
 
+/// What one [`Source::reconcile`] pass did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MaintenanceOutcome {
+    /// Sessions found in the source
+    pub discovered: usize,
+    /// Sessions whose state was prepared or refreshed
+    pub prepared: usize,
+    /// Sessions whose state was dropped because they are gone
+    pub removed: usize,
+    pub elapsed_ms: u64,
+}
+
+/// The standing of a source's own state, from [`Source::maintenance_status`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MaintenanceStatus {
+    /// Sessions found in the source
+    pub discovered: usize,
+    /// Sessions whose state is prepared
+    pub prepared: usize,
+    /// Sessions whose state is missing or behind the source
+    pub stale: usize,
+    /// Where the state lives, when it is on disk
+    pub state_dir: Option<PathBuf>,
+    pub state_bytes: u64,
+    /// When [`Source::reconcile`] last ran, in epoch milliseconds
+    pub last_reconcile_ms: Option<i64>,
+}
+
 /// A handle over one source of native sessions. Dropping the handle
 /// releases whatever it holds; [`Source::close`] does the same and
 /// reports any failure.
@@ -213,6 +241,26 @@ pub trait Source: Send + Sync {
         _on_progress: &mut dyn FnMut(usize, usize),
     ) -> Result<(), DriverError> {
         Ok(())
+    }
+
+    /// Bring this source's own state up to date with the sessions it
+    /// holds, so later reads return without parsing: prepare what is
+    /// missing or stale, drop what is gone. `rebuild` discards the
+    /// state first. `on_progress(done, total)` reports as
+    /// [`warm_summaries`](Self::warm_summaries) does. The default
+    /// maintains nothing.
+    fn reconcile(
+        &self,
+        _rebuild: bool,
+        _on_progress: &mut dyn FnMut(usize, usize),
+    ) -> Result<MaintenanceOutcome, DriverError> {
+        Ok(MaintenanceOutcome::default())
+    }
+
+    /// What [`reconcile`](Self::reconcile) would find. The default
+    /// reports nothing to maintain.
+    fn maintenance_status(&self) -> Result<MaintenanceStatus, DriverError> {
+        Ok(MaintenanceStatus::default())
     }
 
     fn open_native(&self, native_id: &str) -> Result<Box<dyn NativeSession>, DriverError>;

@@ -12,7 +12,6 @@ async-trait = { workspace = true }
 clap = { workspace = true }
 datafusion = { workspace = true }
 futures = { workspace = true }
-gage-claude = { path = "../gage-claude" }
 gage-core = { path = "../gage-core" }
 gage-registry = { path = "../gage-registry" }
 gage-session = { path = "../gage-session" }

@@ -23,12 +23,15 @@ use gage_core::config::plugin_marketplace_dir;
 use gage_session::{
     AgentSession, AgentSpec, AuthInfo, ContentSink, ContentSource, Driver, DriverError,
     DriverStatus, DriverTables, Entry, Field, HarnessInfo, InstallInfo, InstallReport, InstallUi,
-    NativeLookupError, NativeSession, ResolveSession, SessionAttrs, Source, StoredSession,
-    split_scheme,
+    MaintenanceOutcome, MaintenanceStatus, NativeLookupError, NativeSession, ResolveSession,
+    SessionAttrs, Source, StoredSession, split_scheme,
 };
 
 use crate::home::ClaudeHome;
-use crate::index::{IndexStore, SessionSummary, cache_dir_for, derive_entry, derive_session};
+use crate::index::{
+    IndexStore, LockMode, ReconcileEvent, SessionSummary, cache_dir_for, derive_entry,
+    derive_session,
+};
 use crate::model::{configured_model, resolve_model, resolved_model};
 use crate::plugin;
 use crate::preflight;
@@ -435,6 +438,12 @@ pub struct ClaudeSource {
 }
 
 impl ClaudeSource {
+    /// The index store behind this source: the summary cache the
+    /// agent runner reads session attributes through.
+    pub(crate) fn index_store(&self) -> Arc<IndexStore> {
+        Arc::clone(&self.store)
+    }
+
     fn open(source: &str) -> Result<Self, DriverError> {
         let projects_dir = resolve_projects_dir(source)?;
         let root = root_of(&projects_dir);
@@ -448,12 +457,6 @@ impl ClaudeSource {
             store,
             projects: OnceLock::new(),
         })
-    }
-
-    /// The index store for this source's projects directory: the
-    /// summary cache.
-    pub fn index_store(&self) -> Arc<IndexStore> {
-        Arc::clone(&self.store)
     }
 
     /// The Claude root the projects directory sits under
@@ -514,6 +517,53 @@ impl Source for ClaudeSource {
             on_progress(done + 1, total);
         }
         Ok(())
+    }
+
+    /// The reconcile pass over the summary cache: every session the
+    /// cache does not hold at its current fingerprint is derived, and
+    /// the cache of every session gone from disk is removed.
+    fn reconcile(
+        &self,
+        rebuild: bool,
+        on_progress: &mut dyn FnMut(usize, usize),
+    ) -> Result<MaintenanceOutcome, DriverError> {
+        let mut total = 0;
+        let mut done = 0;
+        let mut on_event = |event: ReconcileEvent| match event {
+            ReconcileEvent::Start { total: n } => {
+                total = n as usize;
+                on_progress(0, total);
+            }
+            ReconcileEvent::Advance => {
+                done += 1;
+                on_progress(done, total);
+            }
+        };
+        let outcome = if rebuild {
+            self.store.rebuild_with_progress(&mut on_event)
+        } else {
+            self.store
+                .reconcile_with_progress(LockMode::Wait, &mut on_event)
+        }
+        .map_err(|e| DriverError::Other(e.to_string()))?;
+        Ok(MaintenanceOutcome {
+            discovered: outcome.discovered,
+            prepared: outcome.indexed,
+            removed: outcome.removed,
+            elapsed_ms: outcome.elapsed_ms,
+        })
+    }
+
+    fn maintenance_status(&self) -> Result<MaintenanceStatus, DriverError> {
+        let status = self.store.status();
+        Ok(MaintenanceStatus {
+            discovered: status.discovered,
+            prepared: status.indexed,
+            stale: status.dirty,
+            state_dir: Some(status.cache_dir),
+            state_bytes: status.cache_bytes,
+            last_reconcile_ms: status.last_reconcile_ms,
+        })
     }
 
     fn find_native(&self, prefix: &str) -> Result<String, NativeLookupError> {

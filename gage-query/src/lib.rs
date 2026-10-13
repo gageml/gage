@@ -1,8 +1,8 @@
 //! Composed DataFusion query surface over Gage data.
 //!
 //! gage-query is the query orchestrator. It owns `SessionContext`
-//! creation and the context-level configuration --- the `SessionCache`
-//! and [`rows::RowCache`] extensions, the SQL dialect,
+//! creation and the context-level configuration --- the
+//! [`rows::RowCache`] extension, the SQL dialect,
 //! `information_schema`, and the UDF suite --- and composes what the
 //! data crates and drivers contribute.
 //!
@@ -45,7 +45,6 @@ use std::sync::{Arc, Mutex};
 use datafusion::datasource::{MemTable, TableProvider, ViewTable};
 use datafusion::execution::session_state::SessionStateBuilder;
 use datafusion::prelude::{SessionConfig, SessionContext};
-use gage_claude::tables::SessionCache;
 use gage_registry::scanner::ScannerRegistry;
 use gage_store::{
     LinkKind, NoteDocRow, Store, StoredNoteTable, StoredSessionTable, attachment_file_table,
@@ -338,16 +337,14 @@ const NATIVE_TABLES: [NativeTable; 3] = [
     NativeTable::Entry,
 ];
 
-/// A context carrying the shared configuration --- the `SessionCache`
-/// and `RowCache` extensions, the PostgreSQL SQL dialect,
-/// `information_schema`, the native table functions, and the
-/// `project_for_path` UDF --- with no named tables registered. It
-/// carries only what this crate installs; gage-query's function suite
-/// is not pulled in.
+/// A context carrying the shared configuration --- the `RowCache`
+/// extension, the PostgreSQL SQL dialect, `information_schema`, the
+/// native table functions, and the `project_for_path` UDF --- with no
+/// named tables registered. It carries only what this crate installs;
+/// gage-query's function suite is not pulled in.
 fn new_context(skip_system_cols: bool) -> SessionContext {
     let config = SessionConfig::new()
         .with_information_schema(true)
-        .with_extension(Arc::new(SessionCache::new()))
         .with_extension(Arc::new(RowCache::new()))
         .set_str("datafusion.sql_parser.dialect", "PostgreSQL");
     let state = SessionStateBuilder::new()

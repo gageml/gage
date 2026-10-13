@@ -65,37 +65,6 @@ pub struct Status {
     pub cache_bytes: u64,
 }
 
-impl Status {
-    pub fn last_reconcile_display(&self) -> String {
-        match self
-            .last_reconcile_ms
-            .and_then(chrono::DateTime::from_timestamp_millis)
-        {
-            Some(dt) => dt.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
-            None => "never".to_string(),
-        }
-    }
-
-    pub fn cache_bytes_display(&self) -> String {
-        human_bytes(self.cache_bytes)
-    }
-}
-
-fn human_bytes(bytes: u64) -> String {
-    const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
-    let mut value = bytes as f64;
-    let mut unit = 0;
-    while value >= 1024.0 && unit < UNITS.len() - 1 {
-        value /= 1024.0;
-        unit += 1;
-    }
-    if unit == 0 {
-        format!("{bytes} B")
-    } else {
-        format!("{value:.1} {}", UNITS.get(unit).copied().unwrap_or("GB"))
-    }
-}
-
 /// Per-session cache state, written only under the reconcile lock,
 /// after the summaries are written. A crash before the manifest write
 /// understates the cache; the next reconcile re-derives those

@@ -6,18 +6,16 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Instant, UNIX_EPOCH};
 
-use crate::index::{IndexStore, LockMode};
+use crate::index::IndexStore;
 use datafusion::arrow::array::{Int64Array, StringArray, TimestampMillisecondArray};
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use datafusion::arrow::record_batch::RecordBatch;
-use datafusion::catalog::Session;
-use datafusion::error::{DataFusionError, Result};
+use datafusion::error::Result;
 use datafusion::prelude::Expr;
 
 use gage_core::style::IdHighlighter;
 
 use crate::session::{SessionInfo, SessionListBuilder};
-use crate::tables::cache::SessionCache;
 use gage_session::filter::{ColumnFilter, IdFilter, covered_by};
 
 /// The columns the walk fills from the directory listing alone,
@@ -67,31 +65,6 @@ fn walk_batch(schema: &SchemaRef, sessions: &[SessionInfo]) -> Result<RecordBatc
             Arc::new(Int64Array::from(sizes)),
         ],
     )?)
-}
-
-/// Pull the per-context `SessionCache` from session config extensions.
-pub fn session_cache(state: &dyn Session) -> Result<Arc<SessionCache>> {
-    state
-        .config()
-        .get_extension::<SessionCache>()
-        .ok_or_else(|| {
-            DataFusionError::Internal("SessionCache extension not installed on session".into())
-        })
-}
-
-/// Try-reconcile the corpus before a query. Lock contention is
-/// expected (another query is reconciling the same corpus); we serve
-/// the current committed snapshot instead.
-pub async fn reconcile_for_query(store: &Arc<IndexStore>) -> Result<()> {
-    let store = Arc::clone(store);
-    let outcome = tokio::task::spawn_blocking(move || store.reconcile(LockMode::Try))
-        .await
-        .map_err(|e| DataFusionError::Execution(format!("reconcile task failed: {e}")))?
-        .map_err(|e| DataFusionError::Execution(format!("reconcile failed: {e}")))?;
-    if outcome.skipped {
-        tracing::debug!("reconcile lock contended; scanning current committed snapshot");
-    }
-    Ok(())
 }
 
 /// Result of [`walk_sessions`].

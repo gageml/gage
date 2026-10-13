@@ -1,11 +1,14 @@
 //! In-memory cache of derived sessions, keyed by `session_id` and
 //! validated against the source file's `(mtime, size)` fingerprint.
 //!
-//! Lives on the DataFusion `SessionContext` as extension state. The
-//! `message`, `session`, and `entry` table providers all read through
-//! this cache — first touch of a session parses the JSONL into a
-//! `DerivedSession`; subsequent touches stat the file and either
-//! reuse the cached value or re-parse on fingerprint mismatch.
+//! One cache serves the process. The `message`, `session`, and
+//! `entry` table providers all read through it, across every source
+//! handle and every query — first touch of a session parses the
+//! JSONL into a `DerivedSession`; subsequent touches stat the file
+//! and either reuse the cached value or re-parse on fingerprint
+//! mismatch. A session id names one file within a source, and the
+//! fingerprint check makes a same-id file from another source a
+//! re-parse rather than a wrong answer.
 //!
 //! Concurrency: a `tokio::sync::OnceCell` per slot keeps concurrent
 //! first-touchers from duplicating the parse. The process is
@@ -15,7 +18,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use crate::index::{DerivedSession, Fingerprint, derive_session};
 use datafusion::error::{DataFusionError, Result};
@@ -38,9 +41,17 @@ impl std::fmt::Debug for SessionCache {
     }
 }
 
+static SHARED: LazyLock<Arc<SessionCache>> = LazyLock::new(|| Arc::new(SessionCache::new()));
+
 impl SessionCache {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The process's one cache, which every table provider reads
+    /// through.
+    pub fn shared() -> Arc<SessionCache> {
+        Arc::clone(&SHARED)
     }
 
     /// Number of sessions whose JSONL has been parsed into a

@@ -17,7 +17,6 @@ pub use cache::SessionCache;
 pub use entry::EntryTable;
 pub use message::MessageTable;
 pub use session::SessionTable;
-pub use walk::reconcile_for_query;
 
 use std::collections::HashMap;
 use std::path::PathBuf;

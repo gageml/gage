@@ -26,7 +26,7 @@ use futures::StreamExt;
 
 use super::SessionSource;
 use super::cache::SessionCache;
-use super::walk::{lookup_paths, session_cache, session_paths};
+use super::walk::{lookup_paths, session_paths};
 use gage_session::filter;
 
 const PROJECTION: &[usize] = &[
@@ -103,7 +103,7 @@ impl TableProvider for EntryTable {
 
     async fn scan(
         &self,
-        state: &dyn Session,
+        _state: &dyn Session,
         projection: Option<&Vec<usize>>,
         filters: &[Expr],
         limit: Option<usize>,
@@ -113,7 +113,7 @@ impl TableProvider for EntryTable {
             SessionSource::Lookup(sessions) => lookup_paths(sessions, filters)?,
         };
         let row_filter = filter::RowFilter::new(filters, "session_id")?;
-        let cache = session_cache(state)?;
+        let cache = SessionCache::shared();
         let projected_schema = match projection {
             Some(indices) => Arc::new(self.schema.project(indices)?),
             None => self.schema.clone(),

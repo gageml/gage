@@ -3,10 +3,8 @@
 
 use std::sync::Arc;
 
-use gage_claude::driver::ClaudeSource;
-use gage_claude::index::IndexStore;
 use gage_registry::driver::DriverRegistry;
-use gage_session::{Driver, DriverError, Source};
+use gage_session::{Driver, Source};
 
 /// Long help shared by every `--source` option
 pub const SOURCE_HELP: &str = "Session directory as SCHEME:PATH. A value with no scheme uses \
@@ -56,31 +54,4 @@ pub fn open_source_or_exit(command: &str, source: &str) -> Box<dyn Source> {
             std::process::exit(1);
         }
     }
-}
-
-/// The index store behind `source`, or print `command: <error>` and
-/// exit.
-pub fn index_store_or_exit(command: &str, source: &dyn Source) -> Arc<IndexStore> {
-    match index_store(source) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("{command}: {e}");
-            std::process::exit(1);
-        }
-    }
-}
-
-/// The claude index store behind `source`: the summary cache and text
-/// index `gage index` maintains. The source must be a claude source.
-fn index_store(source: &dyn Source) -> Result<Arc<IndexStore>, DriverError> {
-    source
-        .as_any()
-        .downcast_ref::<ClaudeSource>()
-        .map(ClaudeSource::index_store)
-        .ok_or_else(|| {
-            DriverError::Other(format!(
-                "index requires a claude source, got {:?}",
-                source.source()
-            ))
-        })
 }

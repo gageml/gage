@@ -29,7 +29,7 @@ use datafusion::prelude::*;
 use futures::stream;
 
 use super::cache::SessionCache;
-use super::walk::{WALK_COLS, session_cache, walk_sessions};
+use super::walk::{WALK_COLS, walk_sessions};
 use crate::driver::ClaudeNativeSession;
 use crate::session::SessionInfo;
 use gage_core::uuid::short_uuid;
@@ -136,7 +136,7 @@ impl TableProvider for SessionTable {
 
     async fn scan(
         &self,
-        state: &dyn Session,
+        _state: &dyn Session,
         projection: Option<&Vec<usize>>,
         filters: &[Expr],
         limit: Option<usize>,
@@ -145,7 +145,7 @@ impl TableProvider for SessionTable {
             Some(indices) => Arc::new(self.schema.project(indices)?),
             None => self.schema.clone(),
         };
-        let cache = session_cache(state)?;
+        let cache = SessionCache::shared();
         Ok(Arc::new(SessionExec::new(
             self.store.clone(),
             cache,
