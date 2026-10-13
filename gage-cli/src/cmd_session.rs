@@ -692,6 +692,40 @@ async fn add_dialog(
     Ok(view.finish().into())
 }
 
+/// Add every session in `source` to `store` inside the caller's
+/// dialog, rendering progress as `gage session add --all` does.
+/// Returns the closing line for the caller to log.
+pub(crate) async fn add_all(
+    store: &Store,
+    source: &str,
+    max_bytes: u64,
+) -> Result<String, DialogError> {
+    let filter = SessionFilterArgs {
+        project: None,
+        days: None,
+        today: false,
+        all: true,
+        limit: None,
+        sample: None,
+    };
+    let selected = select_sessions(Some(source), &[], &filter)
+        .await
+        .map_err(|e| DialogError::Failed(format!("{source}: {e}")))?;
+    if selected.is_empty() {
+        return Ok(format!("No sessions in {source}"));
+    }
+    let mut view = DialogAddView::new(io::stdout().is_terminal());
+    add_native(
+        store,
+        Some(source.to_string()),
+        None,
+        &selected,
+        Some(max_bytes),
+        &mut |e| view.on(e),
+    )?;
+    Ok(format!("{} from {source}", view.finish()))
+}
+
 /// Renders an add inside the `Add sessions` dialog: a progress bar
 /// on a terminal, one outcome line per session otherwise, and the
 /// closing line held for the outro.

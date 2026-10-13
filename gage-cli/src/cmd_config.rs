@@ -174,7 +174,7 @@ mod tests {
     fn render_lists_every_section() {
         let (effective, set) = tables("");
         let out = render(&effective, &set, "#");
-        for section in ["[issues]", "[scanners]", "[storage]"] {
+        for section in ["[backup]", "[issues]", "[scanners]", "[storage]"] {
             assert!(out.contains(section), "{out}");
         }
     }

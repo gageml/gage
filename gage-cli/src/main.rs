@@ -216,7 +216,8 @@ enum Command {
 
     /// Back up store to a remote
     ///
-    /// Sends every object, tag, and key to a remote added with
+    /// Adds every session from each configured source to the store,
+    /// then sends every object, tag, and key to a remote added with
     /// `--backup`. Restoring is `gage fetch`.
     Backup(cmd_backup::BackupArgs),
 
@@ -359,7 +360,7 @@ async fn main() {
             Command::Index(args) => cmd_index::run(args).await,
             Command::Push(args) => cmd_push::main(args).await,
             Command::Fetch(args) => cmd_fetch::main(args),
-            Command::Backup(args) => cmd_backup::main(args),
+            Command::Backup(args) => cmd_backup::main(args).await,
         }
     };
     tokio::pin!(cmd);

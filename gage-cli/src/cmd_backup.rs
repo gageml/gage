@@ -1,17 +1,23 @@
 //! `gage backup`: send the whole store to a backup remote.
 //!
-//! Every object, tag, and key ref goes. A configured remote must carry
-//! the backup flag, which is the user's standing statement that it may
-//! hold everything; the store's `pre-push` hook accepts the push on
-//! that flag alone. A bare Git URL or path carries no flag, so the
-//! confirmation that names it is the statement, and the push carries
-//! the approval digest of the whole set as `gage push` does.
+//! Every session in each configured source is added to the store
+//! first, so the backup covers what the sources hold as well as what
+//! the store already had. Then every object, tag, and key ref goes. A
+//! configured remote must carry the backup flag, which is the user's
+//! standing statement that it may hold everything; the store's
+//! `pre-push` hook accepts the push on that flag alone. A bare Git URL
+//! or path carries no flag, so the confirmation that names it is the
+//! statement, and the push carries the approval digest of the whole
+//! set as `gage push` does.
 
 use clap::Args;
 use cliclack as cli;
+use gage_core::config::Config;
 use gage_store::{KEY_REFS, OBJECT_REFS, RemoteStore, Repository, Store, TAG_REFS};
 
+use crate::cmd_session;
 use crate::dialog::{self, DialogError};
+use crate::source::SOURCE_HELP;
 
 #[derive(Args)]
 pub struct BackupArgs {
@@ -21,12 +27,42 @@ pub struct BackupArgs {
     /// or path. Optional when exactly one backup remote exists
     repository: Option<String>,
 
+    /// Add sessions from SOURCE before backup (repeatable)
+    ///
+    /// Replaces the configured backup.sources list for this run.
+    #[arg(
+        short,
+        long,
+        value_name = "SOURCE",
+        long_help = format!("Add sessions from SOURCE before backup (repeatable)\n\n\
+Replaces the configured backup.sources list for this run.\n\n{SOURCE_HELP}")
+    )]
+    source: Vec<String>,
+
+    /// Back up stored sessions only
+    ///
+    /// Sends the store as it is; no source is read first.
+    #[arg(short = 'S', long, conflicts_with = "source")]
+    stored: bool,
+
     /// Skip confirmation prompt
     #[arg(short, long)]
     yes: bool,
 }
 
-pub fn main(args: BackupArgs) {
+pub async fn main(args: BackupArgs) {
+    let config = match Config::load_user() {
+        Ok(config) => config,
+        Err(e) => fail(&e),
+    };
+    let sources: Vec<String> = if args.stored {
+        Vec::new()
+    } else if args.source.is_empty() {
+        config.backup.sources.clone()
+    } else {
+        args.source.clone()
+    };
+    let max_bytes = config.storage.max_session_size.bytes();
     let store = match Store::open(&gage_store::store_path()) {
         Ok(store) => store,
         Err(e) => fail(&e),
@@ -61,32 +97,33 @@ pub fn main(args: BackupArgs) {
         },
     };
     let remote = repository.name();
-    let refs = match remotes.gage_refs() {
-        Ok(refs) => refs,
-        Err(e) => fail(&e),
-    };
-    let on_remote = match remotes.ls_remote(&repository) {
-        Ok(on_remote) => on_remote,
-        Err(e) => fail(&e),
-    };
-    let send: Vec<String> = refs
-        .iter()
-        .filter(|(name, sha)| on_remote.get(*name) != Some(sha))
-        .map(|(name, _)| name.clone())
-        .collect();
-    if send.is_empty() {
-        println!("Everything up to date on {remote}");
-        return;
-    }
-    let count = |prefix: &str| send.iter().filter(|r| r.starts_with(prefix)).count();
-    let summary = [
-        format!("{} objects", count(OBJECT_REFS)),
-        format!("{} tags", count(TAG_REFS)),
-        format!("{} keys", count(KEY_REFS)),
-        format!("{} already on the remote", refs.len() - send.len()),
-    ];
 
-    dialog::run(&format!("Backup to {remote}"), || {
+    dialog::run_async(&format!("Backup to {remote}"), || async {
+        for source in &sources {
+            let added = cmd_session::add_all(&store, source, max_bytes).await?;
+            cli::log::info(added)?;
+        }
+        let refs = remotes
+            .gage_refs()
+            .map_err(|e| DialogError::Other(e.into()))?;
+        let on_remote = remotes
+            .ls_remote(&repository)
+            .map_err(|e| DialogError::Other(e.into()))?;
+        let send: Vec<String> = refs
+            .iter()
+            .filter(|(name, sha)| on_remote.get(*name) != Some(sha))
+            .map(|(name, _)| name.clone())
+            .collect();
+        if send.is_empty() {
+            return Ok(format!("Everything up to date on {remote}").into());
+        }
+        let count = |prefix: &str| send.iter().filter(|r| r.starts_with(prefix)).count();
+        let summary = [
+            format!("{} objects", count(OBJECT_REFS)),
+            format!("{} tags", count(TAG_REFS)),
+            format!("{} keys", count(KEY_REFS)),
+            format!("{} already on the remote", refs.len() - send.len()),
+        ];
         cli::log::remark(summary.join("\n"))?;
         if !args.yes {
             let prompt = format!("Send {} refs to {remote}?", send.len());
@@ -107,7 +144,8 @@ pub fn main(args: BackupArgs) {
             )));
         }
         Ok(format!("Backed up {} refs to {remote}", send.len()).into())
-    });
+    })
+    .await;
 }
 
 fn fail(e: &dyn std::fmt::Display) -> ! {
