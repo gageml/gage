@@ -14,7 +14,6 @@ use datafusion::arrow::array::{
 };
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::prelude::SessionContext;
-use gage_claude::session::SessionInfo;
 use gage_core::config::Config;
 use gage_core::stopwatch::Stopwatch;
 use gage_core::uuid::short_uuid;
@@ -1583,7 +1582,7 @@ enum DatasetPlan {
         session_count: usize,
     },
     New {
-        selected: Vec<SessionInfo>,
+        selected: Vec<String>,
     },
     None,
 }
@@ -2011,7 +2010,7 @@ async fn resolve_dataset_plan(
     if args.sessions.is_empty() && args.filter.is_empty() && !args.yes {
         prompt_session_axis(&mut args.filter)?;
     }
-    let selected = select_sessions(&args.sessions, &args.filter)
+    let selected = select_sessions(None, &args.sessions, &args.filter)
         .await
         .map_err(|e| DialogError::Failed(format!("{e}")))?;
     Ok(DatasetPlan::New { selected })

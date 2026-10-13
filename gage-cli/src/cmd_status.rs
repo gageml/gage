@@ -15,7 +15,6 @@ use clap::Args;
 use console::style;
 use datafusion::prelude::SessionContext;
 
-use gage_claude::session::SessionListBuilder;
 use gage_core::config::gage_home;
 use gage_query::ContextBuilder;
 use gage_session::{AuthInfo, Driver, DriverStatus, Field, HarnessInfo, InstallInfo};
@@ -152,7 +151,8 @@ async fn write_counts(out: &mut String, problems: &mut Vec<String>) {
         }
     }
 
-    let sessions = SessionListBuilder::new().build().len();
+    let native = ContextBuilder::new(None).build().await;
+    let sessions = count_rows(&native, "SELECT COUNT(*) FROM native_session('')").await;
     w(out, format!("  Sessions: {sessions}"));
 }
 

@@ -671,7 +671,7 @@ async fn add_dialog(
             add_stored_to_dataset(&store, &dataset_id, &args.sessions, &mut |e| view.on(e))?
         }
         _ => {
-            let selected = select_sessions(&args.sessions, &args.filter)
+            let selected = select_sessions(source.as_deref(), &args.sessions, &args.filter)
                 .await
                 .map_err(|e| DialogError::Failed(format!("{e}")))?;
             if selected.is_empty() {
@@ -786,15 +786,14 @@ fn add_stored_to_dataset(
 
 /// Add native sessions from `source` to the store and, when
 /// `dataset_id` is given, link them as members in the same operation,
-/// reporting each to `on_event`. `selected` holds records resolved by
-/// the shared session picker; their ids are re-checked against the
-/// opened source so a caller that walked disk directly still meets
-/// the source's own id contract.
+/// reporting each to `on_event`. `selected` holds native ids resolved
+/// by the shared session picker; they are re-checked against the
+/// opened source before anything is written.
 fn add_native(
     store: &Store,
     source: Option<String>,
     dataset_id: Option<&str>,
-    selected: &[gage_claude::session::SessionInfo],
+    selected: &[String],
     max_bytes: Option<u64>,
     on_event: &mut dyn FnMut(AddEvent<'_>),
 ) -> Result<(), DialogError> {
@@ -822,8 +821,8 @@ fn add_native(
     // store untouched.
     let mut ids: Vec<String> = Vec::with_capacity(selected.len());
     let mut errors = Vec::new();
-    for info in selected {
-        match opened.find_native(&info.id) {
+    for native_id in selected {
+        match opened.find_native(native_id) {
             Ok(id) => ids.push(id),
             Err(e) => errors.push(e.to_string()),
         }

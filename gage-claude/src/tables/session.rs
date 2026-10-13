@@ -29,7 +29,7 @@ use datafusion::prelude::*;
 use futures::stream;
 
 use super::cache::SessionCache;
-use super::walk::{session_cache, walk_sessions};
+use super::walk::{WALK_COLS, session_cache, walk_sessions};
 use crate::driver::ClaudeNativeSession;
 use crate::session::SessionInfo;
 use gage_core::uuid::short_uuid;
@@ -118,11 +118,20 @@ impl TableProvider for SessionTable {
         TableType::Base
     }
 
+    /// A filter over the id and the walk's own columns is applied in
+    /// the walk, before any session is parsed, so it is exact and
+    /// DataFusion drops its own filter and pushes the limit down.
     fn supports_filters_pushdown(
         &self,
         filters: &[&Expr],
     ) -> Result<Vec<TableProviderFilterPushDown>> {
-        Ok(filters.iter().map(|f| filter::pushdown(f, "id")).collect())
+        let cols: Vec<&str> = std::iter::once("id")
+            .chain(WALK_COLS.iter().copied())
+            .collect();
+        Ok(filters
+            .iter()
+            .map(|f| filter::pushdown_cols(f, &cols))
+            .collect())
     }
 
     async fn scan(

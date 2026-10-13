@@ -393,6 +393,32 @@ mod tests {
         (tmp, Arc::new(Mutex::new(store)))
     }
 
+    struct Explained {
+        physical: String,
+    }
+
+    /// The physical plan text of `EXPLAIN sql`.
+    async fn explain(ctx: &SessionContext, sql: &str) -> Explained {
+        let batches = ctx
+            .sql(&format!("EXPLAIN {sql}"))
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        let mut physical = String::new();
+        for b in &batches {
+            let kinds = b.column(0).as_any().downcast_ref::<StringArray>().unwrap();
+            let plans = b.column(1).as_any().downcast_ref::<StringArray>().unwrap();
+            for i in 0..b.num_rows() {
+                if kinds.value(i) == "physical_plan" {
+                    physical.push_str(plans.value(i));
+                }
+            }
+        }
+        Explained { physical }
+    }
+
     async fn strings(ctx: &SessionContext, sql: &str) -> Vec<String> {
         let batches = ctx.sql(sql).await.unwrap().collect().await.unwrap();
         batches
@@ -572,6 +598,71 @@ mod tests {
 
     /// `entry` and `message` serve a stored session's rows through
     /// the driver that wrote it, keyed by the Gage session id so they
+    /// `project` and `mtime` predicates and the limit reach the
+    /// driver's walk: the plan carries no filter of its own, and the
+    /// rows are the walk's answer.
+    #[tokio::test]
+    async fn native_session_pushes_project_and_mtime_filters_into_the_walk() {
+        use std::time::{Duration, UNIX_EPOCH};
+
+        let claude_root = tempfile::tempdir().unwrap();
+        let line = r#"{"type":"user","uuid":"u1","timestamp":"2025-01-01T00:00:00Z","message":{"role":"user","content":"hi"}}"#;
+        // (project, id, mtime seconds since the epoch)
+        let sessions = [
+            (
+                "-w-a",
+                "aaaaaaaa-0000-0000-0000-000000000001",
+                1_700_000_000u64,
+            ),
+            (
+                "-w-a",
+                "aaaaaaaa-0000-0000-0000-000000000002",
+                1_700_000_100,
+            ),
+            (
+                "-w-b",
+                "bbbbbbbb-0000-0000-0000-000000000003",
+                1_700_000_200,
+            ),
+        ];
+        for (project, id, secs) in sessions {
+            let dir = claude_root.path().join("projects").join(project);
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join(format!("{id}.jsonl"));
+            std::fs::write(&path, format!("{line}\n")).unwrap();
+            let file = std::fs::File::options().write(true).open(&path).unwrap();
+            file.set_modified(UNIX_EPOCH + Duration::from_secs(secs))
+                .unwrap();
+        }
+        let spec = format!("claude:{}", claude_root.path().display());
+        let ctx = ContextBuilder::new(None).build().await;
+        let from = format!("native_session('{spec}')");
+
+        let newest_in_a =
+            format!("SELECT id FROM {from} WHERE project = '-w-a' ORDER BY mtime DESC LIMIT 1");
+        assert_eq!(
+            strings(&ctx, &newest_in_a).await,
+            ["aaaaaaaa-0000-0000-0000-000000000002"]
+        );
+        let plan = explain(&ctx, &newest_in_a).await;
+        assert!(
+            !plan.physical.contains("FilterExec"),
+            "the project filter is applied in the walk: {}",
+            plan.physical
+        );
+
+        let after = format!(
+            "SELECT id FROM {from} WHERE mtime > to_timestamp_seconds(1700000050) ORDER BY mtime"
+        );
+        assert_eq!(
+            strings(&ctx, &after).await,
+            [
+                "aaaaaaaa-0000-0000-0000-000000000002",
+                "bbbbbbbb-0000-0000-0000-000000000003"
+            ]
+        );
+    }
+
     /// join to `session`.
     #[tokio::test]
     async fn entry_and_message_read_stored_sessions_through_the_driver() {

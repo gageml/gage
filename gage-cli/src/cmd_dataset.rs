@@ -211,23 +211,10 @@ pub async fn refresh(args: DatasetRefreshArgs) {
         return;
     }
 
-    // Look each member's native id back up on disk. A member whose
-    // native session is gone is a hard error; the dataset stays
-    // untouched in that case.
-    let mut selected = Vec::with_capacity(members.len());
-    let mut errors = Vec::new();
-    for member in &members {
-        match gage_claude::session::one_session(&member.native_id) {
-            Ok(info) => selected.push(info),
-            Err(e) => errors.push(e.to_string()),
-        }
-    }
-    if !errors.is_empty() {
-        for e in &errors {
-            eprintln!("gage dataset refresh: {e}");
-        }
-        std::process::exit(1);
-    }
+    // Each member's native id is looked back up in the source by the
+    // add; a member whose native session is gone fails the whole add
+    // and the dataset stays untouched.
+    let selected: Vec<String> = members.iter().map(|m| m.native_id.clone()).collect();
 
     let max_bytes = Some(args.size.max_bytes());
 
@@ -271,7 +258,7 @@ pub(crate) async fn populate_dataset(
     filter: &SessionFilterArgs,
     max_bytes: Option<u64>,
 ) {
-    let selected = match select_sessions(sessions, filter).await {
+    let selected = match select_sessions(source, sessions, filter).await {
         Ok(v) => v,
         Err(e) => {
             eprintln!("{command}: {e}");
@@ -366,7 +353,7 @@ pub(crate) fn add_native_to_dataset(
     store: &Store,
     dataset_id: &str,
     source: Option<&str>,
-    selected: &[gage_claude::session::SessionInfo],
+    selected: &[String],
     max_bytes: Option<u64>,
     on_event: &mut dyn FnMut(AddEvent<'_>),
 ) -> Result<Vec<DatasetSessionAddOutcome>, String> {
@@ -381,8 +368,8 @@ pub(crate) fn add_native_to_dataset(
     // the dataset unchanged rather than partially updated.
     let mut ids: Vec<String> = Vec::with_capacity(selected.len());
     let mut errors = Vec::new();
-    for info in selected {
-        match source_handle.find_native(&info.id) {
+    for native_id in selected {
+        match source_handle.find_native(native_id) {
             Ok(id) => ids.push(id),
             Err(e) => errors.push(e.to_string()),
         }

@@ -95,6 +95,23 @@ pub fn pushdown(expr: &Expr, col_name: &str) -> TableProviderFilterPushDown {
     }
 }
 
+/// Whether the scan can satisfy `expr` itself when it produces `cols`
+/// without parsing anything: a filter referencing only those columns
+/// is `Exact`, because [`ColumnFilter`] evaluates it with DataFusion's
+/// engine before the scan parses a row.
+pub fn pushdown_cols(expr: &Expr, cols: &[&str]) -> TableProviderFilterPushDown {
+    if references_only_set(expr, cols) {
+        TableProviderFilterPushDown::Exact
+    } else {
+        TableProviderFilterPushDown::Inexact
+    }
+}
+
+/// Whether every column `expr` references is one of `cols`.
+pub fn covered_by(expr: &Expr, cols: &[&str]) -> bool {
+    references_only_set(expr, cols)
+}
+
 /// [`pushdown`] extended with the line dimension: a filter over only
 /// `{col_name, line}` is `Exact` because the scan applies it — id-only
 /// filters through [`IdFilter`] path pruning, line-involving filters
@@ -186,6 +203,57 @@ impl RowFilter {
             (0..bools.len()).map(|i| Some(bools.is_valid(i) && bools.value(i))),
         );
         Ok(filter_record_batch(batch, &mask)?)
+    }
+}
+
+/// A predicate over the columns a scan produces without parsing,
+/// compiled with DataFusion's planner and evaluated against a batch
+/// of those columns, so the scan parses only the rows that survive.
+/// The generalization of [`IdFilter`] to any cheap column set.
+#[derive(Debug, Clone)]
+pub struct ColumnFilter {
+    predicate: Arc<dyn PhysicalExpr>,
+    schema: SchemaRef,
+}
+
+impl ColumnFilter {
+    /// Compile the subset of `filters` whose columns all belong to
+    /// `schema`. `None` when no filter does.
+    pub fn new(filters: &[Expr], schema: SchemaRef) -> Result<Option<Self>> {
+        let cols: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        let combined = filters
+            .iter()
+            .filter(|expr| references_only_set(expr, &cols))
+            .cloned()
+            .reduce(Expr::and);
+        let Some(combined) = combined else {
+            return Ok(None);
+        };
+        let df_schema = DFSchema::try_from(schema.clone())?;
+        let predicate = create_physical_expr(&combined, &df_schema, &ExecutionProps::new())?;
+        Ok(Some(Self { predicate, schema }))
+    }
+
+    /// The schema a batch handed to [`mask`](Self::mask) must have.
+    pub fn schema(&self) -> &SchemaRef {
+        &self.schema
+    }
+
+    /// A keep-mask over the rows of `batch`: `true` where the
+    /// predicate holds. A null result counts as no match, matching
+    /// SQL `WHERE` semantics.
+    pub fn mask(&self, batch: &RecordBatch) -> Result<Vec<bool>> {
+        let evaluated = self
+            .predicate
+            .evaluate(batch)?
+            .into_array(batch.num_rows())?;
+        let bools = evaluated
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .expect("a WHERE predicate evaluates to Boolean");
+        Ok((0..bools.len())
+            .map(|i| bools.is_valid(i) && bools.value(i))
+            .collect())
     }
 }
 
@@ -384,6 +452,49 @@ mod tests {
                 ("b".to_string(), 3),
                 ("b".to_string(), 5),
             ]
+        );
+    }
+
+    #[test]
+    fn column_filter_keeps_only_filters_over_its_columns() {
+        use datafusion::arrow::array::Int64Array;
+
+        let schema: SchemaRef = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("size", DataType::Int64, false),
+        ]));
+        let filters = vec![
+            Expr::BinaryExpr(BinaryExpr::new(
+                Box::new(col("size")),
+                Operator::Gt,
+                Box::new(Expr::Literal(ScalarValue::Int64(Some(5)), None)),
+            )),
+            Expr::Like(Like::new(
+                false,
+                Box::new(col("id")),
+                Box::new(lit_str("a%")),
+                None,
+                false,
+            )),
+            // References a parsed column; the scan cannot apply it
+            Expr::IsNotNull(Box::new(col("title"))),
+        ];
+        let filter = ColumnFilter::new(&filters, schema.clone())
+            .unwrap()
+            .unwrap();
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["a1", "a2", "b1"])),
+                Arc::new(Int64Array::from(vec![9, 1, 9])),
+            ],
+        )
+        .unwrap();
+        assert_eq!(filter.mask(&batch).unwrap(), [true, false, false]);
+        assert!(
+            ColumnFilter::new(&filters[2..], filter.schema().clone())
+                .unwrap()
+                .is_none()
         );
     }
 
