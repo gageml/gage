@@ -124,6 +124,7 @@ pub struct SigintGuard {
 
 impl SigintGuard {
     pub fn new() -> Self {
+        INTERRUPTED.store(false, Ordering::Relaxed);
         let handler = on_sigint as extern "C" fn(libc::c_int) as libc::sighandler_t;
         let prev = unsafe { libc::signal(libc::SIGINT, handler) };
         Self { prev }
