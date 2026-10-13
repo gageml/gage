@@ -111,14 +111,6 @@ pub struct DatasetListArgs {
     #[command(flatten)]
     limit: crate::limit::LimitArgs,
 
-    /// Include datasets created by scans
-    ///
-    /// Include datasets created by scans. A scan run without --dataset
-    /// builds a dataset from its session selection and records itself
-    /// as the dataset's origin. Those datasets are hidden by default.
-    #[arg(long)]
-    scans: bool,
-
     /// Show full dataset ID
     #[arg(long)]
     full_id: bool,
@@ -500,12 +492,7 @@ pub async fn list(args: DatasetListArgs) {
     let ctx = ContextBuilder::new(Some(Arc::new(Mutex::new(store))))
         .build()
         .await;
-    let filter = if args.scans {
-        ""
-    } else {
-        "WHERE d.origin IS NULL "
-    };
-    let total = count_rows(&ctx, &format!("SELECT COUNT(*) FROM dataset d {filter}")).await;
+    let total = count_rows(&ctx, "SELECT COUNT(*) FROM dataset").await;
     if total == 0 {
         println!("No datasets found");
         return;
@@ -525,7 +512,7 @@ pub async fn list(args: DatasetListArgs) {
                     WHERE dataset IS NOT NULL GROUP BY dataset) sc ON sc.dataset = d.id \
          LEFT JOIN (SELECT id, string_agg(name, ', ' ORDER BY name) AS names FROM tag \
                     GROUP BY id) t ON t.id = d.id \
-         {filter}ORDER BY d.modified DESC LIMIT {show}"
+         ORDER BY d.modified DESC LIMIT {show}"
     );
     let batches = run_query(&ctx, &sql).await;
 
