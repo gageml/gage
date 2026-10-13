@@ -132,6 +132,9 @@ fn fetch_dialog(
     remote: &str,
     plan: &mut Option<FetchPlan>,
 ) -> Result<DialogResult, DialogError> {
+    // A static line, not a spinner: an ssh passphrase prompt is
+    // written at the cursor, and a spinner's redraw erases it
+    cli::log::step(format!("Listing refs on {remote}"))?;
     let advertised = remotes
         .ls_remote(source.repository())
         .map_err(|e| DialogError::Failed(e.to_string()))?;

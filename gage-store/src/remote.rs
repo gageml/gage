@@ -21,7 +21,7 @@ use std::process::{ExitStatus, Stdio};
 
 use gage_core::uuid::new_uuid;
 
-use crate::git::{git_in, run, run_with_stdin};
+use crate::git::{git_in, git_transport_in, run, run_with_stdin};
 use crate::refs::{GENERATION, ROOT};
 use crate::{Store, StoreError};
 
@@ -239,7 +239,7 @@ impl RemoteStore<'_> {
         repository: &Repository,
     ) -> Result<BTreeMap<String, String>, StoreError> {
         let pattern = format!("{ROOT}*");
-        let out = run(git_in(
+        let out = run(git_transport_in(
             self.store.path(),
             ["ls-remote", "--refs", repository.spec(), &pattern],
         ))?;
@@ -278,7 +278,7 @@ impl RemoteStore<'_> {
         ref_names: &[String],
         approval: &str,
     ) -> Result<ExitStatus, StoreError> {
-        let mut cmd = git_in(self.store.path(), ["push", repository.spec()]);
+        let mut cmd = git_transport_in(self.store.path(), ["push", repository.spec()]);
         for ref_name in ref_names {
             cmd.arg(format!("{ref_name}:{ref_name}"));
         }
@@ -313,7 +313,7 @@ impl RemoteStore<'_> {
     /// runs.
     pub fn fetch_all(&self, source: &FetchSource) -> Result<ExitStatus, StoreError> {
         let refspec = format!("+{ROOT}*:{}*", source.tracking());
-        let mut cmd = git_in(
+        let mut cmd = git_transport_in(
             self.store.path(),
             ["fetch", "--prune", source.repository().spec(), &refspec],
         );
@@ -330,7 +330,7 @@ impl RemoteStore<'_> {
         source: &FetchSource,
         ref_names: &[String],
     ) -> Result<ExitStatus, StoreError> {
-        let mut cmd = git_in(self.store.path(), ["fetch", source.repository().spec()]);
+        let mut cmd = git_transport_in(self.store.path(), ["fetch", source.repository().spec()]);
         for ref_name in ref_names {
             let tracking = match ref_name.strip_prefix(ROOT) {
                 Some(rest) => format!("{}{rest}", source.tracking()),

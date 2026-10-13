@@ -572,11 +572,42 @@ fn parse_identity(value: &str) -> Result<(String, i64), String> {
     Ok((ident.to_string(), secs.saturating_mul(1000)))
 }
 
-/// A `git` command against the repository at `path`, with `-C <path>`
-/// and the requested arguments applied.
+/// A local `git` command against the repository at `path`, with
+/// `-C <path>` and the requested arguments applied. The child runs in
+/// its own process group; see [`git_cmd`].
 pub(crate) fn git_in<const N: usize>(path: &Path, args: [&str; N]) -> Command {
     let mut cmd = git_cmd();
     cmd.arg("-C").arg(path).args(args);
+    cmd
+}
+
+/// A `git` command that talks to a remote (`ls-remote`, `fetch`,
+/// `push`) against the repository at `path`. The child stays in
+/// Gage's process group, which is the terminal's foreground group.
+/// An ssh passphrase or host-key prompt opens `/dev/tty`, turns echo
+/// off with `tcsetattr`, and reads the answer; a process outside the
+/// foreground group is stopped by SIGTTOU at the `tcsetattr` before
+/// it prints the prompt, and Gage then waits on a stopped child that
+/// Ctrl+C cannot reach. In the foreground group the prompt is shown,
+/// answered, and Ctrl+C ends the transport.
+pub(crate) fn git_transport_in<const N: usize>(path: &Path, args: [&str; N]) -> Command {
+    let mut cmd = git_env();
+    cmd.arg("-C").arg(path).args(args);
+    cmd
+}
+
+/// A local `git` command: [`git_env`] with the child in its own
+/// process group, so a terminal's Ctrl+C reaches Gage alone. With the
+/// child in the foreground group the signal killed it mid-command and
+/// the store reported that death before Gage could stop at an object
+/// boundary.
+pub(crate) fn git_cmd() -> Command {
+    let mut cmd = git_env();
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
     cmd
 }
 
@@ -588,22 +619,13 @@ pub(crate) fn git_in<const N: usize>(path: &Path, args: [&str; N]) -> Command {
 /// Anything else `GIT_*` is cleared, so an exported `GIT_DIR`, a
 /// `GIT_NAMESPACE`, or a `GIT_CONFIG_KEY_<n>` injection cannot redirect
 /// or reconfigure the store.
-pub(crate) fn git_cmd() -> Command {
+fn git_env() -> Command {
     let mut cmd = Command::new("git");
     for (name, _) in std::env::vars_os() {
         let Some(name) = name.to_str() else { continue };
         if name.starts_with("GIT_") && !git_env_kept(name) {
             cmd.env_remove(name);
         }
-    }
-    // A git child runs in its own process group, so a terminal's
-    // Ctrl+C reaches Gage alone. With the child in the foreground
-    // group the signal killed it mid-command and the store reported
-    // that death before Gage could stop at an object boundary.
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        cmd.process_group(0);
     }
     cmd
 }
