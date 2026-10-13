@@ -24,33 +24,43 @@ Issues are written for both humans and Claude Code. You can resolve the issue
 yourself and close it by running:
 
 ```cli
-gage issue close <ISSUE_ID>
+gage issue close --completed <ISSUE_ID>
 ```
 
-This marks the issue _completed_. If you want to skip the issue (i.e. mark it as
-a non-issue) use the `--skipped` option.
+If you want to dismiss the issue as a non-issue, use the `--wontfix` option.
 
 ```cli
-gage issue close --skipped <ISSUE_ID>
+gage issue close --wontfix <ISSUE_ID>
 ```
 
 For more issue related commands, run `gage issue -h`.
 
 It's handy to use Claude to resolve issues. To instruct Claude to review open
 issues and help you resolve them, use the `/gage:resolve` command, which is
-installed with the Gage plugin.
+installed with the Gage plugin, or run `gage resolve`.
 
 Claude has several Gage tools for resolving issues, which will require your
 permission to use.
 
-## Authors and duplicate policies
+## Status
 
-Like notes, every issue records an `author`, and a plain write always inserts —
-nothing constrains `(name, author)`. A writer that wants to fold a re-scan into
-its prior issue states a merge policy on the write (`keep_status`,
-`open_on_new_evidence`, `open_on_changed_evidence`), which acts on the most
-recent issue it wrote with the same name: new evidence is added, and the reopen
-policies reopen a closed issue when the evidence warrants it. Author values
-follow the scheme described in [Notes](/docs/notes): `scanner:<name>` for
-deterministic writers, `agent:...?call=<toolUseId>` values tying model writers
-to the authoring transcript entry, and `user:<username>` for people.
+An issue is _pending_, _open_, or _closed_. Scanners that infer issues with an
+agent write them as pending. The first phase of `gage resolve` reconciles
+pending issues against existing ones: a pending issue that re-reports a known
+condition is closed as a duplicate, and the rest are opened. An issue you add
+with `gage issue add` is open unless you pass `--pending`.
+
+A closed issue records a reason: _completed_, _wontfix_, or _duplicate_ of
+another issue.
+
+## Authors and keys
+
+Like notes, every issue records an `author`, and a plain write always inserts.
+The runtime sets `task:<scanner>:<task>` on issues a scanner task writes and
+`user:<username>` on issues a person writes. See [Notes](/docs/notes#authors).
+
+A scanner that wants a single issue to represent a condition across scans
+gives the write a _key_. A later write under the same key replaces the live
+issue instead of adding a second one. A write marked _once_ happens only when
+no issue under the key exists in any status, so closing the issue keeps it
+closed on later scans.

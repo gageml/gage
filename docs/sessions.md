@@ -24,3 +24,11 @@ If you omit the ID, Gage lets you pick from a list.
 
 Gage's session viewer shows you low level data for each session entry. This is
 what scanners see when they look for issues.
+
+## Stored sessions
+
+Gage scans a copy of each session held in its store, not the file under
+`~/.claude`. A scan adds the sessions it selects to the store. The copy is
+updated when the session grows, and it stays after Claude Code deletes the
+original. `gage session list --stored` lists stored sessions. See
+[`gage session`](/docs/commands/session).

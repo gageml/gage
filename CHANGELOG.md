@@ -10,6 +10,9 @@ conventions in _[Keep a Changelog]_. Release versions use [semantic versioning].
 
 Prerelease of 0.2.0 work.
 
+0.2.0 represents a redesign of the Gage store that supports Git like sharing of
+Gage data.
+
 ## [0.1.1]
 
 **Enhancements**

@@ -13,36 +13,40 @@ content. Defects the session itself diagnosed and fixed are skipped.
 
 ## How it works
 
-The scanner runs two tasks.
+The scanner runs three tasks.
 
-The `project_summary` task summarizes each project that appears in the scan. One
-agent call per project reads the project's rule files, such as memory files and
-skill rules, along with its manifest files, and writes summary notes. When a
-project's files have not changed since the last run, the existing summary
-carries forward without a new agent call. A project with no rule or manifest
-files is skipped.
+The `attach_project_files` task adds two attachments per project that appears
+in the scan: `project-rule-files` holds the project's rule files, such as
+memory files, settings, skills, commands, and agent definitions, and
+`project-stack-files` holds its manifest files. Each attachment targets the
+sessions from that project.
 
-The `findings` task reviews each session that edited files. Sessions with no
-file edits are skipped. A review agent reads the session, informed by the
+The `summarize_projects` task summarizes each project. One agent call per
+project reads the attached files and writes summary notes. When a project's
+files have not changed since the last run, the existing summary carries forward
+without a new agent call. A project with no rule or manifest files is skipped.
+
+The `scan_sessions` task reviews each session that edited files. Sessions with
+no file edits are skipped. A review agent reads the session, informed by the
 project's summary notes, and writes one finding note per defect. A session that
 has grown since the last scan is reviewed only over its new lines.
 
 ## What it writes
 
 The scanner writes notes that are in turn used by downstream issue writers. In
-particular, [`finding-issues`](/docs/scanners/finding-issues) reads
-`finding.code` notes and reports issues from them.
+particular, [`findings`](/docs/scanners/findings) reads `code-review[finding]`
+notes and reports issues from them.
 
-| Note                    | Description                                 | Target  |
-| ----------------------- | ------------------------------------------- | ------- |
-| `project-summary.rules` | Summarizes project rules                    | Project |
-| `project-summary.stack` | Summarizes a project stack and architecture | Project |
-| `finding.code`          | Code quality finding                        | Session |
+| Note                     | Description                                 | Target     |
+| ------------------------ | ------------------------------------------- | ---------- |
+| `rules[project-summary]` | Summarizes project rules                    | Attachment |
+| `stack[project-summary]` | Summarizes a project stack and architecture | Attachment |
+| `code-review[finding]`   | Code quality finding                        | Session    |
 
 ## Running
 
-The scanner is in the `default` group. It runs when you run `gage scan` without
-selecting scanners. To run it explicitly:
+The scanner is in the `default` group. It runs when you run `gage scan`
+without selecting scanners. To run it explicitly:
 
 ```cli
 gage scan -s code-review

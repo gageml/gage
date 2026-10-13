@@ -11,9 +11,14 @@ finding.
 
 ## How it works
 
-The scanner reads your Claude Code user settings. When
-`cleanupPeriodDays` is set to any value, it does nothing. When the
-setting is unset, it writes an evidence note and opens an issue.
+The scanner runs two tasks.
+
+The `attach_config` task adds an attachment named `claude-config` to the
+dataset holding `settings.json` and `settings.local.json` from `~/.claude`.
+
+The `check_config` task reads the attachment. When `cleanupPeriodDays` is
+set to any value in either file, it does nothing. When the setting is unset,
+it opens an issue.
 
 Gage analyzes your session history. Once Claude Code deletes a
 transcript, the sessions it contained can no longer be scanned or
@@ -22,17 +27,13 @@ acceptable, close the issue. Otherwise, set `cleanupPeriodDays` in
 `~/.claude/settings.json` to the number of days you want to keep. The
 issue description lists reasonable choices.
 
-Closing the issue keeps it closed. It does not reopen on later scans
-while the setting stays unset.
+The issue is written once under a fixed key. Closing the issue keeps it
+closed. It does not reopen on later scans while the setting stays unset.
 
 ## What it writes
 
-Both items are written only when the setting is unset. The note backs
-the issue as evidence.
-
-| Note                             | Description                       | Target |
-| -------------------------------- | --------------------------------- | ------ |
-| `session-retention-policy.unset` | Records that the setting is unset | Scan   |
+The scanner writes an issue only when the setting is unset. It writes no
+notes.
 
 | Issue               | Description                      |
 | ------------------- | -------------------------------- |

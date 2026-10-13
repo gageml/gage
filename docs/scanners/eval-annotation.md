@@ -19,18 +19,19 @@ nothing worth noting is still marked as annotated.
 
 ## How it works
 
-The scanner submits each session to an annotator agent. The agent reads the
-session and writes one open code note per observation. An open code is a short,
-plain statement of what went wrong or what was surprising. It can anchor to the
-session line where the observed failure first shows.
+The scanner runs one task, `annotate`. It submits each session to an
+annotator agent. The agent reads the session and writes one open code note
+per observation. An open code is a short, plain statement of what went wrong
+or what was surprising. It can anchor to the session line where the observed
+failure first shows.
 
 Sessions with less than 200 characters of text are skipped. A session with
 nothing worth noting gets a note recording that it was reviewed. The note's
 presence marks the session as annotated.
 
-Every run annotates every target session again. Each run's notes carry a
-scan-qualified author, so repeat runs are independent annotation passes. Later
-runs add notes without replacing earlier ones.
+Every run annotates every target session again. Each run's notes belong to
+the scan that wrote them, so repeat runs are independent annotation passes.
+Later runs add notes without replacing earlier ones.
 
 ## What it writes
 
@@ -43,19 +44,13 @@ failure modes is a separate analysis step.
 
 ## Running
 
-This scanner is designed for Gage agent session analysis and is not typically
-run on normal Claude sessions. It's hidden from scanner listings for this
-reason.
-
-To use the scanner to for Gage agent error analysis, run:
-
-```cli
-gage scan --scan SCAN_ID
-```
-
-To run it on a normal Claude session --- e.g. a Gage issue resolution session,
-run:
+The scanner is in the `eval` group and is hidden from scanner listings. It is
+designed for analysis of Claude sessions that ran Gage work, such as a
+`gage resolve` session. To run it on such a session:
 
 ```cli
 gage scan RESOLVE_SESSION_ID -s eval-annotation
 ```
+
+Agent sessions that a scan spawned are not dataset members and cannot be
+selected for a scan.

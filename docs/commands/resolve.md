@@ -16,6 +16,7 @@ gage resolve [OPTIONS] [IDS]... [-- CLAUDE_ARGS...]
 Issue IDs (or prefixes) scope the session. If omitted, all pending and open
 issues are in scope. Arguments after `--` pass through to `claude`.
 
-| Option            | Description           |
-| ----------------- | --------------------- |
-| `--model <MODEL>` | Model for the session |
+| Option                | Description                                        |
+| --------------------- | -------------------------------------------------- |
+| `-m, --model <MODEL>` | Model for the session (prompted if omitted)        |
+| `-y, --yes`           | Skip confirmation prompt                           |

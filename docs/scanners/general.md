@@ -10,9 +10,9 @@ skipped.
 
 ## How it works
 
-The scanner submits each session to an agent that reads the session and
-writes one finding note per observation. The agent sees a single session
-and has no visibility across sessions.
+The scanner runs one task, `scan_sessions`. It submits each session to an
+agent that reads the session and writes one finding note per observation.
+The agent sees a single session and has no visibility across sessions.
 
 Sessions with less than 200 characters of text are skipped. A session
 already scanned is not scanned again. A session that has grown since the
@@ -21,12 +21,12 @@ last scan is scanned only over its new lines.
 ## What it writes
 
 The scanner writes notes that are in turn used by downstream issue
-writers. In particular, [`finding-issues`](/docs/scanners/finding-issues)
-reads `finding.general` notes and reports issues from them.
+writers. In particular, [`findings`](/docs/scanners/findings) reads
+`general[finding]` notes and reports issues from them.
 
-| Note              | Description                         | Target  |
-| ----------------- | ----------------------------------- | ------- |
-| `finding.general` | Noteworthy observation in a session | Session |
+| Note               | Description                         | Target  |
+| ------------------ | ----------------------------------- | ------- |
+| `general[finding]` | Noteworthy observation in a session | Session |
 
 When known, the note also records the session lines the observation
 refers to.
