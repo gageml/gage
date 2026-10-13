@@ -2,7 +2,7 @@
 //!
 //! Every session in each configured source is added to the store
 //! first, so the backup covers what the sources hold as well as what
-//! the store already had. Then every object, tag, and key ref goes. A
+//! the store already had. Then every object and tag ref goes. A
 //! configured remote must carry the backup flag, which is the user's
 //! standing statement that it may hold everything; the store's
 //! `pre-push` hook accepts the push on that flag alone. A bare Git URL
@@ -13,7 +13,7 @@
 use clap::Args;
 use cliclack as cli;
 use gage_core::config::Config;
-use gage_store::{KEY_REFS, OBJECT_REFS, RemoteStore, Repository, Store, TAG_REFS};
+use gage_store::{OBJECT_REFS, RemoteStore, Repository, Store, TAG_REFS};
 
 use crate::cmd_session;
 use crate::dialog::{self, DialogError};
@@ -130,7 +130,6 @@ pub async fn main(args: BackupArgs) {
         let summary = [
             format!("{} objects", count(OBJECT_REFS)),
             format!("{} tags", count(TAG_REFS)),
-            format!("{} keys", count(KEY_REFS)),
             format!("{} already on the remote", refs.len() - pending.len()),
         ];
         cli::log::remark(summary.join("\n"))?;

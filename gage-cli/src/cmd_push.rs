@@ -17,9 +17,7 @@ use clap::Args;
 use cliclack as cli;
 use datafusion::arrow::array::StringArray;
 use gage_query::ContextBuilder;
-use gage_store::{
-    IdMatch, OBJECT_REFS, RemoteStore, Store, StoreError, TAG_REFS, TagStore, object_key_ref,
-};
+use gage_store::{IdMatch, OBJECT_REFS, RemoteStore, Store, StoreError, TAG_REFS, TagStore};
 
 use crate::cmd_session::run_query;
 use crate::dialog::{self, DialogError};
@@ -120,7 +118,7 @@ pub async fn main(args: PushArgs) {
     }
     let send_names: Vec<String> = send.iter().map(|r| r.name.clone()).collect();
 
-    let summary = summary_lines(&objects, &tag_refs, &refs, up_to_date.len());
+    let summary = summary_lines(&objects, &tag_refs, up_to_date.len());
     // The dialog previews and confirms; the push runs after it, so
     // git's own output lands outside the dialog
     let mut confirmed = false;
@@ -187,9 +185,11 @@ async fn notes_targeting(store: &Arc<Mutex<Store>>, targets: &[String]) -> Vec<S
     notes
 }
 
-/// Every ref the push sends: one object ref per object, the key ref of
-/// each live object carrying a key, and the tag refs named on the
-/// command line, each with the commit it points at locally.
+/// Every ref the push sends: one object ref per object and the tag
+/// refs named on the command line, each with the commit it points at
+/// locally. Key refs are not sent: a key ref is this store's index of
+/// which live object carries a key, and a receiving store derives its
+/// own from `attrs.key` in the object tree.
 fn refs_to_send(
     store: &Arc<Mutex<Store>>,
     objects: &[IdMatch],
@@ -202,15 +202,6 @@ fn refs_to_send(
             name: format!("{OBJECT_REFS}{}", object.id),
             sha: object.tip_sha.clone(),
         });
-        if object.deleted {
-            continue;
-        }
-        if let Some(key_ref) = object_key_ref(&store.read_object(&object.tip_sha)?) {
-            refs.push(RefToSend {
-                name: key_ref,
-                sha: object.tip_sha.clone(),
-            });
-        }
     }
     for name in tag_refs {
         let sha = store
@@ -224,12 +215,11 @@ fn refs_to_send(
     Ok(refs)
 }
 
-/// The preview: a count per object type, then the tags and keys, then
-/// how many refs the remote already has.
+/// The preview: a count per object type, then the tags, then how many
+/// refs the remote already has.
 fn summary_lines(
     objects: &[IdMatch],
     tag_refs: &BTreeSet<String>,
-    refs: &[RefToSend],
     up_to_date: usize,
 ) -> Vec<String> {
     let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
@@ -244,10 +234,6 @@ fn summary_lines(
         .iter()
         .map(|(type_name, n)| format!("{n} {type_name}{}", if *n == 1 { "" } else { "s" }))
         .collect();
-    let keys = refs.len() - objects.len() - tag_refs.len();
-    if keys > 0 {
-        lines.push(format!("{keys} key{}", if keys == 1 { "" } else { "s" }));
-    }
     if !tag_refs.is_empty() {
         let names: Vec<&str> = tag_refs
             .iter()

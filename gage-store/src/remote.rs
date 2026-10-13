@@ -22,7 +22,7 @@ use std::process::{ExitStatus, Stdio};
 use gage_core::uuid::new_uuid;
 
 use crate::git::{git_in, git_transport_in, run, run_with_stdin};
-use crate::refs::{GENERATION, ROOT};
+use crate::refs::{GENERATION, OBJECT_REFS, ROOT, TAG_REFS};
 use crate::{Store, StoreError};
 
 /// Typed view over a [`Store`] for remotes.
@@ -289,12 +289,20 @@ impl RemoteStore<'_> {
         cmd.status().map_err(StoreError::Spawn)
     }
 
-    /// Every Gage ref of this store, objects, tags, and keys, as ref
-    /// name to commit SHA: the set `backup` sends.
+    /// Every object and tag ref of this store as ref name to commit
+    /// SHA: the set `backup` sends. Key refs are not included: a key
+    /// ref is this store's index of which live object carries a key,
+    /// and a restoring store derives its own from `attrs.key` in the
+    /// object tree.
     pub fn gage_refs(&self) -> Result<BTreeMap<String, String>, StoreError> {
         let out = run(git_in(
             self.store.path(),
-            ["for-each-ref", "--format=%(refname) %(objectname)", ROOT],
+            [
+                "for-each-ref",
+                "--format=%(refname) %(objectname)",
+                OBJECT_REFS,
+                TAG_REFS,
+            ],
         ))?;
         let mut refs = BTreeMap::new();
         for line in out.lines() {
@@ -524,7 +532,6 @@ mod tests {
     #[test]
     fn push_sends_approved_refs_and_ls_remote_reads_them_back() {
         use crate::note::{NoteInput, NoteStore, NoteValue};
-        use crate::refs::OBJECT_REFS;
         let dir = tempfile::tempdir().unwrap();
         let (source, _fsck) = open_store(&dir.path().join("source"));
         let (target, _fsck2) = open_store(&dir.path().join("target"));
