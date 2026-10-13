@@ -33,6 +33,16 @@ pub fn resolve_source(
     Ok((driver, source.to_string()))
 }
 
+/// A source as a dialog names it: the value given, or the driver's
+/// default location when none was.
+pub fn describe_source(driver: &dyn Driver, spec: &str) -> String {
+    if spec.is_empty() {
+        format!("{} (default location)", driver.name())
+    } else {
+        spec.to_string()
+    }
+}
+
 /// The default driver, or print `command: <error>` and exit.
 pub fn default_driver_or_exit(command: &str) -> Arc<dyn Driver> {
     match driver_registry().default() {

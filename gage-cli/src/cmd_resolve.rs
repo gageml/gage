@@ -4,7 +4,8 @@
 use clap::Args;
 use cliclack as cli;
 use console::{Term, style};
-use gage_store::{IssueStore, Store};
+use gage_core::uuid::short_uuid;
+use gage_store::{IssueFull, IssueStore, Store};
 
 use crate::dialog::{self, DialogError, DialogResult};
 use crate::model_prompt;
@@ -33,20 +34,55 @@ pub struct ResolveArgs {
 }
 
 pub fn run(args: ResolveArgs) {
-    dialog::run("Resolve issues", || run_dialog(&args));
+    // The dialog settles the issues and the model; the session runs
+    // after it, since the harness owns the terminal from then on
+    let mut session: Option<ResolveSetup> = None;
+    dialog::run("Resolve issues", || run_dialog(&args, &mut session));
+    let Some(setup) = session else {
+        return;
+    };
+    let driver = source::default_driver_or_exit("gage resolve");
+    let mut session =
+        match driver.start_resolve_session(&setup.ids, setup.model.as_deref(), &args.extra_args) {
+            Ok(session) => session,
+            Err(e) => {
+                eprintln!("gage resolve: {e}");
+                std::process::exit(1);
+            }
+        };
+    let code = match session.wait() {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("gage resolve: waiting for the session: {e}");
+            std::process::exit(1);
+        }
+    };
+    if code != 0 {
+        eprintln!("gage resolve: session exited with status {code}");
+        std::process::exit(1);
+    }
 }
 
-fn run_dialog(args: &ResolveArgs) -> Result<DialogResult, DialogError> {
+/// What the dialog settled for the session
+struct ResolveSetup {
+    ids: Vec<String>,
+    model: Option<String>,
+}
+
+fn run_dialog(
+    args: &ResolveArgs,
+    setup: &mut Option<ResolveSetup>,
+) -> Result<DialogResult, DialogError> {
     // Every argument resolves to a full id before the session starts,
     // so the skill never sees a prefix
-    let mut ids: Vec<String> = Vec::new();
+    let mut issues: Vec<IssueFull> = Vec::new();
     if !args.ids.is_empty() {
         let store = open_store("gage resolve");
-        let issues = IssueStore::from(&store);
+        let issue_store = IssueStore::from(&store);
         let mut errors = 0;
         for prefix in &args.ids {
-            match issues.get(prefix) {
-                Ok(issue) => ids.push(issue.id),
+            match issue_store.get(prefix) {
+                Ok(issue) => issues.push(issue),
                 Err(e) => {
                     cli::log::error(format!("{prefix}: {e}"))?;
                     errors += 1;
@@ -57,13 +93,23 @@ fn run_dialog(args: &ResolveArgs) -> Result<DialogResult, DialogError> {
             return Err(DialogError::Failed("Unknown issues".to_string()));
         }
     }
+    let ids: Vec<String> = issues.iter().map(|i| i.id.clone()).collect();
 
     cli::log::info(dialog::wrap_text(
         &Term::stdout(),
         "You are about to start an interactive session to resolve issues. \
          Standard token usage applies for the selected model.",
     ))?;
-    cli::log::step(format!("Issues\n{}", style(issues_label(&ids)).dim()))?;
+    if issues.is_empty() {
+        dialog::step_value("Issues", "all pending and open")?;
+    } else {
+        dialog::step_list(
+            "Issues",
+            issues
+                .iter()
+                .map(|i| format!("{} {}", short_uuid(&i.id), i.title)),
+        )?;
+    }
 
     let model = match &args.model {
         Some(m) => {
@@ -82,27 +128,8 @@ fn run_dialog(args: &ResolveArgs) -> Result<DialogResult, DialogError> {
         }
     }
 
-    let driver = source::default_driver_or_exit("gage resolve");
-    let mut session = driver
-        .start_resolve_session(&ids, model.as_deref(), &args.extra_args)
-        .map_err(|e| DialogError::Failed(e.to_string()))?;
-    let code = session
-        .wait()
-        .map_err(|e| DialogError::Other(anyhow::anyhow!("waiting for the session: {e}")))?;
-    if code != 0 {
-        return Err(DialogError::Failed(format!(
-            "resolve session exited with status {code}"
-        )));
-    }
-    Ok(DialogResult::from("Resolve session ended"))
-}
-
-fn issues_label(ids: &[String]) -> String {
-    if ids.is_empty() {
-        "all pending and open".to_string()
-    } else {
-        ids.join("\n")
-    }
+    *setup = Some(ResolveSetup { ids, model });
+    Ok(DialogResult::from("Starting resolve session"))
 }
 
 fn open_store(command: &str) -> Store {

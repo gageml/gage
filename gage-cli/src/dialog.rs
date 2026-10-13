@@ -1,9 +1,12 @@
+use std::fmt::Display;
 use std::io::{self, ErrorKind};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use cliclack as cli;
 use console::{Term, style};
+use gage_core::style::SPINNER_FRAMES;
 
+use crate::human::count;
 use crate::style as s;
 
 struct GageTheme;
@@ -15,6 +18,12 @@ impl cli::Theme for GageTheme {
 
     fn progress_chars(&self) -> String {
         s::PROGRESS_CHARS.to_string()
+    }
+
+    /// indicatif takes the last character as the finished-state glyph
+    /// and animates the rest, so a space follows the frames
+    fn spinner_chars(&self) -> String {
+        format!("{} ", SPINNER_FRAMES.concat())
     }
 
     fn format_footer_with_message(&self, state: &cli::ThemeState, message: &str) -> String {
@@ -176,6 +185,31 @@ fn handle_result(result: Result<DialogResult, DialogError>) {
             std::process::exit(1);
         }
     }
+}
+
+/// A step naming a set of objects: `label` on the first line, then
+/// one dimmed line per object. The lines name each object the step
+/// concerns, `<short id> <detail>`, so a confirmation that follows
+/// refers to a visible list.
+pub fn step_list(label: &str, lines: impl IntoIterator<Item = String>) -> io::Result<()> {
+    let mut text = label.to_string();
+    for line in lines {
+        text.push('\n');
+        text.push_str(&style(line).dim().to_string());
+    }
+    cli::log::step(text)
+}
+
+/// A step with one dimmed value line
+pub fn step_value(label: &str, value: impl Display) -> io::Result<()> {
+    step_list(label, [value.to_string()])
+}
+
+/// The failure of a loop that completed `done` of `total` objects:
+/// `Deleted 2 of 3 notes`. The per-object failures were logged as
+/// the loop ran, so the message goes straight to the outro.
+pub fn partial(verb: &str, done: usize, total: usize, noun: &str) -> DialogError {
+    DialogError::Failed(format!("{verb} {done} of {}", count(total, noun)))
 }
 
 /// Wrap long text for dialog log lines. Width is capped at 79 columns

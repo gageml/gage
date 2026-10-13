@@ -4,6 +4,9 @@ use console::style;
 
 use crate::uuid::short_uuid;
 
+/// The spinner frames every Gage surface animates, in order
+pub const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
 /// The namespace an ID belongs to, which fixes its terminal color.
 ///
 /// Gage object IDs (sessions in the store, notes, issues, scans) are

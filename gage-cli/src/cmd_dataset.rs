@@ -1,4 +1,5 @@
 use std::fmt;
+use std::io::{self, IsTerminal};
 use std::sync::{Arc, Mutex};
 
 use clap::{Args, Subcommand};
@@ -23,8 +24,8 @@ use tabled::{
 use crate::cmd_note::count_rows;
 use crate::cmd_session::{column, run_query};
 use crate::cmd_tag::TAG_HELP;
-use crate::dialog::{self, DialogError};
-use crate::human::format_elapsed_ms;
+use crate::dialog::{self, DialogError, DialogResult};
+use crate::human::{count, format_elapsed_ms};
 use crate::session_filter::{FILTER_ARG_NAMES, SessionFilterArgs, select_sessions};
 use crate::size_limit::SizeLimitArgs;
 use crate::source::SOURCE_HELP;
@@ -83,6 +84,10 @@ pub struct DatasetAddArgs {
     /// Move tag if it exists
     #[arg(long, requires = "tag")]
     pub force_tag: bool,
+
+    /// Skip confirmation prompt
+    #[arg(short, long)]
+    pub yes: bool,
 }
 
 #[derive(Args)]
@@ -96,6 +101,10 @@ pub struct DatasetRefreshArgs {
 
     #[command(flatten)]
     pub size: SizeLimitArgs,
+
+    /// Skip confirmation prompt
+    #[arg(short, long)]
+    pub yes: bool,
 }
 
 #[derive(Args)]
@@ -142,161 +151,210 @@ pub struct DatasetDeleteArgs {
 
 pub async fn add(args: DatasetAddArgs) {
     let store = open_store("gage dataset add");
-    let tags = TagStore::from(&store);
+    dialog::run_async("Add dataset", || add_dialog(&args, &store)).await;
+}
+
+async fn add_dialog(args: &DatasetAddArgs, store: &Store) -> Result<DialogResult, DialogError> {
+    let tags = TagStore::from(store);
     // A tag that cannot be added is reported before the dataset
     // exists, so the failure leaves the store untouched
     if let Some(name) = &args.tag {
-        match tags.check_available(name, args.force_tag) {
-            Ok(()) => {}
-            Err(e @ StoreError::TagExists { .. }) => {
-                eprintln!("gage dataset add: {e} (use --force-tag to move it)");
-                std::process::exit(1);
-            }
-            Err(e) => {
-                eprintln!("gage dataset add: {e}");
-                std::process::exit(1);
-            }
+        tags.check_available(name, args.force_tag)
+            .map_err(|e| match e {
+                StoreError::TagExists { .. } => {
+                    DialogError::Failed(format!("{e} (use --force-tag to move it)"))
+                }
+                e => DialogError::Failed(e.to_string()),
+            })?;
+        dialog::step_value("Tag", name)?;
+    }
+    // The selection is resolved before the dataset exists, so a bad
+    // selection leaves no empty dataset behind
+    let selecting = !args.sessions.is_empty() || !args.filter.is_empty();
+    let selected = if selecting {
+        let registry = crate::source::driver_registry();
+        let (driver, spec) = crate::source::resolve_source(&registry, args.source.as_deref())
+            .map_err(DialogError::Failed)?;
+        let selected = select_sessions(args.source.as_deref(), &args.sessions, &args.filter)
+            .await
+            .map_err(|e| DialogError::Failed(format!("{e}")))?;
+        dialog::step_value(
+            "Source",
+            crate::source::describe_source(driver.as_ref(), &spec),
+        )?;
+        dialog::step_value("Sessions", count(selected.len(), "session"))?;
+        selected
+    } else {
+        Vec::new()
+    };
+    if !args.yes {
+        let prompt = if selected.is_empty() {
+            "Add dataset?".to_string()
+        } else {
+            format!("Add dataset with {}?", count(selected.len(), "session"))
+        };
+        if !cli::confirm(prompt).initial_value(true).interact()? {
+            return Err(DialogError::Canceled);
         }
     }
-    let dataset_id = create_dataset("gage dataset add", &store, None);
-    println!("Created dataset {}", short_uuid(&dataset_id));
+
+    let dataset_id = create_dataset(store, None).map_err(|e| DialogError::Failed(e.to_string()))?;
     if let Some(name) = &args.tag {
-        match tags.add(name, &dataset_id, args.force_tag) {
-            Ok(added) => match added.previous_id {
-                Some(previous) => println!(
-                    "Moved tag {name} from {} to dataset {}",
-                    short_uuid(&previous),
-                    short_uuid(&dataset_id)
-                ),
-                None => println!("Tagged dataset {} as {name}", short_uuid(&dataset_id)),
-            },
-            Err(e) => {
-                eprintln!("gage dataset add: {e}");
-                std::process::exit(1);
-            }
+        let added = tags
+            .add(name, &dataset_id, args.force_tag)
+            .map_err(|e| DialogError::Failed(e.to_string()))?;
+        if let Some(previous) = added.previous_id {
+            cli::log::info(format!("Moved tag {name} from {}", short_uuid(&previous)))?;
         }
     }
-
-    if args.sessions.is_empty() && args.filter.is_empty() {
-        return;
+    let shown = short_uuid(&dataset_id);
+    if selected.is_empty() {
+        if selecting {
+            cli::log::info("No sessions matched the selection")?;
+        }
+        return Ok(format!("Added dataset {shown}").into());
     }
 
-    let max_bytes = Some(args.size.max_bytes());
-
-    populate_dataset(
-        "gage dataset add",
-        &store,
+    let mut view = AddView::new();
+    add_native_to_dataset(
+        store,
         &dataset_id,
         args.source.as_deref(),
-        &args.sessions,
-        &args.filter,
-        max_bytes,
-    )
-    .await;
-}
-
-pub async fn refresh(args: DatasetRefreshArgs) {
-    let store = open_store("gage dataset refresh");
-    let datasets = DatasetStore::from(&store);
-    let record = match datasets.get(&args.dataset) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("gage dataset refresh: {}: {e}", args.dataset);
-            std::process::exit(1);
-        }
-    };
-    let members = match datasets.sessions_list(&record.id) {
-        Ok(m) => m,
-        Err(e) => {
-            eprintln!("gage dataset refresh: {e}");
-            std::process::exit(1);
-        }
-    };
-    if members.is_empty() {
-        println!(
-            "Dataset {} has no sessions to refresh",
-            short_uuid(&record.id)
-        );
-        return;
-    }
-
-    // Each member's native id is looked back up in the source by the
-    // add; a member whose native session is gone fails the whole add
-    // and the dataset stays untouched.
-    let selected: Vec<String> = members.iter().map(|m| m.native_id.clone()).collect();
-
-    let max_bytes = Some(args.size.max_bytes());
-
-    if let Err(e) = add_native_to_dataset(
-        &store,
-        &record.id,
-        args.source.as_deref(),
         &selected,
-        max_bytes,
-        &mut print_added,
-    ) {
-        eprintln!("gage dataset refresh: {e}");
-        std::process::exit(1);
-    }
+        Some(args.size.max_bytes()),
+        &mut |e| view.on(e),
+    )
+    .map_err(DialogError::Failed)?;
+    let placed = view.finish()?;
+    Ok(format!("Added dataset {shown} with {}", count(placed, "session")).into())
 }
 
-/// Create an empty dataset in `store`, recording `origin` when
-/// given. Prints `command: <error>` and exits on failure.
+pub fn refresh(args: DatasetRefreshArgs) {
+    let store = open_store("gage dataset refresh");
+    dialog::run("Refresh dataset", || {
+        let datasets = DatasetStore::from(&store);
+        let record = datasets
+            .get(&args.dataset)
+            .map_err(|e| DialogError::Failed(format!("{}: {e}", args.dataset)))?;
+        let members = datasets
+            .sessions_list(&record.id)
+            .map_err(|e| DialogError::Failed(e.to_string()))?;
+        let shown = short_uuid(&record.id);
+        dialog::step_value(
+            "Dataset",
+            format!("{shown} ({})", count(members.len(), "session")),
+        )?;
+        if members.is_empty() {
+            return Ok(format!("Nothing to refresh in dataset {shown}").into());
+        }
+        if !args.yes {
+            let prompt = format!("Refresh {} from source?", count(members.len(), "session"));
+            if !cli::confirm(prompt).initial_value(true).interact()? {
+                return Err(DialogError::Canceled);
+            }
+        }
+
+        // Each member's native id is looked back up in the source by
+        // the add; a member whose native session is gone fails the
+        // whole add and the dataset stays untouched.
+        let selected: Vec<String> = members.iter().map(|m| m.native_id.clone()).collect();
+        let mut view = AddView::new();
+        add_native_to_dataset(
+            &store,
+            &record.id,
+            args.source.as_deref(),
+            &selected,
+            Some(args.size.max_bytes()),
+            &mut |e| view.on(e),
+        )
+        .map_err(DialogError::Failed)?;
+        let placed = view.finish()?;
+        Ok(format!("Refreshed dataset {shown} ({})", count(placed, "session")).into())
+    });
+}
+
+/// Create an empty dataset in `store`, recording `origin` when given.
 pub(crate) fn create_dataset(
-    command: &str,
     store: &Store,
     origin: Option<&DatasetOrigin>,
-) -> String {
+) -> Result<String, StoreError> {
     let datasets = DatasetStore::from(store);
-    let created = match origin {
+    match origin {
         Some(origin) => datasets.create_with_origin(origin),
         None => datasets.create(),
-    };
-    match created {
-        Ok(id) => id,
-        Err(e) => {
-            eprintln!("{command}: {e}");
-            std::process::exit(1);
-        }
     }
 }
 
-/// Resolve `select` to native sessions and add them to
-/// `dataset_id` through the opened source. Prints one
-/// `Added session … (native …) to dataset …` line per added
-/// session. On any failure it prints `command: <error>` and exits.
-/// A selection that resolves to no sessions is announced and
-/// otherwise is not an error.
-pub(crate) async fn populate_dataset(
-    command: &str,
-    store: &Store,
-    dataset_id: &str,
-    source: Option<&str>,
-    sessions: &[String],
-    filter: &SessionFilterArgs,
-    max_bytes: Option<u64>,
-) {
-    let selected = match select_sessions(source, sessions, filter).await {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("{command}: {e}");
-            std::process::exit(1);
-        }
-    };
-    if selected.is_empty() {
-        println!("No sessions matched the selection; dataset is empty");
-        return;
+/// Renders a session add inside a dialog: a progress bar on a
+/// terminal, a `Sessions` step listing every outcome otherwise, and
+/// the closing line held for the outro.
+pub(crate) struct AddView {
+    progress: bool,
+    bar: Option<cli::ProgressBar>,
+    lines: Vec<String>,
+    placed: usize,
+    done: String,
+}
+
+impl AddView {
+    pub(crate) fn new() -> Self {
+        Self::with_progress(io::stdout().is_terminal())
     }
-    if let Err(e) = add_native_to_dataset(
-        store,
-        dataset_id,
-        source,
-        &selected,
-        max_bytes,
-        &mut print_added,
-    ) {
-        eprintln!("{command}: {e}");
-        std::process::exit(1);
+
+    /// `progress` shows the bar; without it every outcome is a line
+    /// of the step
+    pub(crate) fn with_progress(progress: bool) -> Self {
+        Self {
+            progress,
+            bar: None,
+            lines: Vec::new(),
+            placed: 0,
+            done: String::new(),
+        }
+    }
+
+    pub(crate) fn on(&mut self, event: AddEvent<'_>) {
+        match &event {
+            AddEvent::Starting { total, .. } => {
+                if self.progress {
+                    let message = event.to_string();
+                    self.bar
+                        .get_or_insert_with(|| {
+                            let bar = cli::progress_bar(*total as u64);
+                            bar.start(&message);
+                            bar
+                        })
+                        .set_message(message);
+                }
+            }
+            AddEvent::Added { .. } => {
+                self.placed += 1;
+                match &self.bar {
+                    Some(bar) => bar.inc(1),
+                    None => self.lines.push(event.to_string()),
+                }
+            }
+            AddEvent::Done { .. } => {
+                if let Some(bar) = self.bar.take() {
+                    bar.clear();
+                }
+                self.done = event.to_string();
+            }
+        }
+    }
+
+    /// The number of sessions placed, after writing the outcome lines
+    /// as a step when no bar showed them
+    pub(crate) fn finish(self) -> io::Result<usize> {
+        if !self.progress {
+            dialog::step_list("Sessions", self.lines)?;
+        }
+        Ok(self.placed)
+    }
+
+    /// The closing line, for an outro that reports the add itself
+    pub(crate) fn done(&self) -> &str {
+        &self.done
     }
 }
 
@@ -446,14 +504,6 @@ pub(crate) fn add_native_to_dataset(
         ));
     }
     Ok(outcomes)
-}
-
-/// Print the outcome line of each session an add writes; the plain
-/// listing the dataset commands show.
-fn print_added(event: AddEvent<'_>) {
-    if let AddEvent::Added { .. } = event {
-        println!("{event}");
-    }
 }
 
 pub async fn list(args: DatasetListArgs) {
@@ -633,23 +683,31 @@ pub fn delete(args: DatasetDeleteArgs) {
         std::process::exit(1);
     }
 
-    let count = records.len();
+    let total = records.len();
     let members: usize = records.iter().map(|r| r.session_count).sum();
     dialog::run("Delete datasets", || {
-        let mut remark = format!("{count} {}", plural(count, "dataset"));
+        dialog::step_list(
+            "Datasets",
+            records.iter().map(|r| {
+                format!(
+                    "{} ({})",
+                    short_uuid(&r.id),
+                    count(r.session_count, "session")
+                )
+            }),
+        )?;
         if args.sessions {
-            remark.push_str(&format!(", {members} {}", plural(members, "session")));
+            cli::log::remark(format!("{} to remove", count(members, "session")))?;
         }
-        cli::log::remark(remark)?;
 
         if !args.yes {
             let action = if args.sessions {
                 format!(
-                    "Permanently delete {count} {} and remove their sessions?",
-                    plural(count, "dataset")
+                    "Permanently delete {} and remove their sessions?",
+                    count(total, "dataset")
                 )
             } else {
-                format!("Permanently delete {count} {}?", plural(count, "dataset"))
+                format!("Permanently delete {}?", count(total, "dataset"))
             };
             let confirmed = cli::confirm(format!("{action} This cannot be undone."))
                 .initial_value(false)
@@ -673,30 +731,22 @@ pub fn delete(args: DatasetDeleteArgs) {
             };
             match result {
                 Ok(()) => deleted += 1,
-                Err(e) => eprintln!("warning: failed to delete {}: {e}", short_uuid(&record.id)),
+                Err(e) => cli::log::warning(format!("{}: {e}", short_uuid(&record.id)))?,
             }
         }
+        if deleted < total {
+            return Err(dialog::partial("Deleted", deleted, total, "dataset"));
+        }
 
-        let mut outro = format!("Deleted {deleted} {}", plural(deleted, "dataset"));
+        let mut outro = format!("Deleted {}", count(deleted, "dataset"));
         if args.sessions {
-            outro.push_str(&format!(
-                ", removed {removed} {}",
-                plural(removed, "session")
-            ));
+            outro.push_str(&format!(", removed {}", count(removed, "session")));
             if kept > 0 {
                 outro.push_str(&format!(", kept {kept} held by other datasets"));
             }
         }
         Ok(outro.into())
     });
-}
-
-fn plural(n: usize, noun: &str) -> String {
-    if n == 1 {
-        noun.to_string()
-    } else {
-        format!("{noun}s")
-    }
 }
 
 /// Open the default store, or print `command: <error>` and exit

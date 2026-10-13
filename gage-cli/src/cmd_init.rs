@@ -2,7 +2,6 @@ use clap::Args;
 use cliclack as cli;
 use gage_session::InstallUi;
 use gage_store::{Store, StoreError};
-use indicatif::ProgressBar;
 
 use crate::dialog::{self, DialogError, DialogResult};
 use crate::source::driver_registry;
@@ -45,10 +44,15 @@ fn install_dialog(args: &InitArgs) -> Result<DialogResult, DialogError> {
         }
     }
 
-    let store_spinner = crate::style::spinner("Initializing store");
-    let store_result = init_store();
-    store_spinner.finish_and_clear();
-    store_result?;
+    let spinner = cli::spinner();
+    spinner.start("Initializing store");
+    match init_store() {
+        Ok(done) => spinner.stop(done),
+        Err(e) => {
+            spinner.clear();
+            return Err(e);
+        }
+    }
 
     let gage_bin = std::env::current_exe()?;
     let gage_bin_str = gage_bin.to_str().ok_or_else(|| {
@@ -64,14 +68,15 @@ fn install_dialog(args: &InitArgs) -> Result<DialogResult, DialogError> {
         .map_err(|e| DialogError::Other(anyhow::anyhow!("{e}")))?;
     ui.finish();
 
-    Ok(DialogResult::from("Gage is initialized"))
+    Ok(DialogResult::from("Initialized Gage"))
 }
 
 /// Creates the store only when none exists. An existing store is
 /// opened, which validates its version and object format without
 /// running any git command that modifies it; `gage_store::init` on an
 /// existing store would rewrite `gage.version` and the update hook.
-fn init_store() -> Result<(), DialogError> {
+/// Returns the line that records which happened.
+fn init_store() -> Result<&'static str, DialogError> {
     let path = gage_store::store_path();
     let init_err = |e: StoreError| {
         DialogError::Other(anyhow::anyhow!(
@@ -80,8 +85,10 @@ fn init_store() -> Result<(), DialogError> {
         ))
     };
     match Store::open(&path) {
-        Ok(_) => Ok(()),
-        Err(StoreError::NotFound(_)) => gage_store::init(&path).map(|_| ()).map_err(init_err),
+        Ok(_) => Ok("Opened existing store"),
+        Err(StoreError::NotFound(_)) => gage_store::init(&path)
+            .map(|_| "Created store")
+            .map_err(init_err),
         Err(e) => Err(init_err(e)),
     }
 }
@@ -108,44 +115,55 @@ fn remove_dialog(args: &InitArgs) -> Result<DialogResult, DialogError> {
     ui.finish();
 
     Ok(DialogResult::from(format!(
-        "Gage removed from {} harness",
+        "Removed Gage from {} harness",
         driver.name()
     )))
 }
 
-/// `InstallUi` sink that drives a single cliclack spinner at a time:
-/// each `step` starts one, `step_done` clears it, and `warn` logs a
-/// warning line out of band.
+/// `InstallUi` sink that drives one dialog spinner at a time: each
+/// `step` starts one, `step_done` submits it as a step line, and a
+/// warning raised while a spinner runs is held until the spinner
+/// stops, since a log line written under an active spinner would
+/// overwrite its row.
 #[derive(Default)]
 struct SpinnerUi {
-    current: Option<ProgressBar>,
+    current: Option<(cli::ProgressBar, String)>,
+    pending: Vec<String>,
 }
 
 impl SpinnerUi {
     fn finish(&mut self) {
-        if let Some(bar) = self.current.take() {
-            bar.finish_and_clear();
+        if let Some((spinner, label)) = self.current.take() {
+            spinner.stop(label);
+        }
+        self.flush();
+    }
+
+    fn flush(&mut self) {
+        for message in self.pending.drain(..) {
+            // cliclack's `warning` writer is best-effort; a terminal
+            // write failure here is not actionable at install time.
+            drop(cli::log::warning(message));
         }
     }
 }
 
 impl InstallUi for SpinnerUi {
     fn step(&mut self, label: &str) {
-        if let Some(bar) = self.current.take() {
-            bar.finish_and_clear();
-        }
-        self.current = Some(crate::style::spinner(label));
+        self.finish();
+        let spinner = cli::spinner();
+        spinner.start(label);
+        self.current = Some((spinner, label.to_string()));
     }
 
     fn step_done(&mut self) {
-        if let Some(bar) = self.current.take() {
-            bar.finish_and_clear();
-        }
+        self.finish();
     }
 
     fn warn(&mut self, message: &str) {
-        // cliclack's `warning` writer is best-effort; a terminal write
-        // failure here is not actionable at install time.
-        drop(cli::log::warning(message));
+        self.pending.push(message.to_string());
+        if self.current.is_none() {
+            self.flush();
+        }
     }
 }

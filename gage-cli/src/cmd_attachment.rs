@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use clap::{Args, Subcommand};
+use cliclack as cli;
 use datafusion::arrow::array::{
     Array, Int64Array, ListArray, StringArray, TimestampMillisecondArray,
 };
@@ -32,9 +33,10 @@ use tabled::{
     },
 };
 
-use crate::cmd_note::count_rows;
+use crate::cmd_note::{count_rows, target_cell};
 use crate::cmd_session::{column, run_query};
-use crate::human::{format_elapsed_ms, format_size};
+use crate::dialog::{self, DialogError, DialogResult};
+use crate::human::{count, format_elapsed_ms, format_size};
 use crate::scanner_attach::{self, describe};
 use crate::scanner_spec;
 use crate::source;
@@ -147,6 +149,10 @@ pub struct AttachmentAddArgs {
     /// name, root, and patterns
     #[arg(short, long, value_name = "KEY")]
     pub key: Option<String>,
+
+    /// Skip confirmation prompt
+    #[arg(short, long)]
+    pub yes: bool,
 }
 
 #[derive(Args)]
@@ -182,59 +188,99 @@ pub struct AttachmentRemoveArgs {
     /// Dataset ID (or prefix). The attachments stay in the store
     #[arg(short, long, value_name = "DATASET")]
     pub dataset: Option<String>,
+
+    /// Skip confirmation prompt
+    #[arg(short, long)]
+    pub yes: bool,
 }
 
 pub async fn add(args: AttachmentAddArgs) {
     let store = open_store("gage attachment add");
-    let attachments = AttachmentStore::from(&store);
+    dialog::run_async("Add attachment", || add_dialog(&args, &store)).await;
+}
+
+async fn add_dialog(args: &AttachmentAddArgs, store: &Store) -> Result<DialogResult, DialogError> {
+    let attachments = AttachmentStore::from(store);
 
     if !args.scanners.is_empty() {
         let dataset = args
             .dataset
             .as_deref()
             .expect("clap requires --dataset with --scanner");
-        add_from_scanners(&store, dataset, &args.scanners).await;
-        return;
+        return add_from_scanners(store, dataset, &args.scanners, args.yes).await;
     }
 
     if let Some(stored) = args.stored.as_deref() {
-        let record = resolve("gage attachment add", &attachments, stored);
+        let record = resolve(&attachments, stored).map_err(DialogError::Failed)?;
         let dataset = args
             .dataset
             .as_deref()
             .expect("clap requires --dataset with --stored");
-        let (dataset_id, linked) = link_to_dataset(&store, dataset, &record.id);
+        let dataset_id = DatasetStore::from(store)
+            .resolve_id(dataset)
+            .map_err(|e| DialogError::Failed(format!("--dataset {dataset}: {e}")))?;
+        let shown = describe(record.attrs.name.as_deref(), &record.id);
+        dialog::step_value("Attachment", &shown)?;
+        dialog::step_value("Dataset", short_uuid(&dataset_id))?;
+        confirm(
+            args.yes,
+            format!(
+                "Add attachment {shown} to dataset {}?",
+                short_uuid(&dataset_id)
+            ),
+        )?;
+        let (dataset_id, linked) =
+            link_to_dataset(store, &dataset_id, &record.id).map_err(DialogError::Failed)?;
         let verb = match linked {
             AttachmentLinkOutcome::Linked => "Added",
             AttachmentLinkOutcome::Updated => "Updated",
             AttachmentLinkOutcome::Unchanged => "Unchanged",
         };
-        println!(
+        return Ok(format!(
             "{verb} attachment {} to dataset {}",
             describe(record.attrs.name.as_deref(), &record.id),
             short_uuid(&dataset_id)
-        );
-        return;
+        )
+        .into());
     }
 
-    let root = args.root.unwrap_or_else(|| PathBuf::from("."));
-    let root = match root.canonicalize() {
-        Ok(root) => root,
-        Err(e) => {
-            eprintln!("gage attachment add: {}: {e}", root.display());
-            std::process::exit(1);
-        }
-    };
+    let root = args.root.clone().unwrap_or_else(|| PathBuf::from("."));
+    let root = root
+        .canonicalize()
+        .map_err(|e| DialogError::Failed(format!("{}: {e}", root.display())))?;
     let mut targets = Vec::with_capacity(args.targets.len());
     for input in &args.targets {
-        match resolve_target(&store, input) {
-            Ok(url) => targets.push(url),
-            Err(e) => {
-                eprintln!("gage attachment add: {e}");
-                std::process::exit(1);
-            }
-        }
+        targets.push(resolve_target(store, input).map_err(DialogError::Failed)?);
     }
+    if let Some(name) = &args.name {
+        dialog::step_value("Name", name)?;
+    }
+    dialog::step_value("Root", shorten_home(&root))?;
+    dialog::step_list("Include", args.includes.iter().cloned())?;
+    if !args.exclude.is_empty() {
+        dialog::step_list("Exclude", args.exclude.iter().cloned())?;
+    }
+    if !targets.is_empty() {
+        dialog::step_list("Targets", targets.iter().map(|url| target_cell(url)))?;
+    }
+    let dataset_id = match args.dataset.as_deref() {
+        Some(prefix) => {
+            let id = DatasetStore::from(store)
+                .resolve_id(prefix)
+                .map_err(|e| DialogError::Failed(format!("--dataset {prefix}: {e}")))?;
+            dialog::step_value("Dataset", short_uuid(&id))?;
+            Some(id)
+        }
+        None => None,
+    };
+    confirm(
+        args.yes,
+        match &dataset_id {
+            Some(id) => format!("Add attachment to dataset {}?", short_uuid(id)),
+            None => "Add attachment?".to_string(),
+        },
+    )?;
+
     let spec = AttachmentSpec {
         name: args.name.as_deref(),
         key: args.key.as_deref(),
@@ -243,109 +289,103 @@ pub async fn add(args: AttachmentAddArgs) {
         includes: &args.includes,
         excludes: &args.exclude,
     };
-    let added = match attachments.add(&spec) {
-        Ok(outcome) => outcome,
-        Err(e) => {
-            eprintln!("gage attachment add: {e}");
-            std::process::exit(1);
-        }
-    };
-    let files = plural(added.file_count as usize, "file");
+    let spinner = cli::spinner();
+    spinner.start("Reading files");
+    let added = attachments.add(&spec);
+    spinner.clear();
+    let added = added.map_err(|e| DialogError::Failed(e.to_string()))?;
+    let files = count(added.file_count as usize, "file");
     let shown = describe(args.name.as_deref(), &added.id);
-    match args.dataset.as_deref() {
-        Some(prefix) => {
+    let verb = match added.outcome {
+        AttachmentOutcome::Added => "Added",
+        AttachmentOutcome::Updated => "Updated",
+        AttachmentOutcome::Unchanged => "Unchanged",
+    };
+    match dataset_id {
+        Some(dataset_id) => {
             // The line reports the store write, as `gage dataset add`
             // does; the dataset suffix names where the attachment
             // was placed
-            let (dataset_id, _) = link_to_dataset(&store, prefix, &added.id);
-            let verb = match added.outcome {
-                AttachmentOutcome::Added => "Added",
-                AttachmentOutcome::Updated => "Updated",
-                AttachmentOutcome::Unchanged => "Unchanged",
-            };
-            println!(
+            let (dataset_id, _) =
+                link_to_dataset(store, &dataset_id, &added.id).map_err(DialogError::Failed)?;
+            Ok(format!(
                 "{verb} attachment {shown} with {files} to dataset {}",
                 short_uuid(&dataset_id)
-            );
+            )
+            .into())
         }
-        None => match added.outcome {
-            AttachmentOutcome::Added => println!("Added attachment {shown} with {files}"),
-            AttachmentOutcome::Updated => println!("Updated attachment {shown} with {files}"),
-            AttachmentOutcome::Unchanged => {
-                println!("Attachment {shown} is unchanged with {files}")
-            }
-        },
+        None => Ok(format!("{verb} attachment {shown} with {files}").into()),
     }
+}
+
+/// The confirmation before a write; `yes` skips it
+fn confirm(yes: bool, prompt: String) -> Result<(), DialogError> {
+    if !yes && !cli::confirm(prompt).initial_value(true).interact()? {
+        return Err(DialogError::Canceled);
+    }
+    Ok(())
 }
 
 /// Run the attach tasks of each named scanner against the dataset.
-/// The first failing task ends the command with exit 1; attachments
-/// linked before it stay linked.
-async fn add_from_scanners(store: &Store, dataset_prefix: &str, names: &[String]) {
-    let dataset_id = match DatasetStore::from(store).resolve_id(dataset_prefix) {
-        Ok(id) => id,
-        Err(e) => {
-            eprintln!("gage attachment add: --dataset {dataset_prefix}: {e}");
-            std::process::exit(1);
-        }
-    };
+/// The first failing task ends the command; attachments linked
+/// before it stay linked.
+async fn add_from_scanners(
+    store: &Store,
+    dataset_prefix: &str,
+    names: &[String],
+    yes: bool,
+) -> Result<DialogResult, DialogError> {
+    let dataset_id = DatasetStore::from(store)
+        .resolve_id(dataset_prefix)
+        .map_err(|e| DialogError::Failed(format!("--dataset {dataset_prefix}: {e}")))?;
     let registry = ScannerRegistry::load();
-    let selected = match scanner_spec::resolve(&registry, names) {
-        Ok(selected) => selected,
-        Err(e) => {
-            eprintln!("gage attachment add: {e}");
-            std::process::exit(1);
-        }
-    };
+    let selected = scanner_spec::resolve(&registry, names).map_err(DialogError::Failed)?;
     let mut compiled = Vec::with_capacity(selected.len());
     for resolved in &selected {
-        let scanner = match resolved.scanner() {
-            Ok(scanner) => scanner,
-            Err(e) => {
-                eprintln!("gage attachment add: {e}");
-                std::process::exit(1);
-            }
-        };
-        match gage_scan::compile(&scanner) {
-            Ok(c) => compiled.push(c),
-            Err(e) => {
-                eprintln!("gage attachment add: {e}");
-                std::process::exit(1);
-            }
-        }
+        let scanner = resolved.scanner().map_err(DialogError::Failed)?;
+        compiled
+            .push(gage_scan::compile(&scanner).map_err(|e| DialogError::Failed(e.to_string()))?);
     }
+    dialog::step_value("Dataset", short_uuid(&dataset_id))?;
+    dialog::step_list(
+        "Scanners",
+        selected.iter().map(|r| r.source.def().name.clone()),
+    )?;
+    confirm(
+        yes,
+        format!(
+            "Attach inputs of {} to dataset {}?",
+            count(selected.len(), "scanner"),
+            short_uuid(&dataset_id)
+        ),
+    )?;
     let driver = source::default_driver_or_exit("gage attachment add");
-    if let Err(e) = scanner_attach::attach_for_scanners(store, &dataset_id, &compiled, driver).await
-    {
-        eprintln!("gage attachment add: {e}");
-        std::process::exit(1);
-    }
+    let placed = scanner_attach::attach_for_scanners(store, &dataset_id, &compiled, driver).await?;
+    Ok(format!(
+        "Added {} to dataset {}",
+        count(placed, "attachment"),
+        short_uuid(&dataset_id)
+    )
+    .into())
 }
 
-/// Link one stored attachment into the dataset `prefix` names and
-/// return the resolved dataset id with the link outcome. Prints
-/// `gage attachment add: <error>` and exits on failure.
-fn link_to_dataset(store: &Store, prefix: &str, id: &str) -> (String, AttachmentLinkOutcome) {
+/// Link one stored attachment into `dataset_id` and return the id
+/// with the link outcome.
+fn link_to_dataset(
+    store: &Store,
+    dataset_id: &str,
+    id: &str,
+) -> Result<(String, AttachmentLinkOutcome), String> {
     let datasets = DatasetStore::from(store);
-    let dataset_id = match datasets.resolve_id(prefix) {
-        Ok(id) => id,
-        Err(e) => {
-            eprintln!("gage attachment add: --dataset {prefix}: {e}");
-            std::process::exit(1);
-        }
-    };
-    let mut outcomes = match datasets.attachments_link(&dataset_id, &[id.to_string()]) {
-        Ok(o) => o,
-        Err(e) => {
-            eprintln!("gage attachment add: {e}");
-            std::process::exit(1);
-        }
-    };
+    let dataset_id = dataset_id.to_string();
+    let mut outcomes = datasets
+        .attachments_link(&dataset_id, &[id.to_string()])
+        .map_err(|e| e.to_string())?;
     let linked = outcomes
         .pop()
         .expect("attachments_link should yield one outcome per id")
         .outcome;
-    (dataset_id, linked)
+    Ok((dataset_id, linked))
 }
 
 pub async fn list(args: AttachmentListArgs) {
@@ -447,7 +487,13 @@ fn targets_cell(targets: &datafusion::arrow::array::ArrayRef) -> String {
 pub fn show(args: AttachmentShowArgs) {
     let store = open_store("gage attachment show");
     let attachments = AttachmentStore::from(&store);
-    let record = resolve("gage attachment show", &attachments, &args.attachment);
+    let record = match resolve(&attachments, &args.attachment) {
+        Ok(record) => record,
+        Err(e) => {
+            eprintln!("gage attachment show: {e}");
+            std::process::exit(1);
+        }
+    };
     let files = match attachments.files(&record.commit_sha) {
         Ok(files) => files,
         Err(e) => {
@@ -499,122 +545,124 @@ pub fn remove(args: AttachmentRemoveArgs) {
 
     // Resolve every argument before writing anything, so one bad
     // argument leaves the store untouched
-    let mut ids: Vec<String> = Vec::with_capacity(args.attachments.len());
+    let mut records: Vec<AttachmentRecord> = Vec::with_capacity(args.attachments.len());
+    let mut errors = 0;
     for arg in &args.attachments {
-        let record = resolve("gage attachment remove", &attachments, arg);
-        if !ids.contains(&record.id) {
-            ids.push(record.id);
+        match resolve(&attachments, arg) {
+            Ok(record) => {
+                if !records.iter().any(|r| r.id == record.id) {
+                    records.push(record);
+                }
+            }
+            Err(e) => {
+                eprintln!("gage attachment remove: {e}");
+                errors += 1;
+            }
         }
     }
-    match args.dataset.as_deref() {
-        Some(prefix) => remove_from_dataset(&store, prefix, &ids),
-        None => remove_from_store(&store, &ids),
+    if errors > 0 {
+        std::process::exit(1);
     }
-}
+    let dataset_id = args.dataset.as_deref().map(|prefix| {
+        DatasetStore::from(&store)
+            .resolve_id(prefix)
+            .unwrap_or_else(|e| {
+                eprintln!("gage attachment remove: --dataset {prefix}: {e}");
+                std::process::exit(1);
+            })
+    });
 
-/// Remove attachments from one dataset; the objects stay
-fn remove_from_dataset(store: &Store, dataset_prefix: &str, ids: &[String]) {
-    let datasets = DatasetStore::from(store);
-    let dataset_id = match datasets.resolve_id(dataset_prefix) {
-        Ok(id) => id,
-        Err(e) => {
-            eprintln!("gage attachment remove: --dataset {dataset_prefix}: {e}");
-            std::process::exit(1);
-        }
-    };
-    let outcomes = match datasets.attachments_unlink(&dataset_id, ids) {
-        Ok(o) => o,
-        Err(e) => {
-            eprintln!("gage attachment remove: {e}");
-            std::process::exit(1);
-        }
-    };
-    for o in &outcomes {
-        println!(
-            "Removed attachment {} from dataset {}",
-            o.label,
-            short_uuid(&dataset_id)
-        );
-    }
-}
-
-/// Remove attachments from every dataset holding them and tombstone
-/// them
-fn remove_from_store(store: &Store, ids: &[String]) {
-    let outcome = match AttachmentStore::from(store).remove(ids) {
-        Ok(o) => o,
-        Err(e) => {
-            eprintln!("gage attachment remove: {e}");
-            std::process::exit(1);
-        }
-    };
-    for held in &outcome.datasets {
-        for id in &held.attachment_ids {
-            let name = outcome
-                .attachments
+    let total = records.len();
+    dialog::run("Remove attachments", || {
+        dialog::step_list(
+            "Attachments",
+            records
                 .iter()
-                .find(|r| &r.id == id)
-                .and_then(|r| r.attrs.name.as_deref());
-            println!(
-                "Removed attachment {} from dataset {}",
-                describe(name, id),
-                short_uuid(&held.dataset_id)
-            );
+                .map(|r| describe(r.attrs.name.as_deref(), &r.id)),
+        )?;
+        if let Some(id) = &dataset_id {
+            dialog::step_value("Dataset", short_uuid(id))?;
         }
-    }
-    for record in &outcome.attachments {
-        println!(
-            "Removed attachment {}",
-            describe(record.attrs.name.as_deref(), &record.id)
-        );
-    }
+
+        if !args.yes {
+            let prompt = match &dataset_id {
+                Some(id) => format!(
+                    "Remove {} from dataset {}? (attachments stay in the store)",
+                    count(total, "attachment"),
+                    short_uuid(id)
+                ),
+                None => format!("Remove {} from the store?", count(total, "attachment")),
+            };
+            let confirmed = cli::confirm(prompt).initial_value(false).interact()?;
+            if !confirmed {
+                return Err(DialogError::Canceled);
+            }
+        }
+
+        // Every argument resolved above, so the single commit below
+        // takes the whole set or nothing
+        let ids: Vec<String> = records.iter().map(|r| r.id.clone()).collect();
+        match &dataset_id {
+            Some(dataset_id) => {
+                let outcomes = DatasetStore::from(&store)
+                    .attachments_unlink(dataset_id, &ids)
+                    .map_err(|e| DialogError::Failed(e.to_string()))?;
+                Ok(format!(
+                    "Removed {} from dataset {}",
+                    count(outcomes.len(), "attachment"),
+                    short_uuid(dataset_id)
+                )
+                .into())
+            }
+            None => {
+                let outcome = attachments
+                    .remove(&ids)
+                    .map_err(|e| DialogError::Failed(e.to_string()))?;
+                if !outcome.datasets.is_empty() {
+                    dialog::step_list(
+                        "Datasets",
+                        outcome.datasets.iter().map(|held| {
+                            format!(
+                                "{} ({} removed)",
+                                short_uuid(&held.dataset_id),
+                                count(held.attachment_ids.len(), "attachment")
+                            )
+                        }),
+                    )?;
+                }
+                Ok(format!("Removed {}", count(outcome.attachments.len(), "attachment")).into())
+            }
+        }
+    });
 }
 
 /// The live attachment an argument names: by name first, then by id
 /// or prefix. A name shared by several attachments is an error that
-/// lists them. Exits with the error when nothing resolves.
-fn resolve(command: &str, attachments: &AttachmentStore<'_>, arg: &str) -> AttachmentRecord {
-    let named: Vec<AttachmentRecord> = match attachments
+/// lists them, one per line after the first.
+fn resolve(attachments: &AttachmentStore<'_>, arg: &str) -> Result<AttachmentRecord, String> {
+    let named: Vec<AttachmentRecord> = attachments
         .query()
         .name(arg)
         .iter()
         .and_then(|records| records.collect())
-    {
-        Ok(records) => records,
-        Err(e) => {
-            eprintln!("{command}: {e}");
-            std::process::exit(1);
-        }
-    };
+        .map_err(|e| e.to_string())?;
     if named.len() > 1 {
-        eprintln!("{command}: {arg} names {} attachments:", named.len());
+        let mut message = format!("{arg} names {} attachments:", named.len());
         for record in &named {
             let key = record.attrs.key.as_deref().unwrap_or_default();
-            eprintln!("  {} {key}", record.id);
+            message.push_str(&format!("\n  {} {key}", record.id));
         }
-        std::process::exit(1);
+        return Err(message);
     }
     if let Some(record) = named.into_iter().next() {
-        return record;
+        return Ok(record);
     }
     match attachments.get(arg) {
-        Ok(record) => record,
+        Ok(record) => Ok(record),
         Err(StoreError::ObjectNotFound(_)) => {
-            eprintln!("{command}: no attachment named or identified by {arg}");
-            std::process::exit(1);
+            Err(format!("no attachment named or identified by {arg}"))
         }
-        Err(e) => {
-            eprintln!("{command}: {e}");
-            std::process::exit(1);
-        }
-    }
-}
-
-fn plural(n: usize, noun: &str) -> String {
-    if n == 1 {
-        format!("{n} {noun}")
-    } else {
-        format!("{n} {noun}s")
+        Err(e) => Err(e.to_string()),
     }
 }
 

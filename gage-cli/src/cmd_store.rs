@@ -12,7 +12,7 @@ use tabled::{
 };
 
 use crate::dialog::{self, DialogError};
-use crate::human::format_size;
+use crate::human::{count, format_size};
 use crate::style;
 
 #[derive(Subcommand)]
@@ -179,15 +179,18 @@ fn delete(store: &Store, args: DeleteArgs) {
         std::process::exit(1);
     }
 
-    let count = targets.len();
+    let total = targets.len();
     dialog::run("Delete objects", || {
-        for (id, type_name) in &targets {
-            cli::log::remark(format!("{type_name} {}", short_uuid(id)))?;
-        }
+        dialog::step_list(
+            "Objects",
+            targets
+                .iter()
+                .map(|(id, type_name)| format!("{type_name} {}", short_uuid(id))),
+        )?;
         if !args.yes {
             let confirmed = cli::confirm(format!(
-                "Permanently delete {count} {}? This cannot be undone.",
-                if count == 1 { "object" } else { "objects" }
+                "Permanently delete {}? This cannot be undone.",
+                count(total, "object")
             ))
             .initial_value(false)
             .interact()?;
@@ -199,14 +202,13 @@ fn delete(store: &Store, args: DeleteArgs) {
         for (id, _) in &targets {
             match store.delete_object(id) {
                 Ok(_) => deleted += 1,
-                Err(e) => eprintln!("warning: failed to delete {}: {e}", short_uuid(id)),
+                Err(e) => cli::log::warning(format!("{}: {e}", short_uuid(id)))?,
             }
         }
-        Ok(format!(
-            "Deleted {deleted} {}",
-            if deleted == 1 { "object" } else { "objects" }
-        )
-        .into())
+        if deleted < total {
+            return Err(dialog::partial("Deleted", deleted, total, "object"));
+        }
+        Ok(format!("Deleted {}", count(deleted, "object")).into())
     });
 }
 

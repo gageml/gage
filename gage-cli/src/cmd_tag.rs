@@ -18,7 +18,7 @@ use tabled::{
 };
 
 use crate::dialog::{self, DialogError};
-use crate::human::format_elapsed_ms;
+use crate::human::{count, format_elapsed_ms};
 use crate::style;
 
 /// Long help shared by every option that names a new tag
@@ -58,6 +58,10 @@ pub struct TagAddArgs {
     /// Move tag if it exists
     #[arg(short, long)]
     force: bool,
+
+    /// Skip confirmation prompt
+    #[arg(short, long)]
+    yes: bool,
 }
 
 #[derive(Args)]
@@ -87,35 +91,64 @@ pub struct TagDeleteArgs {
 
 pub fn add(args: TagAddArgs) {
     let store = open_store("gage tag add");
-    let added = match TagStore::from(&store).add(&args.name, &args.object, args.force) {
-        Ok(added) => added,
-        Err(e @ StoreError::TagExists { .. }) => {
-            eprintln!("gage tag add: {e} (use --force to move it)");
-            std::process::exit(1);
+    dialog::run("Add tag", || {
+        let tags = TagStore::from(&store);
+        let target = store
+            .resolve_in(&args.object, None)
+            .map_err(|e| DialogError::Failed(e.to_string()))?;
+        let object = format!(
+            "{} {}",
+            type_name(&target.object_type),
+            short_uuid(&target.id)
+        );
+        // An existing tag is an error unless --force; one that already
+        // names the object is a no-op
+        let previous = tags
+            .resolve(&args.name)
+            .map_err(|e| DialogError::Failed(e.to_string()))?;
+        if let Some(p) = &previous {
+            if p.id == target.id {
+                return Ok(format!("Tag {} already names {object}", args.name).into());
+            }
+            if !args.force {
+                let e = StoreError::TagExists {
+                    name: args.name.clone(),
+                    id: p.id.clone(),
+                };
+                return Err(DialogError::Failed(format!("{e} (use --force to move it)")));
+            }
         }
-        Err(e) => {
-            eprintln!("gage tag add: {e}");
-            std::process::exit(1);
+        dialog::step_value("Tag", &args.name)?;
+        dialog::step_value("Object", &object)?;
+        let prompt = match &previous {
+            Some(p) => {
+                let from = format!("{} {}", type_name(&p.object_type), short_uuid(&p.id));
+                dialog::step_value("Moves from", &from)?;
+                format!("Move tag {} to {object}?", args.name)
+            }
+            None => format!("Tag {object} as {}?", args.name),
+        };
+        if !args.yes && !cli::confirm(prompt).initial_value(true).interact()? {
+            return Err(DialogError::Canceled);
         }
-    };
-    let type_name = added
-        .object_type
-        .strip_prefix("gage::")
-        .unwrap_or(&added.object_type);
-    let object = format!("{type_name} {}", short_uuid(&added.id));
-    match added.previous_id {
-        Some(previous) if previous == added.id => {
-            println!("Tag {} already names {object}", added.name);
-        }
-        Some(previous) => {
-            println!(
+        let added = tags
+            .add(&args.name, &args.object, args.force)
+            .map_err(|e| DialogError::Failed(e.to_string()))?;
+        Ok(match added.previous_id {
+            Some(previous) => format!(
                 "Moved tag {} from {} to {object}",
                 added.name,
                 short_uuid(&previous)
-            );
+            ),
+            None => format!("Tagged {object} as {}", added.name),
         }
-        None => println!("Tagged {object} as {}", added.name),
-    }
+        .into())
+    });
+}
+
+/// The bare type name of a `gage::` object type
+fn type_name(object_type: &str) -> &str {
+    object_type.strip_prefix("gage::").unwrap_or(object_type)
 }
 
 pub fn list(args: TagListArgs) {
@@ -226,13 +259,15 @@ pub fn delete(args: TagDeleteArgs) {
         std::process::exit(1);
     }
 
-    let count = args.names.len();
+    let total = args.names.len();
     dialog::run("Delete tags", || {
-        cli::log::remark(lines.join("\n"))?;
+        dialog::step_list("Tags", lines)?;
 
         if !args.yes {
-            let plural = if count == 1 { "tag" } else { "tags" };
-            let prompt = format!("Delete {count} {plural}? (tagged objects are unaffected)");
+            let prompt = format!(
+                "Delete {}? (tagged objects are unaffected)",
+                count(total, "tag")
+            );
             let confirmed = cli::confirm(prompt).initial_value(false).interact()?;
             if !confirmed {
                 return Err(DialogError::Canceled);
@@ -241,15 +276,15 @@ pub fn delete(args: TagDeleteArgs) {
 
         let mut deleted = 0;
         for name in &args.names {
-            if let Err(e) = tags.delete(name) {
-                eprintln!("warning: failed to delete {name}: {e}");
-            } else {
-                deleted += 1;
+            match tags.delete(name) {
+                Ok(_) => deleted += 1,
+                Err(e) => cli::log::warning(format!("{name}: {e}"))?,
             }
         }
-
-        let plural = if deleted == 1 { "tag" } else { "tags" };
-        Ok(format!("Deleted {deleted} {plural}").into())
+        if deleted < total {
+            return Err(dialog::partial("Deleted", deleted, total, "tag"));
+        }
+        Ok(format!("Deleted {}", count(deleted, "tag")).into())
     });
 }
 

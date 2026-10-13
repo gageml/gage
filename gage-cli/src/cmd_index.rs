@@ -1,4 +1,5 @@
 use clap::Args;
+use cliclack as cli;
 use gage_session::MaintenanceStatus;
 use tabled::{
     Table,
@@ -45,8 +46,8 @@ pub async fn run(args: IndexArgs) {
     }
 
     let rebuild = args.rebuild;
-    let bar = style::progress_bar(0);
-    bar.set_message("Building index");
+    let bar = cli::progress_bar(0);
+    bar.start("Building index");
     let bar_for_task = bar.clone();
     let result = tokio::task::spawn_blocking(move || {
         source.reconcile(rebuild, &mut |done, total| {
@@ -58,7 +59,7 @@ pub async fn run(args: IndexArgs) {
     })
     .await
     .unwrap();
-    bar.finish_and_clear();
+    bar.clear();
 
     match result {
         Ok(outcome) => {

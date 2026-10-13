@@ -2190,7 +2190,6 @@ dependencies = [
  "gage-store",
  "gage-tui",
  "humantime",
- "indicatif",
  "libc",
  "notify",
  "num_cpus",

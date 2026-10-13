@@ -259,6 +259,9 @@ fn init_logging() {
 #[tokio::main]
 async fn main() {
     install_panic_hook();
+    // Every spinner and bar, inside a dialog or not, renders with the
+    // Gage theme
+    dialog::install_theme();
     let cli = Cli::parse();
     if let Some(level) = &cli.log {
         let directive = GAGE_LOG_TARGETS
@@ -328,7 +331,7 @@ async fn main() {
             },
             Command::Dataset { command } => match command {
                 cmd_dataset::DatasetCommand::Add(args) => cmd_dataset::add(args).await,
-                cmd_dataset::DatasetCommand::Refresh(args) => cmd_dataset::refresh(args).await,
+                cmd_dataset::DatasetCommand::Refresh(args) => cmd_dataset::refresh(args),
                 cmd_dataset::DatasetCommand::List(args) => cmd_dataset::list(args).await,
                 cmd_dataset::DatasetCommand::Show(args) => cmd_dataset::show(args).await,
                 cmd_dataset::DatasetCommand::Delete(args) => cmd_dataset::delete(args),

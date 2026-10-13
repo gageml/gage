@@ -1,5 +1,4 @@
 use std::error::Error;
-use std::io::{self, IsTerminal};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -14,10 +13,9 @@ use gage_core::uuid::short_uuid;
 use gage_query::ContextBuilder;
 use gage_registry::driver::DriverRegistry;
 use gage_session::{Driver, Source};
-use gage_store::{DatasetStore, SessionStore, Store};
+use gage_store::{DatasetStore, SessionRecord, SessionStore, Store};
 use gage_tui::session::{Backend, picker_page_size};
 use gage_tui::{ViewOptions, session_view};
-use indicatif::ProgressBar;
 use tabled::{
     Table,
     grid::{config::Position, records::RecordsMut},
@@ -27,8 +25,9 @@ use tabled::{
     },
 };
 
-use crate::cmd_dataset::{AddEvent, add_native_to_dataset};
-use crate::dialog::{self, DialogError};
+use crate::cmd_dataset::{AddEvent, AddView, add_native_to_dataset};
+use crate::dialog::{self, DialogError, DialogResult};
+use crate::human::count;
 use crate::session_filter::{FILTER_ARG_NAMES, SessionFilterArgs, select_sessions};
 use crate::size_limit::SizeLimitArgs;
 use crate::source;
@@ -120,6 +119,10 @@ pub struct SessionAddArgs {
 
     #[command(flatten)]
     pub size: SizeLimitArgs,
+
+    /// Skip confirmation prompt
+    #[arg(short, long)]
+    pub yes: bool,
 }
 
 #[derive(Args)]
@@ -134,6 +137,10 @@ pub struct SessionRemoveArgs {
     /// Dataset ID (or prefix). The sessions stay in the store
     #[arg(short, long, value_name = "DATASET")]
     pub dataset: Option<String>,
+
+    /// Skip confirmation prompt
+    #[arg(short, long)]
+    pub yes: bool,
 }
 
 #[derive(Args)]
@@ -665,12 +672,41 @@ async fn add_dialog(
         None => None,
     };
     let max_bytes = Some(args.size.max_bytes());
-    let mut view = DialogAddView::new(io::stdout().is_terminal());
+    let mut view = AddView::new();
     match dataset_id {
         Some(dataset_id) if stored => {
-            add_stored_to_dataset(&store, &dataset_id, &args.sessions, &mut |e| view.on(e))?
+            let sessions = SessionStore::from(&store);
+            // Resolve every argument before writing anything, so one
+            // bad argument leaves the store untouched
+            let mut records: Vec<SessionRecord> = Vec::with_capacity(args.sessions.len());
+            let mut errors = Vec::new();
+            for prefix in &args.sessions {
+                match sessions.get(prefix) {
+                    Ok(record) => records.push(record),
+                    Err(e) => errors.push(e.to_string()),
+                }
+            }
+            if !errors.is_empty() {
+                return Err(DialogError::Failed(errors.join("\n")));
+            }
+            dialog::step_value("Dataset", short_uuid(&dataset_id))?;
+            dialog::step_list(
+                "Sessions",
+                records.iter().map(|r| {
+                    format!(
+                        "{} (native {})",
+                        short_uuid(&r.id),
+                        short_uuid(&r.attrs.native_id)
+                    )
+                }),
+            )?;
+            confirm_add(args.yes, records.len(), Some(&dataset_id))?;
+            link_stored(&store, &dataset_id, &records, &mut |e| view.on(e))?
         }
         _ => {
+            let registry = source::driver_registry();
+            let (driver, spec) = source::resolve_source(&registry, source.as_deref())
+                .map_err(DialogError::Failed)?;
             let selected = select_sessions(source.as_deref(), &args.sessions, &args.filter)
                 .await
                 .map_err(|e| DialogError::Failed(format!("{e}")))?;
@@ -679,6 +715,12 @@ async fn add_dialog(
                     "No sessions matched the selection".to_string(),
                 ));
             }
+            dialog::step_value("Source", source::describe_source(driver.as_ref(), &spec))?;
+            if let Some(id) = &dataset_id {
+                dialog::step_value("Dataset", short_uuid(id))?;
+            }
+            dialog::step_value("Sessions", count(selected.len(), "session"))?;
+            confirm_add(args.yes, selected.len(), dataset_id.as_deref())?;
             add_native(
                 &store,
                 source,
@@ -689,7 +731,25 @@ async fn add_dialog(
             )?
         }
     }
-    Ok(view.finish().into())
+    let done = view.done().to_string();
+    view.finish()?;
+    Ok(done.into())
+}
+
+/// The confirmation before an add writes: `Add N sessions?`, or with
+/// the dataset named. `yes` skips it.
+fn confirm_add(yes: bool, n: usize, dataset_id: Option<&str>) -> Result<(), DialogError> {
+    if yes {
+        return Ok(());
+    }
+    let prompt = match dataset_id {
+        Some(id) => format!("Add {} to dataset {}?", count(n, "session"), short_uuid(id)),
+        None => format!("Add {}?", count(n, "session")),
+    };
+    if !cli::confirm(prompt).initial_value(true).interact()? {
+        return Err(DialogError::Canceled);
+    }
+    Ok(())
 }
 
 /// Add every session in `source` to `store` inside the caller's
@@ -714,7 +774,7 @@ pub(crate) async fn add_all(
     if selected.is_empty() {
         return Ok(format!("No sessions in {source}"));
     }
-    let mut view = DialogAddView::new(io::stdout().is_terminal());
+    let mut view = AddView::new();
     add_native(
         store,
         Some(source.to_string()),
@@ -723,87 +783,24 @@ pub(crate) async fn add_all(
         Some(max_bytes),
         &mut |e| view.on(e),
     )?;
-    Ok(format!("{} from {source}", view.finish()))
+    let done = view.done().to_string();
+    view.finish()?;
+    Ok(format!("{done} from {source}"))
 }
 
-/// Renders an add inside the `Add sessions` dialog: a progress bar
-/// on a terminal, one outcome line per session otherwise, and the
-/// closing line held for the outro.
-struct DialogAddView {
-    progress: bool,
-    bar: Option<cli::ProgressBar>,
-    done: String,
-}
-
-impl DialogAddView {
-    fn new(progress: bool) -> Self {
-        Self {
-            progress,
-            bar: None,
-            done: String::new(),
-        }
-    }
-
-    fn on(&mut self, event: AddEvent<'_>) {
-        match &event {
-            AddEvent::Starting { total, .. } => {
-                if self.progress {
-                    let bar = self.bar.get_or_insert_with(|| {
-                        let bar = cli::progress_bar(*total as u64);
-                        bar.start("Adding sessions");
-                        bar
-                    });
-                    bar.set_message(event.to_string());
-                }
-            }
-            AddEvent::Added { .. } => match &self.bar {
-                Some(bar) => bar.inc(1),
-                None => println!("{event}"),
-            },
-            AddEvent::Done { .. } => {
-                if let Some(bar) = self.bar.take() {
-                    bar.clear();
-                }
-                self.done = event.to_string();
-            }
-        }
-    }
-
-    /// The closing line, for the outro
-    fn finish(self) -> String {
-        self.done
-    }
-}
-
-/// Link sessions already in the store, given by Gage id or prefix, as
-/// members of `dataset_id`, reporting each to `on_event`.
-fn add_stored_to_dataset(
+/// Link sessions already in the store as members of `dataset_id`,
+/// reporting each to `on_event`.
+fn link_stored(
     store: &Store,
     dataset_id: &str,
-    prefixes: &[String],
+    records: &[SessionRecord],
     on_event: &mut dyn FnMut(AddEvent<'_>),
 ) -> Result<(), DialogError> {
-    let sessions = SessionStore::from(store);
-
-    // Resolve every argument before writing anything, so one bad
-    // argument leaves the store untouched
-    let mut records = Vec::with_capacity(prefixes.len());
-    let mut errors = Vec::new();
-    for prefix in prefixes {
-        match sessions.get(prefix) {
-            Ok(record) => records.push(record),
-            Err(e) => errors.push(e.to_string()),
-        }
-    }
-    if !errors.is_empty() {
-        return Err(DialogError::Failed(errors.join("\n")));
-    }
-
     let ids: Vec<String> = records.iter().map(|r| r.id.clone()).collect();
     let outcomes = DatasetStore::from(store)
         .sessions_link(dataset_id, &ids)
         .map_err(|e| DialogError::Failed(format!("{e}")))?;
-    for (outcome, record) in outcomes.iter().zip(&records) {
+    for (outcome, record) in outcomes.iter().zip(records) {
         on_event(AddEvent::Added {
             outcome: outcome.outcome,
             id: &outcome.id,
@@ -923,88 +920,106 @@ pub fn remove(source: Option<String>, stored: bool, args: SessionRemoveArgs) {
             std::process::exit(1);
         }
     };
-    match args.dataset.as_deref() {
-        Some(prefix) => remove_from_dataset(&store, prefix, &args.ids),
-        None => remove_from_store(&store, &args.ids),
-    }
-}
-
-/// Unlink sessions from one dataset; the session objects stay
-fn remove_from_dataset(store: &Store, dataset_prefix: &str, ids: &[String]) {
-    let datasets = DatasetStore::from(store);
-    let dataset_id = match datasets.resolve_id(dataset_prefix) {
-        Ok(id) => id,
-        Err(e) => {
-            eprintln!("gage session remove: --dataset {dataset_prefix}: {e}");
-            std::process::exit(1);
-        }
-    };
-    // Every argument is resolved before the single dataset commit, so
-    // one bad argument leaves the dataset untouched
-    let outcomes = match datasets.sessions_unlink(&dataset_id, ids) {
-        Ok(o) => o,
-        Err(e) => {
-            eprintln!("gage session remove: {e}");
-            std::process::exit(1);
-        }
-    };
-    for o in &outcomes {
-        println!(
-            "Removed session {} (native {}) from dataset {}",
-            short_uuid(&o.id),
-            short_uuid(&o.native_id),
-            short_uuid(&dataset_id)
-        );
-    }
-}
-
-/// Unlink sessions from every dataset holding them and tombstone them
-fn remove_from_store(store: &Store, ids: &[String]) {
-    let sessions = SessionStore::from(store);
+    let sessions = SessionStore::from(&store);
 
     // Resolve every argument before writing anything, so one bad
     // argument leaves the store untouched
+    let mut records: Vec<SessionRecord> = Vec::with_capacity(args.ids.len());
     let mut errors = 0;
-    for prefix in ids {
-        if let Err(e) = sessions.get(prefix) {
-            eprintln!("gage session remove: {e}");
-            errors += 1;
+    for prefix in &args.ids {
+        match sessions.get(prefix) {
+            Ok(record) => {
+                if !records.iter().any(|r| r.id == record.id) {
+                    records.push(record);
+                }
+            }
+            Err(e) => {
+                eprintln!("gage session remove: {e}");
+                errors += 1;
+            }
         }
     }
     if errors > 0 {
         std::process::exit(1);
     }
+    let dataset_id = args.dataset.as_deref().map(|prefix| {
+        DatasetStore::from(&store)
+            .resolve_id(prefix)
+            .unwrap_or_else(|e| {
+                eprintln!("gage session remove: --dataset {prefix}: {e}");
+                std::process::exit(1);
+            })
+    });
 
-    let outcome = match sessions.remove(ids) {
-        Ok(o) => o,
-        Err(e) => {
-            eprintln!("gage session remove: {e}");
-            std::process::exit(1);
+    let total = records.len();
+    dialog::run("Remove sessions", || {
+        dialog::step_list(
+            "Sessions",
+            records.iter().map(|r| {
+                format!(
+                    "{} (native {})",
+                    short_uuid(&r.id),
+                    short_uuid(&r.attrs.native_id)
+                )
+            }),
+        )?;
+        if let Some(id) = &dataset_id {
+            dialog::step_value("Dataset", short_uuid(id))?;
         }
-    };
-    for members in &outcome.datasets {
-        for id in &members.session_ids {
-            let native_id = outcome
-                .sessions
-                .iter()
-                .find(|r| &r.id == id)
-                .map(|r| r.attrs.native_id.as_str())
-                .unwrap_or_default();
-            println!(
-                "Removed session {} (native {}) from dataset {}",
-                short_uuid(id),
-                short_uuid(native_id),
-                short_uuid(&members.dataset_id)
-            );
+
+        if !args.yes {
+            let prompt = match &dataset_id {
+                Some(id) => format!(
+                    "Remove {} from dataset {}? (sessions stay in the store)",
+                    count(total, "session"),
+                    short_uuid(id)
+                ),
+                None => format!(
+                    "Remove {} from the store? (native sessions are unaffected)",
+                    count(total, "session")
+                ),
+            };
+            let confirmed = cli::confirm(prompt).initial_value(false).interact()?;
+            if !confirmed {
+                return Err(DialogError::Canceled);
+            }
         }
-    }
-    for record in &outcome.sessions {
-        println!(
-            "Removed session {} (native {})",
-            short_uuid(&record.id),
-            short_uuid(&record.attrs.native_id)
-        );
-    }
+
+        // Every argument resolved above, so the single commit below
+        // takes the whole set or nothing
+        let ids: Vec<String> = records.iter().map(|r| r.id.clone()).collect();
+        match &dataset_id {
+            Some(dataset_id) => {
+                let outcomes = DatasetStore::from(&store)
+                    .sessions_unlink(dataset_id, &ids)
+                    .map_err(|e| DialogError::Failed(e.to_string()))?;
+                Ok(format!(
+                    "Removed {} from dataset {}",
+                    count(outcomes.len(), "session"),
+                    short_uuid(dataset_id)
+                )
+                .into())
+            }
+            None => {
+                let outcome = sessions
+                    .remove(&ids)
+                    .map_err(|e| DialogError::Failed(e.to_string()))?;
+                if !outcome.datasets.is_empty() {
+                    dialog::step_list(
+                        "Datasets",
+                        outcome.datasets.iter().map(|m| {
+                            format!(
+                                "{} ({} removed)",
+                                short_uuid(&m.dataset_id),
+                                count(m.session_ids.len(), "session")
+                            )
+                        }),
+                    )?;
+                }
+                Ok(format!("Removed {}", count(outcome.sessions.len(), "session")).into())
+            }
+        }
+    });
 }
 
 pub async fn delete(source: Option<String>, stored: bool, args: SessionDeleteArgs) {
@@ -1037,6 +1052,21 @@ pub async fn delete(source: Option<String>, stored: bool, args: SessionDeleteArg
             std::process::exit(1);
         }
     };
+    dialog::run_async("Delete sessions", || {
+        delete_dialog(&args, source.as_ref(), &spec)
+    })
+    .await;
+    if let Err(e) = source.close() {
+        eprintln!("gage session delete: {spec}: {e}");
+        std::process::exit(1);
+    }
+}
+
+async fn delete_dialog(
+    args: &SessionDeleteArgs,
+    source: &dyn Source,
+    spec: &str,
+) -> Result<DialogResult, DialogError> {
     // The empty-session and id-resolution queries run against the
     // native session rows through the `native_session` table function;
     // the source handle stays only for the driver deletes below.
@@ -1044,13 +1074,14 @@ pub async fn delete(source: Option<String>, stored: bool, args: SessionDeleteArg
     let from = format!("native_session('{}')", spec.replace('\'', "''"));
 
     let targets = if args.empty {
-        let spinner = style::spinner("Looking for empty sessions...");
+        let spinner = cli::spinner();
+        spinner.start("Looking for empty sessions");
         let targets = delete_targets(
             &ctx,
             &format!("SELECT id, is_empty FROM {from} WHERE is_empty"),
         )
         .await;
-        spinner.finish_and_clear();
+        spinner.clear();
         targets
     } else {
         // Resolve every argument before deleting anything, so one bad
@@ -1061,13 +1092,13 @@ pub async fn delete(source: Option<String>, stored: bool, args: SessionDeleteArg
             match source.find_native(prefix) {
                 Ok(id) => ids.push(id),
                 Err(e) => {
-                    eprintln!("gage session delete: {e}");
+                    cli::log::error(format!("{prefix}: {e}"))?;
                     errors += 1;
                 }
             }
         }
         if errors > 0 {
-            std::process::exit(1);
+            return Err(DialogError::Failed("Unknown sessions".to_string()));
         }
         let in_list = ids
             .iter()
@@ -1077,48 +1108,44 @@ pub async fn delete(source: Option<String>, stored: bool, args: SessionDeleteArg
         let sql = format!("SELECT id, is_empty FROM {from} WHERE id IN ({in_list})");
         delete_targets(&ctx, &sql).await
     };
-    let empty_count = targets.iter().filter(|t| t.is_empty).count();
-    let non_empty_count = targets.len() - empty_count;
-
     if targets.is_empty() {
-        dialog::run("Delete sessions", || Ok("Nothing to delete".into()));
-        return;
+        return Ok("Nothing to delete".into());
     }
 
-    dialog::run("Delete sessions", || {
-        if empty_count > 0 {
-            cli::log::remark(format!("Empty sessions: {empty_count}"))?;
-        }
-        if non_empty_count > 0 {
-            cli::log::remark(format!("Non-empty sessions: {non_empty_count}"))?;
-        }
-
-        if !args.yes {
-            let confirmed =
-                cli::confirm("Permanently delete these sessions? This cannot be undone.")
-                    .initial_value(false)
-                    .interact()?;
-            if !confirmed {
-                return Err(DialogError::Canceled);
-            }
-        }
-
-        let mut deleted = 0;
-        for t in &targets {
-            if let Err(e) = source.delete_native(&t.id) {
-                eprintln!("warning: failed to delete {}: {e}", short_uuid(&t.id));
+    let total = targets.len();
+    dialog::step_list(
+        "Sessions",
+        targets.iter().map(|t| {
+            if t.is_empty {
+                format!("{} (empty)", short_uuid(&t.id))
             } else {
-                deleted += 1;
+                short_uuid(&t.id).to_string()
             }
-        }
+        }),
+    )?;
 
-        let plural = if deleted == 1 { "session" } else { "sessions" };
-        Ok(format!("Deleted {deleted} {plural}").into())
-    });
-    if let Err(e) = source.close() {
-        eprintln!("gage session delete: {spec}: {e}");
-        std::process::exit(1);
+    if !args.yes {
+        let prompt = format!(
+            "Permanently delete {}? This cannot be undone.",
+            count(total, "session")
+        );
+        let confirmed = cli::confirm(prompt).initial_value(false).interact()?;
+        if !confirmed {
+            return Err(DialogError::Canceled);
+        }
     }
+
+    let mut deleted = 0;
+    for t in &targets {
+        match source.delete_native(&t.id) {
+            Ok(_) => deleted += 1,
+            Err(e) => cli::log::warning(format!("{}: {e}", short_uuid(&t.id)))?,
+        }
+    }
+    if deleted < total {
+        return Err(dialog::partial("Deleted", deleted, total, "session"));
+    }
+    Ok(format!("Deleted {}", count(deleted, "session")).into())
 }
 
 /// A session selected for deletion
@@ -1196,20 +1223,20 @@ async fn view_native(
 /// Prepare the picker's sessions before the TUI takes the terminal,
 /// behind a progress bar when any of them need reading.
 fn warm_picker_sessions(source: &dyn Source) -> Result<(), Box<dyn Error>> {
-    let mut bar: Option<ProgressBar> = None;
+    let mut bar: Option<cli::ProgressBar> = None;
     source.warm_summaries(picker_page_size(), &mut |done, total| {
         if total == 0 {
             return;
         }
         let bar = bar.get_or_insert_with(|| {
-            let bar = style::progress_bar_plain(total as u64);
-            bar.set_message("Reading sessions");
+            let bar = cli::progress_bar(total as u64);
+            bar.start("Reading sessions");
             bar
         });
         bar.set_position(done as u64);
     })?;
     if let Some(bar) = bar {
-        bar.finish_and_clear();
+        bar.clear();
     }
     Ok(())
 }

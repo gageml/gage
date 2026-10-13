@@ -42,3 +42,13 @@ pub fn format_size(bytes: i64) -> String {
         format!("{:.1} GB", bytes as f64 / GB as f64)
     }
 }
+
+/// `n` and `noun`, pluralized with an `s` when `n` is not one:
+/// `1 note`, `3 notes`
+pub fn count(n: usize, noun: &str) -> String {
+    if n == 1 {
+        format!("{n} {noun}")
+    } else {
+        format!("{n} {noun}s")
+    }
+}

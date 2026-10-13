@@ -9,7 +9,7 @@ use datafusion::prelude::SessionContext;
 use gage_core::uuid::short_uuid;
 use gage_query::ContextBuilder;
 use gage_registry::scanner::ScannerRegistry;
-use gage_store::{NOTE_TYPE, NoteEdit, NoteInput, NoteStore, NoteValue, Store, url};
+use gage_store::{NOTE_TYPE, NoteEdit, NoteFull, NoteInput, NoteStore, NoteValue, Store, url};
 use tabled::{
     Table,
     settings::{
@@ -20,6 +20,7 @@ use tabled::{
 
 use crate::cmd_session::run_query;
 use crate::dialog::{self, DialogError};
+use crate::human::count;
 use crate::style::{self, IdKind, styled_id};
 use crate::target::resolve_target;
 use crate::text_arg::text_value;
@@ -404,7 +405,7 @@ pub fn add(args: NoteAddArgs) {
                 work_id: None,
             })
             .map_err(|e| DialogError::Failed(e.to_string()))?;
-        Ok(format!("Note {} added", short_uuid(&id)).into())
+        Ok(format!("Added note {}", short_uuid(&id)).into())
     });
 }
 
@@ -651,12 +652,12 @@ pub fn edit(args: NoteEditArgs) {
                 .filter(|url| Some(*url) != current.target.as_deref()),
         };
         if edit.name.is_none() && edit.value.is_none() && edit.target.is_none() {
-            return Ok(format!("Note {} unchanged", short_uuid(&current.id)).into());
+            return Ok(format!("Unchanged note {}", short_uuid(&current.id)).into());
         }
         notes
             .edit(&current.id, edit)
             .map_err(|e| DialogError::Failed(e.to_string()))?;
-        Ok(format!("Note {} updated", short_uuid(&current.id)).into())
+        Ok(format!("Updated note {}", short_uuid(&current.id)).into())
     });
 }
 
@@ -672,11 +673,11 @@ pub fn delete(args: NoteDeleteArgs) {
 
     // Resolve every argument before writing anything, so one bad
     // argument leaves the store untouched
-    let mut ids: Vec<String> = Vec::with_capacity(args.ids.len());
+    let mut targets: Vec<NoteFull> = Vec::with_capacity(args.ids.len());
     let mut errors = 0;
     for prefix in &args.ids {
         match notes.get(prefix) {
-            Ok(full) => ids.push(full.id),
+            Ok(full) => targets.push(full),
             Err(e) => {
                 eprintln!("gage note delete: {e}");
                 errors += 1;
@@ -687,13 +688,20 @@ pub fn delete(args: NoteDeleteArgs) {
         std::process::exit(1);
     }
 
-    let count = ids.len();
+    let total = targets.len();
     dialog::run("Delete notes", || {
-        let plural = if count == 1 { "note" } else { "notes" };
-        cli::log::remark(format!("{count} {plural}"))?;
+        dialog::step_list(
+            "Notes",
+            targets
+                .iter()
+                .map(|n| format!("{} {}", short_uuid(&n.id), n.name)),
+        )?;
 
         if !args.yes {
-            let prompt = format!("Permanently delete {count} {plural}? This cannot be undone.");
+            let prompt = format!(
+                "Permanently delete {}? This cannot be undone.",
+                count(total, "note")
+            );
             let confirmed = cli::confirm(prompt).initial_value(false).interact()?;
             if !confirmed {
                 return Err(DialogError::Canceled);
@@ -701,15 +709,15 @@ pub fn delete(args: NoteDeleteArgs) {
         }
 
         let mut deleted = 0;
-        for id in &ids {
-            if let Err(e) = notes.delete(id) {
-                eprintln!("warning: failed to delete {}: {e}", short_uuid(id));
-            } else {
-                deleted += 1;
+        for note in &targets {
+            match notes.delete(&note.id) {
+                Ok(_) => deleted += 1,
+                Err(e) => cli::log::warning(format!("{}: {e}", short_uuid(&note.id)))?,
             }
         }
-
-        let plural = if deleted == 1 { "note" } else { "notes" };
-        Ok(format!("Deleted {deleted} {plural}").into())
+        if deleted < total {
+            return Err(dialog::partial("Deleted", deleted, total, "note"));
+        }
+        Ok(format!("Deleted {}", count(deleted, "note")).into())
     });
 }

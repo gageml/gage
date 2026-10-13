@@ -31,6 +31,7 @@ use crate::author::resolve_author;
 use crate::cmd_note::{count_rows, target_cell, value_cell};
 use crate::cmd_session::{column, run_query};
 use crate::dialog::{self, DialogError};
+use crate::human::count;
 use crate::style::{self, IdKind, styled_id};
 use crate::text_arg::text_value;
 
@@ -725,7 +726,7 @@ pub fn add(args: IssueAddArgs) {
                 key: None,
             })
             .map_err(|e| DialogError::Failed(e.to_string()))?;
-        Ok(format!("Issue {} added", short_uuid(&id)).into())
+        Ok(format!("Added issue {}", short_uuid(&id)).into())
     });
 }
 
@@ -769,31 +770,27 @@ fn resolve_issues(
 }
 
 fn issues_step(issues: &[IssueFull]) -> Result<(), std::io::Error> {
-    let listing = issues
-        .iter()
-        .map(|i| format!("{} {}", style(short_uuid(&i.id)).dim(), i.title))
-        .collect::<Vec<_>>()
-        .join("\n");
     let label = if issues.len() == 1 { "Issue" } else { "Issues" };
-    cli::log::step(format!("{label}\n{listing}"))
-}
-
-fn plural(count: usize) -> &'static str {
-    if count == 1 { "issue" } else { "issues" }
+    dialog::step_list(
+        label,
+        issues
+            .iter()
+            .map(|i| format!("{} {}", short_uuid(&i.id), i.title)),
+    )
 }
 
 pub fn delete(args: IssueDeleteArgs) {
     let store = open_store("gage issue delete");
     let issues = IssueStore::from(&store);
     let targets = resolve_issues("gage issue delete", &issues, &args.ids, |_| Ok(()));
-    let count = targets.len();
+    let total = targets.len();
 
     dialog::run("Delete issues", || {
         issues_step(&targets)?;
         if !args.yes {
             let prompt = format!(
-                "Permanently delete {count} {}? This cannot be undone.",
-                plural(count)
+                "Permanently delete {}? This cannot be undone.",
+                count(total, "issue")
             );
             let confirmed = cli::confirm(prompt).initial_value(false).interact()?;
             if !confirmed {
@@ -802,13 +799,15 @@ pub fn delete(args: IssueDeleteArgs) {
         }
         let mut deleted = 0;
         for issue in &targets {
-            if let Err(e) = issues.delete(&issue.id) {
-                eprintln!("warning: failed to delete {}: {e}", short_uuid(&issue.id));
-            } else {
-                deleted += 1;
+            match issues.delete(&issue.id) {
+                Ok(_) => deleted += 1,
+                Err(e) => cli::log::warning(format!("{}: {e}", short_uuid(&issue.id)))?,
             }
         }
-        Ok(format!("Deleted {deleted} {}", plural(deleted)).into())
+        if deleted < total {
+            return Err(dialog::partial("Deleted", deleted, total, "issue"));
+        }
+        Ok(format!("Deleted {}", count(deleted, "issue")).into())
     });
 }
 
@@ -840,7 +839,7 @@ pub fn close(args: IssueCloseArgs) {
         None => None,
     };
     let given_message = args.message.resolve("gage issue close");
-    let count = targets.len();
+    let total = targets.len();
 
     dialog::run("Close issues", || {
         issues_step(&targets)?;
@@ -853,10 +852,10 @@ pub fn close(args: IssueCloseArgs) {
         }
         let message = prompt_message(given_message.clone(), args.yes, "Type a message (optional)")?;
         if !args.yes {
-            let prompt = if count == 1 {
+            let prompt = if total == 1 {
                 "Close this issue?".to_string()
             } else {
-                format!("Close {count} issues?")
+                format!("Close {total} issues?")
             };
             let confirmed = cli::confirm(prompt).initial_value(true).interact()?;
             if !confirmed {
@@ -878,13 +877,15 @@ pub fn close(args: IssueCloseArgs) {
                     message.as_deref(),
                 ),
             };
-            if let Err(e) = result {
-                eprintln!("warning: failed to close {}: {e}", short_uuid(&issue.id));
-            } else {
-                closed += 1;
+            match result {
+                Ok(_) => closed += 1,
+                Err(e) => cli::log::warning(format!("{}: {e}", short_uuid(&issue.id)))?,
             }
         }
-        Ok(format!("Closed {closed} {} ({reason})", plural(closed)).into())
+        if closed < total {
+            return Err(dialog::partial("Closed", closed, total, "issue"));
+        }
+        Ok(format!("Closed {} ({reason})", count(closed, "issue")).into())
     });
 }
 
@@ -899,16 +900,16 @@ pub fn open(args: IssueOpenArgs) {
         }
     });
     let given_message = args.message.resolve("gage issue open");
-    let count = targets.len();
+    let total = targets.len();
 
     dialog::run("Open issues", || {
         issues_step(&targets)?;
         let message = prompt_message(given_message.clone(), args.yes, "Type a message (optional)")?;
         if !args.yes {
-            let prompt = if count == 1 {
+            let prompt = if total == 1 {
                 "Open this issue?".to_string()
             } else {
-                format!("Open {count} issues?")
+                format!("Open {total} issues?")
             };
             let confirmed = cli::confirm(prompt).initial_value(true).interact()?;
             if !confirmed {
@@ -918,19 +919,21 @@ pub fn open(args: IssueOpenArgs) {
         let author = resolve_author(None);
         let mut opened = 0;
         for issue in &targets {
-            if let Err(e) = issues.set_status(
+            match issues.set_status(
                 &issue.id,
                 IssueStatus::Open,
                 None,
                 &author,
                 message.as_deref(),
             ) {
-                eprintln!("warning: failed to open {}: {e}", short_uuid(&issue.id));
-            } else {
-                opened += 1;
+                Ok(_) => opened += 1,
+                Err(e) => cli::log::warning(format!("{}: {e}", short_uuid(&issue.id)))?,
             }
         }
-        Ok(format!("Opened {opened} {}", plural(opened)).into())
+        if opened < total {
+            return Err(dialog::partial("Opened", opened, total, "issue"));
+        }
+        Ok(format!("Opened {}", count(opened, "issue")).into())
     });
 }
 
@@ -943,7 +946,7 @@ pub fn comment(args: IssueCommentArgs) {
     let issues = IssueStore::from(&store);
     let targets = resolve_issues("gage issue comment", &issues, &args.ids, |_| Ok(()));
     let given_message = args.message.resolve("gage issue comment");
-    let count = targets.len();
+    let total = targets.len();
 
     dialog::run("Comment on issues", || {
         issues_step(&targets)?;
@@ -960,10 +963,10 @@ pub fn comment(args: IssueCommentArgs) {
             return Err(DialogError::Failed("comment is empty".into()));
         }
         if !args.yes {
-            let prompt = if count == 1 {
+            let prompt = if total == 1 {
                 "Add this comment?".to_string()
             } else {
-                format!("Add this comment to {count} issues?")
+                format!("Add this comment to {total} issues?")
             };
             let confirmed = cli::confirm(prompt).initial_value(true).interact()?;
             if !confirmed {
@@ -973,16 +976,15 @@ pub fn comment(args: IssueCommentArgs) {
         let author = resolve_author(None);
         let mut commented = 0;
         for issue in &targets {
-            if let Err(e) = issues.comment(&issue.id, &author, &message) {
-                eprintln!(
-                    "warning: failed to comment on {}: {e}",
-                    short_uuid(&issue.id)
-                );
-            } else {
-                commented += 1;
+            match issues.comment(&issue.id, &author, &message) {
+                Ok(_) => commented += 1,
+                Err(e) => cli::log::warning(format!("{}: {e}", short_uuid(&issue.id)))?,
             }
         }
-        Ok(format!("Commented on {commented} {}", plural(commented)).into())
+        if commented < total {
+            return Err(dialog::partial("Commented on", commented, total, "issue"));
+        }
+        Ok(format!("Commented on {}", count(commented, "issue")).into())
     });
 }
 

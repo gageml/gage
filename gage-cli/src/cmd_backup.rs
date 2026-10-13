@@ -98,7 +98,23 @@ pub async fn main(args: BackupArgs) {
     };
     let remote = repository.name();
 
+    // The dialog adds the sources, previews, and confirms; the push
+    // runs after it, so git's own output lands outside the dialog
+    let mut send: Vec<String> = Vec::new();
     dialog::run_async(&format!("Backup to {remote}"), || async {
+        if !sources.is_empty() {
+            dialog::step_list("Sources", sources.iter().cloned())?;
+        }
+        if !args.yes {
+            let prompt = if sources.is_empty() {
+                format!("Back up store to {remote}?")
+            } else {
+                format!("Add sessions from sources and back up store to {remote}?")
+            };
+            if !cli::confirm(prompt).initial_value(false).interact()? {
+                return Err(DialogError::Canceled);
+            }
+        }
         for source in &sources {
             let added = cmd_session::add_all(&store, source, max_bytes).await?;
             cli::log::info(added)?;
@@ -109,43 +125,44 @@ pub async fn main(args: BackupArgs) {
         let on_remote = remotes
             .ls_remote(&repository)
             .map_err(|e| DialogError::Other(e.into()))?;
-        let send: Vec<String> = refs
+        let pending: Vec<String> = refs
             .iter()
             .filter(|(name, sha)| on_remote.get(*name) != Some(sha))
             .map(|(name, _)| name.clone())
             .collect();
-        if send.is_empty() {
+        if pending.is_empty() {
             return Ok(format!("Everything up to date on {remote}").into());
         }
-        let count = |prefix: &str| send.iter().filter(|r| r.starts_with(prefix)).count();
+        let count = |prefix: &str| pending.iter().filter(|r| r.starts_with(prefix)).count();
         let summary = [
             format!("{} objects", count(OBJECT_REFS)),
             format!("{} tags", count(TAG_REFS)),
             format!("{} keys", count(KEY_REFS)),
-            format!("{} already on the remote", refs.len() - send.len()),
+            format!("{} already on the remote", refs.len() - pending.len()),
         ];
         cli::log::remark(summary.join("\n"))?;
-        if !args.yes {
-            let prompt = format!("Send {} refs to {remote}?", send.len());
-            let confirmed = cli::confirm(prompt).initial_value(false).interact()?;
-            if !confirmed {
-                return Err(DialogError::Canceled);
-            }
-        }
-        let approval = remotes
-            .approval_digest(&send)
-            .map_err(|e| DialogError::Other(e.into()))?;
-        let status = remotes
-            .push(&repository, &send, &approval)
-            .map_err(|e| DialogError::Other(e.into()))?;
-        if !status.success() {
-            return Err(DialogError::Failed(format!(
-                "Backup to {remote} was rejected; fetch and retry: gage fetch {remote}"
-            )));
-        }
-        Ok(format!("Backed up {} refs to {remote}", send.len()).into())
+        send = pending;
+        Ok(format!("Backing up {} refs to {remote}", send.len()).into())
     })
     .await;
+    if send.is_empty() {
+        return;
+    }
+
+    let approval = match remotes.approval_digest(&send) {
+        Ok(approval) => approval,
+        Err(e) => fail(&e),
+    };
+    let status = match remotes.push(&repository, &send, &approval) {
+        Ok(status) => status,
+        Err(e) => fail(&e),
+    };
+    if !status.success() {
+        fail(&format!(
+            "backup to {remote} was rejected; fetch and retry: gage fetch {remote}"
+        ));
+    }
+    println!("Backed up {} refs to {remote}", send.len());
 }
 
 fn fail(e: &dyn std::fmt::Display) -> ! {

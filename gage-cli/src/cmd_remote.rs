@@ -13,6 +13,7 @@ use tabled::{
 };
 
 use crate::dialog::{self, DialogError};
+use crate::human::count;
 use crate::style;
 
 #[derive(Subcommand)]
@@ -48,6 +49,10 @@ pub struct RemoteAddArgs {
     /// refuses any other remote
     #[arg(long)]
     backup: bool,
+
+    /// Skip confirmation prompt
+    #[arg(short, long)]
+    yes: bool,
 }
 
 #[derive(Args)]
@@ -63,20 +68,29 @@ pub struct RemoteDeleteArgs {
 
 pub fn add(args: RemoteAddArgs) {
     let store = open_store("gage remote add");
-    match RemoteStore::from(&store).add(&args.name, &args.url, args.backup) {
-        Ok(remote) => {
-            let backup = if remote.backup {
-                " as a backup target"
-            } else {
-                ""
-            };
-            println!("Added remote {} ({}){backup}", remote.name, remote.url);
+    dialog::run("Add remote", || {
+        dialog::step_value("Name", &args.name)?;
+        dialog::step_value("URL", &args.url)?;
+        if args.backup {
+            dialog::step_value("Backup target", "yes")?;
         }
-        Err(e) => {
-            eprintln!("gage remote add: {e}");
-            std::process::exit(1);
+        if !args.yes
+            && !cli::confirm(format!("Add remote {}?", args.name))
+                .initial_value(true)
+                .interact()?
+        {
+            return Err(DialogError::Canceled);
         }
-    }
+        let remote = RemoteStore::from(&store)
+            .add(&args.name, &args.url, args.backup)
+            .map_err(|e| DialogError::Failed(e.to_string()))?;
+        let backup = if remote.backup {
+            " as a backup target"
+        } else {
+            ""
+        };
+        Ok(format!("Added remote {} ({}){backup}", remote.name, remote.url).into())
+    });
 }
 
 pub fn list() {
@@ -152,13 +166,15 @@ pub fn delete(args: RemoteDeleteArgs) {
         std::process::exit(1);
     }
 
-    let count = args.names.len();
+    let total = args.names.len();
     dialog::run("Delete remotes", || {
-        cli::log::remark(lines.join("\n"))?;
+        dialog::step_list("Remotes", lines)?;
 
         if !args.yes {
-            let plural = if count == 1 { "remote" } else { "remotes" };
-            let prompt = format!("Delete {count} {plural}? (nothing on the remote is changed)");
+            let prompt = format!(
+                "Delete {}? (nothing on the remote is changed)",
+                count(total, "remote")
+            );
             let confirmed = cli::confirm(prompt).initial_value(false).interact()?;
             if !confirmed {
                 return Err(DialogError::Canceled);
@@ -167,15 +183,15 @@ pub fn delete(args: RemoteDeleteArgs) {
 
         let mut deleted = 0;
         for name in &args.names {
-            if let Err(e) = remotes.delete(name) {
-                eprintln!("warning: failed to delete {name}: {e}");
-            } else {
-                deleted += 1;
+            match remotes.delete(name) {
+                Ok(_) => deleted += 1,
+                Err(e) => cli::log::warning(format!("{name}: {e}"))?,
             }
         }
-
-        let plural = if deleted == 1 { "remote" } else { "remotes" };
-        Ok(format!("Deleted {deleted} {plural}").into())
+        if deleted < total {
+            return Err(dialog::partial("Deleted", deleted, total, "remote"));
+        }
+        Ok(format!("Deleted {}", count(deleted, "remote")).into())
     });
 }
 

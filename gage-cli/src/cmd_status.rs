@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use clap::Args;
+use cliclack as cli;
 use console::style;
 use datafusion::prelude::SessionContext;
 
@@ -32,7 +33,8 @@ pub struct StatusArgs {
 }
 
 pub async fn run(args: StatusArgs) {
-    let spinner = crate::style::spinner("Reading status...");
+    let spinner = cli::spinner();
+    spinner.start("Reading status");
     let mut out = String::new();
     let mut problems = Vec::new();
     w(&mut out, format!("{}", style("Drivers").bold()));
@@ -47,7 +49,7 @@ pub async fn run(args: StatusArgs) {
         out.push('\n');
         write_problems(&mut out, &problems);
     }
-    spinner.finish_and_clear();
+    spinner.clear();
     print!("{out}");
 }
 

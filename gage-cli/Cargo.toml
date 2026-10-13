@@ -35,7 +35,6 @@ gage-runtime = { path = "../gage-runtime" }
 gage-scan = { path = "../gage-scan" }
 gage-session = { path = "../gage-session" }
 gage-store = { path = "../gage-store" }
-indicatif = "0.18"
 num_cpus = "1"
 rand = "0.9"
 tracing = "0.1"

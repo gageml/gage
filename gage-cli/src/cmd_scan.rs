@@ -38,7 +38,6 @@ use gage_tui::scan_view::{
 };
 use gage_tui::session::Backend;
 use gage_tui::text::fmt_duration;
-use indicatif::ProgressBar;
 use tabled::{
     Table,
     settings::{
@@ -54,13 +53,13 @@ use tracing_subscriber::field::RecordFields;
 use tracing_subscriber::fmt::FormatFields;
 use tracing_subscriber::fmt::format::Writer;
 
-use crate::cmd_dataset::{self, AddEvent};
+use crate::cmd_dataset::{self, AddView};
 use crate::cmd_issue::event_label;
 use crate::cmd_note::{count_rows, target_cell, value_cell};
 use crate::cmd_session::{column, run_query};
 use crate::cmd_tag::TAG_HELP;
 use crate::dialog::{self, DialogError};
-use crate::human::{format_duration, format_elapsed_ms};
+use crate::human::{count, format_duration, format_elapsed_ms};
 use crate::scanner_attach;
 use crate::scanner_spec::{self, ResolvedSpec};
 use crate::session_filter::{FILTER_ARG_NAMES, SessionFilterArgs, select_sessions};
@@ -1468,15 +1467,15 @@ fn delete(args: ScanDeleteArgs) {
         std::process::exit(1);
     }
 
-    let count = ids.len();
+    let total = ids.len();
     dialog::run("Delete scan runs", || {
-        cli::log::remark(format!("{count} {}", plural(count, "scan run")))?;
+        dialog::step_list("Scan runs", ids.iter().map(|id| short_uuid(id).to_string()))?;
 
         if !args.yes {
             let prompt = format!(
-                "Permanently delete {count} {} and associated notes/issues? \
+                "Permanently delete {} and associated notes/issues? \
                  This cannot be undone.",
-                plural(count, "scan run")
+                count(total, "scan run")
             );
             let confirmed = cli::confirm(prompt).initial_value(false).interact()?;
             if !confirmed {
@@ -1494,26 +1493,20 @@ fn delete(args: ScanDeleteArgs) {
                     notes += d.notes.len();
                     issues += d.issues.len();
                 }
-                Err(e) => eprintln!("warning: failed to delete {}: {e}", short_uuid(id)),
+                Err(e) => cli::log::warning(format!("{}: {e}", short_uuid(id)))?,
             }
         }
-
+        if deleted < total {
+            return Err(dialog::partial("Deleted", deleted, total, "scan run"));
+        }
         Ok(format!(
-            "Deleted {deleted} {}, {notes} {}, {issues} {}",
-            plural(deleted, "scan run"),
-            plural(notes, "note"),
-            plural(issues, "issue")
+            "Deleted {}, {}, {}",
+            count(deleted, "scan run"),
+            count(notes, "note"),
+            count(issues, "issue")
         )
         .into())
     });
-}
-
-fn plural(n: usize, noun: &str) -> String {
-    if n == 1 {
-        noun.to_string()
-    } else {
-        format!("{noun}s")
-    }
 }
 
 async fn run_scan(args: ScanRunArgs) {
@@ -1532,11 +1525,20 @@ async fn run_scan(args: ScanRunArgs) {
         }
     };
 
+    let driver = source::default_driver_or_exit("gage scan");
+
     // The dialog settles the inputs and builds the dataset; the scan
-    // itself runs after it, so its output lands outside the dialog
+    // itself runs after it, under the progress view or headless
     let mut prep: Option<ScanPrep> = None;
     dialog::run_async("Scan sessions", || {
-        prepare_scan_dialog(args, &registry, &config, &store, &mut prep)
+        prepare_scan_dialog(
+            args,
+            &registry,
+            &config,
+            &store,
+            Arc::clone(&driver),
+            &mut prep,
+        )
     })
     .await;
     // A declined confirmation leaves nothing to run; a failure has
@@ -1544,14 +1546,15 @@ async fn run_scan(args: ScanRunArgs) {
     let Some(prep) = prep else {
         return;
     };
-    run_prepared(prep, &store).await;
+    run_prepared(prep, &store, driver).await;
 }
 
 /// Everything the dialog settled for the run.
 struct ScanPrep {
     compiled: Vec<CompiledScanner>,
-    /// The dataset to scan, built or reused once the run starts
-    plan: DatasetPlan,
+    scan_id: String,
+    /// The commit of the dataset to scan; `None` for a run without one
+    dataset_sha: Option<String>,
     jobs: usize,
     agent_jobs: usize,
     invalidate: bool,
@@ -1593,6 +1596,7 @@ async fn prepare_scan_dialog(
     registry: &ScannerRegistry,
     config: &Config,
     store: &Store,
+    driver: Arc<dyn Driver>,
     prep: &mut Option<ScanPrep>,
 ) -> Result<dialog::DialogResult, DialogError> {
     // Scanner selection: -s (a registry name or a path), -g, the
@@ -1674,44 +1678,30 @@ async fn prepare_scan_dialog(
             "No sessions matched the selection".to_string(),
         ));
     }
+    let progress_ui = !args.no_progress && io::stdout().is_terminal();
+    // Minted before the dataset so the dataset can record its scan
+    let scan_id = new_uuid();
+    let (dataset_sha, outro) =
+        materialize_dataset(plan, &scan_id, store, &compiled, driver, progress_ui).await?;
     *prep = Some(ScanPrep {
         compiled,
-        plan,
+        scan_id,
+        dataset_sha,
         jobs: args.jobs,
         agent_jobs: args.agent_jobs,
         invalidate: args.invalidate,
         ignore_missing_attachments: args.ignore_missing_attachments,
         tag: args.tag,
         force_tag: args.force_tag,
-        progress_ui: !args.no_progress && io::stdout().is_terminal(),
+        progress_ui,
     });
-    Ok("Starting scan".into())
+    Ok(outro.into())
 }
 
-/// Build the dataset, then run the prepared scan, headless or under
-/// the progress view, and print its summary line. A canceled scan or
-/// one with a failed task exits with status 1.
-async fn run_prepared(prep: ScanPrep, store: &Store) {
-    let driver = source::default_driver_or_exit("gage scan");
-    // Minted before the dataset so the dataset can record its scan
-    let scan_id = new_uuid();
-    let dataset_sha = match materialize_dataset(
-        prep.plan,
-        &scan_id,
-        store,
-        &prep.compiled,
-        Arc::clone(&driver),
-        prep.progress_ui,
-    )
-    .await
-    {
-        Ok(sha) => sha,
-        Err(e) => {
-            eprintln!("gage scan: {e}");
-            std::process::exit(1);
-        }
-    };
-
+/// Run the prepared scan, headless or under the progress view, and
+/// print its summary line. A canceled scan or one with a failed task
+/// exits with status 1.
+async fn run_prepared(prep: ScanPrep, store: &Store, driver: Arc<dyn Driver>) {
     // Ctrl-C cancels the run; the scan applies what ran. Once tokio
     // has taken the signal, a second Ctrl-C during apply has no
     // effect.
@@ -1727,10 +1717,10 @@ async fn run_prepared(prep: ScanPrep, store: &Store) {
     };
 
     let scan_config = ScanConfig {
-        id: &scan_id,
+        id: &prep.scan_id,
         scans_dir: &scans_dir(),
         gage_version: crate::VERSION,
-        dataset: dataset_sha.as_deref(),
+        dataset: prep.dataset_sha.as_deref(),
         jobs: prep.jobs,
         agent_jobs: prep.agent_jobs,
         driver,
@@ -1756,11 +1746,10 @@ async fn run_prepared(prep: ScanPrep, store: &Store) {
                 Event::Scan(ScanOutput::Out(s)) => print!("{s}"),
                 Event::Scan(ScanOutput::Err(s)) => eprint!("{s}"),
                 Event::Started { id, tasks } => {
-                    let n = tasks.len();
                     println!(
-                        "Scan {} started: {n} {}",
+                        "Scan {} started: {}",
                         short_uuid(&id),
-                        plural(n, "task")
+                        count(tasks.len(), "task")
                     );
                 }
                 // A snapshot for the progress view
@@ -2047,17 +2036,11 @@ fn preview_dataset(plan: &DatasetPlan) -> Result<(), DialogError> {
         DatasetPlan::Reuse {
             id, session_count, ..
         } => {
-            let line = format!(
-                "dataset {} ({} {})",
-                short_uuid(id),
-                session_count,
-                plural(*session_count, "session"),
-            );
+            let line = format!("{} ({})", short_uuid(id), count(*session_count, "session"));
             cli::log::step(format!("Dataset\n{}", style(line).dim()))?;
         }
         DatasetPlan::New { selected } => {
-            let n = selected.len();
-            let line = format!("{n} {}", plural(n, "session"));
+            let line = count(selected.len(), "session");
             cli::log::step(format!("Sessions\n{}", style(line).dim()))?;
         }
         DatasetPlan::None => {
@@ -2071,10 +2054,9 @@ fn preview_dataset(plan: &DatasetPlan) -> Result<(), DialogError> {
 /// of a new dataset built from the selected sessions and prepared by
 /// the attach tasks of `scanners`, so the scan links a commit that
 /// holds the attachments. A new dataset records `scan_id` as its
-/// origin. The build shows a progress bar under
-/// `progress`, cleared when it completes, and prints each session's
-/// outcome line otherwise; the closing `Added N sessions` line and
-/// the attach phase's lines print either way.
+/// origin. The build renders through an `AddView`: a progress bar
+/// under `progress`, every outcome line otherwise. Returns the commit
+/// with the dialog's closing line, which announces the scan.
 async fn materialize_dataset(
     plan: DatasetPlan,
     scan_id: &str,
@@ -2082,50 +2064,46 @@ async fn materialize_dataset(
     scanners: &[CompiledScanner],
     driver: Arc<dyn Driver>,
     progress: bool,
-) -> Result<Option<String>, String> {
+) -> Result<(Option<String>, String), DialogError> {
     match plan {
-        DatasetPlan::None => Ok(None),
-        DatasetPlan::Reuse { commit_sha, .. } => Ok(Some(commit_sha)),
+        DatasetPlan::None => Ok((None, "Starting scan without a dataset".to_string())),
+        DatasetPlan::Reuse {
+            id,
+            commit_sha,
+            session_count,
+        } => Ok((
+            Some(commit_sha),
+            format!(
+                "Starting scan of dataset {} ({})",
+                short_uuid(&id),
+                count(session_count, "session")
+            ),
+        )),
         DatasetPlan::New { selected } => {
             let origin = DatasetOrigin::Scan(scan_id.to_string());
-            let id = cmd_dataset::create_dataset("gage scan", store, Some(&origin));
-            let mut bar: Option<ProgressBar> = None;
+            let id = cmd_dataset::create_dataset(store, Some(&origin))
+                .map_err(|e| DialogError::Failed(e.to_string()))?;
+            let mut view = AddView::with_progress(progress);
             cmd_dataset::add_native_to_dataset(store, &id, None, &selected, None, &mut |event| {
-                match &event {
-                    AddEvent::Starting { total, .. } => {
-                        if progress {
-                            bar.get_or_insert_with(|| add_progress_bar(*total));
-                        }
-                    }
-                    AddEvent::Added { .. } => match &bar {
-                        Some(bar) => bar.inc(1),
-                        None => println!("{event}"),
-                    },
-                    AddEvent::Done { .. } => {
-                        if let Some(bar) = bar.take() {
-                            bar.finish_and_clear();
-                        }
-                        println!("{event}");
-                    }
-                }
-            })?;
-            scanner_attach::attach_for_scanners(store, &id, scanners, driver)
-                .await
-                .map_err(|e| e.to_string())?;
-            Ok(Some(
-                DatasetStore::from(store)
-                    .get(&id)
-                    .map_err(|e| e.to_string())?
-                    .commit_sha,
+                view.on(event)
+            })
+            .map_err(DialogError::Failed)?;
+            let placed = view.finish()?;
+            scanner_attach::attach_for_scanners(store, &id, scanners, driver).await?;
+            let commit_sha = DatasetStore::from(store)
+                .get(&id)
+                .map_err(|e| DialogError::Failed(e.to_string()))?
+                .commit_sha;
+            Ok((
+                Some(commit_sha),
+                format!(
+                    "Starting scan of dataset {} ({})",
+                    short_uuid(&id),
+                    count(placed, "session")
+                ),
             ))
         }
     }
-}
-
-fn add_progress_bar(total: usize) -> ProgressBar {
-    let bar = s::progress_bar(total as u64);
-    bar.set_message("Preparing scan dataset");
-    bar
 }
 
 /// The scan's short id, highlighted against the same set a scan id

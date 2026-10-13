@@ -113,38 +113,48 @@ pub async fn main(args: PushArgs) {
         .iter()
         .partition(|r| on_remote.get(&r.name) != Some(&r.sha));
     if send.is_empty() {
-        println!("Everything up to date on {remote}");
+        dialog::run(&format!("Push to {remote}"), || {
+            Ok(format!("Everything up to date on {remote}").into())
+        });
         return;
     }
     let send_names: Vec<String> = send.iter().map(|r| r.name.clone()).collect();
 
     let summary = summary_lines(&objects, &tag_refs, &refs, up_to_date.len());
+    // The dialog previews and confirms; the push runs after it, so
+    // git's own output lands outside the dialog
+    let mut confirmed = false;
     dialog::run(&format!("Push to {remote}"), || {
         cli::log::remark(summary.join("\n"))?;
-
         if !args.yes {
             let prompt = format!("Push {} refs to {remote}?", send_names.len());
-            let confirmed = cli::confirm(prompt).initial_value(false).interact()?;
-            if !confirmed {
+            if !cli::confirm(prompt).initial_value(false).interact()? {
                 return Err(DialogError::Canceled);
             }
         }
-
-        let store = store.lock().unwrap();
-        let remotes = RemoteStore::from(&*store);
-        let approval = remotes
-            .approval_digest(&send_names)
-            .map_err(|e| DialogError::Other(e.into()))?;
-        let status = remotes
-            .push(&repository, &send_names, &approval)
-            .map_err(|e| DialogError::Other(e.into()))?;
-        if !status.success() {
-            return Err(DialogError::Failed(format!(
-                "Push to {remote} was rejected; fetch and retry: gage fetch {remote}"
-            )));
-        }
-        Ok(format!("Pushed {} refs to {remote}", send_names.len()).into())
+        confirmed = true;
+        Ok(format!("Pushing {} refs to {remote}", send_names.len()).into())
     });
+    if !confirmed {
+        return;
+    }
+
+    let store = store.lock().unwrap();
+    let remotes = RemoteStore::from(&*store);
+    let approval = match remotes.approval_digest(&send_names) {
+        Ok(approval) => approval,
+        Err(e) => fail(&e),
+    };
+    let status = match remotes.push(&repository, &send_names, &approval) {
+        Ok(status) => status,
+        Err(e) => fail(&e),
+    };
+    if !status.success() {
+        fail(&format!(
+            "push to {remote} was rejected; fetch and retry: gage fetch {remote}"
+        ));
+    }
+    println!("Pushed {} refs to {remote}", send_names.len());
 }
 
 /// The named objects and everything they link, transitively.

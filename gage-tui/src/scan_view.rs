@@ -22,6 +22,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use gage_core::stopwatch::Stopwatch;
+use gage_core::style::SPINNER_FRAMES;
 use gage_core::task::{task_display, task_name_display};
 use gage_session::ResolveSession;
 use gage_store::{IssueStatus, StatusReason, url};
@@ -3037,12 +3038,9 @@ fn header_gauge_line(label: &str, ratio: f64, width: usize) -> Line<'static> {
     ])
 }
 
-/// Indicatif-style braille spinner; one frame per 100ms redraw tick
-const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-
 fn draw_tasks(frame: &mut Frame, area: Rect, state: &mut ViewState) {
-    let frame_idx = (state.started.elapsed().as_millis() / 100) as usize % SPINNER.len();
-    let spinner = *SPINNER.get(frame_idx).expect("mod len is in bounds");
+    let frame_idx = (state.started.elapsed().as_millis() / 100) as usize % SPINNER_FRAMES.len();
+    let spinner = *SPINNER_FRAMES.get(frame_idx).expect("mod len is in bounds");
     let selected = state.tasks.selected_index();
     let finished = state.model.finished;
     let flat = flat_task_rows(&state.model, &state.expanded);
