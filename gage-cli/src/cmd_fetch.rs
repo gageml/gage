@@ -40,8 +40,15 @@ pub struct FetchArgs {
     ///
     /// Tag names, object IDs, or unique ID prefixes as the remote
     /// has them. Everything an object links is fetched with it. With
-    /// none, every object and tag the remote has
+    /// none, pass --all to fetch the whole remote
     objects: Vec<String>,
+
+    /// Fetch every object and tag from remote
+    ///
+    /// Required when no object is named. The fetch still previews the
+    /// counts and asks to continue
+    #[arg(long, conflicts_with = "objects")]
+    all: bool,
 
     /// Keep local side on conflict
     #[arg(long, requires = "objects", conflicts_with = "theirs")]
@@ -57,6 +64,9 @@ pub struct FetchArgs {
 }
 
 pub fn main(args: FetchArgs) {
+    if args.objects.is_empty() && !args.all {
+        fail(&"name objects to fetch, or pass --all to fetch the whole remote");
+    }
     let store = match Store::open(&gage_store::store_path()) {
         Ok(store) => store,
         Err(e) => fail(&e),

@@ -210,8 +210,8 @@ enum Command {
 
     /// Fetch objects from a remote or URL
     ///
-    /// Adopts what the remote has: everything, or the named objects
-    /// and what they link. Reports what could not be merged.
+    /// Adopts the named objects and what they link, or the whole
+    /// remote with --all. Reports what could not be merged.
     Fetch(cmd_fetch::FetchArgs),
 
     /// Back up store to a remote
