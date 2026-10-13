@@ -1,7 +1,7 @@
 //! `gage status` — one-shot health and inventory report.
 //!
 //! Gathers each driver's status (its harness, login, and Gage's
-//! installation), corpus item counts, and disk usage under `~/.gage`
+//! plugin installation), corpus item counts, and disk usage under `~/.gage`
 //! behind a spinner, then prints the whole report at once. Read-only:
 //! no dialogs, no session spawns, no token cost.
 
@@ -35,10 +35,11 @@ pub async fn run(args: StatusArgs) {
     let spinner = crate::style::spinner("Reading status...");
     let mut out = String::new();
     let mut problems = Vec::new();
+    w(&mut out, format!("{}", style("Drivers").bold()));
     for driver in driver_registry().drivers() {
         write_driver(&mut out, &mut problems, driver.as_ref());
-        out.push('\n');
     }
+    out.push('\n');
     write_counts(&mut out, &mut problems).await;
     out.push('\n');
     write_storage(&mut out, args.verbose);
@@ -50,18 +51,15 @@ pub async fn run(args: StatusArgs) {
     print!("{out}");
 }
 
-/// One driver's block: its harness, login, and Gage installation,
-/// each on a labeled line, with every problem collected for the
-/// closing list.
+/// One driver's block: its name, then its harness, login, and Gage
+/// plugin each on a labeled line, with every problem collected
+/// for the closing list.
 fn write_driver(out: &mut String, problems: &mut Vec<String>, driver: &dyn Driver) {
-    w(
-        out,
-        format!("{}", style(format!("Driver {}", driver.name())).bold()),
-    );
+    w(out, format!("  {}", driver.name()));
     let status = match driver.status() {
         Ok(status) => status,
         Err(e) => {
-            w(out, "  unavailable".to_string());
+            w(out, "    unavailable".to_string());
             problems.push(format!("Driver {} status unavailable: {e}", driver.name()));
             return;
         }
@@ -71,9 +69,9 @@ fn write_driver(out: &mut String, problems: &mut Vec<String>, driver: &dyn Drive
         auth,
         install,
     } = status;
-    write_field(out, "Harness", &harness, harness_line);
-    write_field(out, "Login", &auth, auth_line);
-    write_field(out, "Install", &install, install_line);
+    write_field(out, "Harness", &harness, harness_lines);
+    write_field(out, "Login", &auth, auth_lines);
+    write_field(out, "Plugin", &install, install_lines);
     for problem in [harness.problem(), auth.problem(), install.problem()]
         .into_iter()
         .flatten()
@@ -83,23 +81,35 @@ fn write_driver(out: &mut String, problems: &mut Vec<String>, driver: &dyn Drive
 }
 
 /// Write `label` and the field's value: the rendered info, a
-/// problem's message, or nothing for an unsupported field.
-fn write_field<T>(out: &mut String, label: &str, field: &Field<T>, render: fn(&T) -> String) {
-    let value = match field {
+/// problem's message, or nothing for an unsupported field. The first
+/// line carries the label; later lines are indented to the value
+/// column.
+fn write_field<T>(out: &mut String, label: &str, field: &Field<T>, render: fn(&T) -> Vec<String>) {
+    let lines = match field {
         Field::Ok(info) => render(info),
-        Field::Problem { message, .. } => message.clone(),
+        Field::Problem { message, .. } => vec![message.clone()],
         Field::Unsupported => return,
     };
-    w(out, format!("  {label:<8} {value}"));
+    for (i, line) in lines.into_iter().enumerate() {
+        if i == 0 {
+            w(out, format!("    {label:<7}  {line}"));
+        } else {
+            w(out, format!("    {:<7}  {line}", ""));
+        }
+    }
 }
 
-fn harness_line(h: &HarnessInfo) -> String {
+fn harness_lines(h: &HarnessInfo) -> Vec<String> {
     let version = h.version.as_deref().unwrap_or("unknown version");
-    format!("{} {version} {}", h.name, style(h.path.display()).dim())
+    vec![format!(
+        "{} {version} {}",
+        h.name,
+        style(h.path.display()).dim()
+    )]
 }
 
-fn auth_line(a: &AuthInfo) -> String {
-    let mut parts = vec![
+fn auth_lines(a: &AuthInfo) -> Vec<String> {
+    let mut lines = vec![
         a.account
             .clone()
             .unwrap_or_else(|| "unknown account".into()),
@@ -111,19 +121,20 @@ fn auth_line(a: &AuthInfo) -> String {
         ("method", &a.method),
     ] {
         if let Some(value) = value {
-            parts.push(format!("{}", style(format!("{label} {value}")).dim()));
+            lines.push(format!("{}", style(format!("{label} {value}")).dim()));
         }
     }
-    parts.join(" · ")
+    lines
 }
 
-fn install_line(i: &InstallInfo) -> String {
+fn install_lines(i: &InstallInfo) -> Vec<String> {
     let version = i.version.as_deref().unwrap_or("unknown version");
     let disabled = if i.enabled { "" } else { " (disabled)" };
-    match &i.path {
-        Some(path) => format!("gage v{version}{disabled} {}", style(path.display()).dim()),
-        None => format!("gage v{version}{disabled}"),
+    let mut lines = vec![format!("gage v{version}{disabled}")];
+    if let Some(path) = &i.path {
+        lines.push(format!("{}", style(path.display()).dim()));
     }
+    lines
 }
 
 fn problem_text((message, remedy): (&str, &str)) -> String {
