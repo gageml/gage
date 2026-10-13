@@ -1,169 +1,124 @@
-use std::collections::BTreeMap;
-use std::collections::btree_map::Entry;
 use std::env;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::io;
 use std::process::Command;
 
-use clap::{Args, Subcommand};
-use tabled::{
-    Table,
-    settings::{Color, Style, object::Rows},
-};
-use toml::Value;
+use clap::Subcommand;
+use console::style;
+use toml::{Table, Value};
 
-use gage_core::config::{
-    Config, discover_config_paths, find_project_gage_dir, find_project_root, user_config_path,
-};
-use gage_core::path::shorten_home;
-
-use crate::style;
+use gage_core::config::{Config, display_user_config_path, user_config_path};
 
 #[derive(Subcommand)]
 pub enum ConfigCommand {
-    /// Show effective Gage configuration
+    /// Show effective configuration
+    ///
+    /// Show effective configuration. Every setting is listed with its
+    /// effective value; settings not present in the config file are
+    /// marked as defaults.
     Show,
 
-    /// Edit a config file in system editor
-    Edit(EditArgs),
-}
-
-#[derive(Args)]
-pub struct EditArgs {
-    /// Edit user config, ~/.gage/config.toml
-    #[arg(long, conflicts_with_all = ["project", "path"])]
-    user: bool,
-
-    /// Edit nearest project config, .gage/config.toml
-    #[arg(long, conflicts_with_all = ["user", "path"])]
-    project: bool,
-
-    /// Edit DIR/.gage/config.toml
-    #[arg(long, conflicts_with_all = ["user", "project"], value_name = "DIR")]
-    path: Option<PathBuf>,
+    /// Edit config file in system editor
+    ///
+    /// Edit config file in system editor. Opens ~/.gage/config.toml in
+    /// $VISUAL or $EDITOR, creating it with default values if absent.
+    Edit,
 }
 
 pub fn run(command: ConfigCommand) {
     match command {
         ConfigCommand::Show => show(),
-        ConfigCommand::Edit(args) => edit(args),
+        ConfigCommand::Edit => edit(),
     }
 }
 
 fn show() {
-    let cwd = match env::current_dir() {
-        Ok(p) => p,
+    let config = match Config::load_user() {
+        Ok(c) => c,
         Err(e) => {
-            eprintln!("Error reading cwd: {e}");
+            eprintln!("gage config show: {e}");
             std::process::exit(1);
         }
     };
-    let paths = discover_config_paths(&cwd);
-
-    // Inner-to-outer collection of (setting, source, raw value).
-    let mut occurrences: Vec<(String, PathBuf, Value)> = Vec::new();
-    for path in &paths {
-        let content = match fs::read_to_string(path) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("Error reading {}: {e}", path.display());
-                std::process::exit(1);
-            }
-        };
-        let table: toml::Table = match toml::from_str(&content) {
-            Ok(t) => t,
-            Err(e) => {
-                eprintln!("Error parsing {}: {e}", path.display());
-                std::process::exit(1);
-            }
-        };
-        flatten_into(&mut occurrences, path, "", &table);
-    }
-
-    if occurrences.is_empty() {
-        println!("\x1b[2;3mGage currently has no configured settings\x1b[22;23m");
-        return;
-    }
-
-    // Keep only the inner-most occurrence per setting (VS Code semantics:
-    // scalars and arrays are replaced; tables deep-merge naturally because
-    // we flatten to dotted leaf paths).
-    let mut order: Vec<String> = Vec::new();
-    let mut winners: BTreeMap<String, (PathBuf, Value)> = BTreeMap::new();
-    for (key, path, value) in occurrences {
-        if let Entry::Vacant(e) = winners.entry(key.clone()) {
-            order.push(key);
-            e.insert((path, value));
-        }
-    }
-
-    let mut rows: Vec<Vec<String>> = Vec::new();
-    rows.push(vec![
-        "Setting".to_string(),
-        "Value".to_string(),
-        "Source".to_string(),
-    ]);
-    for key in order {
-        let (path, value) = winners
-            .get(&key)
-            .expect("key recorded in `order` is present in `winners`");
-        rows.push(vec![key, render_value(value), display_source(path)]);
-    }
-
-    let table = Table::from_iter(rows)
-        .with(Style::rounded())
-        .modify(Rows::first(), style::tty(Color::FG_BRIGHT_YELLOW))
-        .to_string();
-    println!("{table}");
-}
-
-/// Recursively flattens nested TOML tables into dotted keys, appending
-/// `(key, path, value)` entries in document order. Leaf = anything that
-/// isn't a table.
-fn flatten_into(
-    out: &mut Vec<(String, PathBuf, Value)>,
-    path: &Path,
-    prefix: &str,
-    table: &toml::Table,
-) {
-    for (k, v) in table {
-        let key = if prefix.is_empty() {
-            k.clone()
-        } else {
-            format!("{prefix}.{k}")
-        };
-        match v {
-            Value::Table(inner) => flatten_into(out, path, &key, inner),
-            _ => out.push((key, path.to_path_buf(), v.clone())),
-        }
-    }
-}
-
-/// Renders a TOML value as it would appear inline in a config file
-/// (e.g. `"evidence"`, `["a", "b"]`, `42`, `true`).
-fn render_value(v: &Value) -> String {
-    v.to_string()
-}
-
-fn display_source(path: &Path) -> String {
-    shorten_home(path)
-}
-
-fn edit(args: EditArgs) {
-    let target = match resolve_edit_target(&args) {
-        Ok(p) => p,
+    let effective = match Value::try_from(&config) {
+        Ok(Value::Table(t)) => t,
+        Ok(_) => unreachable!("Config serializes to a TOML table"),
         Err(e) => {
-            eprintln!("{e}");
+            eprintln!("gage config show: {e}");
             std::process::exit(1);
         }
     };
+    let set = match read_set_table() {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("gage config show: {e}");
+            std::process::exit(1);
+        }
+    };
+    let marker = style("# default").dim().to_string();
+    println!("# {}", display_user_config_path());
+    print!("{}", render(&effective, &set, &marker));
+}
 
-    if let Some(parent) = target.parent()
-        && let Err(e) = std::fs::create_dir_all(parent)
-    {
-        eprintln!("Error creating {}: {e}", parent.display());
-        std::process::exit(1);
+/// Reads the config file as a raw TOML table, so that `render` can
+/// tell which settings the file supplies. An absent file is an empty
+/// table.
+fn read_set_table() -> io::Result<Table> {
+    match fs::read_to_string(user_config_path()) {
+        Ok(s) => toml::from_str(&s).map_err(io::Error::other),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Table::new()),
+        Err(e) => Err(e),
     }
+}
+
+/// Renders `effective` as TOML. A leaf whose dotted path is absent from
+/// `set` carries `marker` after its value. Tables render as `[dotted]`
+/// sections, each preceded by a blank line.
+fn render(effective: &Table, set: &Table, marker: &str) -> String {
+    let mut out = String::new();
+    render_table(&mut out, effective, set, &[], marker);
+    out
+}
+
+fn render_table(out: &mut String, table: &Table, set: &Table, path: &[&str], marker: &str) {
+    let leaves = table.iter().filter(|(_, v)| !v.is_table());
+    let mut wrote_leaf = false;
+    for (key, value) in leaves {
+        if !wrote_leaf && !path.is_empty() {
+            out.push_str(&format!("\n[{}]\n", path.join(".")));
+        }
+        wrote_leaf = true;
+        let mut full: Vec<&str> = path.to_vec();
+        full.push(key);
+        out.push_str(&format!("{key} = {value}"));
+        if !is_set(set, &full) {
+            out.push_str(&format!("  {marker}"));
+        }
+        out.push('\n');
+    }
+    for (key, value) in table {
+        if let Value::Table(inner) = value {
+            let mut full: Vec<&str> = path.to_vec();
+            full.push(key);
+            render_table(out, inner, set, &full, marker);
+        }
+    }
+}
+
+fn is_set(set: &Table, path: &[&str]) -> bool {
+    let mut cur = set;
+    let (last, parents) = path.split_last().expect("render passes a non-empty path");
+    for key in parents {
+        match cur.get(*key) {
+            Some(Value::Table(t)) => cur = t,
+            _ => return false,
+        }
+    }
+    cur.contains_key(*last)
+}
+
+fn edit() {
+    let target = user_config_path();
     if !target.exists()
         && let Err(e) = Config::default().save_to(&target)
     {
@@ -171,43 +126,71 @@ fn edit(args: EditArgs) {
         std::process::exit(1);
     }
 
-    let editor = env::var("VISUAL")
-        .or_else(|_| env::var("EDITOR"))
-        .unwrap_or_else(|_| "vi".to_string());
+    let editor = env::var_os("VISUAL")
+        .or_else(|| env::var_os("EDITOR"))
+        .unwrap_or_else(|| "vi".into());
 
-    let status = Command::new(&editor).arg(&target).status();
-    match status {
+    match Command::new(&editor).arg(&target).status() {
         Ok(s) if s.success() => {}
         Ok(s) => {
             eprintln!("Editor exited with status {s}");
             std::process::exit(1);
         }
         Err(e) => {
-            eprintln!("Failed to launch editor `{editor}`: {e}");
+            eprintln!("Failed to launch editor {}: {e}", editor.to_string_lossy());
             std::process::exit(1);
         }
     }
 }
 
-fn resolve_edit_target(args: &EditArgs) -> Result<PathBuf, String> {
-    if args.user {
-        return Ok(user_config_path());
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tables(set: &str) -> (Table, Table) {
+        let effective = match Value::try_from(Config::default()).unwrap() {
+            Value::Table(t) => t,
+            _ => unreachable!(),
+        };
+        (effective, toml::from_str(set).unwrap())
     }
-    if let Some(p) = &args.path {
-        return Ok(p.join(".gage").join("config.toml"));
+
+    #[test]
+    fn render_marks_unset_leaves_and_leaves_set_ones_plain() {
+        let (effective, set) = tables("[issues]\nrelated_threshold = 0.2\n");
+        let out = render(&effective, &set, "# default");
+        assert!(
+            out.contains("\n[issues]\nrelated_threshold = 0.2\n"),
+            "{out}"
+        );
+        assert!(
+            out.contains("max_session_size = \"256MB\"  # default\n"),
+            "{out}"
+        );
+        assert!(out.contains("enable = []  # default\n"), "{out}");
     }
-    if args.project {
-        let cwd = env::current_dir().map_err(|e| format!("Error reading cwd: {e}"))?;
-        if let Some(dir) = find_project_gage_dir(&cwd) {
-            return Ok(dir.join(".gage").join("config.toml"));
+
+    #[test]
+    fn render_lists_every_section() {
+        let (effective, set) = tables("");
+        let out = render(&effective, &set, "#");
+        for section in ["[issues]", "[scanners]", "[storage]"] {
+            assert!(out.contains(section), "{out}");
         }
-        if let Some(dir) = find_project_root(&cwd) {
-            return Ok(dir.join(".gage").join("config.toml"));
-        }
-        return Err(
-            "No project directory found. Use `gage config edit --path .` to edit the config in the current directory."
-                .to_string(),
+    }
+
+    #[test]
+    fn render_nests_dotted_sections() {
+        let mut effective = Table::new();
+        let mut foo = Table::new();
+        foo.insert("url".into(), Value::String("claude:~/x".into()));
+        let mut source = Table::new();
+        source.insert("foo".into(), Value::Table(foo));
+        effective.insert("source".into(), Value::Table(source));
+        let set: Table = toml::from_str("[source.foo]\nurl = \"claude:~/x\"\n").unwrap();
+        assert_eq!(
+            render(&effective, &set, "#"),
+            "\n[source.foo]\nurl = \"claude:~/x\"\n"
         );
     }
-    Err("One of --user, --project, or --path is required".to_string())
 }

@@ -1524,15 +1524,8 @@ async fn run_scan(args: ScanRunArgs) {
 
     let registry = ScannerRegistry::load();
     let store = open_store("gage scan");
-    let cwd = match std::env::current_dir() {
-        Ok(cwd) => cwd,
-        Err(e) => {
-            eprintln!("gage scan: reading cwd: {e}");
-            std::process::exit(1);
-        }
-    };
-    let config = match gage_core::config::load_merged(&cwd) {
-        Ok((config, _)) => config,
+    let config = match Config::load_user() {
+        Ok(config) => config,
         Err(e) => {
             eprintln!("gage scan: reading config: {e}");
             std::process::exit(1);
@@ -2157,15 +2150,8 @@ pub(crate) fn list_scanners(registry: &ScannerRegistry) {
         .map(|s| s.to_string())
         .collect();
 
-    let cwd = match std::env::current_dir() {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("Error reading cwd: {e}");
-            std::process::exit(1);
-        }
-    };
-    let config = match gage_core::config::load_merged(&cwd) {
-        Ok((c, _)) => c,
+    let config = match Config::load_user() {
+        Ok(c) => c,
         Err(e) => {
             eprintln!("Error reading config: {e}");
             std::process::exit(1);
