@@ -154,14 +154,20 @@ impl Backend {
 
     /// Every entry with the message subtype the driver derived for
     /// it, when the entry is a message.
+    ///
+    /// The session id is a literal on both sides of the join. A filter
+    /// on the preserved side of a left join is not propagated to the
+    /// other side, so an unfiltered message relation scans every
+    /// session: 15 s against a store of 198k messages versus 0.4 s
+    /// with the literal in the join condition.
     async fn load_entries(&self, session_id: &str) -> Result<Vec<Entry>, Box<dyn Error>> {
+        let id = sql_str(session_id);
         let sql = format!(
             "SELECT e.line, e.uuid, e.type, m.subtype, e.raw \
-             FROM {} e LEFT JOIN {} m ON m.session_id = e.session_id AND m.line = e.line \
-             WHERE e.session_id = '{}' ORDER BY e.line",
+             FROM {} e LEFT JOIN {} m ON m.session_id = '{id}' AND m.line = e.line \
+             WHERE e.session_id = '{id}' ORDER BY e.line",
             self.entry_rel(),
             self.message_rel(),
-            sql_str(session_id)
         );
         let batches = self.ctx.sql(&sql).await?.collect().await?;
         let mut entries = Vec::new();
