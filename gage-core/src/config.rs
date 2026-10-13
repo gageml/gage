@@ -153,25 +153,13 @@ pub struct Config {
 }
 
 /// `gage backup` settings.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct BackupConfig {
     /// Sources whose sessions are added to the store before each
     /// backup. `gage backup --source` replaces the list for one run;
     /// `--stored` skips it.
-    #[serde(default = "default_backup_sources")]
+    #[serde(default)]
     pub sources: Vec<String>,
-}
-
-fn default_backup_sources() -> Vec<String> {
-    vec!["claude:".to_string()]
-}
-
-impl Default for BackupConfig {
-    fn default() -> Self {
-        Self {
-            sources: default_backup_sources(),
-        }
-    }
 }
 
 /// Session storage settings.

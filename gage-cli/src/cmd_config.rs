@@ -1,22 +1,30 @@
 use std::env;
-use std::fs;
-use std::io;
 use std::process::Command;
 
 use clap::Subcommand;
-use console::style;
 use toml::{Table, Value};
 
-use gage_core::config::{Config, display_user_config_path, user_config_path};
+use gage_core::config::{Config, user_config_path};
 
 #[derive(Subcommand)]
 pub enum ConfigCommand {
-    /// Show effective configuration
+    /// List effective configuration
     ///
-    /// Show effective configuration. Every setting is listed with its
-    /// effective value; settings not present in the config file are
-    /// marked as defaults.
-    Show,
+    /// List effective configuration. Every setting is printed as
+    /// "name = value" with its working value, which is the value in
+    /// ~/.gage/config.toml or the default when the file does not set
+    /// it.
+    List,
+
+    /// Show effective value of a setting
+    ///
+    /// Show effective value of a setting. NAME is dotted, as printed by
+    /// "gage config list". A string prints without quotes; any other
+    /// value prints as it appears in config.toml.
+    Get {
+        /// Setting to show
+        name: String,
+    },
 
     /// Edit config file in system editor
     ///
@@ -27,94 +35,70 @@ pub enum ConfigCommand {
 
 pub fn run(command: ConfigCommand) {
     match command {
-        ConfigCommand::Show => show(),
+        ConfigCommand::List => list(),
+        ConfigCommand::Get { name } => get(&name),
         ConfigCommand::Edit => edit(),
     }
 }
 
-fn show() {
+fn list() {
+    let effective = load_effective("list");
+    for (name, value) in leaves(&effective) {
+        println!("{name} = {value}");
+    }
+}
+
+fn get(name: &str) {
+    let effective = load_effective("get");
+    let Some(value) = leaves(&effective).into_iter().find(|(n, _)| n == name) else {
+        eprintln!("gage config get: no setting named {name}");
+        std::process::exit(1);
+    };
+    match value.1 {
+        Value::String(s) => println!("{s}"),
+        other => println!("{other}"),
+    }
+}
+
+/// Loads the user config and converts it to a TOML table so that
+/// every setting, set or defaulted, has a dotted name and a value.
+fn load_effective(verb: &str) -> Table {
     let config = match Config::load_user() {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("gage config show: {e}");
+            eprintln!("gage config {verb}: {e}");
             std::process::exit(1);
         }
     };
-    let effective = match Value::try_from(&config) {
+    match Value::try_from(&config) {
         Ok(Value::Table(t)) => t,
         Ok(_) => unreachable!("Config serializes to a TOML table"),
         Err(e) => {
-            eprintln!("gage config show: {e}");
+            eprintln!("gage config {verb}: {e}");
             std::process::exit(1);
         }
-    };
-    let set = match read_set_table() {
-        Ok(t) => t,
-        Err(e) => {
-            eprintln!("gage config show: {e}");
-            std::process::exit(1);
-        }
-    };
-    let marker = style("# default").dim().to_string();
-    println!("# {}", display_user_config_path());
-    print!("{}", render(&effective, &set, &marker));
-}
-
-/// Reads the config file as a raw TOML table, so that `render` can
-/// tell which settings the file supplies. An absent file is an empty
-/// table.
-fn read_set_table() -> io::Result<Table> {
-    match fs::read_to_string(user_config_path()) {
-        Ok(s) => toml::from_str(&s).map_err(io::Error::other),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Table::new()),
-        Err(e) => Err(e),
     }
 }
 
-/// Renders `effective` as TOML. A leaf whose dotted path is absent from
-/// `set` carries `marker` after its value. Tables render as `[dotted]`
-/// sections, each preceded by a blank line.
-fn render(effective: &Table, set: &Table, marker: &str) -> String {
-    let mut out = String::new();
-    render_table(&mut out, effective, set, &[], marker);
+/// Flattens a table to `(dotted.name, value)` pairs in key order.
+fn leaves(table: &Table) -> Vec<(String, &Value)> {
+    let mut out = Vec::new();
+    collect_leaves(&mut out, table, "");
     out
 }
 
-fn render_table(out: &mut String, table: &Table, set: &Table, path: &[&str], marker: &str) {
-    let leaves = table.iter().filter(|(_, v)| !v.is_table());
-    let mut wrote_leaf = false;
-    for (key, value) in leaves {
-        if !wrote_leaf && !path.is_empty() {
-            out.push_str(&format!("\n[{}]\n", path.join(".")));
-        }
-        wrote_leaf = true;
-        let mut full: Vec<&str> = path.to_vec();
-        full.push(key);
-        out.push_str(&format!("{key} = {value}"));
-        if !is_set(set, &full) {
-            out.push_str(&format!("  {marker}"));
-        }
-        out.push('\n');
-    }
+fn collect_leaves<'a>(out: &mut Vec<(String, &'a Value)>, table: &'a Table, prefix: &str) {
     for (key, value) in table {
-        if let Value::Table(inner) = value {
-            let mut full: Vec<&str> = path.to_vec();
-            full.push(key);
-            render_table(out, inner, set, &full, marker);
+        let name = if prefix.is_empty() {
+            key.clone()
+        } else {
+            format!("{prefix}.{key}")
+        };
+        match value {
+            Value::Table(inner) => collect_leaves(out, inner, &name),
+            leaf => out.push((name, leaf)),
         }
     }
-}
-
-fn is_set(set: &Table, path: &[&str]) -> bool {
-    let mut cur = set;
-    let (last, parents) = path.split_last().expect("render passes a non-empty path");
-    for key in parents {
-        match cur.get(*key) {
-            Some(Value::Table(t)) => cur = t,
-            _ => return false,
-        }
-    }
-    cur.contains_key(*last)
 }
 
 fn edit() {
@@ -147,50 +131,37 @@ fn edit() {
 mod tests {
     use super::*;
 
-    fn tables(set: &str) -> (Table, Table) {
-        let effective = match Value::try_from(Config::default()).unwrap() {
+    fn default_table() -> Table {
+        match Value::try_from(Config::default()).unwrap() {
             Value::Table(t) => t,
             _ => unreachable!(),
-        };
-        (effective, toml::from_str(set).unwrap())
-    }
-
-    #[test]
-    fn render_marks_unset_leaves_and_leaves_set_ones_plain() {
-        let (effective, set) = tables("[issues]\nrelated_threshold = 0.2\n");
-        let out = render(&effective, &set, "# default");
-        assert!(
-            out.contains("\n[issues]\nrelated_threshold = 0.2\n"),
-            "{out}"
-        );
-        assert!(
-            out.contains("max_session_size = \"256MB\"  # default\n"),
-            "{out}"
-        );
-        assert!(out.contains("enable = []  # default\n"), "{out}");
-    }
-
-    #[test]
-    fn render_lists_every_section() {
-        let (effective, set) = tables("");
-        let out = render(&effective, &set, "#");
-        for section in ["[backup]", "[issues]", "[scanners]", "[storage]"] {
-            assert!(out.contains(section), "{out}");
         }
     }
 
     #[test]
-    fn render_nests_dotted_sections() {
-        let mut effective = Table::new();
-        let mut foo = Table::new();
-        foo.insert("url".into(), Value::String("claude:~/x".into()));
-        let mut source = Table::new();
-        source.insert("foo".into(), Value::Table(foo));
-        effective.insert("source".into(), Value::Table(source));
-        let set: Table = toml::from_str("[source.foo]\nurl = \"claude:~/x\"\n").unwrap();
+    fn leaves_flatten_every_setting_to_a_dotted_name() {
+        let names: Vec<String> = leaves(&default_table())
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect();
         assert_eq!(
-            render(&effective, &set, "#"),
-            "\n[source.foo]\nurl = \"claude:~/x\"\n"
+            names,
+            [
+                "backup.sources",
+                "issues.related_threshold",
+                "scanners.disable",
+                "scanners.enable",
+                "storage.max_session_size",
+            ]
         );
+    }
+
+    #[test]
+    fn leaves_nest_dotted_tables() {
+        let table: Table = toml::from_str("[source.foo]\nurl = \"claude:~/x\"\n").unwrap();
+        let found = leaves(&table);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].0, "source.foo.url");
+        assert_eq!(found[0].1.to_string(), "\"claude:~/x\"");
     }
 }
