@@ -23,9 +23,18 @@ use gage_store::{
     StoreError, TAG_REFS,
 };
 
+use tabled::{
+    Table,
+    settings::{
+        Color, Style,
+        object::{Columns, Object, Rows},
+    },
+};
+
 use crate::author::resolve_author;
 use crate::dialog::{self, DialogError, DialogResult};
 use crate::human::count;
+use crate::style;
 
 #[derive(Args)]
 pub struct FetchArgs {
@@ -61,11 +70,21 @@ pub struct FetchArgs {
     /// Skip confirmation prompt
     #[arg(short, long)]
     yes: bool,
+
+    /// List what remote has without fetching
+    ///
+    /// Prints every tag the remote advertises with how the local
+    /// store compares: new, same, or differs. Objects follow as a
+    /// count by state. Transfers nothing and writes nothing
+    #[arg(long, conflicts_with_all = ["objects", "all", "ours", "theirs", "yes"])]
+    list: bool,
 }
 
 pub fn main(args: FetchArgs) {
-    if args.objects.is_empty() && !args.all {
-        fail(&"name objects to fetch, or pass --all to fetch the whole remote");
+    if args.objects.is_empty() && !args.all && !args.list {
+        fail(
+            &"name objects to fetch, pass --all to fetch the whole remote, or --list to see what it has",
+        );
     }
     let store = match Store::open(&gage_store::store_path()) {
         Ok(store) => store,
@@ -76,6 +95,13 @@ pub fn main(args: FetchArgs) {
         Ok(repository) => FetchSource::from(repository),
         Err(e) => fail(&e),
     };
+    if args.list {
+        let remote = source.repository().name().to_string();
+        if let Err(e) = list_remote(&remotes, &source, &store, &remote) {
+            fail(&e);
+        }
+        return;
+    }
     let choose = match (args.ours, args.theirs) {
         (true, _) => Some(Side::Ours),
         (_, true) => Some(Side::Theirs),
@@ -125,6 +151,65 @@ pub fn main(args: FetchArgs) {
     if report.conflicts().next().is_some() {
         std::process::exit(1);
     }
+}
+
+/// Print what the remote advertises without fetching: its tags in
+/// full, then a count of its objects by state. An object id carries
+/// no description, so objects are a scale and drift signal, not a
+/// listing. State is decided from the advertised commit alone, so a
+/// local ref the remote's commit precedes reads `differs`, not
+/// `behind`.
+fn list_remote(
+    remotes: &RemoteStore<'_>,
+    source: &FetchSource,
+    store: &Store,
+    remote: &str,
+) -> Result<(), StoreError> {
+    let advertised = remotes.ls_remote(source.repository())?;
+    let mut tags: Vec<Vec<String>> = Vec::new();
+    let (mut new, mut same, mut differs) = (0usize, 0usize, 0usize);
+    for (name, remote_sha) in &advertised {
+        let state = match store.rev_parse(name)? {
+            None => "new",
+            Some(local) if local == *remote_sha => "same",
+            Some(_) => "differs",
+        };
+        if let Some(tag) = name.strip_prefix(TAG_REFS) {
+            tags.push(vec![tag.to_string(), state.to_string()]);
+        } else if name.starts_with(OBJECT_REFS) {
+            match state {
+                "new" => new += 1,
+                "same" => same += 1,
+                _ => differs += 1,
+            }
+        }
+    }
+    let objects = new + same + differs;
+    if tags.is_empty() && objects == 0 {
+        println!("Nothing on {remote}");
+        return Ok(());
+    }
+    if !tags.is_empty() {
+        let header = vec!["Tag".to_string(), "State".to_string()];
+        let table = Table::from_iter(std::iter::once(header).chain(tags))
+            .with(Style::rounded())
+            .modify(Rows::first(), style::tty(Color::FG_BRIGHT_YELLOW))
+            .modify(
+                Columns::one(0).not(Rows::first()),
+                style::tty(Color::FG_BRIGHT_CYAN),
+            )
+            .to_string();
+        println!("{table}");
+    }
+    if objects > 0 {
+        let parts: Vec<String> = [("new", new), ("same", same), ("differs", differs)]
+            .into_iter()
+            .filter(|(_, n)| *n > 0)
+            .map(|(label, n)| format!("{n} {label}"))
+            .collect();
+        println!("{} ({})", count(objects, "object"), parts.join(", "));
+    }
+    Ok(())
 }
 
 /// What the dialog settled: the remote's advertised refs, and the
