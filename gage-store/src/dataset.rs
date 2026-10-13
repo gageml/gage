@@ -11,8 +11,12 @@
 //! not copy it. Tree construction, commit parents, and edits are the
 //! generic object model's job; see [`crate::object`].
 
+use std::fmt;
+use std::str::FromStr;
+
 use gage_core::uuid::new_uuid;
 use gage_session::{ContentSource, Driver, NativeSession};
+use serde::{Deserialize, Serialize};
 
 use crate::attachment::{AttachmentRecord, AttachmentStore};
 use crate::content::GitContentSource;
@@ -50,6 +54,8 @@ pub struct DatasetRecord {
     /// The dataset's current commit
     pub commit_sha: String,
     pub created_ms: i64,
+    /// What created the dataset; `None` for one a user built
+    pub origin: Option<DatasetOrigin>,
     /// Member sessions listed in `sessions.link`
     pub session_count: usize,
     /// Attachments listed in `attachments.link`
@@ -153,6 +159,41 @@ pub struct DatasetDeleted {
     pub kept: Vec<String>,
 }
 
+/// What created a dataset, recorded in `attrs.json` as `origin` in
+/// Gage URL form. A dataset a user builds carries no origin.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DatasetOrigin {
+    /// Built by `gage scan` for the run with this scan id
+    Scan(String),
+}
+
+impl fmt::Display for DatasetOrigin {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DatasetOrigin::Scan(id) => write!(f, "scan:{id}"),
+        }
+    }
+}
+
+impl FromStr for DatasetOrigin {
+    type Err = StoreError;
+
+    fn from_str(s: &str) -> Result<Self, StoreError> {
+        match s.split_once(':') {
+            Some(("scan", id)) if !id.is_empty() => Ok(DatasetOrigin::Scan(id.to_string())),
+            _ => Err(StoreError::BadUrl(format!("dataset origin {s}"))),
+        }
+    }
+}
+
+/// The dataset's `attrs.json`. Written only when a field is set, so a
+/// dataset without an origin has no `attrs.json` at all.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct DatasetAttrs {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    origin: Option<String>,
+}
+
 /// One session to add to a dataset. The driver drives the serialization
 /// via [`Driver::write_native`]; `session` supplies the native id,
 /// type, and attributes.
@@ -170,16 +211,31 @@ impl DatasetStore<'_> {
         self
     }
 
-    /// Create an empty dataset. Returns the new id.
+    /// Create an empty dataset with no origin. Returns the new id.
     pub fn create(&self) -> Result<String, StoreError> {
+        self.create_with_tree(&ObjectTree::default())
+    }
+
+    /// Create an empty dataset recording what created it. Returns the
+    /// new id.
+    pub fn create_with_origin(&self, origin: &DatasetOrigin) -> Result<String, StoreError> {
+        let attrs = DatasetAttrs {
+            origin: Some(origin.to_string()),
+        };
+        let tree = ObjectTree {
+            attrs: Some(
+                serde_json::to_value(&attrs)
+                    .map_err(|e| StoreError::Parse(format!("dataset attrs encode: {e}")))?,
+            ),
+            ..ObjectTree::default()
+        };
+        self.create_with_tree(&tree)
+    }
+
+    fn create_with_tree(&self, tree: &ObjectTree) -> Result<String, StoreError> {
         let id = new_uuid();
-        self.store.create(
-            OBJECT_TYPE,
-            OBJECT_VERSION,
-            &id,
-            &ObjectTree::default(),
-            "dataset",
-        )?;
+        self.store
+            .create(OBJECT_TYPE, OBJECT_VERSION, &id, tree, "dataset")?;
         Ok(id)
     }
 
@@ -510,6 +566,7 @@ impl DatasetStore<'_> {
         message: &str,
     ) -> Result<(), StoreError> {
         let mut tree = ObjectTree {
+            attrs: dataset.tree.attrs.clone(),
             links: dataset.tree.links.clone(),
             ..ObjectTree::default()
         };
@@ -731,6 +788,7 @@ impl DatasetStore<'_> {
         message: &str,
     ) -> Result<(), StoreError> {
         let mut tree = ObjectTree {
+            attrs: dataset.tree.attrs.clone(),
             links: dataset.tree.links.clone(),
             ..ObjectTree::default()
         };
@@ -818,9 +876,19 @@ fn record(object: &Object) -> Result<DatasetRecord, StoreError> {
         id: object.header.id.clone(),
         commit_sha: object.commit_sha.clone(),
         created_ms,
+        origin: origin(object)?,
         session_count: members(object).len(),
         attachment_count: linked_attachments(object).len(),
     })
+}
+
+fn origin(object: &Object) -> Result<Option<DatasetOrigin>, StoreError> {
+    let Some(value) = &object.tree.attrs else {
+        return Ok(None);
+    };
+    let attrs: DatasetAttrs = serde_json::from_value(value.clone())
+        .map_err(|e| StoreError::Parse(format!("dataset attrs {}: {e}", object.commit_sha)))?;
+    attrs.origin.as_deref().map(str::parse).transpose()
 }
 
 fn members(object: &Object) -> Vec<String> {
@@ -1127,6 +1195,63 @@ mod tests {
         assert!(matches!(
             DatasetStore::from(&store).resolve_id(&note).unwrap_err(),
             StoreError::WrongType { actual, .. } if actual == "gage::note"
+        ));
+    }
+
+    #[test]
+    fn create_has_no_origin_and_no_attrs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let datasets = DatasetStore::from(&store);
+
+        let id = datasets.create().unwrap();
+        assert_eq!(datasets.get(&id).unwrap().origin, None);
+        let listing = run(git_in(
+            store.path(),
+            ["ls-tree", "--name-only", &object_ref(&id)],
+        ))
+        .unwrap();
+        assert!(!listing.contains("attrs.json"), "{listing}");
+    }
+
+    #[test]
+    fn create_with_origin_records_scan_and_edits_keep_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let datasets = DatasetStore::from(&store);
+        let origin = DatasetOrigin::Scan("01ARZ3NDEKTSV4RRFFQ69G5FAV".to_string());
+
+        let id = datasets.create_with_origin(&origin).unwrap();
+        assert_eq!(datasets.get(&id).unwrap().origin, Some(origin.clone()));
+        let attrs = run(git_in(
+            store.path(),
+            ["cat-file", "-p", &format!("{}:attrs.json", object_ref(&id))],
+        ))
+        .unwrap();
+        assert_eq!(
+            attrs.trim(),
+            "{\"origin\":\"scan:01ARZ3NDEKTSV4RRFFQ69G5FAV\"}"
+        );
+
+        // A member edit rewrites the tree and must carry the attrs
+        add(&store, &id, &mut [fake("s1", "a\n")]);
+        let record = datasets.get(&id).unwrap();
+        assert_eq!(record.session_count, 1);
+        assert_eq!(record.origin, Some(origin));
+    }
+
+    #[test]
+    fn dataset_origin_round_trips_through_str() {
+        let origin = DatasetOrigin::Scan("abc".to_string());
+        assert_eq!(origin.to_string(), "scan:abc");
+        assert_eq!(origin.to_string().parse::<DatasetOrigin>().unwrap(), origin);
+        assert!(matches!(
+            "note:abc".parse::<DatasetOrigin>(),
+            Err(StoreError::BadUrl(_))
+        ));
+        assert!(matches!(
+            "scan:".parse::<DatasetOrigin>(),
+            Err(StoreError::BadUrl(_))
         ));
     }
 

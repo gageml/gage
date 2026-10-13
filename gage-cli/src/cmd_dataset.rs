@@ -8,8 +8,8 @@ use gage_core::datetime::ms_to_iso8601;
 use gage_core::uuid::short_uuid;
 use gage_query::ContextBuilder;
 use gage_store::{
-    AddStep, DatasetSessionAddOutcome, DatasetStore, SessionOutcome, SessionSpec, Store,
-    StoreError, TagStore,
+    AddStep, DatasetOrigin, DatasetSessionAddOutcome, DatasetStore, SessionOutcome, SessionSpec,
+    Store, StoreError, TagStore,
 };
 use tabled::{
     Table,
@@ -102,6 +102,14 @@ pub struct DatasetListArgs {
     #[command(flatten)]
     limit: crate::limit::LimitArgs,
 
+    /// Include datasets created by scans
+    ///
+    /// Include datasets created by scans. A scan run without --dataset
+    /// builds a dataset from its session selection and records itself
+    /// as the dataset's origin. Those datasets are hidden by default.
+    #[arg(long)]
+    scans: bool,
+
     /// Show full dataset ID
     #[arg(long)]
     full_id: bool,
@@ -149,7 +157,7 @@ pub async fn add(args: DatasetAddArgs) {
             }
         }
     }
-    let dataset_id = create_dataset("gage dataset add", &store);
+    let dataset_id = create_dataset("gage dataset add", &store, None);
     println!("Created dataset {}", short_uuid(&dataset_id));
     if let Some(name) = &args.tag {
         match tags.add(name, &dataset_id, args.force_tag) {
@@ -231,10 +239,19 @@ pub async fn refresh(args: DatasetRefreshArgs) {
     }
 }
 
-/// Create an empty dataset in `store`. Prints `command: <error>`
-/// and exits on failure.
-pub(crate) fn create_dataset(command: &str, store: &Store) -> String {
-    match DatasetStore::from(store).create() {
+/// Create an empty dataset in `store`, recording `origin` when
+/// given. Prints `command: <error>` and exits on failure.
+pub(crate) fn create_dataset(
+    command: &str,
+    store: &Store,
+    origin: Option<&DatasetOrigin>,
+) -> String {
+    let datasets = DatasetStore::from(store);
+    let created = match origin {
+        Some(origin) => datasets.create_with_origin(origin),
+        None => datasets.create(),
+    };
+    match created {
         Ok(id) => id,
         Err(e) => {
             eprintln!("{command}: {e}");
@@ -437,7 +454,12 @@ pub async fn list(args: DatasetListArgs) {
     let ctx = ContextBuilder::new(Some(Arc::new(Mutex::new(store))))
         .build()
         .await;
-    let total = count_rows(&ctx, "SELECT COUNT(*) FROM dataset").await;
+    let filter = if args.scans {
+        ""
+    } else {
+        "WHERE d.origin IS NULL "
+    };
+    let total = count_rows(&ctx, &format!("SELECT COUNT(*) FROM dataset d {filter}")).await;
     if total == 0 {
         println!("No datasets found");
         return;
@@ -457,7 +479,7 @@ pub async fn list(args: DatasetListArgs) {
                     WHERE dataset IS NOT NULL GROUP BY dataset) sc ON sc.dataset = d.id \
          LEFT JOIN (SELECT id, string_agg(name, ', ' ORDER BY name) AS names FROM tag \
                     GROUP BY id) t ON t.id = d.id \
-         ORDER BY d.modified DESC LIMIT {show}"
+         {filter}ORDER BY d.modified DESC LIMIT {show}"
     );
     let batches = run_query(&ctx, &sql).await;
 
@@ -555,6 +577,11 @@ pub async fn show(args: DatasetShowArgs) {
         .collect::<Vec<_>>()
         .join("\n");
     let scans_cell = scans.join("\n");
+    let origin_cell = record
+        .origin
+        .as_ref()
+        .map(|o| o.to_string())
+        .unwrap_or_default();
     let tags_cell = tags
         .iter()
         .filter(|t| t.id == record.id)
@@ -566,6 +593,7 @@ pub async fn show(args: DatasetShowArgs) {
         ("sessions", sessions_cell),
         ("attachments", attachments_cell),
         ("scans", scans_cell),
+        ("origin", origin_cell),
         ("tags", tags_cell),
         ("created", iso(Some(record.created_ms))),
         ("modified", iso(header.modified_ms)),

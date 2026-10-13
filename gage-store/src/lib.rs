@@ -74,7 +74,7 @@ pub use attachment::{
 };
 pub use dataset::{
     AddStep, AttachmentLinkOutcome, DatasetAttachmentLinkOutcome, DatasetAttachmentUnlinkOutcome,
-    DatasetAttachments, DatasetDeleted, DatasetMembers, DatasetQuery, DatasetRecord,
+    DatasetAttachments, DatasetDeleted, DatasetMembers, DatasetOrigin, DatasetQuery, DatasetRecord,
     DatasetSessionAddOutcome, DatasetSessionSummary, DatasetSessionUnlinkOutcome, DatasetStore,
     OBJECT_TYPE as DATASET_TYPE, SessionSpec,
 };

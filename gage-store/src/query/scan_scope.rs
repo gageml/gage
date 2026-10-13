@@ -563,11 +563,16 @@ pub fn scan_scope_tables(
                 return dataset_rows(&[]);
             };
             let header = store.read_header(&sha).map_err(external)?;
+            let origin = DatasetStore::from(store)
+                .at_commit(&sha)
+                .map_err(external)?
+                .origin;
             let marker = |name: &str, v: Option<i64>| super::batch::marker(&header.id, name, v);
             dataset_rows(&[DatasetRow {
                 id: header.id.clone(),
                 modified_ms: marker("modified", header.modified_ms)?,
                 created_ms: marker("created", header.created_ms)?,
+                origin: origin.map(|o| o.to_string()),
                 id_prefix: header.id.clone(),
                 commit: sha,
             }])

@@ -33,7 +33,7 @@ use crate::error::render_task_error;
 use gage_core::datetime::now_ms;
 use gage_core::glob::glob_match;
 use gage_core::stopwatch::Stopwatch;
-use gage_core::uuid::{new_uuid, short_uuid};
+use gage_core::uuid::short_uuid;
 use gage_registry::scanner::{Scanner, TaskDef, TaskKind};
 use gage_runtime::source::{SourceError, SourceFile, source_files};
 use gage_runtime::{
@@ -372,6 +372,9 @@ impl From<StoreError> for ScanError {
 /// Where a scan's directory lives, how many tasks it runs at once, and what it
 /// records about its runtime.
 pub struct ScanConfig<'a> {
+    /// The scan's id, minted by the caller so objects written before
+    /// the run, such as the dataset `gage scan` builds, can name it
+    pub id: &'a str,
     /// The parent of scan directories, `scans/` under Gage home in production
     pub scans_dir: &'a std::path::Path,
     /// The Gage build version; the scan records
@@ -434,7 +437,7 @@ pub async fn scan(
         })
         .collect();
     let plan = plan::plan(&planned).map_err(ScanError::Plan)?;
-    let id = new_uuid();
+    let id = config.id.to_string();
     // Tasks read the dataset through their own handle: the store's git
     // reader is single-threaded, and this one stays free for the apply
     let dataset = match config.dataset {
@@ -1261,6 +1264,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+    use gage_core::uuid::new_uuid;
 
     /// Write `source` as a scanner file and compile it. The directory
     /// guard is returned so the file outlives the compiled scanner.
@@ -1311,6 +1315,7 @@ mod tests {
     ) -> (Result<ScanOutcome, ScanError>, Vec<Event>) {
         let mut events = Vec::new();
         let config = ScanConfig {
+            id: &new_uuid(),
             scans_dir: root,
             gage_version: "test-version",
             dataset: None,
@@ -1837,6 +1842,7 @@ mod tests {
         let (tmp, store) = open_store();
         let mut events = Vec::new();
         let config = ScanConfig {
+            id: &new_uuid(),
             scans_dir: &tmp.path().join("scans"),
             gage_version: "test-version",
             dataset: None,
@@ -1910,6 +1916,7 @@ mod tests {
         let (tmp, store) = open_store();
         let mut events = Vec::new();
         let config = ScanConfig {
+            id: &new_uuid(),
             scans_dir: &tmp.path().join("scans"),
             gage_version: "test-version",
             dataset: None,
@@ -1962,6 +1969,7 @@ mod tests {
         let (tmp, store) = open_store();
         let mut events = Vec::new();
         let config = ScanConfig {
+            id: &new_uuid(),
             scans_dir: &tmp.path().join("scans"),
             gage_version: "test-version",
             dataset: None,
@@ -2033,6 +2041,7 @@ mod tests {
         let (tmp, store) = open_store();
         let mut events = Vec::new();
         let config = ScanConfig {
+            id: &new_uuid(),
             scans_dir: &tmp.path().join("scans"),
             gage_version: "test-version",
             dataset: None,
@@ -2102,6 +2111,7 @@ mod tests {
         let (tmp, store) = open_store();
         let mut events = Vec::new();
         let config = ScanConfig {
+            id: &new_uuid(),
             scans_dir: &tmp.path().join("scans"),
             gage_version: "test-version",
             dataset: None,
@@ -2239,6 +2249,7 @@ mod tests {
         let (tmp, store) = open_store();
         let mut events = Vec::new();
         let config = ScanConfig {
+            id: &new_uuid(),
             scans_dir: &tmp.path().join("scans"),
             gage_version: "test-version",
             dataset: None,
@@ -2955,6 +2966,7 @@ mod tests {
         );
         let (tmp, store) = open_store();
         let config = ScanConfig {
+            id: &new_uuid(),
             scans_dir: &tmp.path().join("scans"),
             gage_version: "test-version",
             dataset: None,
@@ -3051,6 +3063,7 @@ mod tests {
             .unwrap()
             .commit_sha;
         let config = ScanConfig {
+            id: &new_uuid(),
             scans_dir: &tmp.path().join("scans"),
             gage_version: "test-version",
             dataset: Some(&dataset_sha),
@@ -3110,6 +3123,7 @@ mod tests {
         let compiled = compiled.unwrap();
         let mut events = Vec::new();
         let config = ScanConfig {
+            id: &new_uuid(),
             scans_dir: &tmp.path().join("scans"),
             gage_version: "test-version",
             dataset: Some(&dataset_sha),
@@ -3364,6 +3378,7 @@ mod tests {
             .unwrap()
             .commit_sha;
         let config = ScanConfig {
+            id: &new_uuid(),
             scans_dir: &tmp.path().join("scans"),
             gage_version: "test-version",
             dataset: Some(&dataset_sha),
@@ -3591,6 +3606,7 @@ mod tests {
         let (_dir, compiled) = compile_source(SCANNER);
         let mut events = Vec::new();
         let config = ScanConfig {
+            id: &new_uuid(),
             scans_dir: &tmp.path().join("scans"),
             gage_version: "test-version",
             dataset: Some(&dataset_sha),
@@ -3693,6 +3709,7 @@ mod tests {
         let (_dir, compiled) = compile_source(SCANNER);
         let mut events = Vec::new();
         let config = ScanConfig {
+            id: &new_uuid(),
             scans_dir: &tmp.path().join("scans"),
             gage_version: "test-version",
             dataset: Some(&dataset_sha),
@@ -3879,6 +3896,7 @@ mod tests {
         let (_dir, compiled) = compile_source(SCANNER);
         let mut events = Vec::new();
         let config = ScanConfig {
+            id: &new_uuid(),
             scans_dir: &tmp.path().join("scans"),
             gage_version: "test-version",
             dataset: Some(&dataset_sha),
@@ -4129,6 +4147,7 @@ mod tests {
             async move {
                 let mut events = Vec::new();
                 let config = ScanConfig {
+                    id: &new_uuid(),
                     scans_dir: &root,
                     gage_version: "test-version",
                     dataset: Some(&dataset_sha),
@@ -4379,6 +4398,7 @@ mod tests {
         let (_dir, compiled) = compile_source(SCANNER);
         let mut events = Vec::new();
         let config = ScanConfig {
+            id: &new_uuid(),
             scans_dir: &tmp.path().join("scans"),
             gage_version: "test-version",
             dataset: Some(&dataset_sha),
@@ -4439,6 +4459,7 @@ mod tests {
         let compiled = compiled.unwrap();
         let scans_dir = tmp.path().join("scans");
         let mut config = ScanConfig {
+            id: &new_uuid(),
             scans_dir: &scans_dir,
             gage_version: "test-version",
             dataset: Some(&dataset_sha),
@@ -4522,6 +4543,7 @@ mod tests {
 
         let (_dir, compiled) = compile_source(NEEDY_SCANNER);
         let config = ScanConfig {
+            id: &new_uuid(),
             scans_dir: &tmp.path().join("scans"),
             gage_version: "test-version",
             dataset: Some(&dataset_sha),
@@ -4590,6 +4612,7 @@ mod tests {
         let (tmp, store) = open_store();
         let scans_dir = tmp.path().join("scans");
         let config = ScanConfig {
+            id: &new_uuid(),
             scans_dir: &scans_dir,
             gage_version: "test-version",
             dataset: None,
@@ -4659,6 +4682,7 @@ mod tests {
             async move {
                 let mut events = Vec::new();
                 let config = ScanConfig {
+                    id: &new_uuid(),
                     scans_dir: &root,
                     gage_version: "test-version",
                     dataset: None,
@@ -4798,6 +4822,7 @@ mod tests {
         let (_dir, compiled) = compile_source(SCANNER);
         let mut events = Vec::new();
         let config = ScanConfig {
+            id: &new_uuid(),
             scans_dir: &tmp.path().join("scans"),
             gage_version: "test-version",
             dataset: Some(&dataset_sha),
@@ -5018,6 +5043,7 @@ mod tests {
     ) -> (ScanOutcome, Vec<String>) {
         let mut events = Vec::new();
         let config = ScanConfig {
+            id: &new_uuid(),
             scans_dir: &tmp.path().join("scans"),
             gage_version: "test-version",
             dataset: Some(dataset_sha),
@@ -5742,6 +5768,7 @@ mod tests {
         let (tmp, store) = open_store();
         let mut events = Vec::new();
         let config = ScanConfig {
+            id: &new_uuid(),
             scans_dir: &tmp.path().join("scans"),
             gage_version: "test-version",
             dataset: None,
@@ -5824,6 +5851,7 @@ mod tests {
             r#"{"type":"user","uuid":"u1","timestamp":"2026-01-01T00:00:00Z","message":{"role":"user","content":"hello"}}"#,
         );
         let config = ScanConfig {
+            id: &new_uuid(),
             scans_dir: &tmp.path().join("scans"),
             gage_version: "test-version",
             dataset: Some(&dataset_sha),

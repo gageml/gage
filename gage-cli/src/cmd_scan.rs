@@ -16,7 +16,7 @@ use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::prelude::SessionContext;
 use gage_core::config::Config;
 use gage_core::stopwatch::Stopwatch;
-use gage_core::uuid::short_uuid;
+use gage_core::uuid::{new_uuid, short_uuid};
 use gage_query::{ContextBuilder, ScanScope};
 use gage_registry::driver::DriverRegistry;
 use gage_registry::scanner::{Scanner, ScannerDef, ScannerRegistry, scanner_source};
@@ -27,8 +27,8 @@ use gage_scan::{CompiledScanner, Event, ScanConfig, ScanError, ScanOutput, summa
 use gage_session::{Driver, ResolveSession};
 use gage_store::ScanDirLayout;
 use gage_store::{
-    DatasetStore, IssueStatus, IssueStore, SCAN_TYPE, ScanStore, StatusReason, Store, StoreError,
-    TagStore,
+    DatasetOrigin, DatasetStore, IssueStatus, IssueStore, SCAN_TYPE, ScanStore, StatusReason,
+    Store, StoreError, TagStore,
 };
 use gage_tui::scan_view::{
     self, AgentItem, AgentState, EventItem, EvidenceItem, IssueItem, IssueSessionItem,
@@ -1693,8 +1693,11 @@ async fn prepare_scan_dialog(
 /// one with a failed task exits with status 1.
 async fn run_prepared(prep: ScanPrep, store: &Store) {
     let driver = source::default_driver_or_exit("gage scan");
+    // Minted before the dataset so the dataset can record its scan
+    let scan_id = new_uuid();
     let dataset_sha = match materialize_dataset(
         prep.plan,
+        &scan_id,
         store,
         &prep.compiled,
         Arc::clone(&driver),
@@ -1724,6 +1727,7 @@ async fn run_prepared(prep: ScanPrep, store: &Store) {
     };
 
     let scan_config = ScanConfig {
+        id: &scan_id,
         scans_dir: &scans_dir(),
         gage_version: crate::VERSION,
         dataset: dataset_sha.as_deref(),
@@ -2066,12 +2070,14 @@ fn preview_dataset(plan: &DatasetPlan) -> Result<(), DialogError> {
 /// The commit of the dataset to scan: the reused dataset's, or that
 /// of a new dataset built from the selected sessions and prepared by
 /// the attach tasks of `scanners`, so the scan links a commit that
-/// holds the attachments. The build shows a progress bar under
+/// holds the attachments. A new dataset records `scan_id` as its
+/// origin. The build shows a progress bar under
 /// `progress`, cleared when it completes, and prints each session's
 /// outcome line otherwise; the closing `Added N sessions` line and
 /// the attach phase's lines print either way.
 async fn materialize_dataset(
     plan: DatasetPlan,
+    scan_id: &str,
     store: &Store,
     scanners: &[CompiledScanner],
     driver: Arc<dyn Driver>,
@@ -2081,7 +2087,8 @@ async fn materialize_dataset(
         DatasetPlan::None => Ok(None),
         DatasetPlan::Reuse { commit_sha, .. } => Ok(Some(commit_sha)),
         DatasetPlan::New { selected } => {
-            let id = cmd_dataset::create_dataset("gage scan", store);
+            let origin = DatasetOrigin::Scan(scan_id.to_string());
+            let id = cmd_dataset::create_dataset("gage scan", store, Some(&origin));
             let mut bar: Option<ProgressBar> = None;
             cmd_dataset::add_native_to_dataset(store, &id, None, &selected, None, &mut |event| {
                 match &event {

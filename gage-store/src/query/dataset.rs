@@ -1,5 +1,6 @@
-//! The `dataset` table: one row per live dataset object, from the
-//! index alone. Membership is the `dataset_session_link` table.
+//! The `dataset` table: one row per live dataset object. The tips come
+//! from the index; `origin` is read from each tip's `attrs.json`.
+//! Membership is the `dataset_session_link` table.
 
 use std::sync::{Arc, Mutex};
 
@@ -28,6 +29,9 @@ pub(crate) fn dataset_schema() -> SchemaRef {
             DataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into())),
             false,
         ),
+        // What created the dataset as a Gage URL, e.g. `scan:<id>`;
+        // null for one a user built
+        Field::new("origin", DataType::Utf8, true),
         // System
         system(Field::new("id_display", DataType::Utf8, false)),
         system(Field::new("id_prefix", DataType::Utf8, false)),
@@ -56,13 +60,16 @@ impl BatchSource for Source {
                 .short_prefix_ids(Some(DATASET_TYPE))
                 .map_err(external)?,
         );
+        let datasets = DatasetStore::from(store);
         let mut rows = Vec::with_capacity(tips.len());
         for tip in &tips {
             let n = prefix_len.get(&tip.id).copied().unwrap_or(tip.id.len());
+            let origin = datasets.at_commit(&tip.sha).map_err(external)?.origin;
             rows.push(DatasetRow {
                 id: tip.id.clone(),
                 modified_ms: marker(&tip.id, "modified", tip.modified_ms)?,
                 created_ms: marker(&tip.id, "created", tip.created_ms)?,
+                origin: origin.map(|o| o.to_string()),
                 id_prefix: tip.id.chars().take(n).collect(),
                 commit: tip.sha.clone(),
             });
@@ -76,6 +83,8 @@ pub(crate) struct DatasetRow {
     pub id: String,
     pub modified_ms: i64,
     pub created_ms: i64,
+    /// The origin in Gage URL form, when set
+    pub origin: Option<String>,
     pub id_prefix: String,
     pub commit: String,
 }
@@ -86,6 +95,7 @@ pub(crate) fn dataset_rows(rows: &[DatasetRow]) -> Result<RecordBatch> {
     let mut ids = StringBuilder::with_capacity(len, len * 26);
     let mut modifieds = TimestampMillisecondBuilder::with_capacity(len);
     let mut createds = TimestampMillisecondBuilder::with_capacity(len);
+    let mut origins = StringBuilder::with_capacity(len, len * 31);
     let mut id_displays = StringBuilder::with_capacity(len, len * 8);
     let mut id_prefixes = StringBuilder::with_capacity(len, len * 4);
     let mut locators = StringBuilder::with_capacity(len, len * 44);
@@ -94,6 +104,7 @@ pub(crate) fn dataset_rows(rows: &[DatasetRow]) -> Result<RecordBatch> {
         ids.append_value(&row.id);
         modifieds.append_value(row.modified_ms);
         createds.append_value(row.created_ms);
+        origins.append_option(row.origin.as_deref());
         id_displays.append_value(short_uuid(&row.id));
         id_prefixes.append_value(&row.id_prefix);
         locators.append_value(format!("git:{}", row.commit));
@@ -105,6 +116,7 @@ pub(crate) fn dataset_rows(rows: &[DatasetRow]) -> Result<RecordBatch> {
             Arc::new(ids.finish()),
             Arc::new(modifieds.finish().with_timezone("UTC")),
             Arc::new(createds.finish().with_timezone("UTC")),
+            Arc::new(origins.finish()),
             Arc::new(id_displays.finish()),
             Arc::new(id_prefixes.finish()),
             Arc::new(locators.finish()),
