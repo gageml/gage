@@ -267,7 +267,7 @@ pub async fn list(args: IssueListArgs) {
             let id = ids.value(i);
             let shown = if args.full_id { id } else { short_uuid(id) };
             let status = if reasons.is_valid(i) {
-                format!("{} ({})", statuses.value(i), reasons.value(i))
+                reasons.value(i).to_string()
             } else {
                 statuses.value(i).to_string()
             };
