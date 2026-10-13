@@ -120,15 +120,11 @@ pub fn add(args: TagAddArgs) {
         }
         dialog::step_value("Tag", &args.name)?;
         dialog::step_value("Object", &object)?;
-        let prompt = match &previous {
-            Some(p) => {
-                let from = format!("{} {}", type_name(&p.object_type), short_uuid(&p.id));
-                dialog::step_value("Moves from", &from)?;
-                format!("Move tag {} to {object}?", args.name)
-            }
-            None => format!("Tag {object} as {}?", args.name),
-        };
-        if !args.yes && !cli::confirm(prompt).initial_value(true).interact()? {
+        if let Some(p) = &previous {
+            let from = format!("{} {}", type_name(&p.object_type), short_uuid(&p.id));
+            dialog::step_value("Moves from", &from)?;
+        }
+        if !args.yes && !cli::confirm("Continue?").initial_value(true).interact()? {
             return Err(DialogError::Canceled);
         }
         let added = tags
@@ -263,12 +259,9 @@ pub fn delete(args: TagDeleteArgs) {
     dialog::run("Delete tags", || {
         dialog::step_list("Tags", lines)?;
 
+        cli::log::remark("Tagged objects are unaffected")?;
         if !args.yes {
-            let prompt = format!(
-                "Delete {}? (tagged objects are unaffected)",
-                count(total, "tag")
-            );
-            let confirmed = cli::confirm(prompt).initial_value(false).interact()?;
+            let confirmed = cli::confirm("Continue?").initial_value(false).interact()?;
             if !confirmed {
                 return Err(DialogError::Canceled);
             }

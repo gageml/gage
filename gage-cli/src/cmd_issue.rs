@@ -706,9 +706,7 @@ pub fn add(args: IssueAddArgs) {
         cli::log::step(format!("Status\n{}", style(status).dim()))?;
 
         if !args.yes {
-            let confirmed = cli::confirm("Add this issue?")
-                .initial_value(true)
-                .interact()?;
+            let confirmed = cli::confirm("Continue?").initial_value(true).interact()?;
             if !confirmed {
                 return Err(DialogError::Canceled);
             }
@@ -787,12 +785,9 @@ pub fn delete(args: IssueDeleteArgs) {
 
     dialog::run("Delete issues", || {
         issues_step(&targets)?;
+        cli::log::remark("This cannot be undone")?;
         if !args.yes {
-            let prompt = format!(
-                "Permanently delete {}? This cannot be undone.",
-                count(total, "issue")
-            );
-            let confirmed = cli::confirm(prompt).initial_value(false).interact()?;
+            let confirmed = cli::confirm("Continue?").initial_value(false).interact()?;
             if !confirmed {
                 return Err(DialogError::Canceled);
             }
@@ -852,12 +847,7 @@ pub fn close(args: IssueCloseArgs) {
         }
         let message = prompt_message(given_message.clone(), args.yes, "Type a message (optional)")?;
         if !args.yes {
-            let prompt = if total == 1 {
-                "Close this issue?".to_string()
-            } else {
-                format!("Close {total} issues?")
-            };
-            let confirmed = cli::confirm(prompt).initial_value(true).interact()?;
+            let confirmed = cli::confirm("Continue?").initial_value(true).interact()?;
             if !confirmed {
                 return Err(DialogError::Canceled);
             }
@@ -906,12 +896,7 @@ pub fn open(args: IssueOpenArgs) {
         issues_step(&targets)?;
         let message = prompt_message(given_message.clone(), args.yes, "Type a message (optional)")?;
         if !args.yes {
-            let prompt = if total == 1 {
-                "Open this issue?".to_string()
-            } else {
-                format!("Open {total} issues?")
-            };
-            let confirmed = cli::confirm(prompt).initial_value(true).interact()?;
+            let confirmed = cli::confirm("Continue?").initial_value(true).interact()?;
             if !confirmed {
                 return Err(DialogError::Canceled);
             }
@@ -963,12 +948,7 @@ pub fn comment(args: IssueCommentArgs) {
             return Err(DialogError::Failed("comment is empty".into()));
         }
         if !args.yes {
-            let prompt = if total == 1 {
-                "Add this comment?".to_string()
-            } else {
-                format!("Add this comment to {total} issues?")
-            };
-            let confirmed = cli::confirm(prompt).initial_value(true).interact()?;
+            let confirmed = cli::confirm("Continue?").initial_value(true).interact()?;
             if !confirmed {
                 return Err(DialogError::Canceled);
             }

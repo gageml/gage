@@ -700,7 +700,7 @@ async fn add_dialog(
                     )
                 }),
             )?;
-            confirm_add(args.yes, records.len(), Some(&dataset_id))?;
+            confirm_add(args.yes)?;
             link_stored(&store, &dataset_id, &records, &mut |e| view.on(e))?
         }
         _ => {
@@ -720,7 +720,7 @@ async fn add_dialog(
                 dialog::step_value("Dataset", short_uuid(id))?;
             }
             dialog::step_value("Sessions", count(selected.len(), "session"))?;
-            confirm_add(args.yes, selected.len(), dataset_id.as_deref())?;
+            confirm_add(args.yes)?;
             add_native(
                 &store,
                 source,
@@ -736,17 +736,12 @@ async fn add_dialog(
     Ok(done.into())
 }
 
-/// The confirmation before an add writes: `Add N sessions?`, or with
-/// the dataset named. `yes` skips it.
-fn confirm_add(yes: bool, n: usize, dataset_id: Option<&str>) -> Result<(), DialogError> {
+/// The confirmation before an add writes; `yes` skips it
+fn confirm_add(yes: bool) -> Result<(), DialogError> {
     if yes {
         return Ok(());
     }
-    let prompt = match dataset_id {
-        Some(id) => format!("Add {} to dataset {}?", count(n, "session"), short_uuid(id)),
-        None => format!("Add {}?", count(n, "session")),
-    };
-    if !cli::confirm(prompt).initial_value(true).interact()? {
+    if !cli::confirm("Continue?").initial_value(true).interact()? {
         return Err(DialogError::Canceled);
     }
     Ok(())
@@ -956,7 +951,6 @@ pub fn remove(source: Option<String>, stored: bool, args: SessionRemoveArgs) {
             })
     });
 
-    let total = records.len();
     dialog::run("Remove sessions", || {
         dialog::step_list(
             "Sessions",
@@ -972,19 +966,12 @@ pub fn remove(source: Option<String>, stored: bool, args: SessionRemoveArgs) {
             dialog::step_value("Dataset", short_uuid(id))?;
         }
 
+        cli::log::remark(match &dataset_id {
+            Some(_) => "Sessions stay in the store",
+            None => "Native sessions are unaffected",
+        })?;
         if !args.yes {
-            let prompt = match &dataset_id {
-                Some(id) => format!(
-                    "Remove {} from dataset {}? (sessions stay in the store)",
-                    count(total, "session"),
-                    short_uuid(id)
-                ),
-                None => format!(
-                    "Remove {} from the store? (native sessions are unaffected)",
-                    count(total, "session")
-                ),
-            };
-            let confirmed = cli::confirm(prompt).initial_value(false).interact()?;
+            let confirmed = cli::confirm("Continue?").initial_value(false).interact()?;
             if !confirmed {
                 return Err(DialogError::Canceled);
             }
@@ -1129,12 +1116,9 @@ async fn delete_dialog(
         }),
     )?;
 
+    cli::log::remark("This cannot be undone")?;
     if !args.yes {
-        let prompt = format!(
-            "Permanently delete {}? This cannot be undone.",
-            count(total, "session")
-        );
-        let confirmed = cli::confirm(prompt).initial_value(false).interact()?;
+        let confirmed = cli::confirm("Continue?").initial_value(false).interact()?;
         if !confirmed {
             return Err(DialogError::Canceled);
         }

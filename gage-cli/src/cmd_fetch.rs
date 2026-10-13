@@ -154,11 +154,7 @@ fn fetch_dialog(
         Some(named)
     };
 
-    if !args.yes
-        && !cli::confirm(format!("Fetch from {remote}?"))
-            .initial_value(true)
-            .interact()?
-    {
+    if !args.yes && !cli::confirm("Continue?").initial_value(true).interact()? {
         return Err(DialogError::Canceled);
     }
     *plan = Some(FetchPlan { advertised, named });

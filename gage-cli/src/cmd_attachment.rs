@@ -222,13 +222,7 @@ async fn add_dialog(args: &AttachmentAddArgs, store: &Store) -> Result<DialogRes
         let shown = describe(record.attrs.name.as_deref(), &record.id);
         dialog::step_value("Attachment", &shown)?;
         dialog::step_value("Dataset", short_uuid(&dataset_id))?;
-        confirm(
-            args.yes,
-            format!(
-                "Add attachment {shown} to dataset {}?",
-                short_uuid(&dataset_id)
-            ),
-        )?;
+        confirm(args.yes)?;
         let (dataset_id, linked) =
             link_to_dataset(store, &dataset_id, &record.id).map_err(DialogError::Failed)?;
         let verb = match linked {
@@ -273,13 +267,7 @@ async fn add_dialog(args: &AttachmentAddArgs, store: &Store) -> Result<DialogRes
         }
         None => None,
     };
-    confirm(
-        args.yes,
-        match &dataset_id {
-            Some(id) => format!("Add attachment to dataset {}?", short_uuid(id)),
-            None => "Add attachment?".to_string(),
-        },
-    )?;
+    confirm(args.yes)?;
 
     let spec = AttachmentSpec {
         name: args.name.as_deref(),
@@ -319,8 +307,8 @@ async fn add_dialog(args: &AttachmentAddArgs, store: &Store) -> Result<DialogRes
 }
 
 /// The confirmation before a write; `yes` skips it
-fn confirm(yes: bool, prompt: String) -> Result<(), DialogError> {
-    if !yes && !cli::confirm(prompt).initial_value(true).interact()? {
+fn confirm(yes: bool) -> Result<(), DialogError> {
+    if !yes && !cli::confirm("Continue?").initial_value(true).interact()? {
         return Err(DialogError::Canceled);
     }
     Ok(())
@@ -351,14 +339,7 @@ async fn add_from_scanners(
         "Scanners",
         selected.iter().map(|r| r.source.def().name.clone()),
     )?;
-    confirm(
-        yes,
-        format!(
-            "Attach inputs of {} to dataset {}?",
-            count(selected.len(), "scanner"),
-            short_uuid(&dataset_id)
-        ),
-    )?;
+    confirm(yes)?;
     let driver = source::default_driver_or_exit("gage attachment add");
     let placed = scanner_attach::attach_for_scanners(store, &dataset_id, &compiled, driver).await?;
     Ok(format!(
@@ -572,7 +553,6 @@ pub fn remove(args: AttachmentRemoveArgs) {
             })
     });
 
-    let total = records.len();
     dialog::run("Remove attachments", || {
         dialog::step_list(
             "Attachments",
@@ -584,16 +564,11 @@ pub fn remove(args: AttachmentRemoveArgs) {
             dialog::step_value("Dataset", short_uuid(id))?;
         }
 
+        if dataset_id.is_some() {
+            cli::log::remark("Attachments stay in the store")?;
+        }
         if !args.yes {
-            let prompt = match &dataset_id {
-                Some(id) => format!(
-                    "Remove {} from dataset {}? (attachments stay in the store)",
-                    count(total, "attachment"),
-                    short_uuid(id)
-                ),
-                None => format!("Remove {} from the store?", count(total, "attachment")),
-            };
-            let confirmed = cli::confirm(prompt).initial_value(false).interact()?;
+            let confirmed = cli::confirm("Continue?").initial_value(false).interact()?;
             if !confirmed {
                 return Err(DialogError::Canceled);
             }

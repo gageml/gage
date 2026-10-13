@@ -386,9 +386,7 @@ pub fn add(args: NoteAddArgs) {
         };
 
         if !args.yes {
-            let confirmed = cli::confirm("Add this note?")
-                .initial_value(true)
-                .interact()?;
+            let confirmed = cli::confirm("Continue?").initial_value(true).interact()?;
             if !confirmed {
                 return Err(DialogError::Canceled);
             }
@@ -634,9 +632,7 @@ pub fn edit(args: NoteEditArgs) {
         };
 
         if !args.yes {
-            let confirmed = cli::confirm("Apply these changes?")
-                .initial_value(true)
-                .interact()?;
+            let confirmed = cli::confirm("Continue?").initial_value(true).interact()?;
             if !confirmed {
                 return Err(DialogError::Canceled);
             }
@@ -697,12 +693,9 @@ pub fn delete(args: NoteDeleteArgs) {
                 .map(|n| format!("{} {}", short_uuid(&n.id), n.name)),
         )?;
 
+        cli::log::remark("This cannot be undone")?;
         if !args.yes {
-            let prompt = format!(
-                "Permanently delete {}? This cannot be undone.",
-                count(total, "note")
-            );
-            let confirmed = cli::confirm(prompt).initial_value(false).interact()?;
+            let confirmed = cli::confirm("Continue?").initial_value(false).interact()?;
             if !confirmed {
                 return Err(DialogError::Canceled);
             }

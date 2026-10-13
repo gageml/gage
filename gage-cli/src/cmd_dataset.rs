@@ -186,15 +186,8 @@ async fn add_dialog(args: &DatasetAddArgs, store: &Store) -> Result<DialogResult
     } else {
         Vec::new()
     };
-    if !args.yes {
-        let prompt = if selected.is_empty() {
-            "Add dataset?".to_string()
-        } else {
-            format!("Add dataset with {}?", count(selected.len(), "session"))
-        };
-        if !cli::confirm(prompt).initial_value(true).interact()? {
-            return Err(DialogError::Canceled);
-        }
+    if !args.yes && !cli::confirm("Continue?").initial_value(true).interact()? {
+        return Err(DialogError::Canceled);
     }
 
     let dataset_id = create_dataset(store, None).map_err(|e| DialogError::Failed(e.to_string()))?;
@@ -246,11 +239,8 @@ pub fn refresh(args: DatasetRefreshArgs) {
         if members.is_empty() {
             return Ok(format!("Nothing to refresh in dataset {shown}").into());
         }
-        if !args.yes {
-            let prompt = format!("Refresh {} from source?", count(members.len(), "session"));
-            if !cli::confirm(prompt).initial_value(true).interact()? {
-                return Err(DialogError::Canceled);
-            }
+        if !args.yes && !cli::confirm("Continue?").initial_value(true).interact()? {
+            return Err(DialogError::Canceled);
         }
 
         // Each member's native id is looked back up in the source by
@@ -699,18 +689,9 @@ pub fn delete(args: DatasetDeleteArgs) {
             cli::log::remark(format!("{} to remove", count(members, "session")))?;
         }
 
+        cli::log::remark("This cannot be undone")?;
         if !args.yes {
-            let action = if args.sessions {
-                format!(
-                    "Permanently delete {} and remove their sessions?",
-                    count(total, "dataset")
-                )
-            } else {
-                format!("Permanently delete {}?", count(total, "dataset"))
-            };
-            let confirmed = cli::confirm(format!("{action} This cannot be undone."))
-                .initial_value(false)
-                .interact()?;
+            let confirmed = cli::confirm("Continue?").initial_value(false).interact()?;
             if !confirmed {
                 return Err(DialogError::Canceled);
             }

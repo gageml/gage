@@ -105,15 +105,8 @@ pub async fn main(args: BackupArgs) {
         if !sources.is_empty() {
             dialog::step_list("Sources", sources.iter().cloned())?;
         }
-        if !args.yes {
-            let prompt = if sources.is_empty() {
-                format!("Back up store to {remote}?")
-            } else {
-                format!("Add sessions from sources and back up store to {remote}?")
-            };
-            if !cli::confirm(prompt).initial_value(false).interact()? {
-                return Err(DialogError::Canceled);
-            }
+        if !args.yes && !cli::confirm("Continue?").initial_value(false).interact()? {
+            return Err(DialogError::Canceled);
         }
         for source in &sources {
             let added = cmd_session::add_all(&store, source, max_bytes).await?;

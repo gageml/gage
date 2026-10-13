@@ -187,13 +187,9 @@ fn delete(store: &Store, args: DeleteArgs) {
                 .iter()
                 .map(|(id, type_name)| format!("{type_name} {}", short_uuid(id))),
         )?;
+        cli::log::remark("This cannot be undone")?;
         if !args.yes {
-            let confirmed = cli::confirm(format!(
-                "Permanently delete {}? This cannot be undone.",
-                count(total, "object")
-            ))
-            .initial_value(false)
-            .interact()?;
+            let confirmed = cli::confirm("Continue?").initial_value(false).interact()?;
             if !confirmed {
                 return Err(DialogError::Canceled);
             }

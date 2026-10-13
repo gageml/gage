@@ -120,9 +120,7 @@ fn run_dialog(
     };
 
     if !args.yes {
-        let confirmed = cli::confirm("Start session?")
-            .initial_value(true)
-            .interact()?;
+        let confirmed = cli::confirm("Continue?").initial_value(true).interact()?;
         if !confirmed {
             return Err(DialogError::Canceled);
         }

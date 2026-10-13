@@ -126,11 +126,8 @@ pub async fn main(args: PushArgs) {
     let mut confirmed = false;
     dialog::run(&format!("Push to {remote}"), || {
         cli::log::remark(summary.join("\n"))?;
-        if !args.yes {
-            let prompt = format!("Push {} refs to {remote}?", send_names.len());
-            if !cli::confirm(prompt).initial_value(false).interact()? {
-                return Err(DialogError::Canceled);
-            }
+        if !args.yes && !cli::confirm("Continue?").initial_value(false).interact()? {
+            return Err(DialogError::Canceled);
         }
         confirmed = true;
         Ok(format!("Pushing {} refs to {remote}", send_names.len()).into())

@@ -1471,13 +1471,9 @@ fn delete(args: ScanDeleteArgs) {
     dialog::run("Delete scan runs", || {
         dialog::step_list("Scan runs", ids.iter().map(|id| short_uuid(id).to_string()))?;
 
+        cli::log::remark("Associated notes and issues are deleted. This cannot be undone.")?;
         if !args.yes {
-            let prompt = format!(
-                "Permanently delete {} and associated notes/issues? \
-                 This cannot be undone.",
-                count(total, "scan run")
-            );
-            let confirmed = cli::confirm(prompt).initial_value(false).interact()?;
+            let confirmed = cli::confirm("Continue?").initial_value(false).interact()?;
             if !confirmed {
                 return Err(DialogError::Canceled);
             }
