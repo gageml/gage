@@ -1102,4 +1102,66 @@ mod tests {
             [commit]
         );
     }
+
+    /// A stored scan links the commit of each issue it wrote, but the
+    /// scope lists the issue's current version: a status change after
+    /// the scan shows in `issue` and `issue_event`.
+    #[tokio::test]
+    async fn stored_scan_scope_serves_issues_at_their_tip() {
+        let (tmp, store) = open_store();
+        let root = write_scan_dir(tmp.path());
+        std::fs::write(
+            root.join("scan").join("attrs.json"),
+            r#"{"runtime":"gage 1","started":1000,"stopped":1500,"canceled":false,"tasks":{"total":3,"completed":1,"failed":1}}"#,
+        )
+        .unwrap();
+        let tip = {
+            let store = store.lock().unwrap();
+            let issues = IssueStore::from(&*store);
+            let issue_id = issues
+                .create(IssueInput {
+                    name: "n",
+                    title: "t",
+                    description: None,
+                    author: "task:s:t",
+                    status: IssueStatus::Pending,
+                    evidence: &[],
+                    key: None,
+                })
+                .unwrap();
+            let written = issues.get(&issue_id).unwrap().commit_sha;
+            std::fs::write(
+                root.join("scan").join("issues.link"),
+                format!("{written}\n"),
+            )
+            .unwrap();
+            ScanStore::from(&*store)
+                .create("SCAN1", &root.join("scan"))
+                .unwrap();
+            issues
+                .set_status(
+                    &issue_id,
+                    IssueStatus::Closed,
+                    Some(StatusReason::Completed),
+                    "user:t",
+                    None,
+                )
+                .unwrap();
+            issues.get(&issue_id).unwrap().commit_sha
+        };
+
+        let scoped = ContextBuilder::new(Some(store))
+            .scope(ScanScope::stored("SCAN1"))
+            .build()
+            .await;
+        assert_eq!(
+            strings(&scoped, "SELECT status || ' ' || status_reason FROM issue").await,
+            ["closed completed"]
+        );
+        assert_eq!(strings(&scoped, "SELECT commit FROM issue").await, [tip]);
+        assert_eq!(
+            strings(&scoped, "SELECT event FROM issue_event ORDER BY timestamp").await,
+            ["create", "status"]
+        );
+    }
 }

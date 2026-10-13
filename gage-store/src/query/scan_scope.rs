@@ -6,8 +6,11 @@
 //! issues the scan has written so far. The scan's sessions are the
 //! dataset's members at the commits the scan links and come from the
 //! store either way; the scan's own notes and issues come from the
-//! directory while the scan is active and from the scan object's
-//! links once stored; carried notes are store objects in both cases.
+//! directory while the scan is active; carried notes are store
+//! objects in both cases. Once stored, the scan object's links name
+//! the notes it wrote at the versions it wrote, and name the issues
+//! it wrote whose rows are their current versions, since an issue's
+//! status and history move on after the scan.
 //!
 //! The tables share their schemas and row builders with the store
 //! scope, so a query written against one scope runs against the
@@ -214,7 +217,16 @@ impl ScanSource {
             ScanSource::Stored(id) => {
                 let content = ScanStore::from(store).get(id).map_err(external)?.content;
                 for sha in content.issues {
-                    let full = issues.at_commit(&sha).map_err(external)?;
+                    let issue_id = store.read_header(&sha).map_err(external)?.id;
+                    let full = match issues.get(&issue_id) {
+                        Ok(full) => full,
+                        Err(e @ StoreError::ObjectDeleted(_)) => {
+                            tracing::warn!("{e}; not listed");
+                            continue;
+                        }
+                        Err(e) => return Err(external(e)),
+                    };
+                    let sha = full.commit_sha.clone();
                     let mut evidence = Vec::with_capacity(full.evidence.len());
                     for note_sha in &full.evidence {
                         evidence.push(store.read_header(note_sha).map_err(external)?.id);
