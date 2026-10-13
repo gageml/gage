@@ -450,9 +450,6 @@ enum Focus {
 pub(crate) enum DocSource {
     /// The backend the view runs over (`Backend::load`)
     Backend,
-    /// A session JSONL read directly (`session::load_from_path`) — used
-    /// for sessions outside any source
-    Path(std::path::PathBuf),
 }
 
 /// Snapshot of the view's UI position, for hosts that re-open sessions
@@ -749,7 +746,6 @@ impl AppState {
             DocSource::Backend => tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(backend.load(&session_id))
             }),
-            DocSource::Path(path) => session::load_from_path(&session_id, path),
         }
         .map_err(|e| io::Error::other(e.to_string()))?;
         if self.turns.is_some() {
@@ -1645,7 +1641,7 @@ fn draw_confirm(frame: &mut Frame, message: &str) {
 }
 
 fn compute_turns(doc: &Document) -> Vec<Option<usize>> {
-    let mut counter = gage_claude::stats::TurnCounter::new();
+    let mut counter = crate::format::TurnCounter::new();
     doc.entries
         .iter()
         .map(|e| counter.observe(&e.value))

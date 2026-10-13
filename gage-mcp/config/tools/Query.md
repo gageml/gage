@@ -18,7 +18,8 @@ to go on.
 Tables:
 
 - session (id, project, title, model, message_count, line_count, is_empty,
-  session_type, driver, native_id, native_source, native_size)
+  session_type, driver, content_format, native_id, native_source,
+  native_size)
 - entry (session_id, line, uuid, type, subtype, raw) - one row per transcript
   line, `raw` its JSON
 - message (session_id, line, uuid, type, subtype, text, attachments, ide_tags,

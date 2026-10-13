@@ -101,20 +101,26 @@ pub struct Entry {
     pub line: u32,
     /// The harness's id for the entry, from the `entry` table
     pub uuid: Option<String>,
+    /// The entry type, from the `entry` table
+    pub entry_type: String,
+    /// The message subtype the driver derived, from the `message`
+    /// table; `None` for an entry that is not a message
+    pub message_subtype: Option<String>,
+    /// The harness's row, verbatim
     pub value: Value,
 }
 
 impl Entry {
     pub fn entry_type(&self) -> &str {
-        self.value.get("type").and_then(Value::as_str).unwrap_or("")
+        &self.entry_type
     }
 
-    /// Outline label — the subtype when meaningful (e.g. `tool_use`,
-    /// `thinking`, `tool_result`, `meta`), otherwise the raw type. Mirrors
-    /// the labeling used by `gage test view`.
+    /// Outline label — the message subtype when meaningful (e.g.
+    /// `tool_use`, `thinking`, `tool_result`, `meta`), otherwise the
+    /// entry type.
     pub fn label(&self) -> &str {
-        match gage_claude::entry::message_subtype(&self.value) {
-            Some("text") | None => self.entry_type(),
+        match self.message_subtype.as_deref() {
+            Some("text") | None => &self.entry_type,
             Some(sub) => sub,
         }
     }

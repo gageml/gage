@@ -13,6 +13,7 @@
 use crate::error::Error;
 use crate::row::push_lines_clause;
 use crate::view::{compress_rows, rows_from_batches};
+use datafusion::arrow::array::StringArray;
 use datafusion::common::ScalarValue;
 use rune::runtime::{Protocol, Ref, Value, VmError};
 use rune::{Any, ContextError, Module};
@@ -70,7 +71,32 @@ impl SessionCompress {
     }
 }
 
+/// The `content_format` whose `raw` rows the compressor reads. The
+/// compressor pairs tool results with their calls and reads error
+/// flags out of each message's `raw`, which is opaque by contract;
+/// that reading belongs in the driver or an adapter facility, which
+/// is not designed yet. Until then the format is checked here.
+const SUPPORTED_FORMAT: &str = "claude-jsonl 1";
+
 async fn do_compress(q: SessionCompress) -> Result<Result<String, Error>, VmError> {
+    let format_batches = run(
+        "SELECT content_format FROM session WHERE id = $1",
+        vec![ScalarValue::Utf8(Some(q.session_id.clone()))],
+    )
+    .await?;
+    let content_format = format_batches
+        .iter()
+        .find(|b| b.num_rows() > 0)
+        .and_then(|b| b.column(0).as_any().downcast_ref::<StringArray>())
+        .map(|col| col.value(0).to_string())
+        .unwrap_or_default();
+    if content_format != SUPPORTED_FORMAT {
+        return Ok(Err(Error::Db(format!(
+            "session {}: content format {content_format:?} is not one compress reads; \
+             this runtime reads {SUPPORTED_FORMAT:?} only",
+            q.session_id
+        ))));
+    }
     let mut params = vec![ScalarValue::Utf8(Some(q.session_id.clone()))];
     let mut clauses = vec!["session_id = $1".to_string()];
     push_lines_clause(q.lines, &mut clauses, &mut params);

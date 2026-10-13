@@ -5,7 +5,6 @@ edition.workspace = true
 
 [dependencies]
 datafusion = { workspace = true }
-gage-claude = { path = "../gage-claude" }
 gage-core = { path = "../gage-core" }
 gage-query = { path = "../gage-query" }
 gage-registry = { path = "../gage-registry" }

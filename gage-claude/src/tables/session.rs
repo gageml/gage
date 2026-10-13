@@ -30,7 +30,7 @@ use futures::stream;
 
 use super::cache::SessionCache;
 use super::walk::{WALK_COLS, walk_sessions};
-use crate::driver::ClaudeNativeSession;
+use crate::driver::{CONTENT_FORMAT, ClaudeNativeSession};
 use crate::session::SessionInfo;
 use gage_core::uuid::short_uuid;
 use gage_session::filter;
@@ -68,6 +68,10 @@ fn session_schema() -> SchemaRef {
             false,
         ),
         Field::new("size", DataType::Int64, false),
+        // Provenance
+        // The driver's name and version for the byte layout of `raw`;
+        // a reader of `raw` checks it
+        Field::new("content_format", DataType::Utf8, false),
         // Content summary
         Field::new("title", DataType::Utf8, true),
         Field::new("model", DataType::Utf8, true),
@@ -339,6 +343,7 @@ impl SessionExec {
         let mut paths = StringBuilder::with_capacity(len, len * 64);
         let mut mtimes = TimestampMillisecondBuilder::with_capacity(len);
         let mut sizes = Int64Builder::with_capacity(len);
+        let mut content_formats = StringBuilder::with_capacity(len, len * CONTENT_FORMAT.len());
         let mut titles = StringBuilder::new();
         let mut models = StringBuilder::new();
         let mut message_counts = Int64Builder::with_capacity(len);
@@ -371,6 +376,7 @@ impl SessionExec {
                 .as_millis() as i64;
             mtimes.append_value(millis);
             sizes.append_value(s.size as i64);
+            content_formats.append_value(CONTENT_FORMAT);
 
             // The native session is the authority on a session's
             // attributes; the table is one consumer of it.
@@ -409,6 +415,7 @@ impl SessionExec {
                 Arc::new(projects.finish()),
                 Arc::new(mtimes.finish().with_timezone("UTC")),
                 Arc::new(sizes.finish()),
+                Arc::new(content_formats.finish()),
                 Arc::new(titles.finish()),
                 Arc::new(models.finish()),
                 Arc::new(message_counts.finish()),

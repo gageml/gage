@@ -56,6 +56,7 @@ const ATTRS_COLS: &[&str] = &[
     "native_source",
     "session_type",
     "driver",
+    "content_format",
     "title",
     "model",
     "message_count",
@@ -101,6 +102,9 @@ fn stored_session_schema() -> SchemaRef {
         Field::new("native_source", DataType::Utf8, false),
         Field::new("session_type", DataType::Utf8, false),
         Field::new("driver", DataType::Utf8, false),
+        // The driver's name and version for the byte layout of the
+        // stored content; a reader of `raw` checks it
+        Field::new("content_format", DataType::Utf8, false),
         // Content summary
         Field::new("title", DataType::Utf8, true),
         Field::new("model", DataType::Utf8, true),
@@ -370,6 +374,7 @@ impl StoredSessionExec {
         let mut native_sources = StringBuilder::new();
         let mut session_types = StringBuilder::new();
         let mut drivers = StringBuilder::new();
+        let mut content_formats = StringBuilder::new();
         let mut titles = StringBuilder::new();
         let mut models = StringBuilder::new();
         let mut message_counts = Int64Builder::with_capacity(len);
@@ -396,6 +401,7 @@ impl StoredSessionExec {
                 native_sources.append_value("");
                 session_types.append_value("");
                 drivers.append_value("");
+                content_formats.append_value("");
                 native_mtimes.append_value(0);
                 native_sizes.append_value(0);
                 titles.append_null();
@@ -412,6 +418,7 @@ impl StoredSessionExec {
             native_sources.append_value(&attrs.native_source);
             session_types.append_value(&attrs.session_type);
             drivers.append_value(&attrs.driver);
+            content_formats.append_value(&attrs.content_format);
             native_mtimes.append_value(attrs.native_mtime);
             native_sizes.append_value(attrs.native_size as i64);
             let summary = &attrs.summary;
@@ -436,6 +443,7 @@ impl StoredSessionExec {
                 Arc::new(native_sources.finish()),
                 Arc::new(session_types.finish()),
                 Arc::new(drivers.finish()),
+                Arc::new(content_formats.finish()),
                 Arc::new(titles.finish()),
                 Arc::new(models.finish()),
                 Arc::new(message_counts.finish()),

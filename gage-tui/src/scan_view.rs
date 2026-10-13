@@ -51,7 +51,7 @@ use crate::session::Backend;
 use crate::session_view::{pop_keyboard_enhancements, push_keyboard_enhancements};
 use crate::text::{ellipsize, fmt_duration, fmt_duration_live};
 use crate::textarea::TextArea;
-use crate::{app, hint, markdown, session, styles};
+use crate::{app, hint, markdown, styles};
 
 /// The data behind the view, supplied by the host: the legacy
 /// database or the store. Every method runs on the event loop's
@@ -2734,19 +2734,8 @@ fn load_session_doc(
         tokio::runtime::Handle::current().block_on(backend.load(&item.id))
     });
     match indexed {
-        Ok(doc) if !doc.entries.is_empty() => Ok((doc, app::DocSource::Backend)),
-        other => match &item.path {
-            Some(path) => {
-                let doc = session::load_from_path(&item.id, path).map_err(|e| e.to_string())?;
-                Ok((doc, app::DocSource::Path(path.clone())))
-            }
-            // No JSONL to fall back to: an empty indexed document still
-            // renders (as empty); an index error is surfaced.
-            None => match other {
-                Ok(doc) => Ok((doc, app::DocSource::Backend)),
-                Err(e) => Err(e.to_string()),
-            },
-        },
+        Ok(doc) => Ok((doc, app::DocSource::Backend)),
+        Err(e) => Err(e.to_string()),
     }
 }
 

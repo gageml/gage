@@ -2386,7 +2386,6 @@ name = "gage-tui"
 version = "0.2.0-dev"
 dependencies = [
  "datafusion",
- "gage-claude",
  "gage-core",
  "gage-query",
  "gage-registry",

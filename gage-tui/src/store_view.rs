@@ -1171,7 +1171,7 @@ fn parent_chain_section(store: &Store, commit: &str, width: u16) -> Vec<Line<'st
 /// DarkGray-bg row spanning the pane, and a blank line. The leading
 /// blank is the padding below the previous section's content, so a
 /// section is padded the same above and below. Mirrors the layout of
-/// `scan_view::bar_section` and `test_view::bar_section`.
+/// `scan_view::bar_section`.
 fn section_header(label: &str, width: u16) -> Vec<Line<'static>> {
     let pad = (width as usize).saturating_sub(1);
     vec![

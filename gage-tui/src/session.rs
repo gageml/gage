@@ -8,7 +8,6 @@
 //! backend reads or writes them.
 
 use std::error::Error;
-use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use datafusion::arrow::array::{
@@ -25,6 +24,7 @@ use ratatui::crossterm::terminal;
 use serde_json::Value;
 
 use crate::doc::{Document, Entry, Note, Session};
+use crate::format;
 
 #[derive(Clone)]
 pub struct Backend {
@@ -114,6 +114,11 @@ impl Backend {
 
     pub async fn load(&self, session_id: &str) -> Result<Document, Box<dyn Error>> {
         let session = self.load_session(session_id).await?;
+        // The entries are read as the harness wrote them; a session
+        // that exists must be in the one format this crate reads
+        if let Some(content_format) = session.value.get("content_format").and_then(Value::as_str) {
+            format::require_supported(session_id, content_format);
+        }
         let entries = self.load_entries(session_id).await?;
         let notes = match self.kind {
             Kind::Native { .. } => Vec::new(),
@@ -147,10 +152,15 @@ impl Backend {
         })
     }
 
+    /// Every entry with the message subtype the driver derived for
+    /// it, when the entry is a message.
     async fn load_entries(&self, session_id: &str) -> Result<Vec<Entry>, Box<dyn Error>> {
         let sql = format!(
-            "SELECT line, uuid, raw FROM {} WHERE session_id = '{}' ORDER BY line",
+            "SELECT e.line, e.uuid, e.type, m.subtype, e.raw \
+             FROM {} e LEFT JOIN {} m ON m.session_id = e.session_id AND m.line = e.line \
+             WHERE e.session_id = '{}' ORDER BY e.line",
             self.entry_rel(),
+            self.message_rel(),
             sql_str(session_id)
         );
         let batches = self.ctx.sql(&sql).await?.collect().await?;
@@ -158,7 +168,9 @@ impl Backend {
         for batch in &batches {
             let lines = column::<Int64Array>(batch, 0);
             let uuids = column::<StringArray>(batch, 1);
-            let raws = column::<StringArray>(batch, 2);
+            let types = column::<StringArray>(batch, 2);
+            let subtypes = column::<StringArray>(batch, 3);
+            let raws = column::<StringArray>(batch, 4);
             for i in 0..batch.num_rows() {
                 // A driver that supplies no raw row leaves the entry
                 // with nothing to render; it still holds its line
@@ -167,9 +179,13 @@ impl Backend {
                 } else {
                     serde_json::from_str(raws.value(i))?
                 };
-                let line = u32::try_from(lines.value(i)).unwrap_or(0);
-                let uuid = uuids.is_valid(i).then(|| uuids.value(i).to_string());
-                entries.push(Entry { line, uuid, value });
+                entries.push(Entry {
+                    line: u32::try_from(lines.value(i)).unwrap_or(0),
+                    uuid: uuids.is_valid(i).then(|| uuids.value(i).to_string()),
+                    entry_type: types.value(i).to_string(),
+                    message_subtype: subtypes.is_valid(i).then(|| subtypes.value(i).to_string()),
+                    value,
+                });
             }
         }
         Ok(entries)
@@ -359,6 +375,13 @@ impl Backend {
             Kind::Stored { .. } => "entry".to_string(),
         }
     }
+
+    fn message_rel(&self) -> String {
+        match &self.kind {
+            Kind::Native { spec, .. } => format!("native_message('{}')", sql_str(spec)),
+            Kind::Stored { .. } => "message".to_string(),
+        }
+    }
 }
 
 /// A row in the session-open picker.
@@ -372,32 +395,6 @@ pub struct SessionListItem {
     /// The native mtime for a source, the store's `modified` marker
     /// for the store
     pub time_ms: i64,
-}
-
-/// Load a session document straight from its JSONL file, bypassing
-/// the query layer. Used for sessions outside any source (e.g. scan
-/// agent sessions opened from the legacy `gage scan view`). Session
-/// metadata is synthesized from the id and path; the document has no
-/// notes.
-pub fn load_from_path(session_id: &str, path: &Path) -> Result<Document, Box<dyn Error>> {
-    let mut entries = Vec::new();
-    for item in gage_claude::session_reader::SessionReader::open(path)? {
-        let (line, value) = item?;
-        let uuid = value.get("uuid").and_then(Value::as_str).map(String::from);
-        entries.push(Entry { line, uuid, value });
-    }
-    let session = Session {
-        id: session_id.to_string(),
-        value: serde_json::json!({
-            "id": session_id,
-            "path": path.display().to_string(),
-        }),
-    };
-    Ok(Document {
-        session,
-        entries,
-        notes: Vec::new(),
-    })
 }
 
 fn note_from_full(full: NoteFull) -> Result<Note, Box<dyn Error>> {
