@@ -443,6 +443,7 @@ impl ScanModel {
                 {
                     item.state = TaskState::Error;
                     item.elapsed = Some(item.stopwatch.stop());
+                    item.progress = None;
                 }
             }
             Event::Results {
@@ -3720,6 +3721,53 @@ mod tests {
         state.model.tasks.first_mut().unwrap().progress = Some((0, 4));
         let after = state.progress_ratio();
         assert!(after >= before, "ratio retreated: {before} -> {after}");
+    }
+
+    // Regression: a failed task kept its last progress pair, so the
+    // status cell drew a partial gauge over the "error" label
+    #[test]
+    fn failed_task_drops_progress() {
+        let id = TaskId {
+            scanner: "s".into(),
+            task: "t".into(),
+        };
+        let mut model = ScanModel {
+            scan_id: "scan1".into(),
+            label: None,
+            tasks: vec![TaskItem {
+                id: id.clone(),
+                state: TaskState::Running,
+                cost: None,
+                elapsed: None,
+                progress: Some((5, 10)),
+                pool_blocked: false,
+                stopwatch: Stopwatch::new(),
+                agents: Vec::new(),
+            }],
+            sessions: Vec::new(),
+            notes: Vec::new(),
+            issues: Vec::new(),
+            total: 1,
+            progress: 0,
+            errors: 0,
+            cost: None,
+            finished: false,
+            elapsed: None,
+            log_key: None,
+        };
+        model.apply(&Event::Failed {
+            scanner: id.scanner.clone(),
+            task: id.task.clone(),
+            message: "boom".into(),
+        });
+        model.apply(&Event::Status {
+            total: 1,
+            progress: 1,
+            running: Vec::new(),
+        });
+        let task = &model.tasks[0];
+        assert_eq!(task.state, TaskState::Error);
+        assert_eq!(task.progress, None);
     }
 
     #[test]
