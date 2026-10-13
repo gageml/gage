@@ -9,9 +9,8 @@ use gage_core::datetime::ms_to_iso8601;
 use gage_core::uuid::short_uuid;
 use gage_query::ContextBuilder;
 use gage_store::{
-    StoreError,
-    AddStep, DatasetOrigin, DatasetSessionAddOutcome, DatasetStore, SessionOutcome,
-    Store, StoreError, TagStore,
+    AddStep, DatasetOrigin, DatasetSessionAddOutcome, DatasetStore, SessionOutcome, Store,
+    StoreError, TagStore,
 };
 use tabled::{
     Table,

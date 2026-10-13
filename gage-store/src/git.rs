@@ -596,6 +596,15 @@ pub(crate) fn git_cmd() -> Command {
             cmd.env_remove(name);
         }
     }
+    // A git child runs in its own process group, so a terminal's
+    // Ctrl+C reaches Gage alone. With the child in the foreground
+    // group the signal killed it mid-command and the store reported
+    // that death before Gage could stop at an object boundary.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
     cmd
 }
 

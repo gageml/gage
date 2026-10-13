@@ -898,7 +898,12 @@ fn add_native(
         .close()
         .map_err(|e| DialogError::Failed(format!("{spec}: {e}")))?;
     if placed < total {
-        return Err(dialog::partial("Interrupted after", placed, total, "session"));
+        return Err(dialog::partial(
+            "Interrupted after",
+            placed,
+            total,
+            "session",
+        ));
     }
     Ok(())
 }

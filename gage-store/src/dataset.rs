@@ -202,6 +202,22 @@ pub struct SessionSpec<'a> {
     pub session: &'a mut dyn NativeSession,
 }
 
+/// Opens the session at a native id for
+/// [`DatasetStore::sessions_add_opening`]; `None` stops the add before
+/// that session.
+pub type SessionOpener<'a> =
+    dyn FnMut(&str) -> Result<Option<Box<dyn NativeSession>>, StoreError> + 'a;
+
+/// One step of a dataset add: writes the session at an index through
+/// the given store, reporting its own [`AddStep::Starting`]. `None`
+/// ends the add before that session.
+type AddOne<'a> = dyn FnMut(
+        usize,
+        &SessionStore<'_>,
+        &mut dyn FnMut(AddStep<'_>),
+    ) -> Result<Option<SessionAddOutcome>, StoreError>
+    + 'a;
+
 impl DatasetStore<'_> {
     /// Cap the total content each session added through this store may
     /// write, as [`SessionStore::with_max_session_size`] does for a
@@ -629,7 +645,7 @@ impl DatasetStore<'_> {
         dataset_id: &str,
         driver: &dyn Driver,
         native_ids: &[String],
-        open: &mut dyn FnMut(&str) -> Result<Option<Box<dyn NativeSession>>, StoreError>,
+        open: &mut SessionOpener<'_>,
         progress: &mut dyn FnMut(AddStep<'_>),
     ) -> Result<Vec<DatasetSessionAddOutcome>, StoreError> {
         self.sessions_add_each(
@@ -650,18 +666,12 @@ impl DatasetStore<'_> {
     }
 
     /// Write `count` sessions through `add`, one call per index, and
-    /// link the outcomes as members in one dataset commit. `add`
-    /// reports its own [`AddStep::Starting`]; `None` from it ends the
-    /// loop early.
+    /// link the outcomes as members in one dataset commit.
     fn sessions_add_each(
         &self,
         dataset_id: &str,
         count: usize,
-        add: &mut dyn FnMut(
-            usize,
-            &SessionStore<'_>,
-            &mut dyn FnMut(AddStep<'_>),
-        ) -> Result<Option<SessionAddOutcome>, StoreError>,
+        add: &mut AddOne<'_>,
         progress: &mut dyn FnMut(AddStep<'_>),
     ) -> Result<Vec<DatasetSessionAddOutcome>, StoreError> {
         if count == 0 {
