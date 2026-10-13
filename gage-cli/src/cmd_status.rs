@@ -163,10 +163,6 @@ async fn write_counts(out: &mut String, problems: &mut Vec<String>) {
             problems.push(format!("Store at {} unavailable: {e}", path.display()));
         }
     }
-
-    let native = ContextBuilder::new(None).build().await;
-    let sessions = count_rows(&native, "SELECT COUNT(*) FROM native_session('')").await;
-    w(out, format!("  Sessions: {sessions}"));
 }
 
 async fn write_store_counts(out: &mut String, ctx: &SessionContext) {
@@ -183,6 +179,9 @@ async fn write_store_counts(out: &mut String, ctx: &SessionContext) {
 
     let scans = count_rows(ctx, "SELECT COUNT(*) FROM scan").await;
     w(out, format!("  Scans:    {scans}"));
+
+    let sessions = count_rows(ctx, "SELECT COUNT(*) FROM session").await;
+    w(out, format!("  Sessions: {sessions}"));
 }
 
 fn write_storage(out: &mut String, verbose: bool) {
