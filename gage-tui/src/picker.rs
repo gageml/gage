@@ -21,6 +21,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::dialog;
 use crate::item_table::scrollbar;
+use crate::panel::COLUMN_SPACING;
 use crate::styles;
 use crate::text::ellipsize;
 
@@ -114,8 +115,6 @@ pub(crate) enum PickerAction {
     /// The host fetches the next page and appends it
     LoadMore,
 }
-
-const COLUMN_SPACING: u16 = 2;
 
 impl Picker {
     /// New picker, preselecting `current` when it is in the list.

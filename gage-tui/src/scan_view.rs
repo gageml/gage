@@ -45,7 +45,7 @@ use crate::attrs::attr_lines;
 use crate::dialog;
 use crate::doc::Document;
 use crate::item_table::ItemTable;
-use crate::panel::{header_row, panel_block};
+use crate::panel::{COLUMN_SPACING, header_row, panel_block};
 use crate::picker::{self, PickColumn, PickItem, Picker, PickerAction};
 use crate::scroll::ScrollView;
 use crate::session::Backend;
@@ -1048,7 +1048,8 @@ fn fit_col<'a>(header: &str, values: impl Iterator<Item = &'a str>, area: Rect) 
 /// per fixed column.
 fn fill_width(area: Rect, fixed: &[u16]) -> usize {
     let inner = area.width.saturating_sub(2) as usize;
-    let fixed_total: usize = fixed.iter().map(|w| *w as usize).sum::<usize>() + fixed.len();
+    let fixed_total: usize =
+        fixed.iter().map(|w| *w as usize).sum::<usize>() + fixed.len() * COLUMN_SPACING as usize;
     inner.saturating_sub(fixed_total)
 }
 
@@ -3225,6 +3226,7 @@ fn draw_tasks(frame: &mut Frame, area: Rect, state: &mut ViewState) {
         // Left pad Status to align with values
         Cell::from(Span::styled(" Status", styles::Text::dim())),
     ]))
+    .column_spacing(COLUMN_SPACING)
     .row_highlight_style(styles::Panel::selection(state.focus == Focus::Tasks))
     .block(panel_block(
         format!(" Tasks ({count}) "),
@@ -3312,12 +3314,13 @@ fn draw_sessions(frame: &mut Frame, area: Rect, state: &mut ViewState) {
     let widths: Vec<Constraint> = vec![
         Constraint::Length(8),
         Constraint::Fill(1),
-        Constraint::Length(7),
         Constraint::Length(6),
+        Constraint::Length(5),
     ];
     let header = header_row(["Id", "Title", "Issues", "Notes"]);
     let table = Table::new(rows, widths)
         .header(header)
+        .column_spacing(COLUMN_SPACING)
         .row_highlight_style(styles::Panel::selection(state.focus == Focus::Sessions))
         .block(panel_block(
             format!(" Sessions ({count}) "),
@@ -3366,6 +3369,7 @@ fn draw_notes(frame: &mut Frame, area: Rect, state: &mut ViewState) {
         ],
     )
     .header(header_row(["Id", "Name", "Value", "Target"]))
+    .column_spacing(COLUMN_SPACING)
     .row_highlight_style(styles::Panel::selection(state.focus == Focus::Notes))
     .block(panel_block(
         format!(" Notes ({count}) "),
@@ -3439,6 +3443,7 @@ fn draw_issues(frame: &mut Frame, area: Rect, state: &mut ViewState) {
         ],
     )
     .header(header_row(["Id", "Title", "Notes", "Sessions", "Status"]))
+    .column_spacing(COLUMN_SPACING)
     .row_highlight_style(styles::Panel::selection(state.focus == Focus::Issues))
     .block(panel_block(
         format!(" Issues ({count}) "),

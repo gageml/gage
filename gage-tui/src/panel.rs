@@ -7,6 +7,10 @@ use ratatui::widgets::{Block, Cell, Row};
 
 use crate::styles;
 
+/// Gap between table columns, in cells. Two cells keep a header with
+/// a space in its label distinct from two adjacent headers.
+pub(crate) const COLUMN_SPACING: u16 = 2;
+
 /// Bordered panel with `title`, styled to reflect focus. Match the
 /// convention used across every view: title text is plain; only the
 /// border tone changes with focus, so the title reads the same when
