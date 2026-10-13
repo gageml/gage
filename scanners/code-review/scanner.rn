@@ -350,7 +350,12 @@ fn bash_edit(m) {
     if let Some(result) = m.as_object().get("toolUseResult") {
         if result is Object {
             if let Some(diff) = result.get("bashEditDiff") {
-                return !diff.changedFiles.is_empty();
+                if let Some(changed) = diff.get("changedFiles") {
+                    return !changed.is_empty();
+                }
+                if let Some(files) = diff.get("files") {
+                    return !files.is_empty();
+                }
             }
         }
     }
