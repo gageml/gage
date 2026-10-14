@@ -350,6 +350,14 @@ reading a newer object is a normal condition, not an upgrade-window edge case.
   `SkipSystemCols` wrapper filters by `gage_session::is_system(field)`. A
   name-based system list is a defect.
 
+## CLI rules
+
+- Every command that writes the store or config confirms through the shared
+  dialog; `--yes` skips it. Exceptions: `gage store` subcommands are low level
+  and exempt; `gage config edit` is confirmed by the editor save.
+- Progress and spinners come from the dialog theme. No library defaults.
+- CLI dialog work does not touch `gage-tui`.
+
 ## TUI rules
 
 - Key-hint vocabulary for the key that exits an overlay. The term names the
