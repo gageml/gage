@@ -16,7 +16,7 @@ use datafusion::prelude::Expr;
 
 use gage_core::style::IdHighlighter;
 
-use crate::index::SessionSummary;
+use crate::index::ClaudeSessionAttrs;
 use crate::session::SessionInfo;
 use gage_session::filter::{
     ColumnFilter, IdFilter, TimeBounds, covered_by, required_members, time_bounds,
@@ -89,7 +89,7 @@ impl SummaryPrune {
     };
 
     /// Whether the summary admits a session under `filters`.
-    fn admits(&self, summary: &SessionSummary, bounds: &TimeBounds, paths: &[String]) -> bool {
+    fn admits(&self, summary: &ClaudeSessionAttrs, bounds: &TimeBounds, paths: &[String]) -> bool {
         let in_span = match (summary.first_timestamp_ms, summary.last_timestamp_ms) {
             (Some(first), Some(last)) => bounds.admits(first, last),
             _ => true,
@@ -171,7 +171,7 @@ pub(crate) fn walk_sessions(
         .map(|c| required_members(filters, c))
         .unwrap_or_default();
     if !bounds.is_open() || !paths.is_empty() {
-        sessions.retain(|s| match store.session_summary(&s.id, s.mtime) {
+        sessions.retain(|s| match store.session_attrs(&s.id, s.mtime) {
             Some(summary) => prune.admits(&summary, &bounds, &paths),
             None => true,
         });
@@ -251,8 +251,8 @@ mod tests {
         path
     }
 
-    fn summary(first: i64, last: i64, files: &[&str]) -> SessionSummary {
-        SessionSummary {
+    fn summary(first: i64, last: i64, files: &[&str]) -> ClaudeSessionAttrs {
+        ClaudeSessionAttrs {
             first_timestamp_ms: Some(first),
             last_timestamp_ms: Some(last),
             files_changed: files.iter().map(PathBuf::from).collect(),
@@ -305,7 +305,7 @@ mod tests {
             (ids[2], summary(100, 500, &["/w/a.rs"])),
         ];
         for (id, s) in &summaries {
-            store.put_session_summary(id, s).unwrap();
+            store.put_session_attrs(id, s).unwrap();
         }
         let prune = SummaryPrune {
             time_col: Some("result_timestamp"),

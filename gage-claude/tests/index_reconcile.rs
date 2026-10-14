@@ -41,11 +41,11 @@ fn rich_session_path(root: &Path) -> PathBuf {
 
 /// The cached summary for the rich session, validated against its
 /// current JSONL mtime.
-fn rich_summary(store: &IndexStore, root: &Path) -> Option<gage_claude::index::SessionSummary> {
+fn rich_summary(store: &IndexStore, root: &Path) -> Option<gage_claude::index::ClaudeSessionAttrs> {
     let mtime = std::fs::metadata(rich_session_path(root))
         .map(|m| m.modified().unwrap())
         .unwrap_or(SystemTime::UNIX_EPOCH);
-    store.session_summary(RICH_SESSION, mtime)
+    store.session_attrs(RICH_SESSION, mtime)
 }
 
 #[test]
@@ -132,11 +132,11 @@ fn reconcile_removes_orphan_summaries() {
     store.reconcile(LockMode::Wait).unwrap();
     let orphan = "01234567-89ab-cdef-0123-456789abcdef";
     store
-        .put_session_summary(orphan, &gage_claude::index::SessionSummary::default())
+        .put_session_attrs(orphan, &gage_claude::index::ClaudeSessionAttrs::default())
         .unwrap();
     assert!(
         store
-            .session_summary(orphan, SystemTime::UNIX_EPOCH)
+            .session_attrs(orphan, SystemTime::UNIX_EPOCH)
             .is_some()
     );
 
@@ -144,7 +144,7 @@ fn reconcile_removes_orphan_summaries() {
     assert_eq!(outcome.removed, 1);
     assert!(
         store
-            .session_summary(orphan, SystemTime::UNIX_EPOCH)
+            .session_attrs(orphan, SystemTime::UNIX_EPOCH)
             .is_none()
     );
 }

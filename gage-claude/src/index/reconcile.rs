@@ -18,7 +18,7 @@ use fs4::FileExt;
 use serde::{Deserialize, Serialize};
 
 use super::Result;
-use super::derive::{Fingerprint, SessionSummary, derive_session};
+use super::derive::{ClaudeSessionAttrs, Fingerprint, derive_session};
 use super::summary_cache;
 use crate::session::SessionListBuilder;
 
@@ -169,22 +169,22 @@ impl IndexStore {
         self.cache_dir.join("manifest.json")
     }
 
-    /// Read the cached `SessionSummary` for `id` if its file exists and
+    /// Read the cached `ClaudeSessionAttrs` for `id` if its file exists and
     /// its mtime is at least `jsonl_mtime`. Returns `None` on missing
     /// file, stale cache, or decode failure — the caller falls through
     /// to a full parse. Lock-free; the writer is reconcile, whose
     /// tmp+rename pattern means the reader either sees the old file or
     /// the new one, never a partial.
-    pub fn session_summary(&self, id: &str, jsonl_mtime: SystemTime) -> Option<SessionSummary> {
+    pub fn session_attrs(&self, id: &str, jsonl_mtime: SystemTime) -> Option<ClaudeSessionAttrs> {
         summary_cache::read(&self.cache_dir, id, jsonl_mtime)
     }
 
-    /// Persist a `SessionSummary` to the on-disk cache. Used by the
+    /// Persist a `ClaudeSessionAttrs` to the on-disk cache. Used by the
     /// session-table lazy path to populate the cache as it derives
-    /// sessions on demand, so subsequent queries hit `session_summary`.
-    pub fn put_session_summary(&self, id: &str, summary: &SessionSummary) -> std::io::Result<()> {
+    /// sessions on demand, so subsequent queries hit `session_attrs`.
+    pub fn put_session_attrs(&self, id: &str, attrs: &ClaudeSessionAttrs) -> std::io::Result<()> {
         self.ensure_cache_dir()?;
-        summary_cache::write(&self.cache_dir, id, summary)
+        summary_cache::write(&self.cache_dir, id, attrs)
     }
 
     /// Create the cache dir and record the projects dir it caches in
@@ -370,7 +370,7 @@ impl IndexStore {
                     continue;
                 }
             };
-            if let Err(e) = summary_cache::write(&self.cache_dir, id, &derived.summary) {
+            if let Err(e) = summary_cache::write(&self.cache_dir, id, &derived.attrs) {
                 tracing::warn!(session_id = %id, "failed to write summary cache: {e}");
                 on_event(ReconcileEvent::Advance);
                 continue;

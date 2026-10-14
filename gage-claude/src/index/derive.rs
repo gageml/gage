@@ -89,10 +89,21 @@ impl Fingerprint {
     }
 }
 
-/// Session-level summary: the expensive `session` table columns,
-/// computed in the same derivation pass.
+/// The attributes of one native session: the `session` table columns
+/// and the facts the store records when the session is added, computed
+/// in one derivation pass and cached per transcript file.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct SessionSummary {
+pub struct ClaudeSessionAttrs {
+    /// The transcript file's mtime at derivation, epoch milliseconds
+    #[serde(default)]
+    pub native_mtime_ms: i64,
+    /// The transcript file's size at derivation
+    #[serde(default)]
+    pub native_size: u64,
+    /// The project slug: the name of the directory holding the
+    /// transcript, unless a caller recorded another
+    #[serde(default)]
+    pub project: String,
     pub title: Option<String>,
     pub model: Option<String>,
     pub message_count: i64,
@@ -122,7 +133,7 @@ pub struct DerivedSession {
     pub batch: RecordBatch,
     /// The session's `tool_use` rows
     pub tool_uses: RecordBatch,
-    pub summary: SessionSummary,
+    pub attrs: ClaudeSessionAttrs,
     pub fingerprint: Fingerprint,
 }
 
@@ -416,7 +427,14 @@ pub fn derive_session(session_id: &str, path: &Path) -> Result<DerivedSession> {
 
     let mut b = RowBuilders::new();
     let mut tool_uses = ToolUseCollector::new();
-    let mut summary = SessionSummary {
+    let mut attrs = ClaudeSessionAttrs {
+        native_mtime_ms: fingerprint.mtime_ms,
+        native_size: fingerprint.size,
+        project: path
+            .parent()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default(),
         is_empty: true,
         ..Default::default()
     };
@@ -430,22 +448,22 @@ pub fn derive_session(session_id: &str, path: &Path) -> Result<DerivedSession> {
         };
 
         let entry_type = entry.get("type").and_then(|v| v.as_str());
-        summary.line_count = u64::from(line_num);
+        attrs.line_count = u64::from(line_num);
         if let Some(ms) = entry_timestamp_ms(&entry) {
-            summary.first_timestamp_ms = Some(summary.first_timestamp_ms.map_or(ms, |f| f.min(ms)));
-            summary.last_timestamp_ms = Some(summary.last_timestamp_ms.map_or(ms, |l| l.max(ms)));
+            attrs.first_timestamp_ms = Some(attrs.first_timestamp_ms.map_or(ms, |f| f.min(ms)));
+            attrs.last_timestamp_ms = Some(attrs.last_timestamp_ms.map_or(ms, |l| l.max(ms)));
         }
 
-        if summary.is_empty && entry_has_content(&entry) {
-            summary.is_empty = false;
+        if attrs.is_empty && entry_has_content(&entry) {
+            attrs.is_empty = false;
         }
         match entry_type.unwrap_or("") {
             "user" | "assistant" => {
-                summary.message_count += 1;
+                attrs.message_count += 1;
                 if entry_type == Some("assistant") {
                     let msg = entry.get("message");
-                    if summary.model.is_none() {
-                        summary.model = msg
+                    if attrs.model.is_none() {
+                        attrs.model = msg
                             .and_then(|m| m.get("model"))
                             .and_then(|m| m.as_str())
                             .map(String::from);
@@ -460,30 +478,30 @@ pub fn derive_session(session_id: &str, path: &Path) -> Result<DerivedSession> {
                     if let Some(usage) = msg.and_then(|m| m.get("usage"))
                         && first_row_of_response
                     {
-                        summary.input_tokens += usage
+                        attrs.input_tokens += usage
                             .get("input_tokens")
                             .and_then(|v| v.as_i64())
                             .unwrap_or(0);
-                        summary.output_tokens += usage
+                        attrs.output_tokens += usage
                             .get("output_tokens")
                             .and_then(|v| v.as_i64())
                             .unwrap_or(0);
-                        summary.cache_read_input_tokens += usage
+                        attrs.cache_read_input_tokens += usage
                             .get("cache_read_input_tokens")
                             .and_then(|v| v.as_i64())
                             .unwrap_or(0);
-                        summary.cache_creation_input_tokens += usage
+                        attrs.cache_creation_input_tokens += usage
                             .get("cache_creation_input_tokens")
                             .and_then(|v| v.as_i64())
                             .unwrap_or(0);
                     }
-                } else if entry_type == Some("user") && summary.title.is_none() {
-                    summary.title = session_title_from_entry(&entry);
+                } else if entry_type == Some("user") && attrs.title.is_none() {
+                    attrs.title = session_title_from_entry(&entry);
                 }
             }
             "ai-title" => {
                 if !has_custom_title {
-                    summary.title = entry
+                    attrs.title = entry
                         .get("aiTitle")
                         .and_then(|t| t.as_str())
                         .map(String::from);
@@ -491,7 +509,7 @@ pub fn derive_session(session_id: &str, path: &Path) -> Result<DerivedSession> {
             }
             "custom-title" => {
                 if let Some(t) = entry.get("customTitle").and_then(|t| t.as_str()) {
-                    summary.title = Some(t.to_string());
+                    attrs.title = Some(t.to_string());
                     has_custom_title = true;
                 }
             }
@@ -507,18 +525,18 @@ pub fn derive_session(session_id: &str, path: &Path) -> Result<DerivedSession> {
     let mut tool_use_batch = ToolUseBatch::new();
     for t in tool_uses.finish() {
         tool_use_batch.push(session_id, &t);
-        summary
+        attrs
             .files_changed
             .extend(t.files_changed.iter().flatten().cloned());
     }
-    summary.files_changed.sort();
-    summary.files_changed.dedup();
+    attrs.files_changed.sort();
+    attrs.files_changed.dedup();
 
     Ok(DerivedSession {
         session_id: session_id.to_string(),
         batch: b.finish()?,
         tool_uses: tool_use_batch.finish()?,
-        summary,
+        attrs,
         fingerprint,
     })
 }
@@ -634,10 +652,10 @@ mod tests {
         let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
         std::fs::write(&path, text).unwrap();
         let derived = derive_session("s", &path).unwrap();
-        assert_eq!(derived.summary.first_timestamp_ms, Some(1_735_689_601_000));
-        assert_eq!(derived.summary.last_timestamp_ms, Some(1_735_689_609_000));
+        assert_eq!(derived.attrs.first_timestamp_ms, Some(1_735_689_601_000));
+        assert_eq!(derived.attrs.last_timestamp_ms, Some(1_735_689_609_000));
         assert_eq!(
-            derived.summary.files_changed,
+            derived.attrs.files_changed,
             [PathBuf::from("/w/a.rs"), PathBuf::from("/w/b.rs")]
         );
         assert_eq!(derived.tool_uses.num_rows(), 2);
@@ -661,12 +679,12 @@ mod tests {
         ];
         let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
         std::fs::write(&path, text).unwrap();
-        let summary = derive_session("s", &path).unwrap().summary;
-        assert_eq!(summary.message_count, 4);
-        assert_eq!(summary.input_tokens, 9);
-        assert_eq!(summary.output_tokens, 30);
-        assert_eq!(summary.cache_read_input_tokens, 300);
-        assert_eq!(summary.cache_creation_input_tokens, 21);
+        let attrs = derive_session("s", &path).unwrap().attrs;
+        assert_eq!(attrs.message_count, 4);
+        assert_eq!(attrs.input_tokens, 9);
+        assert_eq!(attrs.output_tokens, 30);
+        assert_eq!(attrs.cache_read_input_tokens, 300);
+        assert_eq!(attrs.cache_creation_input_tokens, 21);
     }
 
     fn system_entry(subtype: &str, extra: serde_json::Value) -> serde_json::Value {

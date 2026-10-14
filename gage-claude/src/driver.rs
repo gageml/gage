@@ -17,7 +17,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Child;
 use std::sync::{Arc, OnceLock};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use gage_core::config::plugin_marketplace_dir;
 use gage_session::{
@@ -30,7 +30,7 @@ use gage_session::{
 use crate::content_schema;
 use crate::home::ClaudeHome;
 use crate::index::{
-    IndexStore, LockMode, ReconcileEvent, SessionSummary, ToolUseCollector, cache_dir_for,
+    ClaudeSessionAttrs, IndexStore, LockMode, ReconcileEvent, ToolUseCollector, cache_dir_for,
     derive_entry, derive_session,
 };
 use crate::model::{configured_model, resolve_model, resolved_model};
@@ -530,7 +530,7 @@ impl Source for ClaudeSource {
         let newest = self.store.session_list().limit(limit).build();
         let uncached: Vec<&SessionInfo> = newest
             .iter()
-            .filter(|s| self.store.session_summary(&s.id, s.mtime).is_none())
+            .filter(|s| self.store.session_attrs(&s.id, s.mtime).is_none())
             .collect();
         let total = uncached.len();
         on_progress(0, total);
@@ -539,8 +539,7 @@ impl Source for ClaudeSource {
             // A session that cannot be read is skipped here and
             // reported by the table scan, which shows it with default
             // attributes.
-            match ClaudeNativeSession::open(&s.id, &s.src, s.mtime, s.size, &self.root, &self.store)
-            {
+            match ClaudeNativeSession::open(&s.id, &s.src, s.mtime, &self.root, &self.store) {
                 Ok(_) => {}
                 Err(e) => tracing::warn!(session_id = %s.id, "session summary unavailable: {e}"),
             }
@@ -623,7 +622,6 @@ impl Source for ClaudeSource {
             native_id,
             &path,
             mtime,
-            meta.len(),
             &self.root,
             &self.store,
         )?))
@@ -854,34 +852,23 @@ impl ClaudeNativeSession {
         native_id: &str,
         path: &Path,
         mtime: SystemTime,
-        size: u64,
         root: &Path,
         store: &IndexStore,
     ) -> Result<Self, DriverError> {
-        let summary = match store.session_summary(native_id, mtime) {
+        let attrs = match store.session_attrs(native_id, mtime) {
             Some(cached) => cached,
             None => {
                 let derived = derive_session(native_id, path)
                     .map_err(|e| DriverError::Other(format!("{}: {e}", path.display())))?;
-                store.put_session_summary(native_id, &derived.summary)?;
-                derived.summary
+                store.put_session_attrs(native_id, &derived.attrs)?;
+                derived.attrs
             }
         };
-        let project_slug = path
-            .parent()
-            .and_then(|p| p.file_name())
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
         Ok(Self {
             native_id: native_id.to_string(),
             source: format!("{NAME}:{}/{native_id}", root.display()),
             session_path: path.to_path_buf(),
-            attrs: ClaudeSessionAttrs {
-                mtime,
-                size,
-                project_slug,
-                summary,
-            },
+            attrs,
         })
     }
 
@@ -892,13 +879,13 @@ impl ClaudeNativeSession {
     /// Record `project` as the session's project in place of the slug
     /// of the directory the transcript sits in.
     pub fn set_project(&mut self, project: String) {
-        self.attrs.project_slug = project;
+        self.attrs.project = project;
     }
 
-    /// The full derived summary, including the token counts the
+    /// The full derived attributes, including the token counts the
     /// generic [`SessionAttrs`] view does not carry.
-    pub fn summary(&self) -> &SessionSummary {
-        &self.attrs.summary
+    pub fn claude_attrs(&self) -> &ClaudeSessionAttrs {
+        &self.attrs
     }
 }
 
@@ -924,44 +911,37 @@ impl NativeSession for ClaudeNativeSession {
     }
 }
 
-struct ClaudeSessionAttrs {
-    mtime: SystemTime,
-    size: u64,
-    project_slug: String,
-    summary: SessionSummary,
-}
-
 impl SessionAttrs for ClaudeSessionAttrs {
     fn native_mtime(&self) -> SystemTime {
-        self.mtime
+        SystemTime::UNIX_EPOCH + Duration::from_millis(self.native_mtime_ms.max(0) as u64)
     }
 
     fn native_size(&self) -> u64 {
-        self.size
+        self.native_size
     }
 
     fn is_empty(&self) -> bool {
-        self.summary.is_empty
+        self.is_empty
     }
 
     fn project_name(&self) -> Option<&str> {
-        Some(&self.project_slug)
+        Some(&self.project)
     }
 
     fn title(&self) -> Option<&str> {
-        self.summary.title.as_deref()
+        self.title.as_deref()
     }
 
     fn model(&self) -> Option<&str> {
-        self.summary.model.as_deref()
+        self.model.as_deref()
     }
 
     fn message_count(&self) -> Option<u64> {
-        Some(self.summary.message_count.max(0) as u64)
+        Some(self.message_count.max(0) as u64)
     }
 
     fn line_count(&self) -> Option<u64> {
-        Some(self.summary.line_count)
+        Some(self.line_count)
     }
 }
 

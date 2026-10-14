@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
-use crate::index::{IndexStore, SessionSummary};
+use crate::index::{ClaudeSessionAttrs, IndexStore};
 use async_trait::async_trait;
 use datafusion::arrow::array::{
     BooleanBuilder, Int64Builder, StringBuilder, TimestampMillisecondBuilder,
@@ -360,7 +360,7 @@ impl SessionExec {
         let mut cache_creation = Int64Builder::with_capacity(len);
         let mut is_empty = BooleanBuilder::with_capacity(len);
 
-        let default_summary = SessionSummary {
+        let default_summary = ClaudeSessionAttrs {
             is_empty: true,
             ..Default::default()
         };
@@ -390,9 +390,8 @@ impl SessionExec {
             let summary = if !needs_summary {
                 default_summary.clone()
             } else {
-                match ClaudeNativeSession::open(&s.id, &s.src, s.mtime, s.size, &root, &self.store)
-                {
-                    Ok(session) => session.summary().clone(),
+                match ClaudeNativeSession::open(&s.id, &s.src, s.mtime, &root, &self.store) {
+                    Ok(session) => session.claude_attrs().clone(),
                     Err(e) => {
                         tracing::warn!(session_id = %s.id, "session summary unavailable: {e}");
                         default_summary.clone()
