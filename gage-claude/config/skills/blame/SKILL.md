@@ -37,7 +37,10 @@ rather than deliberate over it.
    as `[start, end]`, `timestamp`, and `match`. Group the rows by session and
    span. A `match` of `content` means the call's input carries the line's
    text. A `match` of `file` means the latest write to the file in the line's
-   window stood in, which is weaker. A null session means no recorded session
+   window stood in, which is weaker (a shell command's recorded diff lists
+   every file changed since the last snapshot, not only what that command
+   wrote, so a file match can name a session that touched the file nearby but
+   did not write the line). A null session means no recorded session
    wrote the line; git history and comments are then the only record.
 
 3. Read each span through the `mcp__plugin_gage_gage__Query` tool. The span
