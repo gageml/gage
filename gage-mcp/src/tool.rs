@@ -21,10 +21,14 @@ use crate::server::GageServer;
 /// the companion `.md` by [`build_tool_meta`].
 pub type ToolDef = fn() -> ToolRoute<GageServer>;
 
-/// Claude Code truncates MCP tool descriptions at 2048 bytes; anything
-/// past this is silently invisible to the model. Each tool module
-/// enforces this at compile time via [`description_byte_len`].
-pub const MAX_DESCRIPTION_BYTES: usize = 2048;
+/// Claude Code 2.1.296 and later cut an MCP tool description at 4096
+/// characters; anything past the cut is silently invisible to the
+/// model. A tool loaded through tool search gets 16384, but a server
+/// configured with `alwaysLoad` falls back to 4096, so that is the
+/// bound every description observes. Bytes bound characters from
+/// above. Each tool module enforces this at compile time via
+/// [`description_byte_len`].
+pub const MAX_DESCRIPTION_BYTES: usize = 4096;
 
 /// Compile-time length of the description body in `md` (the bytes after
 /// the `+++` frontmatter, with leading/trailing ASCII whitespace

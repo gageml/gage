@@ -20,7 +20,7 @@ pub const NAME: &str = "NoteWrite";
 const MD: &str = include_str!("../../config/tools/NoteWrite.md");
 const _: () = assert!(
     description_byte_len(MD) <= MAX_DESCRIPTION_BYTES,
-    "NoteWrite description exceeds Claude Code's 2048-byte cap",
+    "NoteWrite description exceeds Claude Code's 4096-byte cap",
 );
 
 /// The route for one configuration. The description ends with the

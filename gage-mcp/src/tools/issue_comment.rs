@@ -24,7 +24,7 @@ pub const TOOL: ToolDef = route;
 const MD: &str = include_str!("../../config/tools/IssueComment.md");
 const _: () = assert!(
     description_byte_len(MD) <= MAX_DESCRIPTION_BYTES,
-    "IssueComment description exceeds Claude Code's 2048-byte cap",
+    "IssueComment description exceeds Claude Code's 4096-byte cap",
 );
 
 fn route() -> ToolRoute<GageServer> {

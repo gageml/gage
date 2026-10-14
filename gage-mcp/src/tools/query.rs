@@ -23,7 +23,7 @@ pub const TOOL: ToolDef = route;
 const MD: &str = include_str!("../../config/tools/Query.md");
 const _: () = assert!(
     description_byte_len(MD) <= MAX_DESCRIPTION_BYTES,
-    "Query description exceeds Claude Code's 2048-byte cap",
+    "Query description exceeds Claude Code's 4096-byte cap",
 );
 
 /// The most result text one call returns; rows past it are cut and
