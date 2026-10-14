@@ -4,6 +4,7 @@ use gage_session::InstallUi;
 use gage_store::{Store, StoreError};
 
 use crate::dialog::{self, DialogError, DialogResult};
+use crate::error::CliError;
 use crate::source::driver_registry;
 
 #[derive(Args)]
@@ -17,11 +18,11 @@ pub struct InitArgs {
     pub yes: bool,
 }
 
-pub fn run(args: InitArgs) {
+pub fn run(args: InitArgs) -> Result<(), CliError> {
     if args.remove {
-        dialog::run("Remove Gage setup", || remove_dialog(&args));
+        dialog::run("Remove Gage setup", || remove_dialog(&args))
     } else {
-        dialog::run("Setup Gage", || install_dialog(&args));
+        dialog::run("Setup Gage", || install_dialog(&args))
     }
 }
 

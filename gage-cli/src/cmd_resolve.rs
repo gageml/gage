@@ -1,6 +1,7 @@
 //! `gage resolve` — resolve issues in an interactive session the
 //! default driver starts in its harness.
 
+use anyhow::Context;
 use clap::Args;
 use cliclack as cli;
 use console::{Term, style};
@@ -8,6 +9,7 @@ use gage_core::uuid::short_uuid;
 use gage_store::{IssueFull, IssueStore, Store};
 
 use crate::dialog::{self, DialogError, DialogResult};
+use crate::error::CliError;
 use crate::model_prompt;
 use crate::source;
 
@@ -33,34 +35,27 @@ pub struct ResolveArgs {
     extra_args: Vec<String>,
 }
 
-pub fn run(args: ResolveArgs) {
+pub fn run(args: ResolveArgs) -> Result<(), CliError> {
     // The dialog settles the issues and the model; the session runs
     // after it, since the harness owns the terminal from then on
     let mut session: Option<ResolveSetup> = None;
-    dialog::run("Resolve issues", || run_dialog(&args, &mut session));
+    dialog::run("Resolve issues", || run_dialog(&args, &mut session))?;
     let Some(setup) = session else {
-        return;
+        return Ok(());
     };
-    let driver = source::default_driver_or_exit("gage resolve");
-    let mut session =
-        match driver.start_resolve_session(&setup.ids, setup.model.as_deref(), &args.extra_args) {
-            Ok(session) => session,
-            Err(e) => {
-                eprintln!("gage resolve: {e}");
-                std::process::exit(1);
-            }
-        };
-    let code = match session.wait() {
-        Ok(code) => code,
-        Err(e) => {
-            eprintln!("gage resolve: waiting for the session: {e}");
-            std::process::exit(1);
-        }
-    };
+    let driver = source::default_driver("gage resolve")?;
+    let mut session = driver
+        .start_resolve_session(&setup.ids, setup.model.as_deref(), &args.extra_args)
+        .context("gage resolve")?;
+    let code = session
+        .wait()
+        .context("gage resolve: waiting for the session")?;
     if code != 0 {
-        eprintln!("gage resolve: session exited with status {code}");
-        std::process::exit(1);
+        return Err(CliError::message(format!(
+            "gage resolve: session exited with status {code}"
+        )));
     }
+    Ok(())
 }
 
 /// What the dialog settled for the session
@@ -77,7 +72,7 @@ fn run_dialog(
     // so the skill never sees a prefix
     let mut issues: Vec<IssueFull> = Vec::new();
     if !args.ids.is_empty() {
-        let store = open_store("gage resolve");
+        let store = Store::open(&gage_store::store_path()).context("gage resolve")?;
         let issue_store = IssueStore::from(&store);
         let mut errors = 0;
         for prefix in &args.ids {
@@ -128,14 +123,4 @@ fn run_dialog(
 
     *setup = Some(ResolveSetup { ids, model });
     Ok(DialogResult::from("Starting resolve session"))
-}
-
-fn open_store(command: &str) -> Store {
-    match Store::open(&gage_store::store_path()) {
-        Ok(store) => store,
-        Err(e) => {
-            eprintln!("{command}: {e}");
-            std::process::exit(1);
-        }
-    }
 }

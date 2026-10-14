@@ -12,6 +12,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use anyhow::Context;
 use clap::{Args, Subcommand};
 use cliclack as cli;
 use datafusion::arrow::array::{
@@ -36,6 +37,7 @@ use tabled::{
 use crate::cmd_note::{count_rows, target_cell};
 use crate::cmd_session::{column, run_query};
 use crate::dialog::{self, DialogError, DialogResult};
+use crate::error::CliError;
 use crate::human::{count, format_elapsed_ms, format_size};
 use crate::scanner_attach::{self, describe};
 use crate::scanner_spec;
@@ -194,9 +196,9 @@ pub struct AttachmentRemoveArgs {
     pub yes: bool,
 }
 
-pub async fn add(args: AttachmentAddArgs) {
-    let store = open_store("gage attachment add");
-    dialog::run_async("Add attachment", || add_dialog(&args, &store)).await;
+pub async fn add(args: AttachmentAddArgs) -> Result<(), CliError> {
+    let store = open_store("gage attachment add")?;
+    dialog::run_async("Add attachment", || add_dialog(&args, &store)).await
 }
 
 async fn add_dialog(args: &AttachmentAddArgs, store: &Store) -> Result<DialogResult, DialogError> {
@@ -340,7 +342,9 @@ async fn add_from_scanners(
         selected.iter().map(|r| r.source.def().name.clone()),
     )?;
     confirm(yes)?;
-    let driver = source::default_driver_or_exit("gage attachment add");
+    let driver = source::driver_registry()
+        .default()
+        .ok_or_else(|| DialogError::Failed("no default session driver registered".to_string()))?;
     let placed = scanner_attach::attach_for_scanners(store, &dataset_id, &compiled, driver).await?;
     Ok(format!(
         "Added {} to dataset {}",
@@ -369,19 +373,15 @@ fn link_to_dataset(
     Ok((dataset_id, linked))
 }
 
-pub async fn list(args: AttachmentListArgs) {
-    let store = open_store("gage attachment list");
+pub async fn list(args: AttachmentListArgs) -> Result<(), CliError> {
+    let store = open_store("gage attachment list")?;
     // With --dataset the rows are the dataset's attachments in dataset order;
     // otherwise every live attachment, newest modified first
     let (from, order) = match args.dataset.as_deref() {
         Some(prefix) => {
-            let dataset = match DatasetStore::from(&store).get(prefix) {
-                Ok(record) => record,
-                Err(e) => {
-                    eprintln!("gage attachment list: --dataset {prefix}: {e}");
-                    std::process::exit(1);
-                }
-            };
+            let dataset = DatasetStore::from(&store)
+                .get(prefix)
+                .with_context(|| format!("gage attachment list: --dataset {prefix}"))?;
             (
                 format!(
                     "attachment a JOIN dataset_attachment m ON m.attachment_id = a.id \
@@ -396,17 +396,21 @@ pub async fn list(args: AttachmentListArgs) {
     let ctx = ContextBuilder::new(Some(Arc::new(Mutex::new(store))))
         .build()
         .await;
-    let total = count_rows(&ctx, &format!("SELECT COUNT(*) FROM {from}")).await;
+    let total = count_rows(&ctx, &format!("SELECT COUNT(*) FROM {from}"))
+        .await
+        .context("gage attachment list")?;
     if total == 0 {
         println!("No attachments found");
-        return;
+        return Ok(());
     }
     let show = args.limit.show_count(total);
     let sql = format!(
         "SELECT a.id, a.id_prefix, a.name, a.targets, a.file_count, a.size, a.root, a.modified \
          FROM {from} ORDER BY {order} LIMIT {show}"
     );
-    let batches = run_query(&ctx, &sql).await;
+    let batches = run_query(&ctx, &sql)
+        .await
+        .context("gage attachment list")?;
 
     let header: Vec<String> = ["Id", "Name", "Targets", "Files", "Size", "Root", "Modified"]
         .iter()
@@ -446,6 +450,7 @@ pub async fn list(args: AttachmentListArgs) {
         .to_string();
     println!("{table}");
     args.limit.print_summary(shown, total, "attachment");
+    Ok(())
 }
 
 /// The targets as listings show them: none as blank, one as its
@@ -465,23 +470,14 @@ fn targets_cell(targets: &datafusion::arrow::array::ArrayRef) -> String {
     }
 }
 
-pub fn show(args: AttachmentShowArgs) {
-    let store = open_store("gage attachment show");
+pub fn show(args: AttachmentShowArgs) -> Result<(), CliError> {
+    let store = open_store("gage attachment show")?;
     let attachments = AttachmentStore::from(&store);
-    let record = match resolve(&attachments, &args.attachment) {
-        Ok(record) => record,
-        Err(e) => {
-            eprintln!("gage attachment show: {e}");
-            std::process::exit(1);
-        }
-    };
-    let files = match attachments.files(&record.commit_sha) {
-        Ok(files) => files,
-        Err(e) => {
-            eprintln!("gage attachment show: {e}");
-            std::process::exit(1);
-        }
-    };
+    let record = resolve(&attachments, &args.attachment)
+        .map_err(|e| CliError::message(format!("gage attachment show: {e}")))?;
+    let files = attachments
+        .files(&record.commit_sha)
+        .context("gage attachment show")?;
     let iso = |ms: Option<i64>| {
         ms.map(gage_core::datetime::ms_to_iso8601)
             .unwrap_or_default()
@@ -504,7 +500,7 @@ pub fn show(args: AttachmentShowArgs) {
         println!("{label:<label_width$}  {value}");
     }
     if files.is_empty() {
-        return;
+        return Ok(());
     }
     println!();
     let header: Vec<String> = ["File", "Size"].iter().map(|s| s.to_string()).collect();
@@ -518,10 +514,11 @@ pub fn show(args: AttachmentShowArgs) {
         .modify(Columns::one(1).not(Rows::first()), style::dim())
         .to_string();
     println!("{table}");
+    Ok(())
 }
 
-pub fn remove(args: AttachmentRemoveArgs) {
-    let store = open_store("gage attachment remove");
+pub fn remove(args: AttachmentRemoveArgs) -> Result<(), CliError> {
+    let store = open_store("gage attachment remove")?;
     let attachments = AttachmentStore::from(&store);
 
     // Resolve every argument before writing anything, so one bad
@@ -542,16 +539,16 @@ pub fn remove(args: AttachmentRemoveArgs) {
         }
     }
     if errors > 0 {
-        std::process::exit(1);
+        return Err(CliError::exit(1));
     }
-    let dataset_id = args.dataset.as_deref().map(|prefix| {
-        DatasetStore::from(&store)
-            .resolve_id(prefix)
-            .unwrap_or_else(|e| {
-                eprintln!("gage attachment remove: --dataset {prefix}: {e}");
-                std::process::exit(1);
-            })
-    });
+    let dataset_id = match args.dataset.as_deref() {
+        Some(prefix) => Some(
+            DatasetStore::from(&store)
+                .resolve_id(prefix)
+                .with_context(|| format!("gage attachment remove: --dataset {prefix}"))?,
+        ),
+        None => None,
+    };
 
     dialog::run("Remove attachments", || {
         dialog::step_list(
@@ -608,7 +605,7 @@ pub fn remove(args: AttachmentRemoveArgs) {
                 Ok(format!("Removed {}", count(outcome.attachments.len(), "attachment")).into())
             }
         }
-    });
+    })
 }
 
 /// The live attachment an argument names: by name first, then by id
@@ -641,12 +638,7 @@ fn resolve(attachments: &AttachmentStore<'_>, arg: &str) -> Result<AttachmentRec
     }
 }
 
-fn open_store(command: &str) -> Store {
-    match Store::open(&gage_store::store_path()) {
-        Ok(store) => store,
-        Err(e) => {
-            eprintln!("{command}: {e}");
-            std::process::exit(1);
-        }
-    }
+fn open_store(command: &str) -> Result<Store, CliError> {
+    let store = Store::open(&gage_store::store_path()).context(command.to_string())?;
+    Ok(store)
 }

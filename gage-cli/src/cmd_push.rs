@@ -13,6 +13,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
+use anyhow::Context;
 use clap::Args;
 use cliclack as cli;
 use datafusion::arrow::array::StringArray;
@@ -21,6 +22,7 @@ use gage_store::{IdMatch, OBJECT_REFS, RemoteStore, Store, StoreError, TAG_REFS,
 
 use crate::cmd_session::run_query;
 use crate::dialog::{self, DialogError};
+use crate::error::CliError;
 
 #[derive(Args)]
 pub struct PushArgs {
@@ -52,15 +54,11 @@ struct RefToSend {
     sha: String,
 }
 
-pub async fn main(args: PushArgs) {
-    let store = match Store::open(&gage_store::store_path()) {
-        Ok(store) => store,
-        Err(e) => fail(&e),
-    };
-    let repository = match RemoteStore::from(&store).resolve(&args.repository) {
-        Ok(repository) => repository,
-        Err(e) => fail(&e),
-    };
+pub async fn main(args: PushArgs) -> Result<(), CliError> {
+    let store = Store::open(&gage_store::store_path()).context("gage push")?;
+    let repository = RemoteStore::from(&store)
+        .resolve(&args.repository)
+        .context("gage push")?;
     let remote = repository.name();
 
     // Resolve every argument before anything else, so one bad
@@ -68,53 +66,47 @@ pub async fn main(args: PushArgs) {
     let mut tag_refs: BTreeSet<String> = BTreeSet::new();
     let mut ids: Vec<String> = Vec::with_capacity(args.objects.len());
     for object in &args.objects {
-        match TagStore::from(&store).resolve(object) {
-            Ok(Some(_)) => {
-                tag_refs.insert(format!("{TAG_REFS}{object}"));
-            }
-            Ok(None) => {}
-            Err(e) => fail(&e),
+        if TagStore::from(&store)
+            .resolve(object)
+            .context("gage push")?
+            .is_some()
+        {
+            tag_refs.insert(format!("{TAG_REFS}{object}"));
         }
-        match store.resolve_in(object, None) {
-            Ok(found) => ids.push(found.id),
-            Err(e) => {
-                eprintln!("gage push: {object}: {e}");
-                std::process::exit(1);
-            }
-        }
+        let found = store
+            .resolve_in(object, None)
+            .with_context(|| format!("gage push: {object}"))?;
+        ids.push(found.id);
     }
 
     let store = Arc::new(Mutex::new(store));
-    let mut objects = closure(&store, &ids);
+    let mut objects = closure(&store, &ids).context("gage push")?;
     if args.with_notes {
         let targets: Vec<String> = objects.iter().map(|m| m.id.clone()).collect();
-        let notes = notes_targeting(&store, &targets).await;
+        let notes = notes_targeting(&store, &targets)
+            .await
+            .context("gage push")?;
         if !notes.is_empty() {
             let mut all: Vec<String> = objects.iter().map(|m| m.id.clone()).collect();
             all.extend(notes);
-            objects = closure(&store, &all);
+            objects = closure(&store, &all).context("gage push")?;
         }
     }
 
-    let refs = match refs_to_send(&store, &objects, &tag_refs) {
-        Ok(refs) => refs,
-        Err(e) => fail(&e),
-    };
+    let refs = refs_to_send(&store, &objects, &tag_refs).context("gage push")?;
     let on_remote = {
         let store = store.lock().unwrap();
-        match RemoteStore::from(&*store).ls_remote(&repository) {
-            Ok(on_remote) => on_remote,
-            Err(e) => fail(&e),
-        }
+        RemoteStore::from(&*store)
+            .ls_remote(&repository)
+            .context("gage push")?
     };
     let (send, up_to_date): (Vec<&RefToSend>, Vec<&RefToSend>) = refs
         .iter()
         .partition(|r| on_remote.get(&r.name) != Some(&r.sha));
     if send.is_empty() {
-        dialog::run(&format!("Push to {remote}"), || {
+        return dialog::run(&format!("Push to {remote}"), || {
             Ok(format!("Everything up to date on {remote}").into())
         });
-        return;
     }
     let send_names: Vec<String> = send.iter().map(|r| r.name.clone()).collect();
 
@@ -129,42 +121,39 @@ pub async fn main(args: PushArgs) {
         }
         confirmed = true;
         Ok(format!("Pushing {} refs to {remote}", send_names.len()).into())
-    });
+    })?;
     if !confirmed {
-        return;
+        return Ok(());
     }
 
     let store = store.lock().unwrap();
     let remotes = RemoteStore::from(&*store);
-    let approval = match remotes.approval_digest(&send_names) {
-        Ok(approval) => approval,
-        Err(e) => fail(&e),
-    };
-    let status = match remotes.push(&repository, &send_names, &approval) {
-        Ok(status) => status,
-        Err(e) => fail(&e),
-    };
+    let approval = remotes.approval_digest(&send_names).context("gage push")?;
+    let status = remotes
+        .push(&repository, &send_names, &approval)
+        .context("gage push")?;
     if !status.success() {
-        fail(&format!(
-            "push to {remote} was rejected; fetch and retry: gage fetch {remote}"
-        ));
+        return Err(CliError::message(format!(
+            "gage push: push to {remote} was rejected; fetch and retry: gage fetch {remote}"
+        )));
     }
     println!("Pushed {} refs to {remote}", send_names.len());
+    Ok(())
 }
 
 /// The named objects and everything they link, transitively.
-fn closure(store: &Arc<Mutex<Store>>, ids: &[String]) -> Vec<IdMatch> {
+fn closure(store: &Arc<Mutex<Store>>, ids: &[String]) -> Result<Vec<IdMatch>, StoreError> {
     let store = store.lock().unwrap();
-    match store.link_closure(ids) {
-        Ok(objects) => objects,
-        Err(e) => fail(&e),
-    }
+    store.link_closure(ids)
 }
 
 /// Ids of the live notes whose target is one of `targets`. The index
 /// holds the reverse direction of a note's target link, which the
 /// objects themselves do not.
-async fn notes_targeting(store: &Arc<Mutex<Store>>, targets: &[String]) -> Vec<String> {
+async fn notes_targeting(
+    store: &Arc<Mutex<Store>>,
+    targets: &[String],
+) -> datafusion::error::Result<Vec<String>> {
     let ctx = ContextBuilder::new(Some(Arc::clone(store))).build().await;
     let in_list = targets
         .iter()
@@ -174,7 +163,7 @@ async fn notes_targeting(store: &Arc<Mutex<Store>>, targets: &[String]) -> Vec<S
     let sql =
         format!("SELECT DISTINCT note_id FROM note_target_link WHERE target_id IN ({in_list})");
     let mut notes = Vec::new();
-    for batch in run_query(&ctx, &sql).await {
+    for batch in run_query(&ctx, &sql).await? {
         let column = batch
             .column(0)
             .as_any()
@@ -182,7 +171,7 @@ async fn notes_targeting(store: &Arc<Mutex<Store>>, targets: &[String]) -> Vec<S
             .expect("note_id is a string column");
         notes.extend(column.iter().flatten().map(String::from));
     }
-    notes
+    Ok(notes)
 }
 
 /// Every ref the push sends: one object ref per object and the tag
@@ -245,9 +234,4 @@ fn summary_lines(
         lines.push(format!("{up_to_date} already on the remote"));
     }
     lines
-}
-
-fn fail(e: &dyn std::fmt::Display) -> ! {
-    eprintln!("gage push: {e}");
-    std::process::exit(1)
 }

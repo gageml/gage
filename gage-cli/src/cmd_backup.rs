@@ -10,6 +10,7 @@
 //! statement, and the push carries the approval digest of the whole
 //! set as `gage push` does.
 
+use anyhow::Context;
 use clap::Args;
 use cliclack as cli;
 use gage_core::config::Config;
@@ -17,6 +18,7 @@ use gage_store::{OBJECT_REFS, RemoteStore, Repository, Store, TAG_REFS};
 
 use crate::cmd_session;
 use crate::dialog::{self, DialogError};
+use crate::error::CliError;
 use crate::source::SOURCE_HELP;
 
 #[derive(Args)]
@@ -50,11 +52,8 @@ Replaces the configured backup.sources list for this run.\n\n{SOURCE_HELP}")
     yes: bool,
 }
 
-pub async fn main(args: BackupArgs) {
-    let config = match Config::load_user() {
-        Ok(config) => config,
-        Err(e) => fail(&e),
-    };
+pub async fn main(args: BackupArgs) -> Result<(), CliError> {
+    let config = Config::load_user().context("gage backup")?;
     let sources: Vec<String> = if args.stored {
         Vec::new()
     } else if args.source.is_empty() {
@@ -63,15 +62,9 @@ pub async fn main(args: BackupArgs) {
         args.source.clone()
     };
     let max_bytes = config.storage.max_session_size.bytes();
-    let store = match Store::open(&gage_store::store_path()) {
-        Ok(store) => store,
-        Err(e) => fail(&e),
-    };
+    let store = Store::open(&gage_store::store_path()).context("gage backup")?;
     let remotes = RemoteStore::from(&store);
-    let known = match remotes.list() {
-        Ok(known) => known,
-        Err(e) => fail(&e),
-    };
+    let known = remotes.list().context("gage backup")?;
     let backups: Vec<&str> = known
         .iter()
         .filter(|r| r.backup)
@@ -80,20 +73,26 @@ pub async fn main(args: BackupArgs) {
     let repository = match &args.repository {
         Some(arg) => match known.iter().find(|r| &r.name == arg) {
             Some(found) if found.backup => Repository::from_remote(arg),
-            Some(_) => fail(&format!(
-                "remote {arg} is not a backup target; add one with gage remote add --backup"
-            )),
+            Some(_) => {
+                return Err(CliError::message(format!(
+                    "gage backup: remote {arg} is not a backup target; add one with gage remote add --backup"
+                )));
+            }
             None => Repository::from_url(arg),
         },
         None => match backups.as_slice() {
             [one] => Repository::from_remote(one),
             [] => {
-                fail(&"a backup remote or URL is required; add one with gage remote add --backup")
+                return Err(CliError::message(
+                    "gage backup: a backup remote or URL is required; add one with gage remote add --backup",
+                ));
             }
-            many => fail(&format!(
-                "a remote argument is required; one of: {}",
-                many.join(", ")
-            )),
+            many => {
+                return Err(CliError::message(format!(
+                    "gage backup: a remote argument is required; one of: {}",
+                    many.join(", ")
+                )));
+            }
         },
     };
     let remote = repository.name();
@@ -136,28 +135,20 @@ pub async fn main(args: BackupArgs) {
         send = pending;
         Ok(format!("Backing up {} refs to {remote}", send.len()).into())
     })
-    .await;
+    .await?;
     if send.is_empty() {
-        return;
+        return Ok(());
     }
 
-    let approval = match remotes.approval_digest(&send) {
-        Ok(approval) => approval,
-        Err(e) => fail(&e),
-    };
-    let status = match remotes.push(&repository, &send, &approval) {
-        Ok(status) => status,
-        Err(e) => fail(&e),
-    };
+    let approval = remotes.approval_digest(&send).context("gage backup")?;
+    let status = remotes
+        .push(&repository, &send, &approval)
+        .context("gage backup")?;
     if !status.success() {
-        fail(&format!(
-            "backup to {remote} was rejected; fetch and retry: gage fetch {remote}"
-        ));
+        return Err(CliError::message(format!(
+            "gage backup: backup to {remote} was rejected; fetch and retry: gage fetch {remote}"
+        )));
     }
     println!("Backed up {} refs to {remote}", send.len());
-}
-
-fn fail(e: &dyn std::fmt::Display) -> ! {
-    eprintln!("gage backup: {e}");
-    std::process::exit(1)
+    Ok(())
 }

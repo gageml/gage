@@ -2,6 +2,7 @@ use std::error::Error;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use anyhow::{Context, anyhow};
 use clap::{ArgGroup, Args, Subcommand};
 use cliclack as cli;
 use datafusion::arrow::array::{
@@ -27,6 +28,7 @@ use tabled::{
 
 use crate::cmd_dataset::{AddEvent, AddView, add_native_to_dataset};
 use crate::dialog::{self, DialogError, DialogResult};
+use crate::error::CliError;
 use crate::human::count;
 use crate::session_filter::{FILTER_ARG_NAMES, SessionFilterArgs, select_sessions};
 use crate::size_limit::SizeLimitArgs;
@@ -174,13 +176,16 @@ pub struct SessionDeleteArgs {
     pub yes: bool,
 }
 
-pub async fn list(source: Option<String>, stored: bool, args: SessionListArgs) {
+pub async fn list(
+    source: Option<String>,
+    stored: bool,
+    args: SessionListArgs,
+) -> Result<(), CliError> {
     if args.dataset.is_some() {
         if source.is_some() {
-            eprintln!(
-                "gage session list: --source does not apply with --dataset; a dataset holds stored sessions"
-            );
-            std::process::exit(1);
+            return Err(CliError::message(
+                "gage session list: --source does not apply with --dataset; a dataset holds stored sessions",
+            ));
         }
         if stored {
             eprintln!("warning: --stored is redundant with --dataset");
@@ -193,15 +198,10 @@ pub async fn list(source: Option<String>, stored: bool, args: SessionListArgs) {
     }
 }
 
-async fn list_native(source: Option<String>, args: SessionListArgs) {
+async fn list_native(source: Option<String>, args: SessionListArgs) -> Result<(), CliError> {
     let registry = source::driver_registry();
-    let (driver, spec) = match source::resolve_source(&registry, source.as_deref()) {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("gage session list: {e}");
-            std::process::exit(1);
-        }
-    };
+    let (driver, spec) = source::resolve_source(&registry, source.as_deref())
+        .map_err(|e| anyhow!("gage session list: {e}"))?;
     // The native session rows, the project filter, and the driver
     // encoding all reach the source through SQL: `native_session`
     // opens it, `project_for_path` resolves a directory to its project
@@ -213,7 +213,9 @@ async fn list_native(source: Option<String>, args: SessionListArgs) {
         .as_deref()
         .map(|p| format!("project = project_for_path('{}')", p.replace('\'', "''")));
     let (rows, total) =
-        query_sessions(&ctx, &args, Listing::Native, &from, project_pred.as_deref()).await;
+        query_sessions(&ctx, &args, Listing::Native, &from, project_pred.as_deref())
+            .await
+            .context("gage session list")?;
     if total > 0 {
         let drivers: Vec<Arc<dyn Driver>> = vec![driver.clone(); rows.len()];
         render_table(&rows, &drivers, Listing::Native, args.full_id);
@@ -221,6 +223,7 @@ async fn list_native(source: Option<String>, args: SessionListArgs) {
     } else {
         println!("No sessions found");
     }
+    Ok(())
 }
 
 /// List the sessions in the Gage store. The `session` table is bound
@@ -228,91 +231,71 @@ async fn list_native(source: Option<String>, args: SessionListArgs) {
 /// listing. Rows are in the store's `modified` order, newest first,
 /// and `--since` filters on it; the `Created` column shows when the
 /// session was first added.
-async fn list_stored(args: SessionListArgs) {
+async fn list_stored(args: SessionListArgs) -> Result<(), CliError> {
     if args.project.is_some() {
-        eprintln!("gage session list: --project does not apply to stored sessions");
-        std::process::exit(1);
+        return Err(CliError::message(
+            "gage session list: --project does not apply to stored sessions",
+        ));
     }
-    let store = match Store::open(&gage_store::store_path()) {
-        Ok(store) => store,
-        Err(e) => {
-            eprintln!("gage session list: {e}");
-            std::process::exit(1);
-        }
-    };
+    let store = Store::open(&gage_store::store_path()).context("gage session list")?;
     let ctx = ContextBuilder::new(Some(Arc::new(Mutex::new(store))))
         .build()
         .await;
-    let (rows, total) = query_sessions(&ctx, &args, Listing::Stored, "session", None).await;
+    let (rows, total) = query_sessions(&ctx, &args, Listing::Stored, "session", None)
+        .await
+        .context("gage session list")?;
     if total > 0 {
         let registry = source::driver_registry();
-        let drivers = match stored_drivers(&registry, &rows) {
-            Ok(d) => d,
-            Err(e) => {
-                eprintln!("gage session list: {e}");
-                std::process::exit(1);
-            }
-        };
+        let drivers = stored_drivers(&registry, &rows).context("gage session list")?;
         render_table(&rows, &drivers, Listing::Stored, args.full_id);
         args.limit.print_summary(rows.len(), total, "session");
     } else {
         println!("No sessions found");
     }
+    Ok(())
 }
 
 /// List the member sessions of a dataset, each at the commit the
 /// dataset links, in member order: the `session` table scoped to the
 /// dataset, joined to `dataset_session` for the order.
-async fn list_dataset(args: SessionListArgs) {
+async fn list_dataset(args: SessionListArgs) -> Result<(), CliError> {
     if args.project.is_some() {
-        eprintln!("gage session list: --project does not apply to stored sessions");
-        std::process::exit(1);
+        return Err(CliError::message(
+            "gage session list: --project does not apply to stored sessions",
+        ));
     }
     let prefix = args
         .dataset
         .as_deref()
         .expect("list_dataset is called with --dataset");
-    let store = match Store::open(&gage_store::store_path()) {
-        Ok(store) => store,
-        Err(e) => {
-            eprintln!("gage session list: {e}");
-            std::process::exit(1);
-        }
-    };
-    let dataset = match DatasetStore::from(&store).get(prefix) {
-        Ok(record) => record,
-        Err(e) => {
-            eprintln!("gage session list: --dataset {prefix}: {e}");
-            std::process::exit(1);
-        }
-    };
+    let store = Store::open(&gage_store::store_path()).context("gage session list")?;
+    let dataset = DatasetStore::from(&store)
+        .get(prefix)
+        .with_context(|| format!("gage session list: --dataset {prefix}"))?;
     let store = Arc::new(Mutex::new(store));
     let ctx = ContextBuilder::new(Some(store)).build().await;
     let from = "session JOIN dataset_session m ON m.session_id = session.id";
     let member = format!("m.dataset_id = '{}'", dataset.id);
-    let (rows, total) = query_sessions(&ctx, &args, Listing::Dataset, from, Some(&member)).await;
+    let (rows, total) = query_sessions(&ctx, &args, Listing::Dataset, from, Some(&member))
+        .await
+        .context("gage session list")?;
     if total == 0 {
         println!("No sessions found");
-        return;
+        return Ok(());
     }
     let registry = source::driver_registry();
-    let drivers = match stored_drivers(&registry, &rows) {
-        Ok(drivers) => drivers,
-        Err(e) => {
-            eprintln!("gage session list: {e}");
-            std::process::exit(1);
-        }
-    };
+    let drivers = stored_drivers(&registry, &rows).context("gage session list")?;
     render_table(&rows, &drivers, Listing::Dataset, args.full_id);
     args.limit.print_summary(rows.len(), total, "session");
+    Ok(())
 }
 
-fn stored_drivers(registry: &DriverRegistry, rows: &[Row]) -> Result<Vec<Arc<dyn Driver>>, String> {
+fn stored_drivers(registry: &DriverRegistry, rows: &[Row]) -> anyhow::Result<Vec<Arc<dyn Driver>>> {
     rows.iter()
         .map(|r| {
             registry
                 .for_name(&r.driver_name)
-                .ok_or_else(|| format!("{}: unknown session driver '{}'", r.id, r.driver_name))
+                .ok_or_else(|| anyhow!("{}: unknown session driver '{}'", r.id, r.driver_name))
         })
         .collect()
 }
@@ -369,7 +352,7 @@ async fn query_sessions(
     listing: Listing,
     from: &str,
     project_pred: Option<&str>,
-) -> (Vec<Row>, usize) {
+) -> datafusion::error::Result<(Vec<Row>, usize)> {
     let where_clause = build_where_clause(args, listing, project_pred);
     let limit_clause = match args.limit.fetch_limit() {
         Some(n) => format!(" LIMIT {n}"),
@@ -396,17 +379,17 @@ async fn query_sessions(
          FROM {from}{where_clause} \
          ORDER BY {order_clause}{limit_clause}",
     );
-    let batches = run_query(ctx, &sql).await;
+    let batches = run_query(ctx, &sql).await?;
     let rows = rows_from_batches(&batches);
 
     let count_sql = format!("SELECT COUNT(*) FROM {from}{where_clause}");
-    let count_batches = run_query(ctx, &count_sql).await;
+    let count_batches = run_query(ctx, &count_sql).await?;
     let total = count_batches
         .first()
         .and_then(|b| b.column(0).as_any().downcast_ref::<Int64Array>())
         .map(|a| a.value(0) as usize)
         .unwrap_or(0);
-    (rows, total)
+    Ok((rows, total))
 }
 
 fn build_where_clause(
@@ -619,41 +602,33 @@ fn refit_project_cells(table: &mut Table, rows: &[Row], drivers: &[Arc<dyn Drive
     }
 }
 
-/// Run `sql` and collect its batches, exiting with the error on
-/// failure
-pub(crate) async fn run_query(ctx: &SessionContext, sql: &str) -> Vec<RecordBatch> {
-    match ctx.sql(sql).await {
-        Ok(df) => match df.collect().await {
-            Ok(b) => b,
-            Err(e) => {
-                eprintln!("Error: {e}");
-                std::process::exit(1);
-            }
-        },
-        Err(e) => {
-            eprintln!("Error: {e}");
-            std::process::exit(1);
-        }
-    }
+/// Run `sql` and collect its batches
+pub(crate) async fn run_query(
+    ctx: &SessionContext,
+    sql: &str,
+) -> datafusion::error::Result<Vec<RecordBatch>> {
+    ctx.sql(sql).await?.collect().await
 }
 
-pub async fn add(source: Option<String>, stored: bool, args: SessionAddArgs) {
+pub async fn add(
+    source: Option<String>,
+    stored: bool,
+    args: SessionAddArgs,
+) -> Result<(), CliError> {
     if stored && args.dataset.is_none() {
-        eprintln!(
-            "gage session add: --stored applies only with --dataset; sessions are added from a source"
-        );
-        std::process::exit(1);
+        return Err(CliError::message(
+            "gage session add: --stored applies only with --dataset; sessions are added from a source",
+        ));
     }
     // --stored --dataset resolves stored session IDs, not the native
     // filter axes. Reject anything but positional session IDs here so
     // a filter given with --stored fails up front.
     if stored && (args.sessions.is_empty() || !args.filter.is_empty()) {
-        eprintln!(
-            "gage session add: --stored --dataset takes stored session IDs; the selection flags apply to native sessions"
-        );
-        std::process::exit(1);
+        return Err(CliError::message(
+            "gage session add: --stored --dataset takes stored session IDs; the selection flags apply to native sessions",
+        ));
     }
-    dialog::run_async("Add sessions", || add_dialog(source, stored, args)).await;
+    dialog::run_async("Add sessions", || add_dialog(source, stored, args)).await
 }
 
 async fn add_dialog(
@@ -671,7 +646,11 @@ async fn add_dialog(
         ),
         None => None,
     };
-    let max_bytes = Some(args.size.max_bytes());
+    let max_bytes = Some(
+        args.size
+            .max_bytes()
+            .map_err(|e| DialogError::Other(e.into()))?,
+    );
     let mut view = AddView::new();
     match dataset_id {
         Some(dataset_id) if stored => {
@@ -903,23 +882,20 @@ fn add_native(
     Ok(())
 }
 
-pub fn remove(source: Option<String>, stored: bool, args: SessionRemoveArgs) {
+pub fn remove(
+    source: Option<String>,
+    stored: bool,
+    args: SessionRemoveArgs,
+) -> Result<(), CliError> {
     if source.is_some() {
-        eprintln!(
-            "gage session remove: --source does not apply; sessions are removed from the store"
-        );
-        std::process::exit(1);
+        return Err(CliError::message(
+            "gage session remove: --source does not apply; sessions are removed from the store",
+        ));
     }
     if stored {
         eprintln!("warning: --stored is redundant; sessions are removed from the store");
     }
-    let store = match Store::open(&gage_store::store_path()) {
-        Ok(store) => store,
-        Err(e) => {
-            eprintln!("gage session remove: {e}");
-            std::process::exit(1);
-        }
-    };
+    let store = Store::open(&gage_store::store_path()).context("gage session remove")?;
     let sessions = SessionStore::from(&store);
 
     // Resolve every argument before writing anything, so one bad
@@ -940,16 +916,16 @@ pub fn remove(source: Option<String>, stored: bool, args: SessionRemoveArgs) {
         }
     }
     if errors > 0 {
-        std::process::exit(1);
+        return Err(CliError::exit(1));
     }
-    let dataset_id = args.dataset.as_deref().map(|prefix| {
-        DatasetStore::from(&store)
-            .resolve_id(prefix)
-            .unwrap_or_else(|e| {
-                eprintln!("gage session remove: --dataset {prefix}: {e}");
-                std::process::exit(1);
-            })
-    });
+    let dataset_id = match args.dataset.as_deref() {
+        Some(prefix) => Some(
+            DatasetStore::from(&store)
+                .resolve_id(prefix)
+                .with_context(|| format!("gage session remove: --dataset {prefix}"))?,
+        ),
+        None => None,
+    };
 
     dialog::run("Remove sessions", || {
         dialog::step_list(
@@ -1011,47 +987,40 @@ pub fn remove(source: Option<String>, stored: bool, args: SessionRemoveArgs) {
                 Ok(format!("Removed {}", count(outcome.sessions.len(), "session")).into())
             }
         }
-    });
+    })
 }
 
-pub async fn delete(source: Option<String>, stored: bool, args: SessionDeleteArgs) {
+pub async fn delete(
+    source: Option<String>,
+    stored: bool,
+    args: SessionDeleteArgs,
+) -> Result<(), CliError> {
     if stored {
-        eprintln!(
-            "gage session delete: --stored does not apply; sessions are deleted from a source"
-        );
-        std::process::exit(1);
+        return Err(CliError::message(
+            "gage session delete: --stored does not apply; sessions are deleted from a source",
+        ));
     }
     if args.ids.is_empty() && !args.empty {
-        eprintln!(
+        return Err(CliError::message(
             "gage session delete: provide session IDs or --empty\n\n\
-            Use 'gage session list' to show sessions"
-        );
-        std::process::exit(1);
+            Use 'gage session list' to show sessions",
+        ));
     }
 
     let registry = source::driver_registry();
-    let (driver, spec) = match source::resolve_source(&registry, source.as_deref()) {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("gage session delete: {e}");
-            std::process::exit(1);
-        }
-    };
-    let source = match driver.open_source(&spec) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("gage session delete: {spec}: {e}");
-            std::process::exit(1);
-        }
-    };
-    dialog::run_async("Delete sessions", || {
+    let (driver, spec) = source::resolve_source(&registry, source.as_deref())
+        .map_err(|e| anyhow!("gage session delete: {e}"))?;
+    let source = driver
+        .open_source(&spec)
+        .with_context(|| format!("gage session delete: {spec}"))?;
+    let outcome = dialog::run_async("Delete sessions", || {
         delete_dialog(&args, source.as_ref(), &spec)
     })
     .await;
-    if let Err(e) = source.close() {
-        eprintln!("gage session delete: {spec}: {e}");
-        std::process::exit(1);
-    }
+    source
+        .close()
+        .with_context(|| format!("gage session delete: {spec}"))?;
+    outcome
 }
 
 async fn delete_dialog(
@@ -1072,7 +1041,8 @@ async fn delete_dialog(
             &ctx,
             &format!("SELECT id, is_empty FROM {from} WHERE is_empty"),
         )
-        .await;
+        .await
+        .map_err(|e| DialogError::Other(e.into()))?;
         spinner.clear();
         targets
     } else {
@@ -1098,7 +1068,9 @@ async fn delete_dialog(
             .collect::<Vec<_>>()
             .join(", ");
         let sql = format!("SELECT id, is_empty FROM {from} WHERE id IN ({in_list})");
-        delete_targets(&ctx, &sql).await
+        delete_targets(&ctx, &sql)
+            .await
+            .map_err(|e| DialogError::Other(e.into()))?
     };
     if targets.is_empty() {
         return Ok("Nothing to delete".into());
@@ -1144,9 +1116,12 @@ struct DeleteTarget {
 }
 
 /// Run `sql`, which selects `id` and `is_empty`, as the delete targets
-async fn delete_targets(ctx: &SessionContext, sql: &str) -> Vec<DeleteTarget> {
+async fn delete_targets(
+    ctx: &SessionContext,
+    sql: &str,
+) -> datafusion::error::Result<Vec<DeleteTarget>> {
     let mut targets = Vec::new();
-    for batch in &run_query(ctx, sql).await {
+    for batch in &run_query(ctx, sql).await? {
         let ids = column::<StringArray>(batch, 0);
         let empties = column::<BooleanArray>(batch, 1);
         for i in 0..batch.num_rows() {
@@ -1156,27 +1131,23 @@ async fn delete_targets(ctx: &SessionContext, sql: &str) -> Vec<DeleteTarget> {
             });
         }
     }
-    targets
+    Ok(targets)
 }
 
-pub async fn view(source: Option<String>, stored: bool, args: SessionViewArgs) {
-    let options = match ViewOptions::parse(&args.options) {
-        Ok(o) => o,
-        Err(e) => {
-            eprintln!("gage session view: {e}");
-            std::process::exit(1);
-        }
-    };
+pub async fn view(
+    source: Option<String>,
+    stored: bool,
+    args: SessionViewArgs,
+) -> Result<(), CliError> {
+    let options =
+        ViewOptions::parse(&args.options).map_err(|e| anyhow!("gage session view: {e}"))?;
     // No session arg: the view opens with its session picker dialog.
     let result = if stored {
         view_stored(args.session.as_deref(), options).await
     } else {
         view_native(source.as_deref(), args.session.as_deref(), options).await
     };
-    if let Err(e) = result {
-        eprintln!("gage session view: {e}");
-        std::process::exit(1);
-    }
+    result.map_err(|e| anyhow!("gage session view: {e}").into())
 }
 
 async fn view_stored(prefix: Option<&str>, options: ViewOptions) -> Result<(), Box<dyn Error>> {

@@ -11,6 +11,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use anyhow::Context;
 use clap::Args;
 use cliclack as cli;
 use console::style;
@@ -22,6 +23,7 @@ use gage_session::{AuthInfo, Driver, DriverStatus, Field, HarnessInfo, InstallIn
 use gage_store::Store;
 
 use crate::cmd_note::count_rows;
+use crate::error::CliError;
 use crate::human::format_size;
 use crate::source::driver_registry;
 
@@ -32,9 +34,16 @@ pub struct StatusArgs {
     pub verbose: bool,
 }
 
-pub async fn run(args: StatusArgs) {
+pub async fn run(args: StatusArgs) -> Result<(), CliError> {
     let spinner = cli::spinner();
     spinner.start("Reading status");
+    let report = report(args).await;
+    spinner.clear();
+    print!("{}", report?);
+    Ok(())
+}
+
+async fn report(args: StatusArgs) -> Result<String, CliError> {
     let mut out = String::new();
     let mut problems = Vec::new();
     w(&mut out, format!("{}", style("Drivers").bold()));
@@ -42,15 +51,14 @@ pub async fn run(args: StatusArgs) {
         write_driver(&mut out, &mut problems, driver.as_ref());
     }
     out.push('\n');
-    write_counts(&mut out, &mut problems).await;
+    write_counts(&mut out, &mut problems).await?;
     out.push('\n');
     write_storage(&mut out, args.verbose);
     if !problems.is_empty() {
         out.push('\n');
         write_problems(&mut out, &problems);
     }
-    spinner.clear();
-    print!("{out}");
+    Ok(out)
 }
 
 /// One driver's block: its name, then its harness, login, and Gage
@@ -147,7 +155,7 @@ fn problem_text((message, remedy): (&str, &str)) -> String {
     }
 }
 
-async fn write_counts(out: &mut String, problems: &mut Vec<String>) {
+async fn write_counts(out: &mut String, problems: &mut Vec<String>) -> Result<(), CliError> {
     w(out, format!("{}", style("Data").bold()));
 
     let path = gage_store::store_path();
@@ -156,32 +164,37 @@ async fn write_counts(out: &mut String, problems: &mut Vec<String>) {
             let ctx = ContextBuilder::new(Some(Arc::new(Mutex::new(store))))
                 .build()
                 .await;
-            write_store_counts(out, &ctx).await;
+            write_store_counts(out, &ctx).await.context("gage status")?;
         }
         Err(e) => {
             w(out, "  store unavailable".to_string());
             problems.push(format!("Store at {} unavailable: {e}", path.display()));
         }
     }
+    Ok(())
 }
 
-async fn write_store_counts(out: &mut String, ctx: &SessionContext) {
-    let open_ct = count_rows(ctx, "SELECT COUNT(*) FROM issue WHERE status = 'open'").await;
-    let pending_ct = count_rows(ctx, "SELECT COUNT(*) FROM issue WHERE status = 'pending'").await;
-    let closed_ct = count_rows(ctx, "SELECT COUNT(*) FROM issue WHERE status = 'closed'").await;
+async fn write_store_counts(
+    out: &mut String,
+    ctx: &SessionContext,
+) -> datafusion::error::Result<()> {
+    let open_ct = count_rows(ctx, "SELECT COUNT(*) FROM issue WHERE status = 'open'").await?;
+    let pending_ct = count_rows(ctx, "SELECT COUNT(*) FROM issue WHERE status = 'pending'").await?;
+    let closed_ct = count_rows(ctx, "SELECT COUNT(*) FROM issue WHERE status = 'closed'").await?;
     w(
         out,
         format!("  Issues:   {open_ct} open, {pending_ct} pending, {closed_ct} closed"),
     );
 
-    let notes = count_rows(ctx, "SELECT COUNT(*) FROM note").await;
+    let notes = count_rows(ctx, "SELECT COUNT(*) FROM note").await?;
     w(out, format!("  Notes:    {notes}"));
 
-    let scans = count_rows(ctx, "SELECT COUNT(*) FROM scan").await;
+    let scans = count_rows(ctx, "SELECT COUNT(*) FROM scan").await?;
     w(out, format!("  Scans:    {scans}"));
 
-    let sessions = count_rows(ctx, "SELECT COUNT(*) FROM session").await;
+    let sessions = count_rows(ctx, "SELECT COUNT(*) FROM session").await?;
     w(out, format!("  Sessions: {sessions}"));
+    Ok(())
 }
 
 fn write_storage(out: &mut String, verbose: bool) {

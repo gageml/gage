@@ -1,3 +1,4 @@
+use anyhow::Context;
 use clap::Args;
 use cliclack as cli;
 use gage_session::MaintenanceStatus;
@@ -6,6 +7,7 @@ use tabled::{
     settings::{Style, object::Columns},
 };
 
+use crate::error::CliError;
 use crate::human::format_size;
 use crate::source;
 use crate::style;
@@ -28,21 +30,16 @@ pub struct IndexArgs {
 /// Run the source's reconcile pass and exit. For post-install setup,
 /// cron, and bulk imports — keeps the first-build cost out of
 /// interactive queries.
-pub async fn run(args: IndexArgs) {
-    let source = source::open_source_or_exit("gage index", args.source.as_deref().unwrap_or(""));
+pub async fn run(args: IndexArgs) -> Result<(), CliError> {
+    let source = source::open_source("gage index", args.source.as_deref().unwrap_or(""))?;
 
     if args.status {
         let status = tokio::task::spawn_blocking(move || source.maintenance_status())
             .await
-            .unwrap();
-        match status {
-            Ok(status) => print_status(&status),
-            Err(e) => {
-                eprintln!("gage index: {e}");
-                std::process::exit(1);
-            }
-        }
-        return;
+            .unwrap()
+            .context("gage index")?;
+        print_status(&status);
+        return Ok(());
     }
 
     let rebuild = args.rebuild;
@@ -61,21 +58,15 @@ pub async fn run(args: IndexArgs) {
     .unwrap();
     bar.clear();
 
-    match result {
-        Ok(outcome) => {
-            println!(
-                "{} sessions ({}): {} indexed, {} removed",
-                outcome.discovered,
-                format_elapsed(outcome.elapsed_ms),
-                outcome.prepared,
-                outcome.removed,
-            );
-        }
-        Err(e) => {
-            eprintln!("gage index: {e}");
-            std::process::exit(1);
-        }
-    }
+    let outcome = result.context("gage index")?;
+    println!(
+        "{} sessions ({}): {} indexed, {} removed",
+        outcome.discovered,
+        format_elapsed(outcome.elapsed_ms),
+        outcome.prepared,
+        outcome.removed,
+    );
+    Ok(())
 }
 
 fn format_elapsed(ms: u64) -> String {

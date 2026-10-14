@@ -3,9 +3,12 @@ use std::io;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+use anyhow::Context;
 use clap::Args;
 use gage_query::{ContextBuilder, PrintFormat, ScanScope, exec_command, run_repl};
 use gage_store::{ScanStore, Store};
+
+use crate::error::CliError;
 
 #[derive(Args)]
 pub struct QueryArgs {
@@ -57,22 +60,15 @@ pub struct QueryArgs {
     system: bool,
 }
 
-pub async fn main(args: QueryArgs) {
-    let store = match Store::open(&gage_store::store_path()) {
-        Ok(store) => store,
-        Err(e) => {
-            eprintln!("gage query: {e}");
-            std::process::exit(1);
-        }
-    };
+pub async fn main(args: QueryArgs) -> Result<(), CliError> {
+    let store = Store::open(&gage_store::store_path()).context("gage query")?;
     let scope = match &args.scan {
-        Some(prefix) => match ScanStore::from(&store).get(prefix) {
-            Ok(record) => Some(ScanScope::stored(record.id)),
-            Err(e) => {
-                eprintln!("gage query: --scan {prefix}: {e}");
-                std::process::exit(1);
-            }
-        },
+        Some(prefix) => {
+            let record = ScanStore::from(&store)
+                .get(prefix)
+                .with_context(|| format!("gage query: --scan {prefix}"))?;
+            Some(ScanScope::stored(record.id))
+        }
         None => None,
     };
     let mut builder = ContextBuilder::new(Some(Arc::new(Mutex::new(store))));
@@ -94,13 +90,7 @@ pub async fn main(args: QueryArgs) {
         )
         .await
     } else {
-        let statements = match statements(&args.sql) {
-            Ok(statements) => statements,
-            Err(e) => {
-                eprintln!("gage query: {e}");
-                std::process::exit(1);
-            }
-        };
+        let statements = statements(&args.sql).context("gage query")?;
         let mut result = Ok(());
         for sql in &statements {
             result = exec_command(&ctx, sql, args.format).await;
@@ -110,10 +100,7 @@ pub async fn main(args: QueryArgs) {
         }
         result
     };
-    if let Err(e) = result {
-        eprintln!("Error: {e}");
-        std::process::exit(1);
-    }
+    result.map_err(|e| CliError::message(format!("Error: {e}")))
 }
 
 /// The statements the positional arguments name, in order: an argument

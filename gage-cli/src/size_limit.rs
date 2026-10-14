@@ -2,6 +2,8 @@
 //! sessions. `SizeLimitArgs` flattens into a subcommand's clap struct;
 //! `max_bytes` resolves the flags against the configured default.
 
+use std::io;
+
 use clap::Args;
 use gage_core::config::{ByteSize, Config};
 
@@ -18,11 +20,12 @@ pub struct SizeLimitArgs {
 
 impl SizeLimitArgs {
     /// The cap in bytes: the flag, else the configured default
-    pub fn max_bytes(&self) -> u64 {
-        let configured = Config::load_user()
-            .map(|c| c.storage.max_session_size)
-            .unwrap_or_else(|_| ByteSize(256 * 1024 * 1024));
-        self.max_size.unwrap_or(configured).bytes()
+    pub fn max_bytes(&self) -> io::Result<u64> {
+        let configured = match self.max_size {
+            Some(size) => size,
+            None => Config::load_user()?.storage.max_session_size,
+        };
+        Ok(configured.bytes())
     }
 }
 

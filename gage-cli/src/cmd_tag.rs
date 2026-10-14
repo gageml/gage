@@ -4,6 +4,7 @@
 //! object id resolves an object-ish: a tag name, an id, or a unique
 //! prefix.
 
+use anyhow::Context;
 use clap::{Args, Subcommand};
 use cliclack as cli;
 use gage_core::style::IdHighlighter;
@@ -18,6 +19,7 @@ use tabled::{
 };
 
 use crate::dialog::{self, DialogError};
+use crate::error::CliError;
 use crate::human::{count, format_elapsed_ms};
 use crate::style;
 
@@ -89,8 +91,8 @@ pub struct TagDeleteArgs {
     yes: bool,
 }
 
-pub fn add(args: TagAddArgs) {
-    let store = open_store("gage tag add");
+pub fn add(args: TagAddArgs) -> Result<(), CliError> {
+    let store = open_store("gage tag add")?;
     dialog::run("Add tag", || {
         let tags = TagStore::from(&store);
         let target = store
@@ -139,7 +141,7 @@ pub fn add(args: TagAddArgs) {
             None => format!("Tagged {object} as {}", added.name),
         }
         .into())
-    });
+    })
 }
 
 /// The bare type name of a `gage::` object type
@@ -147,15 +149,9 @@ fn type_name(object_type: &str) -> &str {
     object_type.strip_prefix("gage::").unwrap_or(object_type)
 }
 
-pub fn list(args: TagListArgs) {
-    let store = open_store("gage tag list");
-    let tags = match TagStore::from(&store).records() {
-        Ok(tags) => tags,
-        Err(e) => {
-            eprintln!("gage tag list: {e}");
-            std::process::exit(1);
-        }
-    };
+pub fn list(args: TagListArgs) -> Result<(), CliError> {
+    let store = open_store("gage tag list")?;
+    let tags = TagStore::from(&store).records().context("gage tag list")?;
     let tags: Vec<_> = tags
         .into_iter()
         .filter(|t| !args.orphaned || t.deleted)
@@ -167,17 +163,11 @@ pub fn list(args: TagListArgs) {
         } else {
             println!("No tags found");
         }
-        return;
+        return Ok(());
     }
     // Ids are highlighted against the same set an id argument resolves
     // against, so a shown prefix resolves
-    let peers = match store.short_prefix_ids(None) {
-        Ok(peers) => peers,
-        Err(e) => {
-            eprintln!("gage tag list: {e}");
-            std::process::exit(1);
-        }
-    };
+    let peers = store.short_prefix_ids(None).context("gage tag list")?;
     let highlighter = IdHighlighter::new(peers);
 
     let shown = args.limit.show_count(total);
@@ -218,10 +208,11 @@ pub fn list(args: TagListArgs) {
     println!("{table}");
 
     args.limit.print_summary(shown, total, "tag");
+    Ok(())
 }
 
-pub fn delete(args: TagDeleteArgs) {
-    let store = open_store("gage tag delete");
+pub fn delete(args: TagDeleteArgs) -> Result<(), CliError> {
+    let store = open_store("gage tag delete")?;
     let tags = TagStore::from(&store);
 
     // Resolve every argument before deleting anything, so one bad
@@ -252,7 +243,7 @@ pub fn delete(args: TagDeleteArgs) {
         }
     }
     if errors > 0 {
-        std::process::exit(1);
+        return Err(CliError::exit(1));
     }
 
     let total = args.names.len();
@@ -278,16 +269,10 @@ pub fn delete(args: TagDeleteArgs) {
             return Err(dialog::partial("Deleted", deleted, total, "tag"));
         }
         Ok(format!("Deleted {}", count(deleted, "tag")).into())
-    });
+    })
 }
 
-/// Open the default store, or print `command: <error>` and exit
-fn open_store(command: &str) -> Store {
-    match Store::open(&gage_store::store_path()) {
-        Ok(store) => store,
-        Err(e) => {
-            eprintln!("{command}: {e}");
-            std::process::exit(1);
-        }
-    }
+/// Open the default store, or `command: <error>`
+fn open_store(command: &str) -> anyhow::Result<Store> {
+    Store::open(&gage_store::store_path()).context(command.to_string())
 }

@@ -1,10 +1,13 @@
 use std::env;
 use std::process::Command;
 
+use anyhow::Context;
 use clap::Subcommand;
 use toml::{Table, Value};
 
 use gage_core::config::{Config, user_config_path};
+
+use crate::error::CliError;
 
 #[derive(Subcommand)]
 pub enum ConfigCommand {
@@ -33,7 +36,7 @@ pub enum ConfigCommand {
     Edit,
 }
 
-pub fn run(command: ConfigCommand) {
+pub fn run(command: ConfigCommand) -> Result<(), CliError> {
     match command {
         ConfigCommand::List => list(),
         ConfigCommand::Get { name } => get(&name),
@@ -41,42 +44,35 @@ pub fn run(command: ConfigCommand) {
     }
 }
 
-fn list() {
-    let effective = load_effective("list");
+fn list() -> Result<(), CliError> {
+    let effective = load_effective("list")?;
     for (name, value) in leaves(&effective) {
         println!("{name} = {value}");
     }
+    Ok(())
 }
 
-fn get(name: &str) {
-    let effective = load_effective("get");
+fn get(name: &str) -> Result<(), CliError> {
+    let effective = load_effective("get")?;
     let Some(value) = leaves(&effective).into_iter().find(|(n, _)| n == name) else {
-        eprintln!("gage config get: no setting named {name}");
-        std::process::exit(1);
+        return Err(CliError::message(format!(
+            "gage config get: no setting named {name}"
+        )));
     };
     match value.1 {
         Value::String(s) => println!("{s}"),
         other => println!("{other}"),
     }
+    Ok(())
 }
 
 /// Loads the user config and converts it to a TOML table so that
 /// every setting, set or defaulted, has a dotted name and a value.
-fn load_effective(verb: &str) -> Table {
-    let config = match Config::load_user() {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("gage config {verb}: {e}");
-            std::process::exit(1);
-        }
-    };
-    match Value::try_from(&config) {
-        Ok(Value::Table(t)) => t,
-        Ok(_) => unreachable!("Config serializes to a TOML table"),
-        Err(e) => {
-            eprintln!("gage config {verb}: {e}");
-            std::process::exit(1);
-        }
+fn load_effective(verb: &str) -> Result<Table, CliError> {
+    let config = Config::load_user().with_context(|| format!("gage config {verb}"))?;
+    match Value::try_from(&config).with_context(|| format!("gage config {verb}"))? {
+        Value::Table(t) => Ok(t),
+        _ => unreachable!("Config serializes to a TOML table"),
     }
 }
 
@@ -101,30 +97,28 @@ fn collect_leaves<'a>(out: &mut Vec<(String, &'a Value)>, table: &'a Table, pref
     }
 }
 
-fn edit() {
+fn edit() -> Result<(), CliError> {
     let target = user_config_path();
-    if !target.exists()
-        && let Err(e) = Config::default().save_to(&target)
-    {
-        eprintln!("Error initializing {}: {e}", target.display());
-        std::process::exit(1);
+    if !target.exists() {
+        Config::default()
+            .save_to(&target)
+            .with_context(|| format!("Error initializing {}", target.display()))?;
     }
 
     let editor = env::var_os("VISUAL")
         .or_else(|| env::var_os("EDITOR"))
         .unwrap_or_else(|| "vi".into());
 
-    match Command::new(&editor).arg(&target).status() {
-        Ok(s) if s.success() => {}
-        Ok(s) => {
-            eprintln!("Editor exited with status {s}");
-            std::process::exit(1);
-        }
-        Err(e) => {
-            eprintln!("Failed to launch editor {}: {e}", editor.to_string_lossy());
-            std::process::exit(1);
-        }
+    let status = Command::new(&editor)
+        .arg(&target)
+        .status()
+        .with_context(|| format!("Failed to launch editor {}", editor.to_string_lossy()))?;
+    if !status.success() {
+        return Err(CliError::message(format!(
+            "Editor exited with status {status}"
+        )));
     }
+    Ok(())
 }
 
 #[cfg(test)]

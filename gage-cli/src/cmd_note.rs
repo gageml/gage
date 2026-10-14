@@ -1,5 +1,6 @@
 use std::sync::{Arc, Mutex};
 
+use anyhow::Context;
 use clap::{Args, Subcommand};
 use cliclack as cli;
 use console::style;
@@ -20,6 +21,7 @@ use tabled::{
 
 use crate::cmd_session::run_query;
 use crate::dialog::{self, DialogError};
+use crate::error::CliError;
 use crate::human::count;
 use crate::style::{self, IdKind, styled_id};
 use crate::target::resolve_target;
@@ -149,14 +151,8 @@ pub struct NoteDeleteArgs {
     yes: bool,
 }
 
-pub async fn list(args: NoteListArgs) {
-    let store = match Store::open(&gage_store::store_path()) {
-        Ok(store) => store,
-        Err(e) => {
-            eprintln!("gage note list: {e}");
-            std::process::exit(1);
-        }
-    };
+pub async fn list(args: NoteListArgs) -> Result<(), CliError> {
+    let store = Store::open(&gage_store::store_path()).context("gage note list")?;
     let ctx = ContextBuilder::new(Some(Arc::new(Mutex::new(store))))
         .build()
         .await;
@@ -172,11 +168,13 @@ pub async fn list(args: NoteListArgs) {
         "SELECT id, id_prefix, name, text, value, target, scan, created \
          FROM note{where_clause} ORDER BY created DESC{limit_clause}"
     );
-    let batches = run_query(&ctx, &sql).await;
-    let total = count_rows(&ctx, &format!("SELECT COUNT(*) FROM note{where_clause}")).await;
+    let batches = run_query(&ctx, &sql).await.context("gage note list")?;
+    let total = count_rows(&ctx, &format!("SELECT COUNT(*) FROM note{where_clause}"))
+        .await
+        .context("gage note list")?;
     if total == 0 {
         println!("No notes found");
-        return;
+        return Ok(());
     }
 
     let header: Vec<String> = ["Id", "Name", "Value", "Target", "Scan", "Created"]
@@ -247,15 +245,19 @@ pub async fn list(args: NoteListArgs) {
     println!("{table}");
 
     args.limit.print_summary(shown, total, "note");
+    Ok(())
 }
 
 /// The single count a `SELECT COUNT(*)` query returns
-pub(crate) async fn count_rows(ctx: &SessionContext, sql: &str) -> usize {
-    let batches = run_query(ctx, sql).await;
-    batches
+pub(crate) async fn count_rows(
+    ctx: &SessionContext,
+    sql: &str,
+) -> datafusion::error::Result<usize> {
+    let batches = run_query(ctx, sql).await?;
+    Ok(batches
         .first()
         .map(|b| column::<Int64Array>(b, 0).value(0) as usize)
-        .unwrap_or(0)
+        .unwrap_or(0))
 }
 
 fn column<T: 'static>(batch: &RecordBatch, idx: usize) -> &T {
@@ -299,36 +301,23 @@ pub(crate) fn value_cell(raw: &str) -> String {
     }
 }
 
-pub fn add(args: NoteAddArgs) {
+pub fn add(args: NoteAddArgs) -> Result<(), CliError> {
     if args.yes && args.text.is_none() {
-        eprintln!("gage note add: --yes requires TEXT");
-        std::process::exit(1);
+        return Err(CliError::message("gage note add: --yes requires TEXT"));
     }
-    let store = match Store::open(&gage_store::store_path()) {
-        Ok(store) => store,
-        Err(e) => {
-            eprintln!("gage note add: {e}");
-            std::process::exit(1);
-        }
-    };
-    let target = match args.target.as_deref() {
-        Some(input) => match resolve_target(&store, input) {
-            Ok(url) => Some(url),
-            Err(e) => {
-                eprintln!("gage note add: {e}");
-                std::process::exit(1);
-            }
-        },
-        None => None,
-    };
-    let metadata = match args.metadata.as_deref().map(parse_metadata) {
-        Some(Ok(m)) => Some(m),
-        Some(Err(e)) => {
-            eprintln!("gage note add: {e}");
-            std::process::exit(1);
-        }
-        None => None,
-    };
+    let store = Store::open(&gage_store::store_path()).context("gage note add")?;
+    let target = args
+        .target
+        .as_deref()
+        .map(|input| resolve_target(&store, input))
+        .transpose()
+        .map_err(|e| CliError::message(format!("gage note add: {e}")))?;
+    let metadata = args
+        .metadata
+        .as_deref()
+        .map(parse_metadata)
+        .transpose()
+        .map_err(|e| CliError::message(format!("gage note add: {e}")))?;
 
     dialog::run("Add note", || {
         if let Some(url) = &target {
@@ -341,7 +330,8 @@ pub fn add(args: NoteAddArgs) {
         let given = args
             .text
             .as_deref()
-            .map(|value| text_value("gage note add", "TEXT", value));
+            .map(|value| text_value("gage note add", "TEXT", value))
+            .transpose()?;
         let text: String = match given {
             Some(ref t) => {
                 cli::log::step(format!("{label}\n{}", style(t).dim()))?;
@@ -404,7 +394,7 @@ pub fn add(args: NoteAddArgs) {
             })
             .map_err(|e| DialogError::Failed(e.to_string()))?;
         Ok(format!("Added note {}", short_uuid(&id)).into())
-    });
+    })
 }
 
 /// A `--metadata` argument as a JSON object
@@ -424,26 +414,19 @@ fn env_user() -> Option<String> {
         .filter(|u| !u.is_empty())
 }
 
-pub async fn show(args: NoteShowArgs) {
-    let store = match Store::open(&gage_store::store_path()) {
-        Ok(store) => store,
-        Err(e) => {
-            eprintln!("gage note show: {e}");
-            std::process::exit(1);
-        }
-    };
+pub async fn show(args: NoteShowArgs) -> Result<(), CliError> {
+    let store = Store::open(&gage_store::store_path()).context("gage note show")?;
     // The prefix resolves through the store; the row comes from SQL
-    let id = match store.resolve_in(&args.id, Some(NOTE_TYPE)) {
-        Ok(found) if found.deleted => {
-            eprintln!("gage note show: note {} is deleted", short_uuid(&found.id));
-            std::process::exit(1);
-        }
-        Ok(found) => found.id,
-        Err(e) => {
-            eprintln!("gage note show: {e}");
-            std::process::exit(1);
-        }
-    };
+    let found = store
+        .resolve_in(&args.id, Some(NOTE_TYPE))
+        .context("gage note show")?;
+    if found.deleted {
+        return Err(CliError::message(format!(
+            "gage note show: note {} is deleted",
+            short_uuid(&found.id)
+        )));
+    }
+    let id = found.id;
     let ctx = ContextBuilder::new(Some(Arc::new(Mutex::new(store))))
         .build()
         .await;
@@ -451,32 +434,25 @@ pub async fn show(args: NoteShowArgs) {
         "SELECT name, value, text, metadata, target, author, created, modified \
          FROM note WHERE id = '{id}'"
     );
-    let batches = run_query(&ctx, &sql).await;
+    let batches = run_query(&ctx, &sql).await.context("gage note show")?;
     let Some(batch) = batches.iter().find(|b| b.num_rows() > 0) else {
-        eprintln!("gage note show: note {id} not found");
-        std::process::exit(1);
+        return Err(CliError::message(format!(
+            "gage note show: note {id} not found"
+        )));
     };
     let text_col = column::<StringArray>(batch, 2);
     let value = if text_col.is_valid(0) {
         NoteValue::Text(text_col.value(0).to_string())
     } else {
-        match serde_json::from_str(column::<StringArray>(batch, 1).value(0)) {
-            Ok(json) => NoteValue::Json(json),
-            Err(e) => {
-                eprintln!("gage note show: note {id} value: {e}");
-                std::process::exit(1);
-            }
-        }
+        let json = serde_json::from_str(column::<StringArray>(batch, 1).value(0))
+            .with_context(|| format!("gage note show: note {id} value"))?;
+        NoteValue::Json(json)
     };
     let metadata_col = column::<StringArray>(batch, 3);
     let metadata: Option<serde_json::Value> = if metadata_col.is_valid(0) {
-        match serde_json::from_str(metadata_col.value(0)) {
-            Ok(json) => Some(json),
-            Err(e) => {
-                eprintln!("gage note show: note {id} metadata: {e}");
-                std::process::exit(1);
-            }
-        }
+        let json = serde_json::from_str(metadata_col.value(0))
+            .with_context(|| format!("gage note show: note {id} metadata"))?;
+        Some(json)
     } else {
         None
     };
@@ -550,38 +526,24 @@ pub async fn show(args: NoteShowArgs) {
         table.modify(Cell::new(2, 1), style::tty(Color::FG_BRIGHT_CYAN));
     }
     println!("{table}");
+    Ok(())
 }
 
-pub fn edit(args: NoteEditArgs) {
+pub fn edit(args: NoteEditArgs) -> Result<(), CliError> {
     if args.yes && args.text.is_none() && args.name.is_none() && args.target.is_none() {
-        eprintln!("gage note edit: --yes requires TEXT, --name, or --target");
-        std::process::exit(1);
+        return Err(CliError::message(
+            "gage note edit: --yes requires TEXT, --name, or --target",
+        ));
     }
-    let store = match Store::open(&gage_store::store_path()) {
-        Ok(store) => store,
-        Err(e) => {
-            eprintln!("gage note edit: {e}");
-            std::process::exit(1);
-        }
-    };
+    let store = Store::open(&gage_store::store_path()).context("gage note edit")?;
     let notes = NoteStore::from(&store);
-    let current = match notes.get(&args.id) {
-        Ok(full) => full,
-        Err(e) => {
-            eprintln!("gage note edit: {e}");
-            std::process::exit(1);
-        }
-    };
-    let given_target = match args.target.as_deref() {
-        Some(input) => match resolve_target(&store, input) {
-            Ok(url) => Some(url),
-            Err(e) => {
-                eprintln!("gage note edit: {e}");
-                std::process::exit(1);
-            }
-        },
-        None => None,
-    };
+    let current = notes.get(&args.id).context("gage note edit")?;
+    let given_target = args
+        .target
+        .as_deref()
+        .map(|input| resolve_target(&store, input))
+        .transpose()
+        .map_err(|e| CliError::message(format!("gage note edit: {e}")))?;
 
     dialog::run("Edit note", || {
         cli::log::step(format!("Note\n{}", style(short_uuid(&current.id)).dim()))?;
@@ -606,7 +568,8 @@ pub fn edit(args: NoteEditArgs) {
         let given = args
             .text
             .as_deref()
-            .map(|value| text_value("gage note edit", "TEXT", value));
+            .map(|value| text_value("gage note edit", "TEXT", value))
+            .transpose()?;
         let text: String = match given {
             Some(ref t) => {
                 cli::log::step(format!("{label}\n{}", style(t).dim()))?;
@@ -654,17 +617,11 @@ pub fn edit(args: NoteEditArgs) {
             .edit(&current.id, edit)
             .map_err(|e| DialogError::Failed(e.to_string()))?;
         Ok(format!("Updated note {}", short_uuid(&current.id)).into())
-    });
+    })
 }
 
-pub fn delete(args: NoteDeleteArgs) {
-    let store = match Store::open(&gage_store::store_path()) {
-        Ok(store) => store,
-        Err(e) => {
-            eprintln!("gage note delete: {e}");
-            std::process::exit(1);
-        }
-    };
+pub fn delete(args: NoteDeleteArgs) -> Result<(), CliError> {
+    let store = Store::open(&gage_store::store_path()).context("gage note delete")?;
     let notes = NoteStore::from(&store);
 
     // Resolve every argument before writing anything, so one bad
@@ -681,7 +638,7 @@ pub fn delete(args: NoteDeleteArgs) {
         }
     }
     if errors > 0 {
-        std::process::exit(1);
+        return Err(CliError::exit(1));
     }
 
     let total = targets.len();
@@ -712,5 +669,5 @@ pub fn delete(args: NoteDeleteArgs) {
             return Err(dialog::partial("Deleted", deleted, total, "note"));
         }
         Ok(format!("Deleted {}", count(deleted, "note")).into())
-    });
+    })
 }

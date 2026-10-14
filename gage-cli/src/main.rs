@@ -1,10 +1,13 @@
+use std::process::ExitCode;
 use std::sync::OnceLock;
 use std::time::Duration;
 
+use anyhow::Context;
 use clap::{Parser, Subcommand};
 use humantime::DurationError;
 use tokio_util::sync::CancellationToken;
 
+use crate::error::CliError;
 use crate::source::SOURCE_HELP;
 
 static PANIC_TOKEN: OnceLock<CancellationToken> = OnceLock::new();
@@ -46,6 +49,7 @@ mod cmd_status;
 mod cmd_store;
 mod cmd_tag;
 mod dialog;
+mod error;
 #[cfg(test)]
 mod help_lint;
 mod human;
@@ -257,7 +261,7 @@ fn init_logging() {
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> ExitCode {
     install_panic_hook();
     // Every spinner and bar, inside a dialog or not, renders with the
     // Gage theme
@@ -353,12 +357,7 @@ async fn main() {
             },
             Command::Scan(args) => cmd_scan::main(args).await,
             Command::Resolve(args) => cmd_resolve::run(args),
-            Command::Mcp => {
-                if let Err(e) = run_mcp().await {
-                    eprintln!("gage mcp: {e}");
-                    std::process::exit(1);
-                }
-            }
+            Command::Mcp => run_mcp().await.context("gage mcp").map_err(CliError::from),
             Command::Query(args) => cmd_query::main(args).await,
             Command::Index(args) => cmd_index::run(args).await,
             Command::Push(args) => cmd_push::main(args).await,
@@ -367,22 +366,40 @@ async fn main() {
         }
     };
     tokio::pin!(cmd);
-    tokio::select! {
-        () = &mut cmd => {}
+    let result = tokio::select! {
+        result = &mut cmd => result,
         _ = panic_token().cancelled() => {
             #[allow(clippy::let_underscore_must_use)]
             let _ = tokio::time::timeout(Duration::from_secs(2), cmd).await;
-            std::process::exit(1);
+            return ExitCode::FAILURE;
+        }
+    };
+    exit_code(result)
+}
+
+/// The one place a command's outcome becomes process state
+fn exit_code(result: Result<(), CliError>) -> ExitCode {
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(CliError::Exit { code, message }) => {
+            if let Some(message) = message {
+                eprintln!("{message}");
+            }
+            ExitCode::from(code)
+        }
+        Err(CliError::Other(e)) => {
+            eprintln!("{e:#}");
+            ExitCode::FAILURE
         }
     }
 }
 
-async fn run_mcp() -> Result<(), Box<dyn std::error::Error>> {
+async fn run_mcp() -> anyhow::Result<()> {
     use std::sync::{Arc, Mutex};
 
     let path = gage_store::store_path();
     let store = gage_store::Store::open(&path)
-        .map_err(|e| format!("open store at {}: {e}", path.display()))?;
+        .with_context(|| format!("open store at {}", path.display()))?;
     let store = Arc::new(Mutex::new(store));
     let context = gage_query::ContextBuilder::new(Some(Arc::clone(&store)))
         .build()
@@ -417,5 +434,7 @@ async fn run_mcp() -> Result<(), Box<dyn std::error::Error>> {
         ],
         custom: Vec::new(),
     };
-    gage_mcp::serve_stdio(spec).await
+    gage_mcp::serve_stdio(spec)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))
 }

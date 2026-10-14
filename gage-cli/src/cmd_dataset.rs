@@ -2,6 +2,7 @@ use std::fmt;
 use std::io::{self, IsTerminal};
 use std::sync::{Arc, Mutex};
 
+use anyhow::Context;
 use clap::{Args, Subcommand};
 use cliclack as cli;
 use datafusion::arrow::array::{Int64Array, StringArray, TimestampMillisecondArray};
@@ -24,6 +25,7 @@ use crate::cmd_note::count_rows;
 use crate::cmd_session::{column, run_query};
 use crate::cmd_tag::TAG_HELP;
 use crate::dialog::{self, DialogError, DialogResult};
+use crate::error::CliError;
 use crate::human::{count, format_elapsed_ms};
 use crate::session_filter::{FILTER_ARG_NAMES, SessionFilterArgs, select_sessions};
 use crate::size_limit::SizeLimitArgs;
@@ -140,9 +142,9 @@ pub struct DatasetDeleteArgs {
     yes: bool,
 }
 
-pub async fn add(args: DatasetAddArgs) {
-    let store = open_store("gage dataset add");
-    dialog::run_async("Add dataset", || add_dialog(&args, &store)).await;
+pub async fn add(args: DatasetAddArgs) -> Result<(), CliError> {
+    let store = open_store("gage dataset add")?;
+    dialog::run_async("Add dataset", || add_dialog(&args, &store)).await
 }
 
 async fn add_dialog(args: &DatasetAddArgs, store: &Store) -> Result<DialogResult, DialogError> {
@@ -205,7 +207,7 @@ async fn add_dialog(args: &DatasetAddArgs, store: &Store) -> Result<DialogResult
         &dataset_id,
         args.source.as_deref(),
         &selected,
-        Some(args.size.max_bytes()),
+        Some(args.size.max_bytes().context("user config")?),
         &mut |e| view.on(e),
     )
     .map_err(DialogError::Failed)?;
@@ -213,8 +215,8 @@ async fn add_dialog(args: &DatasetAddArgs, store: &Store) -> Result<DialogResult
     Ok(format!("Added dataset {shown} with {}", count(placed, "session")).into())
 }
 
-pub fn refresh(args: DatasetRefreshArgs) {
-    let store = open_store("gage dataset refresh");
+pub fn refresh(args: DatasetRefreshArgs) -> Result<(), CliError> {
+    let store = open_store("gage dataset refresh")?;
     dialog::run("Refresh dataset", || {
         let datasets = DatasetStore::from(&store);
         let record = datasets
@@ -245,13 +247,13 @@ pub fn refresh(args: DatasetRefreshArgs) {
             &record.id,
             args.source.as_deref(),
             &selected,
-            Some(args.size.max_bytes()),
+            Some(args.size.max_bytes().context("user config")?),
             &mut |e| view.on(e),
         )
         .map_err(DialogError::Failed)?;
         let placed = view.finish()?;
         Ok(format!("Refreshed dataset {shown} ({})", count(placed, "session")).into())
-    });
+    })
 }
 
 /// Create an empty dataset in `store`, recording `origin` when given.
@@ -487,15 +489,17 @@ pub(crate) fn add_native_to_dataset(
     Ok(outcomes)
 }
 
-pub async fn list(args: DatasetListArgs) {
-    let store = open_store("gage dataset list");
+pub async fn list(args: DatasetListArgs) -> Result<(), CliError> {
+    let store = open_store("gage dataset list")?;
     let ctx = ContextBuilder::new(Some(Arc::new(Mutex::new(store))))
         .build()
         .await;
-    let total = count_rows(&ctx, "SELECT COUNT(*) FROM dataset").await;
+    let total = count_rows(&ctx, "SELECT COUNT(*) FROM dataset")
+        .await
+        .context("gage dataset list")?;
     if total == 0 {
         println!("No datasets found");
-        return;
+        return Ok(());
     }
     let show = args.limit.show_count(total);
     let sql = format!(
@@ -514,7 +518,7 @@ pub async fn list(args: DatasetListArgs) {
                     GROUP BY id) t ON t.id = d.id \
          ORDER BY d.modified DESC LIMIT {show}"
     );
-    let batches = run_query(&ctx, &sql).await;
+    let batches = run_query(&ctx, &sql).await.context("gage dataset list")?;
 
     let header: Vec<String> = ["Id", "Sessions", "Attachments", "Scans", "Tags", "Created"]
         .iter()
@@ -556,30 +560,27 @@ pub async fn list(args: DatasetListArgs) {
         .to_string();
     println!("{table}");
     args.limit.print_summary(shown, total, "dataset");
+    Ok(())
 }
 
-pub async fn show(args: DatasetShowArgs) {
-    let store = Arc::new(Mutex::new(open_store("gage dataset show")));
-    fn or_exit<T>(result: Result<T, StoreError>) -> T {
-        result.unwrap_or_else(|e| {
-            eprintln!("gage dataset show: {e}");
-            std::process::exit(1)
-        })
-    }
+pub async fn show(args: DatasetShowArgs) -> Result<(), CliError> {
+    let store = Arc::new(Mutex::new(open_store("gage dataset show")?));
     let (record, sessions, attachments, tags, header) = {
         let store = store.lock().unwrap();
         let datasets = DatasetStore::from(&*store);
-        let record = match datasets.get(&args.dataset) {
-            Ok(record) => record,
-            Err(e) => {
-                eprintln!("gage dataset show: {}: {e}", args.dataset);
-                std::process::exit(1);
-            }
-        };
-        let sessions = or_exit(datasets.sessions(&record.id));
-        let attachments = or_exit(datasets.attachments(&record.id));
-        let tags = or_exit(TagStore::from(&*store).targets());
-        let header = or_exit(store.read_header(&record.commit_sha));
+        let record = datasets
+            .get(&args.dataset)
+            .with_context(|| format!("gage dataset show: {}", args.dataset))?;
+        let sessions = datasets.sessions(&record.id).context("gage dataset show")?;
+        let attachments = datasets
+            .attachments(&record.id)
+            .context("gage dataset show")?;
+        let tags = TagStore::from(&*store)
+            .targets()
+            .context("gage dataset show")?;
+        let header = store
+            .read_header(&record.commit_sha)
+            .context("gage dataset show")?;
         (record, sessions, attachments, tags, header)
     };
     let ctx = ContextBuilder::new(Some(store)).build().await;
@@ -587,8 +588,8 @@ pub async fn show(args: DatasetShowArgs) {
         "SELECT id FROM scan WHERE dataset = '{}' ORDER BY modified DESC",
         record.id
     );
-    let scans: Vec<String> = run_query(&ctx, &sql)
-        .await
+    let batches = run_query(&ctx, &sql).await.context("gage dataset show")?;
+    let scans: Vec<String> = batches
         .iter()
         .flat_map(|batch| {
             let ids = column::<StringArray>(batch, 0);
@@ -636,10 +637,11 @@ pub async fn show(args: DatasetShowArgs) {
         .modify(Columns::first(), style::tty(Color::FG_BRIGHT_YELLOW))
         .to_string();
     println!("{table}");
+    Ok(())
 }
 
-pub fn delete(args: DatasetDeleteArgs) {
-    let store = open_store("gage dataset delete");
+pub fn delete(args: DatasetDeleteArgs) -> Result<(), CliError> {
+    let store = open_store("gage dataset delete")?;
     let datasets = DatasetStore::from(&store);
 
     // Resolve every argument before writing anything, so one bad
@@ -656,7 +658,7 @@ pub fn delete(args: DatasetDeleteArgs) {
         }
     }
     if errors > 0 {
-        std::process::exit(1);
+        return Err(CliError::exit(1));
     }
 
     let total = records.len();
@@ -713,16 +715,11 @@ pub fn delete(args: DatasetDeleteArgs) {
             }
         }
         Ok(outro.into())
-    });
+    })
 }
 
-/// Open the default store, or print `command: <error>` and exit
-fn open_store(command: &str) -> Store {
-    match Store::open(&gage_store::store_path()) {
-        Ok(store) => store,
-        Err(e) => {
-            eprintln!("{command}: {e}");
-            std::process::exit(1);
-        }
-    }
+/// Open the default store, or `command: <error>`
+fn open_store(command: &str) -> Result<Store, CliError> {
+    let store = Store::open(&gage_store::store_path()).context(command.to_string())?;
+    Ok(store)
 }

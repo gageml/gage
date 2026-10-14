@@ -6,6 +6,7 @@ use cliclack as cli;
 use console::{Term, style};
 use gage_core::style::SPINNER_FRAMES;
 
+use crate::error::CliError;
 use crate::human::count;
 use crate::style as s;
 
@@ -139,17 +140,17 @@ impl Drop for SigintGuard {
     }
 }
 
-pub fn run<F>(title: &str, f: F)
+pub fn run<F>(title: &str, f: F) -> Result<(), CliError>
 where
     F: FnOnce() -> Result<DialogResult, DialogError>,
 {
     install_theme();
     let _sigint = SigintGuard::new();
     cli::intro(style(title).bold()).unwrap();
-    handle_result(f());
+    handle_result(f())
 }
 
-pub async fn run_async<F, Fut>(title: &str, f: F)
+pub async fn run_async<F, Fut>(title: &str, f: F) -> Result<(), CliError>
 where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = Result<DialogResult, DialogError>>,
@@ -157,23 +158,28 @@ where
     install_theme();
     let _sigint = SigintGuard::new();
     cli::intro(style(title).bold()).unwrap();
-    handle_result(f().await);
+    handle_result(f().await)
 }
 
-fn handle_result(result: Result<DialogResult, DialogError>) {
+/// The dialog prints its own outcome, so a failure exits without a
+/// message
+fn handle_result(result: Result<DialogResult, DialogError>) -> Result<(), CliError> {
     match result {
         Ok(DialogResult::Message(msg)) => {
             cli::outro(style(msg).green().bright()).unwrap();
+            Ok(())
         }
         Err(DialogError::Interrupted) => {
             // Cliclack already showed cancel UI — nothing more to print
+            Ok(())
         }
         Err(DialogError::Canceled) => {
             cli::outro_cancel("Canceled").unwrap();
+            Ok(())
         }
         Err(DialogError::Failed(msg)) => {
             cli::outro_cancel(msg).unwrap();
-            std::process::exit(1);
+            Err(CliError::exit(1))
         }
         Err(DialogError::Other(e)) => {
             let wrapped = wrap_text(&Term::stderr(), &format!("{e:#}"))
@@ -183,7 +189,7 @@ fn handle_result(result: Result<DialogResult, DialogError>) {
                 .join("\n");
             cli::log::error(wrapped).unwrap();
             cli::outro_cancel("Canceled due to errors").unwrap();
-            std::process::exit(1);
+            Err(CliError::exit(1))
         }
     }
 }

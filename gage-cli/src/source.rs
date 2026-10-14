@@ -3,8 +3,11 @@
 
 use std::sync::Arc;
 
+use anyhow::Context;
 use gage_registry::driver::DriverRegistry;
 use gage_session::{Driver, Source};
+
+use crate::error::CliError;
 
 /// Long help shared by every `--source` option
 pub const SOURCE_HELP: &str = "Session directory as SCHEME:PATH. A value with no scheme uses \
@@ -43,25 +46,17 @@ pub fn describe_source(driver: &dyn Driver, spec: &str) -> String {
     }
 }
 
-/// The default driver, or print `command: <error>` and exit.
-pub fn default_driver_or_exit(command: &str) -> Arc<dyn Driver> {
-    match driver_registry().default() {
-        Some(driver) => driver,
-        None => {
-            eprintln!("{command}: no default session driver registered");
-            std::process::exit(1);
-        }
-    }
+/// The default driver, or `command: <error>`
+pub fn default_driver(command: &str) -> Result<Arc<dyn Driver>, CliError> {
+    driver_registry().default().ok_or_else(|| {
+        CliError::message(format!("{command}: no default session driver registered"))
+    })
 }
 
-/// Open `source` through the registry, or print `command: <error>`
-/// and exit.
-pub fn open_source_or_exit(command: &str, source: &str) -> Box<dyn Source> {
-    match driver_registry().open_source(source) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("{command}: {source}: {e}");
-            std::process::exit(1);
-        }
-    }
+/// Open `source` through the registry, or `command: source: <error>`
+pub fn open_source(command: &str, source: &str) -> Result<Box<dyn Source>, CliError> {
+    driver_registry()
+        .open_source(source)
+        .with_context(|| format!("{command}: {source}"))
+        .map_err(CliError::from)
 }

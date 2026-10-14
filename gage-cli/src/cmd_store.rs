@@ -1,3 +1,4 @@
+use anyhow::Context;
 use clap::{Args, Subcommand};
 use cliclack as cli;
 use gage_core::path::shorten_home;
@@ -12,6 +13,7 @@ use tabled::{
 };
 
 use crate::dialog::{self, DialogError};
+use crate::error::CliError;
 use crate::human::{count, format_size};
 use crate::style;
 
@@ -120,19 +122,13 @@ pub struct GcArgs {
     prune: Option<String>,
 }
 
-pub fn run(command: StoreCommand) {
+pub fn run(command: StoreCommand) -> Result<(), CliError> {
     match command {
-        StoreCommand::Init => {
-            init();
-            return;
-        }
-        StoreCommand::Index(args) if args.rebuild => {
-            rebuild_index();
-            return;
-        }
+        StoreCommand::Init => return init(),
+        StoreCommand::Index(args) if args.rebuild => return rebuild_index(),
         _ => {}
     }
-    let store = open_store();
+    let store = open_store()?;
     match command {
         StoreCommand::Init => unreachable!("handled above"),
         StoreCommand::Index(_) => index_status(&store),
@@ -145,7 +141,7 @@ pub fn run(command: StoreCommand) {
     }
 }
 
-fn delete(store: &Store, args: DeleteArgs) {
+fn delete(store: &Store, args: DeleteArgs) -> Result<(), CliError> {
     // Resolve every argument before writing anything, so one bad
     // argument leaves the store untouched
     let mut targets: Vec<(String, String)> = Vec::with_capacity(args.ids.len());
@@ -176,7 +172,7 @@ fn delete(store: &Store, args: DeleteArgs) {
         }
     }
     if errors > 0 {
-        std::process::exit(1);
+        return Err(CliError::exit(1));
     }
 
     let total = targets.len();
@@ -205,56 +201,35 @@ fn delete(store: &Store, args: DeleteArgs) {
             return Err(dialog::partial("Deleted", deleted, total, "object"));
         }
         Ok(format!("Deleted {}", count(deleted, "object")).into())
-    });
+    })
 }
 
-/// Open the default store, or exit with the open error.
-fn open_store() -> Store {
-    match Store::open(&gage_store::store_path()) {
-        Ok(store) => store,
-        Err(e) => {
-            eprintln!("gage store: {e}");
-            std::process::exit(1);
-        }
-    }
+/// Open the default store, or `gage store: <error>`
+fn open_store() -> Result<Store, CliError> {
+    let store = Store::open(&gage_store::store_path()).context("gage store")?;
+    Ok(store)
 }
 
-fn init() {
+fn init() -> Result<(), CliError> {
     let path = gage_store::store_path();
-    let outcome = match gage_store::init(&path) {
-        Ok(outcome) => outcome,
-        Err(e) => {
-            eprintln!("gage store init: {e}");
-            std::process::exit(1);
-        }
-    };
+    let outcome = gage_store::init(&path).context("gage store init")?;
     let verb = match outcome {
         InitOutcome::Created => "Initialized empty",
         InitOutcome::Reinitialized => "Reinitialized existing",
     };
     println!("{verb} Gage store in {}/", path.display());
+    Ok(())
 }
 
 /// The rebuild replaces the index file, so it opens the store itself
 /// rather than taking the handle `open_store` would have built.
-fn rebuild_index() {
-    match Store::rebuild_index(&gage_store::store_path()) {
-        Ok(store) => index_status(&store),
-        Err(e) => {
-            eprintln!("gage store index: {e}");
-            std::process::exit(1);
-        }
-    }
+fn rebuild_index() -> Result<(), CliError> {
+    let store = Store::rebuild_index(&gage_store::store_path()).context("gage store index")?;
+    index_status(&store)
 }
 
-fn index_status(store: &Store) {
-    let status = match store.index_status() {
-        Ok(status) => status,
-        Err(e) => {
-            eprintln!("gage store index: {e}");
-            std::process::exit(1);
-        }
-    };
+fn index_status(store: &Store) -> Result<(), CliError> {
+    let status = store.index_status().context("gage store index")?;
     let rows = [
         ["path".to_string(), shorten_home(&status.path)],
         ["refs".to_string(), status.counts.refs.to_string()],
@@ -266,55 +241,41 @@ fn index_status(store: &Store) {
         .modify(Columns::first(), style::dim())
         .to_string();
     println!("{table}");
+    Ok(())
 }
 
-fn view(store: Store, args: ViewArgs) {
+fn view(store: Store, args: ViewArgs) -> Result<(), CliError> {
     // A prefix that names nothing is an error before the terminal is
     // taken over; an ambiguous one opens the view on its first match
     if let Some(prefix) = &args.object {
         match store.resolve_id(prefix) {
             Ok(_) | Err(StoreError::AmbiguousId(..)) => {}
-            Err(e) => {
-                eprintln!("gage store view: {e}");
-                std::process::exit(1);
-            }
+            Err(e) => Err(e).context("gage store view")?,
         }
     }
-    if let Err(e) = gage_tui::store_view::run(store, args.object.as_deref()) {
-        eprintln!("gage store view: {e}");
-        std::process::exit(1);
-    }
+    gage_tui::store_view::run(store, args.object.as_deref()).context("gage store view")?;
+    Ok(())
 }
 
-fn status(store: &Store, args: StatusArgs) {
+fn status(store: &Store, args: StatusArgs) -> Result<(), CliError> {
     if args.check {
-        match store.fsck() {
-            Ok(lines) => {
-                for line in lines {
-                    println!("{line}");
-                }
-                println!("Integrity: OK");
-            }
-            Err(e) => {
-                eprintln!("Integrity: FAIL ({e})");
-                std::process::exit(1);
-            }
+        let lines = store
+            .fsck()
+            .map_err(|e| CliError::message(format!("Integrity: FAIL ({e})")))?;
+        for line in lines {
+            println!("{line}");
         }
-        return;
+        println!("Integrity: OK");
+        return Ok(());
     }
-    let status = match store.status() {
-        Ok(status) => status,
-        Err(e) => {
-            eprintln!("gage store status: {e}");
-            std::process::exit(1);
-        }
-    };
+    let status = store.status().context("gage store status")?;
     let rows = status_rows(&status);
     let table = Table::from_iter(rows)
         .with(Style::rounded().horizontals([]))
         .modify(Columns::first(), style::dim())
         .to_string();
     println!("{table}");
+    Ok(())
 }
 
 fn status_rows(status: &StoreStatus) -> Vec<Vec<String>> {
@@ -345,14 +306,10 @@ fn status_rows(status: &StoreStatus) -> Vec<Vec<String>> {
     rows
 }
 
-fn gc(store: &Store, args: GcArgs) {
-    let outcome = match store.gc(args.prune.as_deref(), false) {
-        Ok(outcome) => outcome,
-        Err(e) => {
-            eprintln!("gage store gc: {e}");
-            std::process::exit(1);
-        }
-    };
+fn gc(store: &Store, args: GcArgs) -> Result<(), CliError> {
+    let outcome = store
+        .gc(args.prune.as_deref(), false)
+        .context("gage store gc")?;
     println!();
     let header: Vec<String> = ["", "Before", "After"]
         .iter()
@@ -371,6 +328,7 @@ fn gc(store: &Store, args: GcArgs) {
             outcome.pruned_commits
         );
     }
+    Ok(())
 }
 
 fn gc_summary_rows(outcome: &gage_store::GcOutcome) -> Vec<Vec<String>> {
@@ -402,17 +360,11 @@ fn gc_summary_rows(outcome: &gage_store::GcOutcome) -> Vec<Vec<String>> {
     .collect()
 }
 
-fn ls(store: &Store, args: LsArgs) {
-    let tip = resolve_tip(store, "gage store ls", &args.object);
-    let entries = match store.ls(&tip) {
-        Ok(entries) => entries,
-        Err(e) => {
-            eprintln!("gage store ls: {e}");
-            std::process::exit(1);
-        }
-    };
+fn ls(store: &Store, args: LsArgs) -> Result<(), CliError> {
+    let tip = resolve_tip(store, "gage store ls", &args.object)?;
+    let entries = store.ls(&tip).context("gage store ls")?;
     if entries.is_empty() {
-        return;
+        return Ok(());
     }
     let header: Vec<String> = vec!["Name".into(), "Type".into(), "Size".into()];
     let rows = std::iter::once(header).chain(entries.iter().map(ls_row));
@@ -426,6 +378,7 @@ fn ls(store: &Store, args: LsArgs) {
         .modify(Columns::one(2).not(Rows::first()), style::dim())
         .to_string();
     println!("{table}");
+    Ok(())
 }
 
 fn ls_row(entry: &TreeEntry) -> Vec<String> {
@@ -441,36 +394,31 @@ fn ls_row(entry: &TreeEntry) -> Vec<String> {
     vec![name, kind, size]
 }
 
-fn cat(store: &Store, args: CatArgs) {
+fn cat(store: &Store, args: CatArgs) -> Result<(), CliError> {
     use std::io::Write;
 
-    let tip = resolve_tip(store, "gage store cat", &args.object);
+    let tip = resolve_tip(store, "gage store cat", &args.object)?;
     let file = args.file.as_deref().unwrap_or("attrs.json");
     let bytes = match store.read_blob_bytes(&format!("{tip}:{file}")) {
         Ok(bytes) => bytes,
         Err(StoreError::MissingObject(_)) => {
-            eprintln!("gage store cat: {}: no such file: {file}", args.object);
-            std::process::exit(1);
+            return Err(CliError::message(format!(
+                "gage store cat: {}: no such file: {file}",
+                args.object
+            )));
         }
-        Err(e) => {
-            eprintln!("gage store cat: {e}");
-            std::process::exit(1);
-        }
+        Err(e) => Err(e).context("gage store cat")?,
     };
-    if let Err(e) = std::io::stdout().write_all(&bytes) {
-        eprintln!("gage store cat: {e}");
-        std::process::exit(1);
-    }
+    std::io::stdout()
+        .write_all(&bytes)
+        .context("gage store cat")?;
+    Ok(())
 }
 
-/// The stored version an object name resolves to, or print
-/// `command: <error>` and exit
-fn resolve_tip(store: &Store, command: &str, object: &str) -> String {
-    match store.resolve_in(object, None) {
-        Ok(found) => found.tip_sha,
-        Err(e) => {
-            eprintln!("{command}: {e}");
-            std::process::exit(1);
-        }
-    }
+/// The stored version an object name resolves to, or `command: <error>`
+fn resolve_tip(store: &Store, command: &str, object: &str) -> Result<String, CliError> {
+    let found = store
+        .resolve_in(object, None)
+        .with_context(|| command.to_string())?;
+    Ok(found.tip_sha)
 }

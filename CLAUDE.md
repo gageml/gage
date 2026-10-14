@@ -357,6 +357,10 @@ reading a newer object is a normal condition, not an upgrade-window edge case.
   and exempt; `gage config edit` is confirmed by the editor save.
 - Progress and spinners come from the dialog theme. No library defaults.
 - CLI dialog work does not touch `gage-tui`.
+- Use `CliError::Exit` to exit rather than `process::exit`. A command returns
+  `Result<(), CliError>`, and `main` owns the single handler that prints the
+  error and sets the exit code. `CliError::Exit` carries the exit code and an
+  optional message. `process::exit` appears only in `main`.
 
 ## TUI rules
 

@@ -15,6 +15,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 
+use anyhow::Context;
 use clap::Args;
 use cliclack as cli;
 use gage_core::uuid::short_uuid;
@@ -33,6 +34,7 @@ use tabled::{
 
 use crate::author::resolve_author;
 use crate::dialog::{self, DialogError, DialogResult};
+use crate::error::CliError;
 use crate::human::count;
 use crate::style;
 
@@ -80,27 +82,20 @@ pub struct FetchArgs {
     list: bool,
 }
 
-pub fn main(args: FetchArgs) {
+pub fn main(args: FetchArgs) -> Result<(), CliError> {
     if args.objects.is_empty() && !args.all && !args.list {
-        fail(
-            &"name objects to fetch, pass --all to fetch the whole remote, or --list to see what it has",
-        );
+        return Err(CliError::message(
+            "gage fetch: name objects to fetch, pass --all to fetch the whole remote, or --list to see what it has",
+        ));
     }
-    let store = match Store::open(&gage_store::store_path()) {
-        Ok(store) => store,
-        Err(e) => fail(&e),
-    };
+    let store = Store::open(&gage_store::store_path()).context("gage fetch")?;
     let remotes = RemoteStore::from(&store);
-    let source = match remotes.resolve(&args.repository) {
-        Ok(repository) => FetchSource::from(repository),
-        Err(e) => fail(&e),
-    };
+    let source = FetchSource::from(remotes.resolve(&args.repository).context("gage fetch")?);
     if args.list {
         let remote = source.repository().name().to_string();
-        if let Err(e) = list_remote(&remotes, &source, &store, &remote) {
-            fail(&e);
-        }
-        return;
+        return list_remote(&remotes, &source, &store, &remote)
+            .context("gage fetch")
+            .map_err(CliError::from);
     }
     let choose = match (args.ours, args.theirs) {
         (true, _) => Some(Side::Ours),
@@ -108,10 +103,8 @@ pub fn main(args: FetchArgs) {
         _ => None,
     };
 
-    if source.is_transient()
-        && let Err(e) = remotes.clear_transient()
-    {
-        fail(&e);
+    if source.is_transient() {
+        remotes.clear_transient().context("gage fetch")?;
     }
     let remote = source.repository().name().to_string();
     // The dialog previews and confirms; the fetch runs after it, so
@@ -119,9 +112,9 @@ pub fn main(args: FetchArgs) {
     let mut plan: Option<FetchPlan> = None;
     dialog::run(&format!("Fetch from {remote}"), || {
         fetch_dialog(&remotes, &source, &args, &remote, &mut plan)
-    });
+    })?;
     let Some(plan) = plan else {
-        return;
+        return Ok(());
     };
 
     let result = fetch(
@@ -135,22 +128,22 @@ pub fn main(args: FetchArgs) {
     let report = match result {
         Ok(report) => report,
         Err(message) => {
-            for line in message.lines() {
-                eprintln!("gage fetch: {line}");
-            }
+            let mut lines: Vec<String> = message
+                .lines()
+                .map(|line| format!("gage fetch: {line}"))
+                .collect();
             if let Err(e) = discarded {
-                eprintln!("gage fetch: {e}");
+                lines.push(format!("gage fetch: {e}"));
             }
-            std::process::exit(1);
+            return Err(CliError::message(lines.join("\n")));
         }
     };
     print_report(&remote, &report);
-    if let Err(e) = discarded {
-        fail(&e);
-    }
+    discarded.context("gage fetch")?;
     if report.conflicts().next().is_some() {
-        std::process::exit(1);
+        return Err(CliError::exit(1));
     }
+    Ok(())
 }
 
 /// Print what the remote advertises without fetching: its tags in
@@ -450,9 +443,4 @@ fn print_report(source: &str, report: &FetchReport) {
     if report.conflicts().next().is_some() {
         println!("Resolve a conflict with: gage fetch {source} <OBJECT>... --ours | --theirs");
     }
-}
-
-fn fail(e: &dyn std::fmt::Display) -> ! {
-    eprintln!("gage fetch: {e}");
-    std::process::exit(1)
 }

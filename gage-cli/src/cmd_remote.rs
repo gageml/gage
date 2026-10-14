@@ -1,6 +1,7 @@
 //! `gage remote`: the Git remotes the store pushes to, fetches from,
 //! and backs up to.
 
+use anyhow::Context;
 use clap::{Args, Subcommand};
 use cliclack as cli;
 use gage_store::{RemoteStore, Store, StoreError};
@@ -13,6 +14,7 @@ use tabled::{
 };
 
 use crate::dialog::{self, DialogError};
+use crate::error::CliError;
 use crate::human::count;
 use crate::style;
 
@@ -66,8 +68,8 @@ pub struct RemoteDeleteArgs {
     yes: bool,
 }
 
-pub fn add(args: RemoteAddArgs) {
-    let store = open_store("gage remote add");
+pub fn add(args: RemoteAddArgs) -> Result<(), CliError> {
+    let store = open_store("gage remote add")?;
     dialog::run("Add remote", || {
         dialog::step_value("Name", &args.name)?;
         dialog::step_value("URL", &args.url)?;
@@ -86,21 +88,17 @@ pub fn add(args: RemoteAddArgs) {
             ""
         };
         Ok(format!("Added remote {} ({}){backup}", remote.name, remote.url).into())
-    });
+    })
 }
 
-pub fn list() {
-    let store = open_store("gage remote list");
-    let remotes = match RemoteStore::from(&store).list() {
-        Ok(remotes) => remotes,
-        Err(e) => {
-            eprintln!("gage remote list: {e}");
-            std::process::exit(1);
-        }
-    };
+pub fn list() -> Result<(), CliError> {
+    let store = open_store("gage remote list")?;
+    let remotes = RemoteStore::from(&store)
+        .list()
+        .context("gage remote list")?;
     if remotes.is_empty() {
         println!("No remotes found");
-        return;
+        return Ok(());
     }
     let header: Vec<String> = ["Name", "URL", "Backup"]
         .iter()
@@ -126,21 +124,16 @@ pub fn list() {
         )
         .to_string();
     println!("{table}");
+    Ok(())
 }
 
-pub fn delete(args: RemoteDeleteArgs) {
-    let store = open_store("gage remote delete");
+pub fn delete(args: RemoteDeleteArgs) -> Result<(), CliError> {
+    let store = open_store("gage remote delete")?;
     let remotes = RemoteStore::from(&store);
 
     // Resolve every argument before deleting anything, so one bad
     // argument leaves the store untouched
-    let known = match remotes.list() {
-        Ok(known) => known,
-        Err(e) => {
-            eprintln!("gage remote delete: {e}");
-            std::process::exit(1);
-        }
-    };
+    let known = remotes.list().context("gage remote delete")?;
     let mut lines: Vec<String> = Vec::with_capacity(args.names.len());
     let mut errors = 0;
     for name in &args.names {
@@ -159,7 +152,7 @@ pub fn delete(args: RemoteDeleteArgs) {
         }
     }
     if errors > 0 {
-        std::process::exit(1);
+        return Err(CliError::exit(1));
     }
 
     let total = args.names.len();
@@ -185,16 +178,11 @@ pub fn delete(args: RemoteDeleteArgs) {
             return Err(dialog::partial("Deleted", deleted, total, "remote"));
         }
         Ok(format!("Deleted {}", count(deleted, "remote")).into())
-    });
+    })
 }
 
-/// Open the default store, or print `command: <error>` and exit
-fn open_store(command: &str) -> Store {
-    match Store::open(&gage_store::store_path()) {
-        Ok(store) => store,
-        Err(e) => {
-            eprintln!("{command}: {e}");
-            std::process::exit(1);
-        }
-    }
+/// Open the default store, or `command: <error>`
+fn open_store(command: &str) -> Result<Store, CliError> {
+    let store = Store::open(&gage_store::store_path()).with_context(|| command.to_string())?;
+    Ok(store)
 }

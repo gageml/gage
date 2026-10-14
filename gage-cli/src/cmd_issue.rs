@@ -8,6 +8,7 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+use anyhow::Context;
 use clap::{ArgGroup, Args, Subcommand};
 use cliclack as cli;
 use console::style;
@@ -31,6 +32,7 @@ use crate::author::resolve_author;
 use crate::cmd_note::{count_rows, target_cell, value_cell};
 use crate::cmd_session::{column, run_query};
 use crate::dialog::{self, DialogError};
+use crate::error::CliError;
 use crate::human::count;
 use crate::style::{self, IdKind, styled_id};
 use crate::text_arg::text_value;
@@ -198,10 +200,11 @@ pub struct MessageArgs {
 
 impl MessageArgs {
     /// The message as given, or `None` when the option was not used.
-    fn resolve(&self, command: &str) -> Option<String> {
+    fn resolve(&self, command: &str) -> anyhow::Result<Option<String>> {
         self.message
             .as_deref()
             .map(|value| text_value(command, "--message", value))
+            .transpose()
     }
 
     fn given(&self) -> bool {
@@ -209,18 +212,12 @@ impl MessageArgs {
     }
 }
 
-fn open_store(command: &str) -> Store {
-    match Store::open(&gage_store::store_path()) {
-        Ok(store) => store,
-        Err(e) => {
-            eprintln!("{command}: {e}");
-            std::process::exit(1);
-        }
-    }
+fn open_store(command: &str) -> anyhow::Result<Store> {
+    Store::open(&gage_store::store_path()).context(command.to_string())
 }
 
-pub async fn list(args: IssueListArgs) {
-    let store = open_store("gage issue list");
+pub async fn list(args: IssueListArgs) -> Result<(), CliError> {
+    let store = open_store("gage issue list")?;
     let ctx = ContextBuilder::new(Some(Arc::new(Mutex::new(store))))
         .build()
         .await;
@@ -242,11 +239,13 @@ pub async fn list(args: IssueListArgs) {
         "SELECT id, id_prefix, title, status, status_reason, name, scan, created \
          FROM issue{where_clause} ORDER BY created DESC{limit_clause}"
     );
-    let batches = run_query(&ctx, &sql).await;
-    let total = count_rows(&ctx, &format!("SELECT COUNT(*) FROM issue{where_clause}")).await;
+    let batches = run_query(&ctx, &sql).await.context("gage issue list")?;
+    let total = count_rows(&ctx, &format!("SELECT COUNT(*) FROM issue{where_clause}"))
+        .await
+        .context("gage issue list")?;
     if total == 0 {
         println!("No issues found");
-        return;
+        return Ok(());
     }
 
     let header: Vec<String> = ["Id", "Name", "Title", "Scan", "Status", "Created"]
@@ -311,29 +310,26 @@ pub async fn list(args: IssueListArgs) {
     println!("{table}");
 
     args.limit.print_summary(shown, total, "issue");
+    Ok(())
 }
 
 fn sql_str(s: &str) -> String {
     s.replace('\'', "''")
 }
 
-pub async fn show(args: IssueShowArgs) {
-    let store = open_store("gage issue show");
+pub async fn show(args: IssueShowArgs) -> Result<(), CliError> {
+    let store = open_store("gage issue show")?;
     // The prefix resolves through the store; the rows come from SQL
-    let id = match store.resolve_in(&args.id, Some(ISSUE_TYPE)) {
-        Ok(found) if found.deleted => {
-            eprintln!(
-                "gage issue show: issue {} is deleted",
-                short_uuid(&found.id)
-            );
-            std::process::exit(1);
-        }
-        Ok(found) => found.id,
-        Err(e) => {
-            eprintln!("gage issue show: {e}");
-            std::process::exit(1);
-        }
-    };
+    let found = store
+        .resolve_in(&args.id, Some(ISSUE_TYPE))
+        .context("gage issue show")?;
+    if found.deleted {
+        return Err(CliError::message(format!(
+            "gage issue show: issue {} is deleted",
+            short_uuid(&found.id)
+        )));
+    }
+    let id = found.id;
     let ctx = ContextBuilder::new(Some(Arc::new(Mutex::new(store))))
         .build()
         .await;
@@ -341,10 +337,11 @@ pub async fn show(args: IssueShowArgs) {
         "SELECT name, title, status, status_reason, description, author, scan, \
          created, modified FROM issue WHERE id = '{id}'"
     );
-    let batches = run_query(&ctx, &sql).await;
+    let batches = run_query(&ctx, &sql).await.context("gage issue show")?;
     let Some(batch) = batches.iter().find(|b| b.num_rows() > 0) else {
-        eprintln!("gage issue show: issue {id} not found");
-        std::process::exit(1);
+        return Err(CliError::message(format!(
+            "gage issue show: issue {id} not found"
+        )));
     };
     let text = |idx: usize| column::<StringArray>(batch, idx).value(0).to_string();
     let opt_text = |idx: usize| {
@@ -388,31 +385,36 @@ pub async fn show(args: IssueShowArgs) {
          FROM issue_evidence e JOIN note n ON n.id = e.note_id \
          WHERE e.issue_id = '{id}' ORDER BY n.created"
     );
-    let evidence = run_query(&ctx, &evidence_sql).await;
+    let evidence = run_query(&ctx, &evidence_sql)
+        .await
+        .context("gage issue show")?;
     let events_sql = format!(
         "SELECT event, author, timestamp, from_status, to_status, reason, \"of\", message \
          FROM issue_event WHERE issue_id = '{id}' ORDER BY event_id"
     );
-    let events = run_query(&ctx, &events_sql).await;
+    let events = run_query(&ctx, &events_sql)
+        .await
+        .context("gage issue show")?;
     let sessions_sql = format!(
         "SELECT s.id, s.project, s.driver, s.title \
          FROM session_issue si JOIN session s ON s.id = si.session_id \
          WHERE si.issue_id = '{id}' ORDER BY s.id"
     );
-    let sessions = run_query(&ctx, &sessions_sql).await;
-    let threshold = match Config::load_user() {
-        Ok(config) => config.issues.related_threshold,
-        Err(e) => {
-            eprintln!("gage issue show: {e}");
-            std::process::exit(1);
-        }
-    };
+    let sessions = run_query(&ctx, &sessions_sql)
+        .await
+        .context("gage issue show")?;
+    let threshold = Config::load_user()
+        .context("gage issue show")?
+        .issues
+        .related_threshold;
     let related_sql = format!(
         "SELECT r.related_id, i.status, i.title \
          FROM related_issue('{id}') r JOIN issue i ON i.id = r.related_id \
          WHERE r.score >= {threshold} ORDER BY r.score DESC"
     );
-    let related = run_query(&ctx, &related_sql).await;
+    let related = run_query(&ctx, &related_sql)
+        .await
+        .context("gage issue show")?;
 
     let evidence_label = "evidence";
     let related_label = "related";
@@ -563,6 +565,7 @@ pub async fn show(args: IssueShowArgs) {
         .modify(Columns::first(), style::tty(Color::FG_BRIGHT_YELLOW))
         .to_string();
     println!("{table}");
+    Ok(())
 }
 
 /// The project of a session row in the driver's display form; the
@@ -606,17 +609,19 @@ pub(crate) fn event_label(
     label
 }
 
-pub fn add(args: IssueAddArgs) {
+pub fn add(args: IssueAddArgs) -> Result<(), CliError> {
     if args.yes && args.title.is_none() {
-        eprintln!("gage issue add: --yes requires --title");
-        std::process::exit(1);
+        return Err(CliError::message("gage issue add: --yes requires --title"));
     }
-    let store = open_store("gage issue add");
+    let store = open_store("gage issue add")?;
     let issues = IssueStore::from(&store);
-    let description = args.description.as_deref().map(|value| {
-        let path = value.strip_prefix('@').map(PathBuf::from);
-        (path, text_value("gage issue add", "--description", value))
-    });
+    let description = match args.description.as_deref() {
+        Some(value) => {
+            let path = value.strip_prefix('@').map(PathBuf::from);
+            Some((path, text_value("gage issue add", "--description", value)?))
+        }
+        None => None,
+    };
 
     // Resolve every cited note before any prompt, so a bad argument
     // fails first
@@ -639,7 +644,7 @@ pub fn add(args: IssueAddArgs) {
         }
     }
     if errors > 0 {
-        std::process::exit(1);
+        return Err(CliError::exit(1));
     }
 
     dialog::run("Add issue", || {
@@ -725,7 +730,7 @@ pub fn add(args: IssueAddArgs) {
             })
             .map_err(|e| DialogError::Failed(e.to_string()))?;
         Ok(format!("Added issue {}", short_uuid(&id)).into())
-    });
+    })
 }
 
 /// `$USER` when set and non-empty
@@ -743,7 +748,7 @@ fn resolve_issues(
     issues: &IssueStore,
     prefixes: &[String],
     accept: impl Fn(&IssueFull) -> Result<(), String>,
-) -> Vec<IssueFull> {
+) -> Result<Vec<IssueFull>, CliError> {
     let mut out: Vec<IssueFull> = Vec::with_capacity(prefixes.len());
     let mut errors = 0;
     for prefix in prefixes {
@@ -762,9 +767,9 @@ fn resolve_issues(
         }
     }
     if errors > 0 {
-        std::process::exit(1);
+        return Err(CliError::exit(1));
     }
-    out
+    Ok(out)
 }
 
 fn issues_step(issues: &[IssueFull]) -> Result<(), std::io::Error> {
@@ -777,10 +782,10 @@ fn issues_step(issues: &[IssueFull]) -> Result<(), std::io::Error> {
     )
 }
 
-pub fn delete(args: IssueDeleteArgs) {
-    let store = open_store("gage issue delete");
+pub fn delete(args: IssueDeleteArgs) -> Result<(), CliError> {
+    let store = open_store("gage issue delete")?;
     let issues = IssueStore::from(&store);
-    let targets = resolve_issues("gage issue delete", &issues, &args.ids, |_| Ok(()));
+    let targets = resolve_issues("gage issue delete", &issues, &args.ids, |_| Ok(()))?;
     let total = targets.len();
 
     dialog::run("Delete issues", || {
@@ -803,11 +808,11 @@ pub fn delete(args: IssueDeleteArgs) {
             return Err(dialog::partial("Deleted", deleted, total, "issue"));
         }
         Ok(format!("Deleted {}", count(deleted, "issue")).into())
-    });
+    })
 }
 
-pub fn close(args: IssueCloseArgs) {
-    let store = open_store("gage issue close");
+pub fn close(args: IssueCloseArgs) -> Result<(), CliError> {
+    let store = open_store("gage issue close")?;
     let issues = IssueStore::from(&store);
     let targets = resolve_issues("gage issue close", &issues, &args.ids, |i| {
         if i.status == IssueStatus::Closed {
@@ -815,7 +820,7 @@ pub fn close(args: IssueCloseArgs) {
         } else {
             Ok(())
         }
-    });
+    })?;
     let reason = if args.wontfix {
         StatusReason::WontFix
     } else if args.duplicate.is_some() {
@@ -824,16 +829,14 @@ pub fn close(args: IssueCloseArgs) {
         StatusReason::Completed
     };
     let survivor = match &args.duplicate {
-        Some(duplicate) => match issues.get(duplicate) {
-            Ok(survivor) => Some(survivor),
-            Err(e) => {
-                eprintln!("gage issue close: --duplicate {duplicate}: {e}");
-                std::process::exit(1);
-            }
-        },
+        Some(duplicate) => Some(
+            issues
+                .get(duplicate)
+                .with_context(|| format!("gage issue close: --duplicate {duplicate}"))?,
+        ),
         None => None,
     };
-    let given_message = args.message.resolve("gage issue close");
+    let given_message = args.message.resolve("gage issue close")?;
     let total = targets.len();
 
     dialog::run("Close issues", || {
@@ -876,11 +879,11 @@ pub fn close(args: IssueCloseArgs) {
             return Err(dialog::partial("Closed", closed, total, "issue"));
         }
         Ok(format!("Closed {} ({reason})", count(closed, "issue")).into())
-    });
+    })
 }
 
-pub fn open(args: IssueOpenArgs) {
-    let store = open_store("gage issue open");
+pub fn open(args: IssueOpenArgs) -> Result<(), CliError> {
+    let store = open_store("gage issue open")?;
     let issues = IssueStore::from(&store);
     let targets = resolve_issues("gage issue open", &issues, &args.ids, |i| {
         if i.status == IssueStatus::Open {
@@ -888,8 +891,8 @@ pub fn open(args: IssueOpenArgs) {
         } else {
             Ok(())
         }
-    });
-    let given_message = args.message.resolve("gage issue open");
+    })?;
+    let given_message = args.message.resolve("gage issue open")?;
     let total = targets.len();
 
     dialog::run("Open issues", || {
@@ -919,18 +922,19 @@ pub fn open(args: IssueOpenArgs) {
             return Err(dialog::partial("Opened", opened, total, "issue"));
         }
         Ok(format!("Opened {}", count(opened, "issue")).into())
-    });
+    })
 }
 
-pub fn comment(args: IssueCommentArgs) {
+pub fn comment(args: IssueCommentArgs) -> Result<(), CliError> {
     if args.yes && !args.message.given() {
-        eprintln!("gage issue comment: --yes requires --message");
-        std::process::exit(1);
+        return Err(CliError::message(
+            "gage issue comment: --yes requires --message",
+        ));
     }
-    let store = open_store("gage issue comment");
+    let store = open_store("gage issue comment")?;
     let issues = IssueStore::from(&store);
-    let targets = resolve_issues("gage issue comment", &issues, &args.ids, |_| Ok(()));
-    let given_message = args.message.resolve("gage issue comment");
+    let targets = resolve_issues("gage issue comment", &issues, &args.ids, |_| Ok(()))?;
+    let given_message = args.message.resolve("gage issue comment")?;
     let total = targets.len();
 
     dialog::run("Comment on issues", || {
@@ -965,7 +969,7 @@ pub fn comment(args: IssueCommentArgs) {
             return Err(dialog::partial("Commented on", commented, total, "issue"));
         }
         Ok(format!("Commented on {}", count(commented, "issue")).into())
-    });
+    })
 }
 
 /// An optional message: the given one, shown; or a prompt unless

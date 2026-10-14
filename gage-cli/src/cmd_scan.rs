@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use anyhow::{Context, anyhow};
 use clap::{Args, Subcommand};
 use cliclack as cli;
 use console::style;
@@ -59,6 +60,7 @@ use crate::cmd_note::{count_rows, target_cell, value_cell};
 use crate::cmd_session::{column, run_query};
 use crate::cmd_tag::TAG_HELP;
 use crate::dialog::{self, DialogError};
+use crate::error::CliError;
 use crate::human::{count, format_duration, format_elapsed_ms};
 use crate::scanner_attach;
 use crate::scanner_spec::{self, ResolvedSpec};
@@ -310,8 +312,8 @@ pub struct ScanDeleteArgs {
     yes: bool,
 }
 
-pub async fn main(args: ScanArgs) {
-    recover_orphans();
+pub async fn main(args: ScanArgs) -> Result<(), CliError> {
+    recover_orphans()?;
     match args.command {
         Some(ScanCommand::List(a)) => list(a).await,
         Some(ScanCommand::View(a)) => view(a).await,
@@ -324,19 +326,19 @@ pub async fn main(args: ScanArgs) {
 /// the command reads or writes scans. A directory a live run owns is
 /// left alone. Each recovery is reported on stderr; one that fails
 /// stays for the next command to retry.
-fn recover_orphans() {
+fn recover_orphans() -> Result<(), CliError> {
     let scans_dir = scans_dir();
     let orphans = match recover::find_orphans(&scans_dir) {
         Ok(orphans) => orphans,
         Err(e) => {
             eprintln!("gage scan: checking {}: {e}", scans_dir.display());
-            return;
+            return Ok(());
         }
     };
     if orphans.is_empty() {
-        return;
+        return Ok(());
     }
-    let store = open_store("gage scan");
+    let store = open_store("gage scan")?;
     for orphan in orphans {
         let shown = short_uuid(orphan.id()).to_string();
         match recover::recover(&store, orphan, crate::VERSION) {
@@ -350,17 +352,20 @@ fn recover_orphans() {
             Err(e) => eprintln!("gage scan: recovering scan {shown}: {e}"),
         }
     }
+    Ok(())
 }
 
-async fn list(args: ScanListArgs) {
-    let store = open_store("gage scan list");
+async fn list(args: ScanListArgs) -> Result<(), CliError> {
+    let store = open_store("gage scan list")?;
     let ctx = ContextBuilder::new(Some(Arc::new(Mutex::new(store))))
         .build()
         .await;
-    let total = count_rows(&ctx, "SELECT COUNT(*) FROM scan").await;
+    let total = count_rows(&ctx, "SELECT COUNT(*) FROM scan")
+        .await
+        .context("gage scan list")?;
     if total == 0 {
         println!("No scan runs found");
-        return;
+        return Ok(());
     }
     let show = args.limit.show_count(total);
     // Sessions and Notes are counts over the relation views
@@ -374,7 +379,7 @@ async fn list(args: ScanListArgs) {
               ON sn.scan_id = s.id \
          ORDER BY s.modified DESC LIMIT {show}"
     );
-    let batches = run_query(&ctx, &sql).await;
+    let batches = run_query(&ctx, &sql).await.context("gage scan list")?;
 
     let header: Vec<String> = [
         "Id", "Tasks", "Sessions", "Issues", "Notes", "Errors", "Cost", "Status", "Duration",
@@ -437,10 +442,11 @@ async fn list(args: ScanListArgs) {
     println!("{table}");
 
     args.limit.print_summary(shown, total, "scan run");
+    Ok(())
 }
 
-async fn view(args: ScanViewArgs) {
-    let store = Arc::new(Mutex::new(open_store("gage scan view")));
+async fn view(args: ScanViewArgs) -> Result<(), CliError> {
+    let store = Arc::new(Mutex::new(open_store("gage scan view")?));
     let host = Arc::new(StoreHost {
         store,
         registry: DriverRegistry::builtin(),
@@ -448,19 +454,17 @@ async fn view(args: ScanViewArgs) {
     });
     // No scan arg: the view opens with its scan picker dialog.
     let model = match args.scan.as_deref() {
-        Some(prefix) => match host.load_model(prefix).await {
-            Ok(model) => Some(model),
-            Err(e) => {
-                eprintln!("gage scan view: {e}");
-                std::process::exit(1);
-            }
-        },
+        Some(prefix) => Some(
+            host.load_model(prefix)
+                .await
+                .map_err(|e| anyhow!("gage scan view: {e}"))?,
+        ),
         None => None,
     };
-    if let Err(e) = scan_view::view(model, host).await {
-        eprintln!("gage scan view: {e}");
-        std::process::exit(1);
-    }
+    scan_view::view(model, host)
+        .await
+        .context("gage scan view")?;
+    Ok(())
 }
 
 /// The scan view's host over the store. `live` names the scan
@@ -1446,8 +1450,8 @@ async fn query(ctx: &SessionContext, sql: &str) -> Result<Vec<RecordBatch>, Box<
     Ok(ctx.sql(sql).await?.collect().await?)
 }
 
-fn delete(args: ScanDeleteArgs) {
-    let store = open_store("gage scan delete");
+fn delete(args: ScanDeleteArgs) -> Result<(), CliError> {
+    let store = open_store("gage scan delete")?;
     let scans = ScanStore::from(&store);
 
     // Resolve every argument before writing anything, so one bad
@@ -1464,7 +1468,7 @@ fn delete(args: ScanDeleteArgs) {
         }
     }
     if errors > 0 {
-        std::process::exit(1);
+        return Err(CliError::exit(1));
     }
 
     let total = ids.len();
@@ -1502,26 +1506,19 @@ fn delete(args: ScanDeleteArgs) {
             count(issues, "issue")
         )
         .into())
-    });
+    })
 }
 
-async fn run_scan(args: ScanRunArgs) {
+async fn run_scan(args: ScanRunArgs) -> Result<(), CliError> {
     if args.list_scanners {
-        list_scanners(&ScannerRegistry::load());
-        return;
+        return list_scanners(&ScannerRegistry::load());
     }
 
     let registry = ScannerRegistry::load();
-    let store = open_store("gage scan");
-    let config = match Config::load_user() {
-        Ok(config) => config,
-        Err(e) => {
-            eprintln!("gage scan: reading config: {e}");
-            std::process::exit(1);
-        }
-    };
+    let store = open_store("gage scan")?;
+    let config = Config::load_user().context("gage scan: reading config")?;
 
-    let driver = source::default_driver_or_exit("gage scan");
+    let driver = source::default_driver("gage scan")?;
 
     // The dialog settles the inputs and builds the dataset; the scan
     // itself runs after it, under the progress view or headless
@@ -1536,13 +1533,12 @@ async fn run_scan(args: ScanRunArgs) {
             &mut prep,
         )
     })
-    .await;
-    // A declined confirmation leaves nothing to run; a failure has
-    // already exited
+    .await?;
+    // A declined confirmation leaves nothing to run
     let Some(prep) = prep else {
-        return;
+        return Ok(());
     };
-    run_prepared(prep, &store, driver).await;
+    run_prepared(prep, &store, driver).await
 }
 
 /// Everything the dialog settled for the run.
@@ -1697,7 +1693,11 @@ async fn prepare_scan_dialog(
 /// Run the prepared scan, headless or under the progress view, and
 /// print its summary line. A canceled scan or one with a failed task
 /// exits with status 1.
-async fn run_prepared(prep: ScanPrep, store: &Store, driver: Arc<dyn Driver>) {
+async fn run_prepared(
+    prep: ScanPrep,
+    store: &Store,
+    driver: Arc<dyn Driver>,
+) -> Result<(), CliError> {
     // Ctrl-C cancels the run; the scan applies what ran. Once tokio
     // has taken the signal, a second Ctrl-C during apply has no
     // effect.
@@ -1781,13 +1781,7 @@ async fn run_prepared(prep: ScanPrep, store: &Store, driver: Arc<dyn Driver>) {
     } else {
         // The progress view reads the scan through its own store
         // handle: the runner's stays free for the tasks and the apply
-        let view_store = match Store::open(&gage_store::store_path()) {
-            Ok(store) => store,
-            Err(e) => {
-                eprintln!("gage scan: {e}");
-                std::process::exit(1);
-            }
-        };
+        let view_store = Store::open(&gage_store::store_path()).context("gage scan")?;
         let (tx, rx) = unbounded_channel();
         let scan_fut =
             gage_scan::scan(store, &scan_config, &prep.compiled, &cancel, move |event| {
@@ -1795,48 +1789,37 @@ async fn run_prepared(prep: ScanPrep, store: &Store, driver: Arc<dyn Driver>) {
             });
         let view_fut = drive_view(rx, Arc::new(Mutex::new(view_store)), cancel.clone());
         let (result, view_result) = tokio::join!(scan_fut, view_fut);
-        if let Err(e) = view_result {
-            eprintln!("gage scan: {e}");
-            std::process::exit(1);
-        }
+        view_result.context("gage scan")?;
         result
     };
     io::stdout().flush().unwrap();
     cancel.cancel();
     signal_task.await.unwrap();
 
-    let outcome = match result {
-        Ok(outcome) => outcome,
-        Err(e @ ScanError::MissingAttachments(_)) => {
-            eprintln!("gage scan: {e}");
-            eprintln!("gage scan: use --ignore-missing-attachments to run anyway");
-            std::process::exit(1);
-        }
-        Err(e) => {
-            eprintln!("gage scan: {e}");
-            std::process::exit(1);
-        }
-    };
+    let outcome = result.map_err(|e| match e {
+        ScanError::MissingAttachments(_) => CliError::message(format!(
+            "gage scan: {e}\ngage scan: use --ignore-missing-attachments to run anyway"
+        )),
+        e => CliError::from(anyhow::Error::new(e).context("gage scan")),
+    })?;
     let shown_id = styled_scan_id(store, &outcome.id);
     println!("{}", summary_line(&shown_id, &outcome.attrs));
     if let Some(name) = &prep.tag {
-        match TagStore::from(store).add(name, &outcome.id, prep.force_tag) {
-            Ok(added) => match added.previous_id {
-                Some(previous) => println!(
-                    "Moved tag {name} from {} to scan {shown_id}",
-                    short_uuid(&previous)
-                ),
-                None => println!("Tagged scan {shown_id} as {name}"),
-            },
-            Err(e) => {
-                eprintln!("gage scan: {e}");
-                std::process::exit(1);
-            }
+        let added = TagStore::from(store)
+            .add(name, &outcome.id, prep.force_tag)
+            .context("gage scan")?;
+        match added.previous_id {
+            Some(previous) => println!(
+                "Moved tag {name} from {} to scan {shown_id}",
+                short_uuid(&previous)
+            ),
+            None => println!("Tagged scan {shown_id} as {name}"),
         }
     }
     if outcome.attrs.canceled || outcome.attrs.tasks.failed > 0 {
-        std::process::exit(1);
+        return Err(CliError::exit(1));
     }
+    Ok(())
 }
 
 /// The registry scanners selected by group: `-g`, the `-y` default,
@@ -2115,29 +2098,18 @@ fn styled_scan_id(store: &Store, id: &str) -> String {
     }
 }
 
-fn open_store(command: &str) -> Store {
-    match Store::open(&gage_store::store_path()) {
-        Ok(store) => store,
-        Err(e) => {
-            eprintln!("{command}: {e}");
-            std::process::exit(1);
-        }
-    }
+fn open_store(command: &str) -> Result<Store, CliError> {
+    let store = Store::open(&gage_store::store_path()).with_context(|| command.to_string())?;
+    Ok(store)
 }
 
-pub(crate) fn list_scanners(registry: &ScannerRegistry) {
+pub(crate) fn list_scanners(registry: &ScannerRegistry) -> Result<(), CliError> {
     let header: Vec<String> = ["Scanner", "Source", "Groups", "Description"]
         .iter()
         .map(|s| s.to_string())
         .collect();
 
-    let config = match Config::load_user() {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("Error reading config: {e}");
-            std::process::exit(1);
-        }
-    };
+    let config = Config::load_user().context("Error reading config")?;
 
     let mut defs = registry.list_visible();
     defs.sort_by(|a, b| {
@@ -2219,4 +2191,5 @@ pub(crate) fn list_scanners(registry: &ScannerRegistry) {
             eprintln!("{}", def.render_problems());
         }
     }
+    Ok(())
 }
