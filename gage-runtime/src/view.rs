@@ -29,7 +29,7 @@
 
 use std::collections::BTreeMap;
 
-use datafusion::arrow::array::{Array, Int64Array, StringArray};
+use datafusion::arrow::array::{Array, BooleanArray, Int64Array, StringArray};
 use datafusion::arrow::record_batch::RecordBatch;
 use rune::runtime::Value;
 use serde::Deserialize;
@@ -46,17 +46,18 @@ const CHARS_PER_TOKEN: f64 = 2.2;
 
 /// Render `rows` as a compressed session: the `budget` and `rules`
 /// values as a scanner passes them, parsed here, with tool results
-/// linked to their calls before the render. The rows are one
-/// session's messages in line order.
+/// linked to their calls through `links` before the render. The rows
+/// are one session's messages in line order.
 pub fn compress_rows(
     session_id: &str,
     mut rows: Vec<MessageRow>,
+    links: &[ToolLink],
     budget: &Value,
     rules: &Value,
 ) -> Result<String, Error> {
     let budget = parse_budget(budget)?;
     let rules = parse_rules(rules)?;
-    link_tool_calls(&mut rows);
+    link_tool_calls(&mut rows, links);
     build_compressed(session_id, &rows, budget, &rules)
 }
 
@@ -107,7 +108,7 @@ impl Rule {
 
 struct Selector {
     pattern: Pattern,
-    /// Bracketed qualifiers, resolved by peeking at the message `raw`.
+    /// Bracketed qualifiers, resolved from the row's tool link.
     error_only: bool,
     tool: Option<String>,
 }
@@ -506,26 +507,11 @@ fn selector_matches(sel: &Selector, row: &MessageRow) -> bool {
         Pattern::Token(tok) => row.type_ == *tok || row.subtype.as_deref() == Some(tok.as_str()),
     };
     matched
-        && (!sel.error_only || is_error_result(row))
+        && (!sel.error_only || row.is_error)
         && sel
             .tool
             .as_deref()
             .is_none_or(|t| row.tool.as_deref() == Some(t))
-}
-
-/// Qualifier peek into `raw`: any tool_result block with
-/// `is_error: true`.
-fn is_error_result(row: &MessageRow) -> bool {
-    let Ok(raw) = serde_json::from_str::<Json>(&row.raw) else {
-        return false;
-    };
-    let Some(Json::Array(blocks)) = raw.get("message").and_then(|m| m.get("content")) else {
-        return false;
-    };
-    blocks.iter().any(|b| {
-        b.get("type").and_then(Json::as_str) == Some("tool_result")
-            && b.get("is_error").and_then(Json::as_bool) == Some(true)
-    })
 }
 
 fn render_message(row: &MessageRow, text: &[char], alloc: usize, parts: &[Part]) -> String {
@@ -647,67 +633,51 @@ pub struct MessageRow {
     pub type_: String,
     pub subtype: Option<String>,
     pub text: String,
-    pub raw: String,
     /// Tool name of a tool_use row, and of the call a tool_result
     /// answers. Set by `link_tool_calls`.
     pub tool: Option<String>,
     /// For a tool_result, the line of the tool_use it answers.
     pub call_line: Option<u64>,
+    /// For a tool_result, whether the result is an error. Set by
+    /// `link_tool_calls`.
+    pub is_error: bool,
+}
+
+/// One `tool_use` row's linkage: the call line, the result line when
+/// the call was answered, the tool, and the result's error flag.
+pub struct ToolLink {
+    pub line: u64,
+    pub result_line: Option<u64>,
+    pub name: String,
+    pub is_error: bool,
 }
 
 /// Name every tool row's tool and link each tool_result back to the
-/// line of the call it answers, matching on `tool_use_id`. Position
+/// line of the call it answers, from the `tool_use` rows. Position
 /// is not a sound substitute: an assistant turn issuing several tool
 /// calls at once emits all the calls before any result, which puts a
 /// result on the line after its call for only 78% of Edits and 51%
-/// of Writes.
-fn link_tool_calls(rows: &mut [MessageRow]) {
-    let mut calls: BTreeMap<String, (u64, String)> = BTreeMap::new();
-    for row in rows.iter_mut() {
-        if let Some((id, name)) = tool_use_block(row) {
-            row.tool = Some(name.clone());
-            calls.insert(id, (row.line, name));
+/// of Writes. A link whose call line is outside `rows` still names
+/// and back-links its result.
+fn link_tool_calls(rows: &mut [MessageRow], links: &[ToolLink]) {
+    let by_line: BTreeMap<u64, usize> = rows
+        .iter()
+        .enumerate()
+        .map(|(i, row)| (row.line, i))
+        .collect();
+    for link in links {
+        if let Some(&i) = by_line.get(&link.line)
+            && let Some(row) = rows.get_mut(i)
+        {
+            row.tool = Some(link.name.clone());
         }
-    }
-    for row in rows.iter_mut() {
-        // A result whose call falls outside the fetched line range
-        // has no entry and keeps its bare header.
-        if let Some((line, name)) = tool_result_id(row).and_then(|id| calls.get(&id)) {
-            row.tool = Some(name.clone());
-            row.call_line = Some(*line);
+        if let Some(&i) = link.result_line.and_then(|l| by_line.get(&l))
+            && let Some(row) = rows.get_mut(i)
+        {
+            row.tool = Some(link.name.clone());
+            row.call_line = Some(link.line);
+            row.is_error = link.is_error;
         }
-    }
-}
-
-/// The `(id, name)` of a row's first tool_use block.
-fn tool_use_block(row: &MessageRow) -> Option<(String, String)> {
-    content_blocks(row)?.into_iter().find_map(|b| {
-        if b.get("type").and_then(Json::as_str) != Some("tool_use") {
-            return None;
-        }
-        let id = b.get("id").and_then(Json::as_str)?;
-        let name = b.get("name").and_then(Json::as_str)?;
-        Some((id.to_string(), name.to_string()))
-    })
-}
-
-/// The `tool_use_id` of a row's first tool_result block.
-fn tool_result_id(row: &MessageRow) -> Option<String> {
-    content_blocks(row)?.into_iter().find_map(|b| {
-        if b.get("type").and_then(Json::as_str) != Some("tool_result") {
-            return None;
-        }
-        b.get("tool_use_id")
-            .and_then(Json::as_str)
-            .map(str::to_string)
-    })
-}
-
-fn content_blocks(row: &MessageRow) -> Option<Vec<Json>> {
-    let raw = serde_json::from_str::<Json>(&row.raw).ok()?;
-    match raw.get("message").and_then(|m| m.get("content")) {
-        Some(Json::Array(blocks)) => Some(blocks.clone()),
-        _ => None,
     }
 }
 
@@ -727,20 +697,53 @@ pub fn rows_from_batches(batches: &[RecordBatch]) -> Vec<MessageRow> {
             .downcast_ref::<StringArray>()
             .unwrap();
         let text_arr = col("text").as_any().downcast_ref::<StringArray>().unwrap();
-        let raw_arr = col("raw").as_any().downcast_ref::<StringArray>().unwrap();
         for i in 0..batch.num_rows() {
             rows.push(MessageRow {
                 line: line_arr.value(i) as u64,
                 type_: type_arr.value(i).to_string(),
                 subtype: opt_str(subtype_arr, i),
                 text: text_arr.value(i).to_string(),
-                raw: raw_arr.value(i).to_string(),
                 tool: None,
                 call_line: None,
+                is_error: false,
             });
         }
     }
     rows
+}
+
+/// The links of a `SELECT line, result_line, name, is_error FROM
+/// tool_use` result, in batch order.
+pub fn tool_links_from_batches(batches: &[RecordBatch]) -> Vec<ToolLink> {
+    let mut links = Vec::new();
+    for batch in batches {
+        if batch.num_rows() == 0 {
+            continue;
+        }
+        let schema = batch.schema();
+        let col = |name: &str| batch.column(schema.index_of(name).unwrap());
+        let line_arr = col("line").as_any().downcast_ref::<Int64Array>().unwrap();
+        let result_line_arr = col("result_line")
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        let name_arr = col("name").as_any().downcast_ref::<StringArray>().unwrap();
+        let is_error_arr = col("is_error")
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .unwrap();
+        for i in 0..batch.num_rows() {
+            links.push(ToolLink {
+                line: line_arr.value(i) as u64,
+                result_line: result_line_arr
+                    .is_valid(i)
+                    .then(|| result_line_arr.value(i) as u64),
+                name: name_arr.value(i).to_string(),
+                is_error: is_error_arr.is_valid(i) && is_error_arr.value(i),
+            });
+        }
+    }
+    links
 }
 
 fn opt_str(arr: &StringArray, i: usize) -> Option<String> {
@@ -761,9 +764,9 @@ mod tests {
             type_: type_.to_string(),
             subtype: subtype.map(str::to_string),
             text: text.to_string(),
-            raw: "{}".to_string(),
             tool: None,
             call_line: None,
+            is_error: false,
         }
     }
 
@@ -779,27 +782,27 @@ mod tests {
         }
     }
 
-    /// A row whose `raw` carries one tool_use block.
-    fn use_row(line: u64, id: &str, name: &str, text: &str) -> MessageRow {
-        MessageRow {
-            raw: serde_json::json!({
-                "message": {"content": [{"type": "tool_use", "id": id, "name": name}]}
-            })
-            .to_string(),
-            ..row(line, "assistant", Some("tool_use"), text)
+    fn use_row(line: u64, text: &str) -> MessageRow {
+        row(line, "assistant", Some("tool_use"), text)
+    }
+
+    fn result_row(line: u64, text: &str) -> MessageRow {
+        row(line, "user", Some("tool_result"), text)
+    }
+
+    fn link(line: u64, result_line: Option<u64>, name: &str) -> ToolLink {
+        ToolLink {
+            line,
+            result_line,
+            name: name.to_string(),
+            is_error: false,
         }
     }
 
-    /// A row whose `raw` carries one tool_result block.
-    fn result_row(line: u64, tool_use_id: &str, text: &str) -> MessageRow {
-        MessageRow {
-            raw: serde_json::json!({
-                "message": {
-                    "content": [{"type": "tool_result", "tool_use_id": tool_use_id}]
-                }
-            })
-            .to_string(),
-            ..row(line, "user", Some("tool_result"), text)
+    fn error_link(line: u64, result_line: u64, name: &str) -> ToolLink {
+        ToolLink {
+            is_error: true,
+            ..link(line, Some(result_line), name)
         }
     }
 
@@ -921,19 +924,10 @@ mod tests {
     }
 
     #[test]
-    fn error_qualifier_peeks_raw() {
-        let mk = |line, is_error: bool| {
-            let raw = serde_json::json!({
-                "message": { "content": [{
-                    "type": "tool_result",
-                    "is_error": is_error,
-                    "content": "boom",
-                }] },
-            });
-            MessageRow {
-                raw: raw.to_string(),
-                ..row(line, "user", Some("tool_result"), &"e".repeat(100))
-            }
+    fn error_qualifier_reads_the_result_flag() {
+        let mk = |line, is_error| MessageRow {
+            is_error,
+            ..row(line, "user", Some("tool_result"), &"e".repeat(100))
         };
         let rows = [mk(1, true), mk(2, false)];
         let rules = [
@@ -1106,12 +1100,15 @@ mod tests {
         // A parallel batch: both calls, then both results. Position
         // pairs L11 with L12; the tool_use_id pairs it with L10.
         let mut rows = vec![
-            use_row(10, "toolu_a", "Edit", "Edit:\n  file_path: a.rs"),
-            use_row(11, "toolu_b", "Write", "Write:\n  file_path: b.rs"),
-            result_row(12, "toolu_a", "updated a.rs"),
-            result_row(13, "toolu_b", "wrote b.rs"),
+            use_row(10, "Edit:\n  file_path: a.rs"),
+            use_row(11, "Write:\n  file_path: b.rs"),
+            result_row(12, "updated a.rs"),
+            result_row(13, "wrote b.rs"),
         ];
-        link_tool_calls(&mut rows);
+        link_tool_calls(
+            &mut rows,
+            &[link(10, Some(12), "Edit"), link(11, Some(13), "Write")],
+        );
         assert_eq!(rows[2].tool.as_deref(), Some("Edit"));
         assert_eq!(rows[2].call_line, Some(10));
         assert_eq!(rows[3].tool.as_deref(), Some("Write"));
@@ -1121,30 +1118,40 @@ mod tests {
     #[test]
     fn header_names_the_tool_and_back_links_the_call() {
         let mut rows = vec![
-            use_row(10, "toolu_a", "Edit", "Edit:\n  file_path: a.rs"),
-            result_row(12, "toolu_a", "updated a.rs"),
+            use_row(10, "Edit:\n  file_path: a.rs"),
+            result_row(12, "updated a.rs"),
         ];
-        link_tool_calls(&mut rows);
+        link_tool_calls(&mut rows, &[link(10, Some(12), "Edit")]);
         assert_eq!(header(&rows[0]), "[L10 assistant tool_use Edit]");
         assert_eq!(header(&rows[1]), "[L12 user tool_result Edit ←L10]");
     }
 
     #[test]
-    fn tool_result_without_its_call_in_range_keeps_a_bare_header() {
-        let mut rows = vec![result_row(12, "toolu_missing", "updated a.rs")];
-        link_tool_calls(&mut rows);
+    fn tool_result_without_a_link_keeps_a_bare_header() {
+        let mut rows = vec![result_row(12, "updated a.rs")];
+        link_tool_calls(&mut rows, &[]);
         assert_eq!(rows[0].tool, None);
         assert_eq!(header(&rows[0]), "[L12 user tool_result]");
     }
 
     #[test]
+    fn tool_result_links_to_a_call_outside_the_fetched_rows() {
+        let mut rows = vec![result_row(12, "updated a.rs")];
+        link_tool_calls(&mut rows, &[link(5, Some(12), "Edit")]);
+        assert_eq!(header(&rows[0]), "[L12 user tool_result Edit ←L5]");
+    }
+
+    #[test]
     fn tool_qualifier_selects_by_tool_name() {
         let mut rows = vec![
-            use_row(1, "toolu_a", "Edit", "editing"),
-            use_row(2, "toolu_b", "Read", "reading"),
-            result_row(3, "toolu_b", "file contents here"),
+            use_row(1, "editing"),
+            use_row(2, "reading"),
+            result_row(3, "file contents here"),
         ];
-        link_tool_calls(&mut rows);
+        link_tool_calls(
+            &mut rows,
+            &[link(1, None, "Edit"), link(2, Some(3), "Read")],
+        );
         let rules = [
             rule("assistant.tool_use", 20, None, 1, vec![Part::Start]),
             rule(
@@ -1168,10 +1175,10 @@ mod tests {
     #[test]
     fn header_rule_renders_the_header_alone() {
         let mut rows = vec![
-            use_row(1, "toolu_a", "Read", "Read:\n  file_path: a.rs"),
-            result_row(2, "toolu_a", "a very long file dump that must not appear"),
+            use_row(1, "Read:\n  file_path: a.rs"),
+            result_row(2, "a very long file dump that must not appear"),
         ];
-        link_tool_calls(&mut rows);
+        link_tool_calls(&mut rows, &[link(1, Some(2), "Read")]);
         let rules = rules_from(serde_json::json!({
             "assistant.tool_use": { "min": 40 },
             "user.tool_result[tool=Read]": { "header": true },
@@ -1199,12 +1206,15 @@ mod tests {
         // Two tool-scoped rules over one pattern are disjoint: a
         // message's tool is one or the other, never both.
         let mut rows = vec![
-            use_row(1, "toolu_a", "Grep", "grepping"),
-            use_row(2, "toolu_b", "Glob", "globbing"),
-            result_row(3, "toolu_a", "grep hits"),
-            result_row(4, "toolu_b", "glob hits"),
+            use_row(1, "grepping"),
+            use_row(2, "globbing"),
+            result_row(3, "grep hits"),
+            result_row(4, "glob hits"),
         ];
-        link_tool_calls(&mut rows);
+        link_tool_calls(
+            &mut rows,
+            &[link(1, Some(3), "Grep"), link(2, Some(4), "Glob")],
+        );
         let rules = rules_from(serde_json::json!({
             "assistant.tool_use": { "min": 40 },
             "user.tool_result[tool=Grep]": { "header": true },
@@ -1218,21 +1228,8 @@ mod tests {
 
     #[test]
     fn error_qualifier_outranks_tool_qualifier_by_default() {
-        let mut rows = vec![use_row(1, "toolu_a", "Bash", "just check")];
-        rows.push(MessageRow {
-            raw: serde_json::json!({
-                "message": {
-                    "content": [{
-                        "type": "tool_result",
-                        "tool_use_id": "toolu_a",
-                        "is_error": true,
-                    }],
-                },
-            })
-            .to_string(),
-            ..row(2, "user", Some("tool_result"), "clippy failed")
-        });
-        link_tool_calls(&mut rows);
+        let mut rows = vec![use_row(1, "just check"), result_row(2, "clippy failed")];
+        link_tool_calls(&mut rows, &[error_link(1, 2, "Bash")]);
         let rules = rules_from(serde_json::json!({
             "assistant.tool_use": { "min": 40 },
             "user.tool_result[error]": { "min": 40 },
@@ -1247,21 +1244,8 @@ mod tests {
 
     #[test]
     fn order_overrides_specificity() {
-        let mut rows = vec![use_row(1, "toolu_a", "Bash", "just check")];
-        rows.push(MessageRow {
-            raw: serde_json::json!({
-                "message": {
-                    "content": [{
-                        "type": "tool_result",
-                        "tool_use_id": "toolu_a",
-                        "is_error": true,
-                    }],
-                },
-            })
-            .to_string(),
-            ..row(2, "user", Some("tool_result"), "clippy failed")
-        });
-        link_tool_calls(&mut rows);
+        let mut rows = vec![use_row(1, "just check"), result_row(2, "clippy failed")];
+        link_tool_calls(&mut rows, &[error_link(1, 2, "Bash")]);
         // `[error]` outranks `[tool=Bash]` on specificity; `order` on
         // the lower-ranked rule reverses that.
         let rules = rules_from(serde_json::json!({

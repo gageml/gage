@@ -5,15 +5,15 @@
 //! The builder captures the session, the budget, and the rules;
 //! `.lines(start, end)` constrains it to a line range, the pair
 //! `scan().sessions().unseen(key)` yields. Awaiting it reads the
-//! session's rows and renders them with the compressor in `view`,
-//! which owns the budget and rule grammar. The await is a `Result`: a
+//! session's `message` rows and its `tool_use` links and renders
+//! them with the compressor in `view`, which owns the budget and
+//! rule grammar. The await is a `Result`: a
 //! budget or a rule the scanner wrote wrong is `Error::Args`. A query
 //! failure is a VM error, since the SQL is the runtime's.
 
 use crate::error::Error;
 use crate::row::push_lines_clause;
-use crate::view::{compress_rows, rows_from_batches};
-use datafusion::arrow::array::StringArray;
+use crate::view::{compress_rows, rows_from_batches, tool_links_from_batches};
 use datafusion::common::ScalarValue;
 use rune::runtime::{Protocol, Ref, Value, VmError};
 use rune::{Any, ContextError, Module};
@@ -71,32 +71,7 @@ impl SessionCompress {
     }
 }
 
-/// The `content_format` whose `raw` rows the compressor reads. The
-/// compressor pairs tool results with their calls and reads error
-/// flags out of each message's `raw`, which is opaque by contract;
-/// that reading belongs in the driver or an adapter facility, which
-/// is not designed yet. Until then the format is checked here.
-const SUPPORTED_FORMAT: &str = "claude-jsonl 1";
-
 async fn do_compress(q: SessionCompress) -> Result<Result<String, Error>, VmError> {
-    let format_batches = run(
-        "SELECT content_format FROM session WHERE id = $1",
-        vec![ScalarValue::Utf8(Some(q.session_id.clone()))],
-    )
-    .await?;
-    let content_format = format_batches
-        .iter()
-        .find(|b| b.num_rows() > 0)
-        .and_then(|b| b.column(0).as_any().downcast_ref::<StringArray>())
-        .map(|col| col.value(0).to_string())
-        .unwrap_or_default();
-    if content_format != SUPPORTED_FORMAT {
-        return Ok(Err(Error::Db(format!(
-            "session {}: content format {content_format:?} is not one compress reads; \
-             this runtime reads {SUPPORTED_FORMAT:?} only",
-            q.session_id
-        ))));
-    }
     let mut params = vec![ScalarValue::Utf8(Some(q.session_id.clone()))];
     let mut clauses = vec!["session_id = $1".to_string()];
     push_lines_clause(q.lines, &mut clauses, &mut params);
@@ -104,10 +79,22 @@ async fn do_compress(q: SessionCompress) -> Result<Result<String, Error>, VmErro
         "SELECT * FROM message WHERE {} ORDER BY line",
         clauses.join(" AND ")
     );
-    let batches = run(&sql, params).await?;
+    let batches = run(&sql, params.clone()).await?;
+    // A result inside the range is linked even when its call is
+    // before the range, so the link query admits either line
+    let links_sql = match q.lines {
+        Some(_) => {
+            "SELECT line, result_line, name, is_error FROM tool_use \
+             WHERE session_id = $1 AND ((line >= $2 AND line <= $3) \
+             OR (result_line >= $2 AND result_line <= $3))"
+        }
+        None => "SELECT line, result_line, name, is_error FROM tool_use WHERE session_id = $1",
+    };
+    let link_batches = run(links_sql, params).await?;
     Ok(compress_rows(
         &q.session_id,
         rows_from_batches(&batches),
+        &tool_links_from_batches(&link_batches),
         &q.budget,
         &q.rules,
     ))
