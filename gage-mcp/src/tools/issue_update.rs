@@ -52,6 +52,8 @@ fn handle(
 #[derive(Debug, PartialEq, Eq)]
 enum Update {
     Open,
+    /// Claim an open issue for the session working toward its close
+    Resolving,
     Close(StatusReason),
     /// Close as a duplicate of the surviving issue
     Duplicate {
@@ -79,6 +81,10 @@ pub fn execute(config: &StoreWriterConfig, params: JsonObject) -> Result<CallToo
         Update::Open => (
             issues.set_status(&issue.id, IssueStatus::Open, None, author, message),
             "open".to_string(),
+        ),
+        Update::Resolving => (
+            issues.set_status(&issue.id, IssueStatus::Resolving, None, author, message),
+            "resolving".to_string(),
         ),
         Update::Close(reason) => (
             issues.set_status(
@@ -110,7 +116,10 @@ pub fn execute(config: &StoreWriterConfig, params: JsonObject) -> Result<CallToo
 
 fn parse_update(params: &JsonObject) -> Result<Update, McpError> {
     let status: IssueStatus = required_string(params, "status")?.parse().map_err(|e| {
-        McpError::invalid_params(format!("`status` must be open or closed: {e}"), None)
+        McpError::invalid_params(
+            format!("`status` must be open, resolving, or closed: {e}"),
+            None,
+        )
     })?;
     let reason = match optional_string(params, "status_reason")? {
         Some(s) => Some(s.parse::<StatusReason>().map_err(|e| {
@@ -124,7 +133,8 @@ fn parse_update(params: &JsonObject) -> Result<Update, McpError> {
     let of = optional_string(params, "of")?;
     match (status, reason, of) {
         (IssueStatus::Open, None, None) => Ok(Update::Open),
-        (IssueStatus::Open, Some(_), _) => Err(McpError::invalid_params(
+        (IssueStatus::Resolving, None, None) => Ok(Update::Resolving),
+        (IssueStatus::Open | IssueStatus::Resolving, Some(_), _) => Err(McpError::invalid_params(
             "`status_reason` applies to closing only",
             None,
         )),
@@ -142,7 +152,7 @@ fn parse_update(params: &JsonObject) -> Result<Update, McpError> {
             Ok(Update::Close(reason.unwrap_or(StatusReason::Completed)))
         }
         (IssueStatus::Pending | IssueStatus::Unknown, _, _) => Err(McpError::invalid_params(
-            "`status` must be open or closed",
+            "`status` must be open, resolving, or closed",
             None,
         )),
     }
@@ -177,6 +187,38 @@ mod tests {
 
     use super::*;
     use crate::tools::store_test::{config, issue, object, text_of};
+
+    #[test]
+    fn resolving_claims_an_open_issue_and_refuses_a_pending_one() {
+        let (_tmp, config) = config();
+        let open = issue(&config, "Open", IssueStatus::Open);
+        let pending = issue(&config, "Pending", IssueStatus::Pending);
+
+        let r = execute(
+            &config,
+            object(json!({"issue_id": open, "status": "resolving", "message": "session abc"})),
+        )
+        .unwrap();
+        assert_eq!(r.is_error, Some(false), "{}", text_of(&r));
+        assert!(text_of(&r).contains("to resolving"), "{}", text_of(&r));
+        {
+            let store = config.store.lock().unwrap();
+            let full = IssueStore::from(&*store).get(&open).unwrap();
+            assert_eq!(full.status, IssueStatus::Resolving);
+            assert_eq!(
+                full.changes.last().unwrap().message.as_deref(),
+                Some("session abc")
+            );
+        }
+
+        let r = execute(
+            &config,
+            object(json!({"issue_id": pending, "status": "resolving"})),
+        )
+        .unwrap();
+        assert_eq!(r.is_error, Some(true), "{}", text_of(&r));
+        assert!(text_of(&r).contains("from open only"), "{}", text_of(&r));
+    }
 
     #[test]
     fn opens_closes_and_records_a_duplicate_survivor() {

@@ -225,7 +225,7 @@ pub async fn list(args: IssueListArgs) -> Result<(), CliError> {
     if args.closed {
         clauses.push("status = 'closed'".to_string());
     } else {
-        clauses.push("status IN ('pending', 'open')".to_string());
+        clauses.push("status IN ('pending', 'open', 'resolving')".to_string());
     }
     if let Some(name) = &args.name {
         clauses.push(format!("name = '{}'", sql_str(name)));

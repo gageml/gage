@@ -70,6 +70,9 @@ pub enum IssueStatus {
     /// open or closes it as a duplicate
     Pending,
     Open,
+    /// Claimed by a session working toward a close. Set from open
+    /// only; a release returns it to open, and a close ends it
+    Resolving,
     Closed,
     /// A status this build does not know, written by a newer build.
     /// Read only: no writer accepts it.
@@ -78,13 +81,18 @@ pub enum IssueStatus {
 }
 
 impl IssueStatus {
-    pub const ALL: [IssueStatus; 3] =
-        [IssueStatus::Pending, IssueStatus::Open, IssueStatus::Closed];
+    pub const ALL: [IssueStatus; 4] = [
+        IssueStatus::Pending,
+        IssueStatus::Open,
+        IssueStatus::Resolving,
+        IssueStatus::Closed,
+    ];
 
     pub fn as_str(self) -> &'static str {
         match self {
             IssueStatus::Pending => "pending",
             IssueStatus::Open => "open",
+            IssueStatus::Resolving => "resolving",
             IssueStatus::Closed => "closed",
             IssueStatus::Unknown => "unknown",
         }
@@ -567,6 +575,12 @@ impl IssueStore<'_> {
                 id: object.header.id,
                 status: status.as_str().to_string(),
             });
+        }
+        if status == IssueStatus::Resolving && attrs.status != IssueStatus::Open {
+            return Err(StoreError::IssueInput(format!(
+                "an issue is set resolving from open only, not from {}",
+                attrs.status
+            )));
         }
         let reason = match (status, reason) {
             (IssueStatus::Closed, reason) => Some(reason.unwrap_or(StatusReason::Completed)),
@@ -1575,6 +1589,52 @@ mod tests {
         assert!(
             !cat_file(&store, &format!("{}:attrs.json", object_ref(&id))).contains("status_reason")
         );
+    }
+
+    #[test]
+    fn resolving_is_set_from_open_only_and_releases_to_open() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let issues = IssueStore::from(&store);
+        let pending = issue(&store, IssueStatus::Pending, &[]);
+        assert!(matches!(
+            issues.set_status(&pending, IssueStatus::Resolving, None, "user:test", None),
+            Err(StoreError::IssueInput(_))
+        ));
+
+        let id = issue(&store, IssueStatus::Open, &[]);
+        issues
+            .set_status(
+                &id,
+                IssueStatus::Resolving,
+                None,
+                "user:test",
+                Some("session abc"),
+            )
+            .unwrap();
+        let full = issues.get(&id).unwrap();
+        assert_eq!(full.status, IssueStatus::Resolving);
+        assert_eq!(full.status_reason, None);
+        let claim = full.changes.last().unwrap();
+        assert_eq!(claim.to_status, Some(IssueStatus::Resolving));
+        assert_eq!(claim.message.as_deref(), Some("session abc"));
+
+        issues
+            .set_status(&id, IssueStatus::Open, None, "user:test", None)
+            .unwrap();
+        assert_eq!(issues.get(&id).unwrap().status, IssueStatus::Open);
+
+        issues
+            .set_status(&id, IssueStatus::Resolving, None, "user:test", None)
+            .unwrap();
+        issues
+            .set_status(&id, IssueStatus::Closed, None, "user:test", None)
+            .unwrap();
+        assert_eq!(issues.get(&id).unwrap().status, IssueStatus::Closed);
+        assert!(matches!(
+            issues.set_status(&id, IssueStatus::Resolving, None, "user:test", None),
+            Err(StoreError::IssueInput(_))
+        ));
     }
 
     #[test]

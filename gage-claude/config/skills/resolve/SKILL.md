@@ -1,28 +1,35 @@
 ---
 description:
-  Resolve pending Gage issues, then walk through open issues and close them as
-  completed or wontfix.
+  Resolve pending Gage issues, then take up an open issue and work it to a
+  close.
 disable-model-invocation: true
 ---
 
 Your task is to help the user process Gage issues. There are two phases:
 
-1. _Pending issue resolution_ - reconcile newly written (pending) issues against
-   other issues, closing duplicates and promoting novel issues to open. This
-   phase does not require user input except where noted below.
-2. _Open issue resolution_ - walk the user through open issues and help resolve
-   them.
+1. _Pending issue resolution_ - reconcile newly written (pending) issues
+   against other issues, closing duplicates and promoting novel issues to
+   open. This phase does not require user input except where noted below.
+2. _Open issue resolution_ - take up one open issue and help the user resolve
+   it.
 
 Run phase 1 to completion before starting phase 2.
+
+Several sessions may run this skill at once. An issue a session is working on
+has status `resolving`, and the status event that set it carries that
+session's ID. Phase 2 claims an issue before working on it and releases or
+closes it when done, so two sessions do not take up the same issue.
 
 ## Scoped invocation
 
 Arguments to this skill, when present, are issue IDs that restrict scope:
 
 - Phase 1 resolves only the pending issues among them.
-- Phase 2 processes only the open issues among them.
-- An ID matching neither a pending nor an open issue is reported to the user and
-  otherwise ignored.
+- Phase 2 takes up the open issues among them. With one such issue, take it up
+  directly. With several, list them and ask which to take up first.
+- An ID matching neither a pending nor an open issue is reported to the user
+  and otherwise ignored. A resolving issue in scope is reported with its
+  holder and the age of its claim; take it up only when the user says so.
 
 Scope restricts which issues are processed, not which issues they are compared
 against. Related-issue queries in phase 1 always draw from the full issue set
@@ -47,10 +54,9 @@ issues.
 Do not ask the user for permission to run this phase. Only ask the user for
 input as per step 7 below.
 
-Use a sub-agent for each pending issue to resolve it using the steps below. Note
-that sub-agents provide recommendations and do not modify issue status. You are
-the sole writer in this phase and will resolve any conflicts across sub-agents
-before applying the resolutions with `mcp__plugin_gage_gage__IssuePendingResolve`.
+Sub-agents judge clusters of related issues and provide recommendations; they
+do not modify issue status. You are the sole writer in this phase and apply
+the resolutions with `mcp__plugin_gage_gage__IssuePendingResolve`.
 
 1. Query the pending issues:
 
@@ -70,25 +76,28 @@ before applying the resolutions with `mcp__plugin_gage_gage__IssuePendingResolve
    FROM related_issue('<issue_id>') r JOIN issue i ON i.id = r.related_id
    ```
 
-3. A pending issue with no candidates is novel by definition. Do not spawn a
-   sub-agent for it.
+   Keep only candidates with a score of 0.15 or higher. In the sessions this
+   threshold was calibrated on, every duplicate scored 0.19 or higher against
+   its survivor, and every novel issue's best candidate scored below 0.16.
 
-4. For each pending issue with candidates, invoke the Agent tool with
-   `subagent_type: "gage:pending-issue-reconcile"`. Pass the subject issue ID
-   and its candidate issue IDs in the prompt. The agent's definition contains
-   the full instructions and reply contract; the parent supplies only the IDs.
+3. A pending issue with no kept candidate is novel. Do not spawn a sub-agent
+   for it.
 
-5. Adjudicate the collected recommendations:
-   - Pending issues may be related to other pending issues (e.g. multiple scans
-     without resolution) --- a duplicate pair can come back as two mirrored
-     recommendations. Pick one survivor according to issue report quality. The
-     survivor is promoted. The others close against it, with their unique
-     insight carried as comments.
-   - If two sub-agents disagree about the same pair, decide yourself using the
-     available information.
-   - Flatten chains: if A closes against B and B closes against open issue X,
-     both close against X. A duplicate always closes against the issue that
-     stays open or closed, never against another duplicate.
+4. Group the remaining pending issues into clusters. A pending issue and its
+   kept candidates form one cluster, and two clusters that share a member
+   merge. For each cluster, invoke the Agent tool with
+   `subagent_type: "gage:pending-issue-reconcile"`, passing every member's
+   ID and status in the prompt. The agent's definition contains the full
+   instructions and reply contract; the parent supplies only the IDs and
+   statuses. Launch every cluster's agent in one message with
+   `run_in_background: false`, so the agents run concurrently and their
+   results return together in one turn.
+
+5. Collect the recommendations. A cluster's agent names one survivor among
+   pending members that describe the same condition and closes the rest
+   against it, so no chain or mirrored pair needs flattening. If a
+   recommendation names a duplicate as a survivor, or names a survivor outside
+   the cluster, decide the pair yourself from the available information.
 
 6. Apply the automatic batch, every pending issue except those marked for user
    decision, in one `IssuePendingResolve` call. The tool takes a `resolutions`
@@ -101,8 +110,8 @@ before applying the resolutions with `mcp__plugin_gage_gage__IssuePendingResolve
      a `comment` field; it is recorded on the survivor.
 
    The plan must name each pending issue at most once, and a duplicate's `of`
-   must be a survivor the plan promotes or an issue already open or closed.
-   Flatten any chain (step 5) before building the plan, or the tool rejects it.
+   must be a survivor the plan promotes or an issue already open, resolving,
+   or closed.
 
 7. If any issues are marked for user decision, present each in turn to the user
    as one batch, grouped per closed issue, with the prior close reason and the
@@ -129,62 +138,69 @@ Issues are not necessarily related to source code. Issues often touch on
 methods, best practices, tool configuration, and so on. Look at each issue in
 its own right without pre-judging it.
 
-### Phase 2a: Present a summary
+### Phase 2a: Choose an issue
 
-1. Use the `mcp__plugin_gage_gage__Query` to select open issues from the `issue`
-   table by running `SELECT id, title FROM issue WHERE status = 'open'`. This is
-   your working list. Run this query only after phase 1 completes - resolution
-   changes which issues are open.
+1. Query the open issues and the issues other sessions are resolving. Run
+   these queries only after phase 1 completes - resolution changes which
+   issues are open.
 
-2. For each open issue, invoke the Agent tool with
-   `subagent_type: "gage:issue-summarize"`, passing the issue ID in the prompt.
-   The agent's definition contains the full rubric and reply contract; the
-   parent supplies only the ID. Launch these calls in parallel.
+   ```sql
+   SELECT id, title, created FROM issue WHERE status = 'open' ORDER BY created
+   ```
 
-3. With the summaries from the sub-agents, triage the list looking for the most
-   important issues and list those first. Issues that cause the user the most
-   grief or that, when fixed, provide the most value are the most important.
+   ```sql
+   WITH claims AS (
+     SELECT issue_id, timestamp, message,
+            row_number() OVER (PARTITION BY issue_id ORDER BY timestamp DESC) AS rn
+     FROM issue_event
+     WHERE event = 'status' AND to_status = 'resolving'
+   )
+   SELECT i.id, i.title, c.timestamp AS claimed, c.message AS holder
+   FROM issue i JOIN claims c ON c.issue_id = i.id AND c.rn = 1
+   WHERE i.status = 'resolving'
+   ```
 
-4. Present a summary of what you see to the user using the table format below.
-   Do not use issue names in your summary --- these are internal values and do
-   not have meaning to a user. Use the short issue ID (first 8 chars) and the
+2. Present the open issues using the table format below, oldest first. Do not
+   use issue names in your summary --- these are internal values and do not
+   have meaning to a user. Use the short issue ID (first 8 chars) and the
    issue title.
 
-Issue summary table format:
+   ```
+   | Issue      | Title   | Age   |
+   | ---------- | ------- | ----- |
+   | {short_id} | {title} | {age} |
+   ```
 
-```
-| Issue      | Title   | Priority          |
-| ---------- | ------- | ----------------- |
-| {short_id} | {title} | {high,medium,low} |
-```
+   Below the table, list any resolving issues with their holder and the age of
+   the claim. A claim older than 24 hours is abandoned: say so, and offer to
+   take the issue up. Do not take up a younger claim unless the user says so.
 
-Priority is your rollup of the sub-agent's user benefit, user pain addressed,
-fix ease, and fix risk for that issue. Use high, medium, or low according to
-your own judgement from the sub-agent results.
+3. With one open issue, say so and take it up. With more than one, ask:
 
-Having presented the summary, get direction from the user. If there is more than
-one issue to address, use this statement:
+   > Would you like to start with a specific issue or should I take the first
+   > in order?
 
-> Would you like to start with a specific issue or should I present each in
-> order?
-
-### Phase 2b: Resolve issues
-
-After presenting the summary above, your job is to resolve the issue as per the
-user's direction. Each issue should be resolved in series unless it's clear a
-set of issues are related and can be worked on as a single unit.
+### Phase 2b: Resolve the issue
 
 Gage issues are user-directed and therefore it's imperative that the user
 understand what is being presented. Do not assume the user knows what an issue
 is based on its ID (meaningless) or title. Your job is to foster understanding
 first and only then to resolve issues with user direction.
 
+**Claim the issue**
+
+Before any other work on the issue, claim it with
+`mcp__plugin_gage_gage__IssueUpdate`, `status=resolving`, and the session ID
+from `$CLAUDE_CODE_SESSION_ID` as `message`. A refusal means another session
+claimed it first: report that and return to phase 2a.
+
 **Verify that the issue is valid**
 
-When you take up an issue, first verify the current state of affairs. The issue
-may already have been addressed. The state of affairs may have changed. Do not
-take anything for granted. If you proceed without confirming the current state,
-you risk wasting time and making matters worse.
+Read the full report with `SELECT report FROM issue_report('<issue_id>')`.
+Then verify the current state of affairs. The issue may already have been
+addressed. The state of affairs may have changed. Do not take anything for
+granted. If you proceed without confirming the current state, you risk wasting
+time and making matters worse.
 
 You are free to investigate further using `Query` to read referenced notes and
 session messages. If the issue related to project files, use tools to get the
@@ -197,8 +213,6 @@ Use the following template when presenting the issue:
 ```
 ### `{issue_short_id}` - {title}
 
-Issue {N} of {total}
-
 Applies to `{project_1}`, `{project_2}`
 
 {short_summary}
@@ -210,8 +224,6 @@ Applies to `{project_1}`, `{project_2}`
 
 - `issue_short_id` - First 8 chars of the issue ID
 - `title` - Issue title
-- `N` - Issue position
-- `total` - Total issues being worked on
 - `project_1`, `project_2` - List of projects the issue applies to. Use
   `SELECT DISTINCT s.project FROM session_issue si JOIN session s ON s.id = si.session_id WHERE si.issue_id = '<issue_id>'`
 - `short_summary` - One or two sentences introducing the issue to the user.
@@ -233,9 +245,7 @@ Ask the user how they would like to proceed or if they need more information.
 
 Support the user in understanding what the issue says, what it means in terms of
 benefit (if fixed) or cost (if not fixed). If there are trade offs to consider,
-present those clearly so the user understands what's at stake. Draw on the
-sub-agent's rubric answers from Phase 2a (benefit, pain, ease, risk) to ground
-this discussion.
+present those clearly so the user understands what's at stake.
 
 **Resolve the issue**
 
@@ -259,3 +269,10 @@ Use `mcp__plugin_gage_gage__IssueUpdate` with `status=closed` and
 
 If the user decides to not fix the issue, close it with `status=closed` and
 `status_reason=wontfix`.
+
+**Release the issue**
+
+A close ends the claim. If the user defers the issue, or stops work on it
+without closing, release it with `status=open` so another session can take it
+up. After a close or a release, return to phase 2a and present the remaining
+open issues.
