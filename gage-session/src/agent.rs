@@ -134,6 +134,11 @@ pub struct TurnResult {
 /// process, takes the transcript for storing, and cleans up.
 #[async_trait]
 pub trait AgentSession: Send {
+    /// The harness's id for the session. It is fixed before the
+    /// process starts, so a reader can find the transcript while the
+    /// agent runs.
+    fn native_id(&self) -> &str;
+
     /// The next event, or `None` once the harness has closed its
     /// output.
     async fn next_event(&mut self) -> Option<AgentEvent>;

@@ -19,7 +19,7 @@ use datafusion::logical_expr::{
 };
 use datafusion::scalar::ScalarValue;
 use gage_registry::driver::DriverRegistry;
-use gage_session::Source;
+use gage_session::{Source, SourceOptions};
 
 pub fn project_for_path_udf() -> ScalarUDF {
     ScalarUDF::from(ProjectForPath::new())
@@ -112,7 +112,11 @@ impl Resolver {
         }
         if self.source.is_none() {
             let registry = DriverRegistry::builtin();
-            self.source = Some(registry.open_source("").map_err(external)?);
+            self.source = Some(
+                registry
+                    .open_source(&SourceOptions::new(""))
+                    .map_err(external)?,
+            );
         }
         let source = self.source.as_ref().expect("source opened above");
         source.project_name(path).map_err(external)

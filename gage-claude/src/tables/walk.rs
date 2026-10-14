@@ -15,7 +15,7 @@ use datafusion::prelude::Expr;
 
 use gage_core::style::IdHighlighter;
 
-use crate::session::{SessionInfo, SessionListBuilder};
+use crate::session::SessionInfo;
 use gage_session::filter::{ColumnFilter, IdFilter, covered_by};
 
 /// The columns the walk fills from the directory listing alone,
@@ -106,11 +106,7 @@ pub(crate) fn walk_sessions(
     let limit_pushed = limit.is_some() && filters.iter().all(|f| covered_by(f, &walk_cols));
 
     let walk_start = Instant::now();
-    let mut sessions: Vec<SessionInfo> = SessionListBuilder::new()
-        .root(store.root())
-        .build()
-        .into_iter()
-        .collect();
+    let mut sessions: Vec<SessionInfo> = store.session_list().build().into_iter().collect();
     let walk_ms = walk_start.elapsed().as_millis();
     let walked = sessions.len();
 

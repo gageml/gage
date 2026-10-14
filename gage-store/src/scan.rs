@@ -49,6 +49,8 @@ const NOTES_CARRIED_LINK: &str = "notes_carried.link";
 const ISSUES_LINK: &str = "issues.link";
 const AGENTS_LINK: &str = "agents.link";
 const AGENTS_DIR: &str = "agents";
+/// The native session id of an agent still running, in its `agents/<id>/`
+const NATIVE_ID_FILE: &str = "native_id";
 const STDERR_FILE: &str = "stderr";
 const RESULT_FILE: &str = "result";
 /// The blobs an `agents/<id>/` directory may hold
@@ -166,7 +168,17 @@ pub struct ScanTask {
 pub struct TaskAgent {
     /// The agent session's object id
     pub id: String,
-    pub attrs: AgentAttrs,
+    pub record: AgentRecord,
+}
+
+/// What an agent's directory holds: the native session id alone while
+/// the agent runs, its result once it has ended. The runtime writes
+/// the running form at agent start and replaces it at stop. A stored
+/// scan holds ended records only.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AgentRecord {
+    Running { native_id: String },
+    Ended(AgentAttrs),
 }
 
 /// An agent's `attrs.json`: the session-level result the runtime
@@ -630,11 +642,9 @@ pub fn read_tasks(files: &dyn ScanFiles) -> Result<Vec<ScanTask>, StoreError> {
                 read_link(files, &format!("{task_path}/{AGENTS_LINK}"))?.unwrap_or_default();
             let mut agents = Vec::new();
             for id in files.list_dirs(&format!("{task_path}/{AGENTS_DIR}"))? {
-                let attrs = read_json(
-                    files,
-                    &format!("{task_path}/{AGENTS_DIR}/{id}/{ATTRS_FILE}"),
-                )?;
-                agents.push(TaskAgent { id, attrs });
+                let dir = format!("{task_path}/{AGENTS_DIR}/{id}");
+                let record = read_agent_record(files, &dir)?;
+                agents.push(TaskAgent { id, record });
             }
             tasks.push(ScanTask {
                 scanner: scanner.clone(),
@@ -705,6 +715,28 @@ fn parse_watermark(content: &str) -> Option<(&str, u64)> {
 
 /// The SHAs in the link file `name`, one per line, or `None` when
 /// the file is absent.
+/// The record under one `agents/<id>/`: the result when `attrs.json`
+/// is present, else the running marker.
+fn read_agent_record(files: &dyn ScanFiles, dir: &str) -> Result<AgentRecord, StoreError> {
+    let attrs_path = format!("{dir}/{ATTRS_FILE}");
+    if let Some(bytes) = files.read(&attrs_path)? {
+        return Ok(AgentRecord::Ended(parse_json(&bytes, &attrs_path)?));
+    }
+    let native_path = format!("{dir}/{NATIVE_ID_FILE}");
+    let Some(bytes) = files.read(&native_path)? else {
+        return Err(StoreError::Parse(format!(
+            "agent record {dir} holds neither {ATTRS_FILE} nor {NATIVE_ID_FILE}"
+        )));
+    };
+    let native_id = String::from_utf8_lossy(&bytes).trim().to_string();
+    if native_id.is_empty() {
+        return Err(StoreError::Parse(format!(
+            "scan file {native_path} is empty"
+        )));
+    }
+    Ok(AgentRecord::Running { native_id })
+}
+
 fn read_link(files: &dyn ScanFiles, name: &str) -> Result<Option<Vec<String>>, StoreError> {
     let Some(bytes) = files.read(name)? else {
         return Ok(None);
@@ -774,7 +806,11 @@ fn read_json<T: for<'de> Deserialize<'de>>(
     let bytes = files
         .read(path)?
         .ok_or_else(|| StoreError::Parse(format!("scan file {path} is missing")))?;
-    serde_json::from_slice(&bytes).map_err(|e| StoreError::Parse(format!("scan file {path}: {e}")))
+    parse_json(&bytes, path)
+}
+
+fn parse_json<T: for<'de> Deserialize<'de>>(bytes: &[u8], path: &str) -> Result<T, StoreError> {
+    serde_json::from_slice(bytes).map_err(|e| StoreError::Parse(format!("scan file {path}: {e}")))
 }
 
 /// Build the `tasks/` tree from a scan directory's `tasks/`. Returns
@@ -844,11 +880,16 @@ fn import_task_tree(store_path: &Path, task_dir: &Path) -> Result<String, StoreE
 }
 
 /// Build a task's `agents/` tree: one subtree per agent session id,
-/// each holding only [`AGENT_FILES`].
+/// each holding only [`AGENT_FILES`]. An agent still running when the
+/// scan ended left only its native id; nothing of it is stored, and
+/// `agents.link` never named it.
 fn import_agents_tree(store_path: &Path, agents_dir: &Path) -> Result<String, StoreError> {
     require_dirs_only(agents_dir)?;
     let mut trees: Vec<(String, String)> = Vec::new();
     for agent_dir in subdirs(agents_dir)? {
+        if !agent_dir.join(ATTRS_FILE).is_file() {
+            continue;
+        }
         trees.push((
             dir_name(&agent_dir),
             import_fixed_blobs(store_path, &agent_dir, &AGENT_FILES)?,
@@ -1140,7 +1181,7 @@ mod tests {
 
     use gage_session::{
         ContentSink, ContentSource, Driver, DriverError, NativeSession, SessionAttrs, Source,
-        StoredSession,
+        SourceOptions, StoredSession,
     };
 
     use super::*;
@@ -1355,7 +1396,7 @@ mod tests {
         fn schemes(&self) -> &'static [&'static str] {
             &["fake"]
         }
-        fn open_source(&self, _source: &str) -> Result<Box<dyn Source>, DriverError> {
+        fn open_source(&self, _options: &SourceOptions) -> Result<Box<dyn Source>, DriverError> {
             Err(DriverError::Other("open_source not used".into()))
         }
         fn write_native(
@@ -1418,28 +1459,45 @@ mod tests {
             &scan_dir.join("tasks/hello/greet/agents.link"),
             &format!("{}\n", added.commit_sha),
         );
+        // An agent still running when the scan ends: its record is
+        // the native id alone, read live and left out of the store
+        write(
+            &scan_dir.join("tasks/hello/greet/agents/zzz-running/native_id"),
+            "native-2\n",
+        );
+        let ended = TaskAgent {
+            id: added.id.clone(),
+            // An earlier runtime's record: every field after the
+            // exit code defaults
+            record: AgentRecord::Ended(AgentAttrs {
+                exit_code: 0,
+                is_error: false,
+                stop_reason: String::new(),
+                turns: 0,
+                duration_ms: 0,
+                cost_usd: None,
+            }),
+        };
+        let live = read_tasks(&DirFiles::new(&scan_dir)).unwrap();
+        assert_eq!(
+            live[1].agents,
+            [
+                ended.clone(),
+                TaskAgent {
+                    id: "zzz-running".into(),
+                    record: AgentRecord::Running {
+                        native_id: "native-2".into()
+                    },
+                }
+            ]
+        );
         let scans = ScanStore::from(&store);
         let commit = scans.create("SCANA", &scan_dir).unwrap();
 
         let greet = &scans.get("SCANA").unwrap().content.tasks[1];
         assert_eq!(greet.task, "greet");
         assert_eq!(greet.agent_sessions, slice::from_ref(&added.commit_sha));
-        assert_eq!(
-            greet.agents,
-            [TaskAgent {
-                id: added.id.clone(),
-                // An earlier runtime's record: every field after
-                // the exit code defaults
-                attrs: AgentAttrs {
-                    exit_code: 0,
-                    is_error: false,
-                    stop_reason: String::new(),
-                    turns: 0,
-                    duration_ms: 0,
-                    cost_usd: None,
-                },
-            }]
-        );
+        assert_eq!(greet.agents, [ended]);
         assert_eq!(
             scans
                 .agent_file(&commit, "hello", "greet", &added.id, "stderr")

@@ -73,6 +73,7 @@ pub struct ContextBuilder {
     store: Option<Arc<Mutex<Store>>>,
     scope: Option<ScanScope>,
     skip_system_cols: bool,
+    show_agents: bool,
 }
 
 impl ContextBuilder {
@@ -81,6 +82,7 @@ impl ContextBuilder {
             store,
             scope: None,
             skip_system_cols: false,
+            show_agents: false,
         }
     }
 
@@ -101,6 +103,14 @@ impl ContextBuilder {
         self
     }
 
+    /// Let the native table functions read the runtime's own in-flight
+    /// agent sessions, which every other context leaves out. The live
+    /// scan view reads a running agent through such a context.
+    pub fn show_agents(mut self) -> Self {
+        self.show_agents = true;
+        self
+    }
+
     /// Build the context. A store-scoped context registers the base
     /// tables, the `_link` tables, and the views over them; with
     /// `skip_system_cols` the `_link` tables are left out and the
@@ -109,7 +119,7 @@ impl ContextBuilder {
     /// context registers the scan's tables, with the relations as
     /// tables rather than views.
     pub async fn build(self) -> SessionContext {
-        let ctx = new_context(self.skip_system_cols);
+        let ctx = new_context(self.skip_system_cols, self.show_agents);
         let Some(store) = self.store else {
             return ctx;
         };
@@ -359,7 +369,7 @@ const NATIVE_TABLES: [NativeTable; 4] = [
 /// native table functions, and the `project_for_path` UDF --- with no
 /// named tables registered. It carries only what this crate installs;
 /// gage-query's function suite is not pulled in.
-fn new_context(skip_system_cols: bool) -> SessionContext {
+fn new_context(skip_system_cols: bool, show_agents: bool) -> SessionContext {
     let config = SessionConfig::new()
         .with_information_schema(true)
         .with_extension(Arc::new(RowCache::new()))
@@ -375,6 +385,7 @@ fn new_context(skip_system_cols: bool) -> SessionContext {
             Arc::new(NativeTableFn {
                 table,
                 skip_system_cols,
+                show_agents,
             }),
         );
     }
@@ -390,6 +401,7 @@ mod tests {
     use datafusion::arrow::array::StringArray;
     use datafusion::prelude::SessionContext;
     use gage_registry::driver::DriverRegistry;
+    use gage_session::SourceOptions;
     use gage_store::{
         DatasetStore, IssueInput, IssueStatus, IssueStore, NoteInput, NoteStore, NoteValue,
         ScanStore, SessionSpec, SessionStore, StatusReason, Store, TagStore,
@@ -700,7 +712,7 @@ mod tests {
         let spec = format!("claude:{}", claude_root.path().display());
         let registry = DriverRegistry::builtin();
         let driver = registry.driver_for(&spec).unwrap();
-        let source = driver.open_source(&spec).unwrap();
+        let source = driver.open_source(&SourceOptions::new(&spec)).unwrap();
         let mut native = source.open_native(native_id).unwrap();
         {
             let store = store.lock().unwrap();
@@ -752,7 +764,7 @@ mod tests {
         let spec = format!("claude:{}", claude_root.path().display());
         let registry = DriverRegistry::builtin();
         let driver = registry.driver_for(&spec).unwrap();
-        let source = driver.open_source(&spec).unwrap();
+        let source = driver.open_source(&SourceOptions::new(&spec)).unwrap();
         let mut native = source.open_native(native_id).unwrap();
         {
             let store = store.lock().unwrap();
@@ -847,7 +859,7 @@ mod tests {
         let spec = format!("claude:{}", claude_root.path().display());
         let registry = DriverRegistry::builtin();
         let driver = registry.driver_for(&spec).unwrap();
-        let source = driver.open_source(&spec).unwrap();
+        let source = driver.open_source(&SourceOptions::new(&spec)).unwrap();
         let mut native = source.open_native(native_id).unwrap();
         let (dataset_id, dataset_commit, session_id, note_id, issue_id) = {
             let store = store.lock().unwrap();
@@ -1072,12 +1084,15 @@ mod tests {
             "tasks/hello/greet/agents/AGENT1/result",
             r#"{"is_error":false,"total_cost_usd":0.5}"#,
         );
+        // An agent still running: its record is the native id alone
+        write("tasks/hello/greet/agents/AGENT2/native_id", "native-2\n");
         root
     }
 
     /// `scan_task` lists an active scan's tasks in plan order with
     /// their plan selection, and `scan_task_agent` its agent records
-    /// with the result verbatim; neither has a commit.
+    /// with the result verbatim; neither has a commit. A running
+    /// agent is a row with its native id and null result columns.
     #[tokio::test]
     async fn scan_dir_scope_serves_tasks_and_agents() {
         let (tmp, store) = open_store();
@@ -1124,6 +1139,15 @@ mod tests {
             .await,
             ["end_turn"]
         );
+        assert_eq!(
+            strings(
+                &ctx,
+                "SELECT session_id FROM scan_task_agent \
+                 WHERE native_id = 'native-2' AND exit_code IS NULL AND is_error IS NULL"
+            )
+            .await,
+            ["AGENT2"]
+        );
     }
 
     /// Once the scan is stored, the store scope lists its tasks and
@@ -1154,6 +1178,7 @@ mod tests {
             strings(&ctx, "SELECT DISTINCT scan_commit FROM scan_task").await,
             slice::from_ref(&commit)
         );
+        // The running agent's record was never stored
         assert_eq!(
             strings(&ctx, "SELECT session_id FROM scan_task_agent").await,
             ["AGENT1"]

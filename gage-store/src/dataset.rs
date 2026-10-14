@@ -1018,7 +1018,9 @@ mod tests {
     use crate::object::object_ref;
     use crate::test_support::open_store;
     use crate::{NoteInput, NoteStore, NoteValue};
-    use gage_session::{ContentSink, DriverError, SessionAttrs, Source, StoredSession};
+    use gage_session::{
+        ContentSink, DriverError, SessionAttrs, Source, SourceOptions, StoredSession,
+    };
     use std::any::Any;
     use std::io::{Cursor, Write as _};
     use std::slice;
@@ -1096,7 +1098,7 @@ mod tests {
         fn schemes(&self) -> &'static [&'static str] {
             &["fake"]
         }
-        fn open_source(&self, _source: &str) -> Result<Box<dyn Source>, DriverError> {
+        fn open_source(&self, _options: &SourceOptions) -> Result<Box<dyn Source>, DriverError> {
             Err(DriverError::Other("open_source not used".into()))
         }
         fn write_native(

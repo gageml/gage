@@ -17,7 +17,7 @@ use datafusion::datasource::TableProvider;
 use datafusion::error::{DataFusionError, Result};
 use datafusion::prelude::Expr;
 use gage_registry::driver::DriverRegistry;
-use gage_session::DriverTables;
+use gage_session::{DriverTables, SourceOptions};
 
 use crate::system_cols::SkipSystemCols;
 
@@ -55,6 +55,8 @@ pub struct NativeTableFn {
     pub table: NativeTable,
     /// Hide the system columns of the returned table
     pub skip_system_cols: bool,
+    /// Read the runtime's own in-flight agent sessions too
+    pub show_agents: bool,
 }
 
 impl TableFunctionImpl for NativeTableFn {
@@ -72,7 +74,9 @@ impl TableFunctionImpl for NativeTableFn {
             }
         };
         let registry = DriverRegistry::builtin();
-        let opened = registry.open_source(&source).map_err(external)?;
+        let mut options = SourceOptions::new(&source);
+        options.show_agents(self.show_agents);
+        let opened = registry.open_source(&options).map_err(external)?;
         // The provider holds its own handle to the driver's index; the
         // opened source may drop once the tables are taken.
         let table = self.table.select(opened.tables().map_err(external)?);

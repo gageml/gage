@@ -23,7 +23,7 @@ use gage_session::system;
 use serde_json::Value;
 
 use super::batch::{BatchSource, BatchTable, external, readable};
-use crate::{Order, ScanStore, ScanTask, Store};
+use crate::{AgentRecord, Order, ScanStore, ScanTask, Store};
 
 fn timestamp() -> DataType {
     DataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into()))
@@ -58,16 +58,21 @@ pub(crate) fn scan_task_agent_schema() -> SchemaRef {
         Field::new("task", DataType::Utf8, false),
         // The agent session's object id
         Field::new("session_id", DataType::Utf8, false),
+        // The harness's own id for the session; set while the agent
+        // runs, when the session is readable through the harness's
+        // native source and not yet through the store
+        Field::new("native_id", DataType::Utf8, true),
+        // The result columns are null while the agent runs.
         // The harness process's exit code; -1 when it was signaled
-        Field::new("exit_code", DataType::Int64, false),
+        Field::new("exit_code", DataType::Int64, true),
         // The harness reported the session as an error, or exited
         // nonzero without a result
-        Field::new("is_error", DataType::Boolean, false),
+        Field::new("is_error", DataType::Boolean, true),
         // The last turn's stop reason; `eof` when the harness closed
         // its output without one
-        Field::new("stop_reason", DataType::Utf8, false),
-        Field::new("turns", DataType::Int64, false),
-        Field::new("duration_ms", DataType::Int64, false),
+        Field::new("stop_reason", DataType::Utf8, true),
+        Field::new("turns", DataType::Int64, true),
+        Field::new("duration_ms", DataType::Int64, true),
         // Spend in USD; null when the harness reported no result
         Field::new("cost_usd", DataType::Float64, true),
         // The harness's result message verbatim; null when the agent
@@ -99,11 +104,12 @@ pub(crate) struct ScanTaskAgentRow {
     pub scanner: String,
     pub task: String,
     pub session_id: String,
-    pub exit_code: i64,
-    pub is_error: bool,
-    pub stop_reason: String,
-    pub turns: i64,
-    pub duration_ms: i64,
+    pub native_id: Option<String>,
+    pub exit_code: Option<i64>,
+    pub is_error: Option<bool>,
+    pub stop_reason: Option<String>,
+    pub turns: Option<i64>,
+    pub duration_ms: Option<i64>,
     pub cost_usd: Option<f64>,
     pub result: Option<String>,
     pub scan_commit: Option<String>,
@@ -177,22 +183,35 @@ pub(crate) fn agent_rows_of(
     let mut rows = Vec::new();
     for t in tasks {
         for a in &t.agents {
-            let result = read_result(&t.scanner, &t.task, &a.id)?
-                .map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
-            rows.push(ScanTaskAgentRow {
+            let mut row = ScanTaskAgentRow {
                 scan_id: scan_id.to_string(),
                 scanner: t.scanner.clone(),
                 task: t.task.clone(),
                 session_id: a.id.clone(),
-                exit_code: a.attrs.exit_code,
-                is_error: a.attrs.is_error,
-                stop_reason: a.attrs.stop_reason.clone(),
-                turns: a.attrs.turns,
-                duration_ms: a.attrs.duration_ms,
-                cost_usd: a.attrs.cost_usd,
-                result,
+                native_id: None,
+                exit_code: None,
+                is_error: None,
+                stop_reason: None,
+                turns: None,
+                duration_ms: None,
+                cost_usd: None,
+                result: None,
                 scan_commit: scan_commit.map(String::from),
-            });
+            };
+            match &a.record {
+                AgentRecord::Running { native_id } => row.native_id = Some(native_id.clone()),
+                AgentRecord::Ended(attrs) => {
+                    row.exit_code = Some(attrs.exit_code);
+                    row.is_error = Some(attrs.is_error);
+                    row.stop_reason = Some(attrs.stop_reason.clone());
+                    row.turns = Some(attrs.turns);
+                    row.duration_ms = Some(attrs.duration_ms);
+                    row.cost_usd = attrs.cost_usd;
+                    row.result = read_result(&t.scanner, &t.task, &a.id)?
+                        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
+                }
+            }
+            rows.push(row);
         }
     }
     Ok(rows)
@@ -247,6 +266,7 @@ pub(crate) fn scan_task_agent_rows(rows: &[ScanTaskAgentRow]) -> Result<RecordBa
     let mut scanners = StringBuilder::new();
     let mut tasks = StringBuilder::new();
     let mut sessions = StringBuilder::with_capacity(len, len * 26);
+    let mut native_ids = StringBuilder::new();
     let mut exit_codes = Int64Builder::with_capacity(len);
     let mut is_errors = BooleanBuilder::with_capacity(len);
     let mut stop_reasons = StringBuilder::new();
@@ -260,11 +280,12 @@ pub(crate) fn scan_task_agent_rows(rows: &[ScanTaskAgentRow]) -> Result<RecordBa
         scanners.append_value(&row.scanner);
         tasks.append_value(&row.task);
         sessions.append_value(&row.session_id);
-        exit_codes.append_value(row.exit_code);
-        is_errors.append_value(row.is_error);
-        stop_reasons.append_value(&row.stop_reason);
-        turns.append_value(row.turns);
-        durations.append_value(row.duration_ms);
+        native_ids.append_option(row.native_id.as_deref());
+        exit_codes.append_option(row.exit_code);
+        is_errors.append_option(row.is_error);
+        stop_reasons.append_option(row.stop_reason.as_deref());
+        turns.append_option(row.turns);
+        durations.append_option(row.duration_ms);
         costs.append_option(row.cost_usd);
         results.append_option(row.result.as_deref());
         commits.append_option(row.scan_commit.as_deref());
@@ -276,6 +297,7 @@ pub(crate) fn scan_task_agent_rows(rows: &[ScanTaskAgentRow]) -> Result<RecordBa
             Arc::new(scanners.finish()),
             Arc::new(tasks.finish()),
             Arc::new(sessions.finish()),
+            Arc::new(native_ids.finish()),
             Arc::new(exit_codes.finish()),
             Arc::new(is_errors.finish()),
             Arc::new(stop_reasons.finish()),

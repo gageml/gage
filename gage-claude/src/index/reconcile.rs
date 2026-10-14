@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use super::Result;
 use super::derive::{Fingerprint, SessionSummary, derive_session};
 use super::summary_cache;
+use crate::session::SessionListBuilder;
 
 /// How to take the reconcile lock. Queries use `Try` —
 /// skip-with-stale on contention. Explicit maintenance (`gage index`)
@@ -114,6 +115,7 @@ fn process_lock(cache_dir: &Path) -> Arc<Mutex<()>> {
 pub struct IndexStore {
     root: PathBuf,
     cache_dir: PathBuf,
+    show_agents: bool,
 }
 
 /// File in a cache dir holding the projects dir the cache is for
@@ -128,7 +130,27 @@ impl IndexStore {
         Self {
             root: root.into(),
             cache_dir: cache_dir.into(),
+            show_agents: false,
         }
+    }
+
+    /// Include the runtime's own in-flight agent sessions in every
+    /// walk of the projects directory
+    pub fn show_agents(mut self, show: bool) -> Self {
+        self.show_agents = show;
+        self
+    }
+
+    pub fn shows_agents(&self) -> bool {
+        self.show_agents
+    }
+
+    /// A session walk over this store's projects directory, reading
+    /// agent sessions as the store does
+    pub fn session_list(&self) -> SessionListBuilder {
+        SessionListBuilder::new()
+            .root(&self.root)
+            .show_agents(self.show_agents)
     }
 
     pub fn root(&self) -> &Path {
@@ -277,8 +299,8 @@ impl IndexStore {
         let start = std::time::Instant::now();
 
         // 1. Walk: (mtime, size) per session, no file reads.
-        let walked: Vec<(String, PathBuf, Fingerprint)> = crate::session::SessionListBuilder::new()
-            .root(&self.root)
+        let walked: Vec<(String, PathBuf, Fingerprint)> = self
+            .session_list()
             .build()
             .into_iter()
             .map(|s| {
@@ -315,9 +337,13 @@ impl IndexStore {
             .iter()
             .filter(|(id, _, fp)| manifest.sessions.get(id) != Some(fp) || !cached.contains(id))
             .collect();
-        let removed: Vec<String> = manifest
+        // A cache file with no manifest entry was derived by a table
+        // read, as for an agent session read while it ran; once its
+        // JSONL is gone it is collected with the rest.
+        let removed: BTreeSet<String> = manifest
             .sessions
             .keys()
+            .chain(cached.iter())
             .filter(|id| !walked_ids.contains(id.as_str()))
             .cloned()
             .collect();
@@ -356,7 +382,7 @@ impl IndexStore {
         }
 
         // 4. Garbage collection: summary cache files for sessions gone
-        // from disk.
+        // from disk
         for id in &removed {
             manifest.sessions.remove(id);
             if let Err(e) = summary_cache::remove(&self.cache_dir, id) {
@@ -384,8 +410,8 @@ impl IndexStore {
     /// The status report: cache version, session counts, dirty count,
     /// on-disk size, last reconcile time. Read-only — takes no lock.
     pub fn status(&self) -> Status {
-        let walked: HashMap<String, Fingerprint> = crate::session::SessionListBuilder::new()
-            .root(&self.root)
+        let walked: HashMap<String, Fingerprint> = self
+            .session_list()
             .build()
             .into_iter()
             .map(|s| {

@@ -16,7 +16,6 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -151,9 +150,6 @@ pub struct TaskId {
 pub struct SessionEntry {
     pub id: String,
     pub title: String,
-    /// The session's JSONL source, read by the session dialog when
-    /// the backend cannot load the session
-    pub path: Option<PathBuf>,
 }
 
 /// Everything known before a live scan starts.
@@ -238,9 +234,11 @@ pub struct TaskItem {
 #[derive(Debug, Clone)]
 pub struct AgentItem {
     pub session_id: String,
-    /// Archived JSONL source, read by the session dialog; None when
-    /// the session is not on disk
-    pub path: Option<PathBuf>,
+    /// The harness's own id for the session, set while the agent
+    /// runs. The session dialog reads a running agent by this id
+    /// through the harness's native source; the store holds the
+    /// session only once the agent has ended.
+    pub native_id: Option<String>,
     pub state: AgentState,
     /// Recorded spend in USD; None until a terminal result is recorded
     pub cost: Option<f64>,
@@ -286,8 +284,9 @@ impl TaskState {
 pub struct SessionItem {
     pub id: String,
     pub title: String,
-    /// JSONL source; None when the session is no longer on disk
-    pub path: Option<PathBuf>,
+    /// Set for an agent session still running: the id the dialog
+    /// loads it by through the harness's native source
+    pub native_id: Option<String>,
     pub notes: usize,
     pub issues: usize,
 }
@@ -387,7 +386,7 @@ impl ScanModel {
             .map(|s| SessionItem {
                 id: s.id,
                 title: s.title,
-                path: s.path,
+                native_id: None,
                 notes: 0,
                 issues: 0,
             })
@@ -1373,10 +1372,10 @@ impl ViewState {
     }
 
     /// Search the scan's agent sessions for the `tool_use` entry with
-    /// uuid `entry_uuid`. Agent JSONL files are text-scanned first so
-    /// only candidate sessions are parsed; a file that cannot be read
-    /// falls through to the full document load, which surfaces the
-    /// error. Load errors go to the scan log and the search continues.
+    /// uuid `entry_uuid`. A still-running agent is not searched: a
+    /// tool-use jump comes from a note or issue the agent has already
+    /// written, and the store holds only ended agents. Load errors go
+    /// to the scan log and the search continues.
     fn find_tool_use_entry(&mut self, entry_uuid: &str) -> Option<ToolUseHit> {
         let items: Vec<SessionItem> = self
             .model
@@ -1392,13 +1391,10 @@ impl ViewState {
             }
         };
         for item in items {
-            if let Some(path) = &item.path
-                && let Ok(text) = std::fs::read_to_string(path)
-                && !text.contains(entry_uuid)
-            {
+            if item.native_id.is_some() {
                 continue;
             }
-            match load_session_doc(&item, &backend) {
+            match load_session_doc(&item.id, &backend) {
                 Ok((doc, source)) => {
                     if let Some(entry_index) = tool_use_entry_index(&doc, entry_uuid) {
                         return Some(ToolUseHit {
@@ -1447,7 +1443,7 @@ impl ViewState {
     fn open_session_at_target(&mut self, target: SessionTarget) {
         let item = self.target_session_item(&target.session_id);
         let loaded = match self.host.session_backend() {
-            Ok(backend) => match load_session_doc(&item, &backend) {
+            Ok(backend) => match load_session_doc(&item.id, &backend) {
                 Ok((doc, source)) => Some((doc, source, backend)),
                 Err(e) => {
                     self.push_log(format!("Open session {}: {e}", item.id));
@@ -1498,7 +1494,7 @@ impl ViewState {
             .unwrap_or_else(|| SessionItem {
                 id: session_id.to_string(),
                 title: String::new(),
-                path: None,
+                native_id: None,
                 notes: 0,
                 issues: 0,
             })
@@ -1817,14 +1813,19 @@ impl ViewState {
     /// the same component `gage session view` runs; its UI position is
     /// restored when the session was viewed before.
     fn open_session_dialog(&mut self, item: &SessionItem, nav: SessionNav) {
-        let backend = match self.host.session_backend() {
+        let backend = match &item.native_id {
+            Some(_) => live_agent_backend(),
+            None => self.host.session_backend(),
+        };
+        let backend = match backend {
             Ok(backend) => backend,
             Err(e) => {
                 self.push_log(format!("Open session {}: {e}", item.id));
                 return;
             }
         };
-        let (doc, source) = match load_session_doc(item, &backend) {
+        let load_id = item.native_id.as_deref().unwrap_or(&item.id);
+        let (doc, source) = match load_session_doc(load_id, &backend) {
             Ok(loaded) => loaded,
             Err(e) => {
                 self.push_log(format!("Open session {}: {e}", item.id));
@@ -1854,6 +1855,9 @@ impl ViewState {
     /// (`Ignored` by the view) steps to the neighboring session,
     /// remembering the current one's UI position.
     fn handle_session_dialog_key(&mut self, key: KeyEvent) {
+        if key.code == KeyCode::Char('r') && self.reopen_ended_agent() {
+            return;
+        }
         let mut close = false;
         let mut step: isize = 0;
         let mut error: Option<String> = None;
@@ -1903,6 +1907,40 @@ impl ViewState {
         } else if step != 0 {
             self.step_dialog_item(step);
         }
+    }
+
+    /// An agent dialog opened while the agent ran reads the harness's
+    /// native source, which the runtime clears once the agent ends.
+    /// A refresh after the model has the agent's result re-opens the
+    /// dialog through the store, where the session now lives, at the
+    /// saved position. Returns false when the refresh is the view's
+    /// own to handle.
+    fn reopen_ended_agent(&mut self) -> bool {
+        let Dialog::Session {
+            id,
+            view,
+            nav: SessionNav::Agents,
+            backend,
+            ..
+        } = &self.dialog
+        else {
+            return false;
+        };
+        if !backend.is_native() {
+            return false;
+        }
+        let ended = self.model.tasks.iter().find_map(|t| {
+            t.agents
+                .iter()
+                .find(|a| a.session_id == *id && a.state != AgentState::Running)
+                .map(|a| agent_session_item(t, a))
+        });
+        let Some(item) = ended else {
+            return false;
+        };
+        self.session_ui.insert(id.clone(), view.save_ui());
+        self.open_agent_session(&item);
+        true
     }
 
     /// Enter on the tasks panel: a task row with agents toggles its
@@ -2324,7 +2362,7 @@ fn agent_session_item(task: &TaskItem, agent: &AgentItem) -> SessionItem {
     SessionItem {
         id: agent.session_id.clone(),
         title: task_display(&task.id.scanner, &task.id.task),
-        path: agent.path.clone(),
+        native_id: agent.native_id.clone(),
         notes: 0,
         issues: 0,
     }
@@ -2725,18 +2763,22 @@ fn issue_session_lines(sessions: &[IssueSessionItem], width: usize) -> Vec<Line<
 /// session's issues, session-level notes (targets with no line
 /// number), and an optional trailing notice (truncation or read
 /// error).
-/// Load the session document for the dialog's embedded view. Prefers
-/// the source (matching `gage session view`); a session absent from
-/// the source — agent sessions, or one indexed as empty — falls back
-/// to reading the JSONL directly when its path is known.
-fn load_session_doc(
-    item: &SessionItem,
-    backend: &Backend,
-) -> Result<(Document, app::DocSource), String> {
-    let indexed = tokio::task::block_in_place(|| {
-        tokio::runtime::Handle::current().block_on(backend.load(&item.id))
+/// A backend over the harness's default native source that reads the
+/// runtime's own in-flight agent sessions, which the store backend
+/// cannot serve until the agent has ended.
+fn live_agent_backend() -> io::Result<Backend> {
+    tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(Backend::native_with_agents(""))
+    })
+    .map_err(|e| io::Error::other(e.to_string()))
+}
+
+/// Load the session `id` names for the dialog's embedded view.
+fn load_session_doc(id: &str, backend: &Backend) -> Result<(Document, app::DocSource), String> {
+    let loaded = tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(backend.load(id))
     });
-    match indexed {
+    match loaded {
         Ok(doc) => Ok((doc, app::DocSource::Backend)),
         Err(e) => Err(e.to_string()),
     }

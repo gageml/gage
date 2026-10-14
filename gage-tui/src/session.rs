@@ -74,12 +74,27 @@ impl Backend {
     /// Over the driver source `spec` names. Empty names the default
     /// driver's default location.
     pub async fn native(spec: &str) -> Result<Backend, Box<dyn Error>> {
+        Self::native_showing(spec, false).await
+    }
+
+    /// Over the driver source `spec` names, reading the runtime's own
+    /// in-flight agent sessions too. The live scan view opens a
+    /// running agent through this backend.
+    pub async fn native_with_agents(spec: &str) -> Result<Backend, Box<dyn Error>> {
+        Self::native_showing(spec, true).await
+    }
+
+    async fn native_showing(spec: &str, show_agents: bool) -> Result<Backend, Box<dyn Error>> {
         let registry = DriverRegistry::builtin();
         let driver = registry
             .driver_for(spec)
             .ok_or_else(|| format!("no session driver for source {spec:?}"))?;
+        let mut ctx = ContextBuilder::new(None);
+        if show_agents {
+            ctx = ctx.show_agents();
+        }
         Ok(Backend {
-            ctx: ContextBuilder::new(None).build().await,
+            ctx: ctx.build().await,
             kind: Kind::Native {
                 spec: spec.to_string(),
                 driver,
@@ -487,6 +502,7 @@ fn sql_str(s: &str) -> String {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use gage_session::SourceOptions;
     use gage_store::SessionStore;
     use tempfile::TempDir;
 
@@ -526,7 +542,7 @@ pub(crate) mod tests {
         let spec = format!("claude:{}", claude_root.path().display());
         let registry = DriverRegistry::builtin();
         let driver = registry.driver_for(&spec).unwrap();
-        let source = driver.open_source(&spec).unwrap();
+        let source = driver.open_source(&SourceOptions::new(&spec)).unwrap();
         let mut native = source.open_native(native_id).unwrap();
         let session_id = SessionStore::from(&store)
             .add(driver.as_ref(), native.as_mut())

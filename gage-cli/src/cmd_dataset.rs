@@ -9,6 +9,7 @@ use datafusion::arrow::array::{Int64Array, StringArray, TimestampMillisecondArra
 use gage_core::datetime::ms_to_iso8601;
 use gage_core::uuid::short_uuid;
 use gage_query::ContextBuilder;
+use gage_session::SourceOptions;
 use gage_store::{
     AddStep, DatasetOrigin, DatasetSessionAddOutcome, DatasetStore, SessionOutcome, Store,
     StoreError, TagStore,
@@ -419,7 +420,7 @@ pub(crate) fn add_native_to_dataset(
     let registry = crate::source::driver_registry();
     let (driver, spec) = crate::source::resolve_source(&registry, source)?;
     let source_handle = driver
-        .open_source(&spec)
+        .open_source(&SourceOptions::new(&spec))
         .map_err(|e| format!("{spec}: {e}"))?;
 
     // Confirm every selected session is present in the opened

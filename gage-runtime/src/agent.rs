@@ -1,7 +1,7 @@
 //! `call_agent(prompt)`: run an agent through the scan's driver.
 //!
 //! The builder collects the call's shape and, when awaited, starts the
-//! agent through [`Driver::run_agent`](gage_session::Driver::run_agent)
+//! agent through [`Driver::start_agent`](gage_session::Driver::start_agent)
 //! and returns an [`Agent`]. `poll` yields one [`Event`] at a time;
 //! `wait` drives the agent to its end and returns the
 //! [`AgentResult`]; `send`, `send_now`, `stop`, and `kill` steer a
@@ -42,7 +42,7 @@ use futures::StreamExt;
 use futures::stream::FuturesUnordered;
 use gage_mcp::{ServiceHandle, build_mcp_service};
 use gage_session::{AgentEvent, AgentMcp, AgentSession, AgentSpec, SystemPrompt, TurnResult};
-use gage_store::{AgentAttrs, SessionStore};
+use gage_store::{AgentAttrs, SessionStore, session_object_id};
 use rune::alloc::fmt::TryWrite;
 use rune::runtime::{Formatter, Mut, Object, Protocol, Ref, Value, VmError};
 use rune::{Any, ContextError, Module};
@@ -247,7 +247,14 @@ async fn start_in_span(c: CallAgent, span: Span) -> Result<Agent, Error> {
         .set(session.tool_use_entries())
         .ok()
         .expect("the tool-use slot is fresh for each agent");
-    tracing::info!(tools, "agent started");
+    let object_id = session_object_id(ctx.driver.name(), session.native_id());
+    write_running_record(
+        &ctx.paths.tasks_dir().join(&ctx.scanner).join(&ctx.task),
+        &object_id,
+        session.native_id(),
+    )
+    .map_err(|e| Error::agent(format!("call_agent: writing agent record: {e}")))?;
+    tracing::info!(tools, session = %object_id, "agent started");
     Ok(Agent {
         model,
         max_turns,
@@ -556,11 +563,23 @@ async fn store_transcript(
     .map_err(|e| Error::agent(format!("writing agent record: {e}")))
 }
 
+/// `agents/<id>/native_id` under the task's directory: the record of
+/// an agent that has started and not ended. `id` is the object id the
+/// store will give the session, so the result written at stop lands
+/// in the same directory. Live readers open the session through the
+/// harness's native source by the id in the file.
+fn write_running_record(task_dir: &Path, id: &str, native_id: &str) -> io::Result<()> {
+    let dir = task_dir.join("agents").join(id);
+    fs::create_dir_all(&dir)?;
+    fs::write(dir.join("native_id"), native_id)
+}
+
 /// `agents/<id>/{attrs.json, stderr, result}` under the task's
 /// directory, and the session's commit appended to `agents.link`.
 /// `attrs.json` carries the session-level result; `result` is the
 /// harness's last turn message verbatim, absent when the harness
-/// reported none, in which case a nonzero exit is the error.
+/// reported none, in which case a nonzero exit is the error. The
+/// running marker goes once the result is in place.
 fn write_agent_record(
     task_dir: &Path,
     id: &str,
@@ -583,6 +602,13 @@ fn write_agent_record(
     fs::write(dir.join("stderr"), &result.stderr)?;
     if let Some(raw) = raw {
         fs::write(dir.join("result"), raw)?;
+    }
+    // A marker already gone means the record was never provisional,
+    // which changes nothing about the result beside it
+    match fs::remove_file(dir.join("native_id")) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
     }
     let mut link = fs::OpenOptions::new()
         .create(true)

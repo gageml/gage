@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use gage_registry::driver::DriverRegistry;
-use gage_session::{Driver, Source};
+use gage_session::{Driver, Source, SourceOptions};
 
 use crate::error::CliError;
 
@@ -56,7 +56,7 @@ pub fn default_driver(command: &str) -> Result<Arc<dyn Driver>, CliError> {
 /// Open `source` through the registry, or `command: source: <error>`
 pub fn open_source(command: &str, source: &str) -> Result<Box<dyn Source>, CliError> {
     driver_registry()
-        .open_source(source)
+        .open_source(&SourceOptions::new(source))
         .with_context(|| format!("{command}: {source}"))
         .map_err(CliError::from)
 }

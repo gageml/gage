@@ -700,7 +700,9 @@ pub(crate) mod tests {
     use crate::DatasetStore;
     use crate::git::{git_in, run};
     use crate::test_support::open_store;
-    use gage_session::{ContentSource, Driver as DriverTrait, DriverError, Source, StoredSession};
+    use gage_session::{
+        ContentSource, Driver as DriverTrait, DriverError, Source, SourceOptions, StoredSession,
+    };
     use std::any::Any;
     use std::io::Cursor;
     use std::slice;
@@ -781,7 +783,7 @@ pub(crate) mod tests {
         fn schemes(&self) -> &'static [&'static str] {
             &["fake"]
         }
-        fn open_source(&self, _source: &str) -> Result<Box<dyn Source>, DriverError> {
+        fn open_source(&self, _options: &SourceOptions) -> Result<Box<dyn Source>, DriverError> {
             Err(DriverError::Other("open_source not used".into()))
         }
         fn write_native(
@@ -912,7 +914,7 @@ pub(crate) mod tests {
         fn schemes(&self) -> &'static [&'static str] {
             FakeDriver.schemes()
         }
-        fn open_source(&self, _source: &str) -> Result<Box<dyn Source>, DriverError> {
+        fn open_source(&self, _options: &SourceOptions) -> Result<Box<dyn Source>, DriverError> {
             Err(DriverError::Other("open_source not used".into()))
         }
         fn write_native(

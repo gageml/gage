@@ -1217,6 +1217,7 @@ fn note_line(indent: &str, text: &str) -> Line<'static> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gage_session::SourceOptions;
     use gage_store::{NoteInput, NoteStore, NoteValue};
     use ratatui::backend::TestBackend;
 
@@ -1532,7 +1533,7 @@ mod tests {
         }
         fn open_source(
             &self,
-            _source: &str,
+            _options: &SourceOptions,
         ) -> Result<Box<dyn gage_session::Source>, gage_session::DriverError> {
             Err(gage_session::DriverError::Other("not used".into()))
         }

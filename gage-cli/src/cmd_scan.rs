@@ -747,7 +747,7 @@ impl StoreHost {
                 SessionItem {
                     id: entry.id,
                     title: entry.title,
-                    path: None,
+                    native_id: None,
                     notes,
                     issues,
                 }
@@ -804,7 +804,6 @@ impl StoreHost {
                 sessions.push(SessionEntry {
                     id: ids.value(i).to_string(),
                     title: string_or_empty(titles, i),
-                    path: None,
                 });
             }
         }
@@ -821,15 +820,17 @@ impl StoreHost {
         let mut agent_ids = Vec::new();
         for batch in &query(
             ctx,
-            "SELECT scanner, task, session_id, is_error, cost_usd FROM scan_task_agent",
+            "SELECT scanner, task, session_id, native_id, is_error, cost_usd \
+             FROM scan_task_agent",
         )
         .await?
         {
             let scanners = column::<StringArray>(batch, 0);
             let tasks = column::<StringArray>(batch, 1);
             let sessions = column::<StringArray>(batch, 2);
-            let is_errors = column::<BooleanArray>(batch, 3);
-            let costs = column::<Float64Array>(batch, 4);
+            let native_ids = column::<StringArray>(batch, 3);
+            let is_errors = column::<BooleanArray>(batch, 4);
+            let costs = column::<Float64Array>(batch, 5);
             for i in 0..batch.num_rows() {
                 let task = TaskId {
                     scanner: scanners.value(i).to_string(),
@@ -837,7 +838,8 @@ impl StoreHost {
                 };
                 let agent = agent_item(
                     sessions.value(i),
-                    is_errors.value(i),
+                    native_ids.is_valid(i).then(|| native_ids.value(i)),
+                    is_errors.is_valid(i).then(|| is_errors.value(i)),
                     costs.is_valid(i).then(|| costs.value(i)),
                 );
                 let cost = task_costs.entry(task.clone()).or_insert((0.0, false));
@@ -1378,14 +1380,21 @@ fn send_view_event(tx: &UnboundedSender<scan_view::Event>, event: scan_view::Eve
 }
 
 /// An agent's view entry from its record.
-fn agent_item(session_id: &str, is_error: bool, cost: Option<f64>) -> AgentItem {
+/// An agent row as the view shows it. A row without a result is an
+/// agent still running.
+fn agent_item(
+    session_id: &str,
+    native_id: Option<&str>,
+    is_error: Option<bool>,
+    cost: Option<f64>,
+) -> AgentItem {
     AgentItem {
         session_id: session_id.to_string(),
-        path: None,
-        state: if is_error {
-            AgentState::Error
-        } else {
-            AgentState::Done
+        native_id: native_id.map(str::to_string),
+        state: match is_error {
+            None => AgentState::Running,
+            Some(true) => AgentState::Error,
+            Some(false) => AgentState::Done,
         },
         cost,
         started_ms: None,

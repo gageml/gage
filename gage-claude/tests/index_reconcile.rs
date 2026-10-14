@@ -122,3 +122,29 @@ fn reconcile_removes_legacy_text_index() {
     store.reconcile(LockMode::Wait).unwrap();
     assert!(!cache.path().join("text").exists());
 }
+
+/// A summary a table read cached for a session the walk does not
+/// list, as for an agent session read while it ran, has no manifest
+/// entry. Reconcile removes it once the session is gone from disk.
+#[test]
+fn reconcile_removes_orphan_summaries() {
+    let (store, _root, _cache) = store_with_tempdirs();
+    store.reconcile(LockMode::Wait).unwrap();
+    let orphan = "01234567-89ab-cdef-0123-456789abcdef";
+    store
+        .put_session_summary(orphan, &gage_claude::index::SessionSummary::default())
+        .unwrap();
+    assert!(
+        store
+            .session_summary(orphan, SystemTime::UNIX_EPOCH)
+            .is_some()
+    );
+
+    let outcome = store.reconcile(LockMode::Wait).unwrap();
+    assert_eq!(outcome.removed, 1);
+    assert!(
+        store
+            .session_summary(orphan, SystemTime::UNIX_EPOCH)
+            .is_none()
+    );
+}

@@ -23,7 +23,7 @@ use std::time::SystemTime;
 
 use gage_session::{
     ContentSink, ContentSource, Driver, DriverError, NativeSession, SessionAttrs, Source,
-    StoredSession,
+    SourceOptions, StoredSession,
 };
 use gage_store::{
     AttachmentSpec, AttachmentStore, DatasetOrigin, DatasetStore, IssueInput, IssueStatus,
@@ -119,7 +119,7 @@ impl Driver for FakeDriver {
     fn schemes(&self) -> &'static [&'static str] {
         &["fake"]
     }
-    fn open_source(&self, _source: &str) -> Result<Box<dyn Source>, DriverError> {
+    fn open_source(&self, _options: &SourceOptions) -> Result<Box<dyn Source>, DriverError> {
         Err(DriverError::Other("open_source not used".into()))
     }
     fn write_native(

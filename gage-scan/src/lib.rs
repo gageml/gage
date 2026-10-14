@@ -1258,7 +1258,7 @@ mod tests {
     use gage_registry::scanner::{ScannerDef, parse_scanner_file};
     use gage_session::{
         AgentEvent, AgentMcp, AgentSession, AgentSpec, ContentSink, ContentSource, DriverError,
-        NativeSession, SessionAttrs, Source, StoredSession, TurnResult,
+        NativeSession, SessionAttrs, Source, SourceOptions, StoredSession, TurnResult,
     };
     use gage_store::DatasetStore;
     use tempfile::TempDir;
@@ -1545,6 +1545,9 @@ mod tests {
 
     #[async_trait::async_trait]
     impl AgentSession for ScriptedAgent {
+        fn native_id(&self) -> &str {
+            &self.native_id
+        }
         async fn next_event(&mut self) -> Option<AgentEvent> {
             self.events.pop_front()
         }
@@ -1588,7 +1591,7 @@ mod tests {
         fn schemes(&self) -> &'static [&'static str] {
             &["scripted"]
         }
-        fn open_source(&self, _source: &str) -> Result<Box<dyn Source>, DriverError> {
+        fn open_source(&self, _options: &SourceOptions) -> Result<Box<dyn Source>, DriverError> {
             Err(DriverError::Other("open_source not used".into()))
         }
         fn write_native(
@@ -1657,7 +1660,7 @@ mod tests {
         fn schemes(&self) -> &'static [&'static str] {
             &["scripted"]
         }
-        fn open_source(&self, _source: &str) -> Result<Box<dyn Source>, DriverError> {
+        fn open_source(&self, _options: &SourceOptions) -> Result<Box<dyn Source>, DriverError> {
             Err(DriverError::Other("open_source not used".into()))
         }
         fn write_native(
@@ -1730,6 +1733,9 @@ mod tests {
 
     #[async_trait::async_trait]
     impl AgentSession for PoolAgent {
+        fn native_id(&self) -> &str {
+            self.inner.native_id()
+        }
         async fn next_event(&mut self) -> Option<AgentEvent> {
             tokio::task::yield_now().await;
             self.inner.next_event().await
@@ -1771,7 +1777,7 @@ mod tests {
         fn schemes(&self) -> &'static [&'static str] {
             &["scripted"]
         }
-        fn open_source(&self, _source: &str) -> Result<Box<dyn Source>, DriverError> {
+        fn open_source(&self, _options: &SourceOptions) -> Result<Box<dyn Source>, DriverError> {
             Err(DriverError::Other("open_source not used".into()))
         }
         fn write_native(
@@ -2079,7 +2085,7 @@ mod tests {
     /// and the task's agent record is in the scan object.
     #[tokio::test]
     async fn tasks_run_agents_and_the_scan_records_them() {
-        use gage_store::{AgentAttrs, SessionStore, TaskAgent, session_object_id};
+        use gage_store::{AgentAttrs, AgentRecord, SessionStore, TaskAgent, session_object_id};
 
         let (_dir, compiled) = compile_source(
             r#"
@@ -2163,14 +2169,14 @@ mod tests {
             task.agents,
             [TaskAgent {
                 id: session_id.clone(),
-                attrs: AgentAttrs {
+                record: AgentRecord::Ended(AgentAttrs {
                     exit_code: 0,
                     is_error: false,
                     stop_reason: "end_turn".into(),
                     turns: 1,
                     duration_ms: 0,
                     cost_usd: Some(0.0),
-                },
+                }),
             }]
         );
         assert_eq!(
@@ -3516,7 +3522,7 @@ mod tests {
         jsonl: &str,
         project_dir: &std::path::Path,
     ) -> (String, String, String) {
-        use gage_session::Driver;
+        use gage_session::{Driver, SourceOptions};
         use gage_store::SessionSpec;
 
         let claude = root.join("claude");
@@ -3528,7 +3534,7 @@ mod tests {
         std::fs::write(dir.join(format!("{native_id}.jsonl")), jsonl).unwrap();
         let driver = gage_claude::driver::ClaudeDriver::new();
         let source = driver
-            .open_source(&format!("claude:{}", claude.display()))
+            .open_source(&SourceOptions::new(&format!("claude:{}", claude.display())))
             .unwrap();
         let mut native = source.open_native(native_id).unwrap();
 
@@ -4583,7 +4589,10 @@ mod tests {
             fn schemes(&self) -> &'static [&'static str] {
                 &["unready"]
             }
-            fn open_source(&self, _source: &str) -> Result<Box<dyn Source>, DriverError> {
+            fn open_source(
+                &self,
+                _options: &SourceOptions,
+            ) -> Result<Box<dyn Source>, DriverError> {
                 Err(DriverError::Other("not used".into()))
             }
             fn write_native(
@@ -4748,7 +4757,7 @@ mod tests {
         native_id: &str,
         jsonl: &str,
     ) -> (String, String) {
-        use gage_session::Driver;
+        use gage_session::{Driver, SourceOptions};
         use gage_store::SessionSpec;
 
         let claude = root.join("claude");
@@ -4756,7 +4765,7 @@ mod tests {
         std::fs::write(dir.join(format!("{native_id}.jsonl")), jsonl).unwrap();
         let driver = gage_claude::driver::ClaudeDriver::new();
         let source = driver
-            .open_source(&format!("claude:{}", claude.display()))
+            .open_source(&SourceOptions::new(&format!("claude:{}", claude.display())))
             .unwrap();
         let mut native = source.open_native(native_id).unwrap();
         let datasets = DatasetStore::from(store);
@@ -4864,7 +4873,7 @@ mod tests {
         dataset_id: &str,
         jsonl: &str,
     ) -> String {
-        use gage_session::Driver;
+        use gage_session::{Driver, SourceOptions};
         use gage_store::SessionSpec;
 
         let claude = root.join("claude");
@@ -4873,7 +4882,7 @@ mod tests {
         std::fs::write(dir.join(format!("{native_id}.jsonl")), jsonl).unwrap();
         let driver = gage_claude::driver::ClaudeDriver::new();
         let source = driver
-            .open_source(&format!("claude:{}", claude.display()))
+            .open_source(&SourceOptions::new(&format!("claude:{}", claude.display())))
             .unwrap();
         let mut native = source.open_native(native_id).unwrap();
         let datasets = DatasetStore::from(store);

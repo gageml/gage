@@ -29,6 +29,41 @@ pub use status::{AuthInfo, DriverStatus, Field, HarnessInfo, InstallInfo};
 pub use system_col::{SYSTEM_META_KEY, is_system, system};
 pub use tool_use::{ToolUse, ToolUseBatch, tool_use_batch, tool_use_schema};
 
+/// What a driver opens and how it reads it. `new` names the source as
+/// the user gave it: empty for the driver's default location, a body
+/// under one of the driver's schemes, or a scheme-less value the
+/// driver interprets as it sees fit. The runtime's own in-flight agent
+/// sessions are left out unless `show_agents` is set; the live scan
+/// view is the one reader that wants them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceOptions {
+    url: String,
+    show_agents: bool,
+}
+
+impl SourceOptions {
+    pub fn new(url: &str) -> Self {
+        Self {
+            url: url.to_string(),
+            show_agents: false,
+        }
+    }
+
+    pub fn show_agents(&mut self, show: bool) -> &mut Self {
+        self.show_agents = show;
+        self
+    }
+
+    /// The source URL as given
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+
+    pub fn shows_agents(&self) -> bool {
+        self.show_agents
+    }
+}
+
 pub trait Driver: Send + Sync {
     /// The driver's name, recorded on stored sessions. Not a scheme.
     fn name(&self) -> &'static str;
@@ -38,13 +73,11 @@ pub trait Driver: Send + Sync {
     /// source with one of these schemes to the driver.
     fn schemes(&self) -> &'static [&'static str];
 
-    /// Open a handle over a source. `source` is the value as the user
-    /// gave it: empty for the driver's default location, a body under
-    /// one of the driver's schemes, or a scheme-less value the driver
-    /// interprets as it sees fit. The handle is the driver's place to
-    /// hold per-source state (caches, parsed registries, an index) for
-    /// as long as the caller keeps it.
-    fn open_source(&self, source: &str) -> Result<Box<dyn Source>, DriverError>;
+    /// Open a handle over the source `options` names, read as `options`
+    /// says. The handle is the driver's place to hold per-source state
+    /// (caches, parsed registries, an index) for as long as the caller
+    /// keeps it.
+    fn open_source(&self, options: &SourceOptions) -> Result<Box<dyn Source>, DriverError>;
 
     /// Open the source holding the native session `native_source`
     /// names: the container a stored session's `native_source` came
@@ -52,7 +85,7 @@ pub trait Driver: Send + Sync {
     /// whose native session URLs differ from its container URLs
     /// overrides it.
     fn open_native_source(&self, native_source: &str) -> Result<Box<dyn Source>, DriverError> {
-        self.open_source(native_source)
+        self.open_source(&SourceOptions::new(native_source))
     }
 
     /// Serialize `session` into the store through `sink`. The returned
@@ -471,6 +504,15 @@ impl From<DriverError> for NativeLookupError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_options_hide_agents_unless_asked() {
+        let mut options = SourceOptions::new("claude:/tmp/foo");
+        assert_eq!(options.url(), "claude:/tmp/foo");
+        assert!(!options.shows_agents());
+        options.show_agents(true);
+        assert!(options.shows_agents());
+    }
 
     #[test]
     fn split_scheme_recognizes_scheme_and_body() {

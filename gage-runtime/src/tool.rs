@@ -1182,7 +1182,8 @@ fn render(v: &Value) -> Result<JsonValue, String> {
 #[cfg(test)]
 mod tests {
     use gage_session::{
-        ContentSink, ContentSource, Driver, DriverError, NativeSession, Source, StoredSession,
+        ContentSink, ContentSource, Driver, DriverError, NativeSession, Source, SourceOptions,
+        StoredSession,
     };
     use rune::runtime::Vm;
     use rune::sync::Arc as RuneArc;
@@ -1206,7 +1207,7 @@ mod tests {
         fn schemes(&self) -> &'static [&'static str] {
             &[]
         }
-        fn open_source(&self, _source: &str) -> Result<Box<dyn Source>, DriverError> {
+        fn open_source(&self, _options: &SourceOptions) -> Result<Box<dyn Source>, DriverError> {
             Err(DriverError::Other("not used".into()))
         }
         fn write_native(

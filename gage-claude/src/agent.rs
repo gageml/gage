@@ -25,8 +25,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use gage_core::config::gage_home;
 use gage_session::{
-    AgentEvent, AgentSession, AgentSpec, Driver, DriverError, NativeSession, SystemPrompt,
-    ToolUseEntries, TurnResult,
+    AgentEvent, AgentSession, AgentSpec, Driver, DriverError, NativeSession, SourceOptions,
+    SystemPrompt, ToolUseEntries, TurnResult,
 };
 use serde_json::Value as Json;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -56,7 +56,9 @@ pub(crate) fn start(spec: AgentSpec) -> Result<ClaudeAgent, DriverError> {
         .chain(spec.builtin_tools.iter().cloned())
         .collect();
     let run = prepare_run(&allowed_tools)?;
+    let session_id = Uuid::new_v4().to_string();
     let mut cmd = Command::new(&run.claude_bin);
+    cmd.arg("--session-id").arg(&session_id);
     cmd.arg("-p");
     cmd.args(["--input-format", "stream-json"]);
     cmd.args(["--output-format", "stream-json"]);
@@ -121,7 +123,7 @@ pub(crate) fn start(spec: AgentSpec) -> Result<ClaudeAgent, DriverError> {
         pending_prompt: Some(spec.prompt),
         project: spec.project,
         buffer: VecDeque::new(),
-        session_id: None,
+        session_id,
         pending_tasks: HashSet::new(),
     })
 }
@@ -393,8 +395,8 @@ pub struct ClaudeAgent {
     project: Option<String>,
     /// Events expanded from one stream message and not yet returned
     buffer: VecDeque<AgentEvent>,
-    /// From the `system/init` message
-    session_id: Option<String>,
+    /// Chosen before spawn and passed as `--session-id`
+    session_id: String,
     /// Background sub-agents the child reports as started and not
     /// yet finished. Claude Code resumes the parent turn as each one
     /// finishes, so a turn end with tasks pending is not the session's
@@ -446,21 +448,12 @@ impl ClaudeAgent {
                         _ => {}
                     }
                 }
-                if self.session_id.is_none()
-                    && v.get("subtype").and_then(Json::as_str) == Some("init")
-                    && let Some(sid) = v.get("session_id").and_then(Json::as_str)
-                {
-                    self.session_id = Some(sid.to_string());
-                }
                 self.buffer.push_back(AgentEvent::System(v.to_string()));
             }
             StreamMessage::Assistant(v) => expand_assistant(&v, &mut self.buffer),
             StreamMessage::User(v) => expand_user(&v, &mut self.buffer),
             StreamMessage::Result(v) => {
                 let result = turn_result_of(&v);
-                if self.session_id.is_none() && !result.session_id.is_empty() {
-                    self.session_id = Some(result.session_id.clone());
-                }
                 self.buffer.push_back(AgentEvent::TurnEnd {
                     result: Box::new(result),
                     idle: self.pending_tasks.is_empty(),
@@ -490,34 +483,22 @@ impl ClaudeAgent {
         Ok(())
     }
 
-    /// The transcript file: the one named by the session id, else the
-    /// only `.jsonl` in the run's slot
-    fn transcript_path(&self) -> io::Result<Option<PathBuf>> {
-        if let Some(sid) = &self.session_id {
-            let path = self.live_projects.join(format!("{sid}.jsonl"));
-            return Ok(path.is_file().then_some(path));
-        }
-        let entries = match fs::read_dir(&self.live_projects) {
-            Ok(entries) => entries,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(e),
-        };
-        let mut found = Vec::new();
-        for entry in entries {
-            let path = entry?.path();
-            if path.extension().and_then(|s| s.to_str()) == Some("jsonl") {
-                found.push(path);
-            }
-        }
-        match found.as_slice() {
-            [one] => Ok(Some(one.clone())),
-            _ => Ok(None),
-        }
+    /// The transcript file, named by the session id; None until the
+    /// harness has written it
+    fn transcript_path(&self) -> Option<PathBuf> {
+        let path = self
+            .live_projects
+            .join(format!("{}.jsonl", self.session_id));
+        path.is_file().then_some(path)
     }
 }
 
 #[async_trait]
 impl AgentSession for ClaudeAgent {
+    fn native_id(&self) -> &str {
+        &self.session_id
+    }
+
     async fn next_event(&mut self) -> Option<AgentEvent> {
         loop {
             if let Some(ev) = self.buffer.pop_front() {
@@ -584,20 +565,14 @@ impl AgentSession for ClaudeAgent {
     }
 
     fn transcript(&mut self) -> Result<Option<Box<dyn NativeSession + Send>>, DriverError> {
-        let Some(path) = self.transcript_path()? else {
+        let Some(path) = self.transcript_path() else {
             return Ok(None);
         };
-        let native_id = match &self.session_id {
-            Some(sid) => sid.clone(),
-            None => path
-                .file_stem()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_default(),
-        };
+        let native_id = self.session_id.clone();
         let meta = fs::metadata(&path)?;
         // The default source's index store caches the summary, as it
         // does for every session in the user's projects directory
-        let source = ClaudeDriver::new().open_source("")?;
+        let source = ClaudeDriver::new().open_source(&SourceOptions::new(""))?;
         let claude = source
             .as_any()
             .downcast_ref::<ClaudeSource>()

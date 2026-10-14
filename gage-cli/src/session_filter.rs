@@ -15,6 +15,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use clap::Args;
 use datafusion::prelude::SessionContext;
 use gage_query::ContextBuilder;
+use gage_session::SourceOptions;
 use rand::seq::SliceRandom;
 
 use crate::source;
@@ -134,7 +135,7 @@ pub async fn select_sessions(
 
     if !sessions.is_empty() {
         let handle = driver
-            .open_source(&spec)
+            .open_source(&SourceOptions::new(&spec))
             .map_err(|e| SessionSelectError::Setup(format!("{spec}: {e}")))?;
         let mut out = Vec::with_capacity(sessions.len());
         let mut errors = Vec::new();

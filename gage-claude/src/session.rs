@@ -94,6 +94,7 @@ pub struct SessionListBuilder {
     projects: Vec<String>,
     since: Option<SystemTime>,
     limit: Option<usize>,
+    show_agents: bool,
 }
 
 impl SessionListBuilder {
@@ -103,6 +104,7 @@ impl SessionListBuilder {
             projects: Vec::new(),
             since: None,
             limit: None,
+            show_agents: false,
         }
     }
 
@@ -134,6 +136,13 @@ impl SessionListBuilder {
         self
     }
 
+    /// Include the runtime's own in-flight agent sessions, which the
+    /// walk leaves out by default
+    pub fn show_agents(mut self, show: bool) -> Self {
+        self.show_agents = show;
+        self
+    }
+
     pub fn build(self) -> SessionList {
         let projects_dir = self
             .root
@@ -159,11 +168,11 @@ impl SessionListBuilder {
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
 
-            // Skip the runtime's own in-flight agent sessions. Their
-            // cwd lives under `~/.gage/tmp/<run_id>/cwd`, encoded here
-            // as a slug containing `--gage-tmp-`. The persistent copy
-            // is hardlinked under `~/.gage/claude/<name>/`.
-            if is_agent_tmp_slug(&dir_name) {
+            // The runtime's own in-flight agent sessions are left out
+            // unless asked for. Their cwd lives under
+            // `~/.gage/tmp/<run_id>/cwd`, encoded here as a slug
+            // containing `--gage-tmp-`.
+            if !self.show_agents && is_agent_tmp_slug(&dir_name) {
                 continue;
             }
 
@@ -438,7 +447,7 @@ mod tests {
     }
 
     #[test]
-    fn build_skips_agent_tmp_projects() {
+    fn build_skips_agent_tmp_projects_unless_asked() {
         let root = tempfile::tempdir().unwrap();
         let uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
 
@@ -461,6 +470,19 @@ mod tests {
             .iter()
             .map(|s| s.project_name().into_owned())
             .collect();
-        assert_eq!(slugs, vec![real_slug]);
+        assert_eq!(slugs, vec![real_slug.clone()]);
+
+        let shown = SessionListBuilder::new()
+            .root(root.path())
+            .show_agents(true)
+            .build();
+        let mut slugs: Vec<String> = shown
+            .iter()
+            .map(|s| s.project_name().into_owned())
+            .collect();
+        slugs.sort();
+        let mut expected = vec![real_slug, tmp_slug];
+        expected.sort();
+        assert_eq!(slugs, expected);
     }
 }

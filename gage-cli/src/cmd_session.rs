@@ -13,7 +13,7 @@ use datafusion::prelude::SessionContext;
 use gage_core::uuid::short_uuid;
 use gage_query::ContextBuilder;
 use gage_registry::driver::DriverRegistry;
-use gage_session::{Driver, Source};
+use gage_session::{Driver, Source, SourceOptions};
 use gage_store::{DatasetStore, SessionRecord, SessionStore, Store};
 use gage_tui::session::{Backend, picker_page_size};
 use gage_tui::{ViewOptions, session_view};
@@ -818,7 +818,7 @@ fn add_native(
     let (driver, spec) =
         source::resolve_source(&registry, source.as_deref()).map_err(DialogError::Failed)?;
     let opened = driver
-        .open_source(&spec)
+        .open_source(&SourceOptions::new(&spec))
         .map_err(|e| DialogError::Failed(format!("{spec}: {e}")))?;
 
     // Confirm every selected session is present in the opened source
@@ -1011,7 +1011,7 @@ pub async fn delete(
     let (driver, spec) = source::resolve_source(&registry, source.as_deref())
         .map_err(|e| anyhow!("gage session delete: {e}"))?;
     let source = driver
-        .open_source(&spec)
+        .open_source(&SourceOptions::new(&spec))
         .with_context(|| format!("gage session delete: {spec}"))?;
     let outcome = dialog::run_async("Delete sessions", || {
         delete_dialog(&args, source.as_ref(), &spec)
@@ -1167,7 +1167,7 @@ async fn view_native(
 ) -> Result<(), Box<dyn Error>> {
     let registry = source::driver_registry();
     let (driver, spec) = source::resolve_source(&registry, source)?;
-    let opened = driver.open_source(&spec)?;
+    let opened = driver.open_source(&SourceOptions::new(&spec))?;
     let id = match prefix {
         Some(prefix) => Some(opened.find_native(prefix)?),
         None => {

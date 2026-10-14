@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use gage_claude::driver::ClaudeDriver;
-use gage_session::{Driver, DriverError, Source, split_scheme};
+use gage_session::{Driver, DriverError, Source, SourceOptions, split_scheme};
 
 pub struct DriverRegistry {
     default: Option<Arc<dyn Driver>>,
@@ -83,13 +83,13 @@ impl DriverRegistry {
         }
     }
 
-    /// Route `source` to its driver and open it. The empty source is
-    /// the default driver's default location.
-    pub fn open_source(&self, source: &str) -> Result<Box<dyn Source>, DriverError> {
+    /// Route the source `options` names to its driver and open it. The
+    /// empty source is the default driver's default location.
+    pub fn open_source(&self, options: &SourceOptions) -> Result<Box<dyn Source>, DriverError> {
         let driver = self
-            .driver_for(source)
+            .driver_for(options.url())
             .ok_or_else(|| DriverError::Other("no default session driver registered".into()))?;
-        driver.open_source(source)
+        driver.open_source(options)
     }
 }
 
@@ -103,7 +103,8 @@ impl Default for DriverRegistry {
 mod tests {
     use super::*;
     use gage_session::{
-        ContentSink, ContentSource, DriverError, NativeSession, Source, StoredSession,
+        ContentSink, ContentSource, DriverError, NativeSession, Source, SourceOptions,
+        StoredSession,
     };
 
     struct Fake(&'static str, &'static [&'static str]);
@@ -118,7 +119,7 @@ mod tests {
         fn schemes(&self) -> &'static [&'static str] {
             self.1
         }
-        fn open_source(&self, _source: &str) -> Result<Box<dyn Source>, DriverError> {
+        fn open_source(&self, _options: &SourceOptions) -> Result<Box<dyn Source>, DriverError> {
             Err(DriverError::Other("not used".into()))
         }
         fn write_native(
