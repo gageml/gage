@@ -5,6 +5,7 @@
 //! tables) plus the session-level aggregates. JSONL is parsed only
 //! here; the in-memory cache in `gage-query` holds the results.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
 use std::time::UNIX_EPOCH;
@@ -420,6 +421,7 @@ pub fn derive_session(session_id: &str, path: &Path) -> Result<DerivedSession> {
         ..Default::default()
     };
     let mut has_custom_title = false;
+    let mut counted_responses: HashSet<String> = HashSet::new();
 
     for result in reader {
         let (line_num, entry) = match result {
@@ -448,7 +450,16 @@ pub fn derive_session(session_id: &str, path: &Path) -> Result<DerivedSession> {
                             .and_then(|m| m.as_str())
                             .map(String::from);
                     }
-                    if let Some(usage) = msg.and_then(|m| m.get("usage")) {
+                    // One API response is written as one row per content
+                    // block, each repeating the response's usage
+                    let response_id = msg.and_then(|m| m.get("id")).and_then(|v| v.as_str());
+                    let first_row_of_response = match response_id {
+                        Some(id) => counted_responses.insert(id.to_string()),
+                        None => true,
+                    };
+                    if let Some(usage) = msg.and_then(|m| m.get("usage"))
+                        && first_row_of_response
+                    {
                         summary.input_tokens += usage
                             .get("input_tokens")
                             .and_then(|v| v.as_i64())
@@ -630,6 +641,32 @@ mod tests {
             [PathBuf::from("/w/a.rs"), PathBuf::from("/w/b.rs")]
         );
         assert_eq!(derived.tool_uses.num_rows(), 2);
+    }
+
+    #[test]
+    fn token_usage_counts_each_api_response_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        let usage = json!({"input_tokens":3,"output_tokens":10,
+                           "cache_read_input_tokens":100,"cache_creation_input_tokens":7});
+        let lines = [
+            json!({"type":"assistant","uuid":"a1","message":{"id":"msg_1","role":"assistant",
+                   "content":[{"type":"text","text":"one"}],"usage":usage}}),
+            json!({"type":"assistant","uuid":"a2","message":{"id":"msg_1","role":"assistant",
+                   "content":[{"type":"tool_use","id":"t1","name":"Read","input":{}}],"usage":usage}}),
+            json!({"type":"assistant","uuid":"a3","message":{"id":"msg_2","role":"assistant",
+                   "content":[{"type":"text","text":"two"}],"usage":usage}}),
+            json!({"type":"assistant","uuid":"a4","message":{"role":"assistant",
+                   "content":[{"type":"text","text":"no id"}],"usage":usage}}),
+        ];
+        let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
+        std::fs::write(&path, text).unwrap();
+        let summary = derive_session("s", &path).unwrap().summary;
+        assert_eq!(summary.message_count, 4);
+        assert_eq!(summary.input_tokens, 9);
+        assert_eq!(summary.output_tokens, 30);
+        assert_eq!(summary.cache_read_input_tokens, 300);
+        assert_eq!(summary.cache_creation_input_tokens, 21);
     }
 
     fn system_entry(subtype: &str, extra: serde_json::Value) -> serde_json::Value {

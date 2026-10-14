@@ -57,11 +57,16 @@ pub fn compute_session_stats(path: &Path) -> io::Result<SessionStats> {
             Err(_) => continue,
         };
 
-        if let Some(n) = turns.observe(&entry) {
+        // Every row of one API response repeats its usage; the first row
+        // opens a new turn, and a row without a message id is its own
+        let turn = turns.observe(&entry);
+        let first_row_of_response = turn.is_none_or(|n| n > max_turn);
+        if let Some(n) = turn {
             max_turn = max_turn.max(n);
         }
 
         if entry.get("type").and_then(Value::as_str) == Some("assistant")
+            && first_row_of_response
             && let Some(usage) = entry.get("message").and_then(|m| m.get("usage"))
         {
             let count = |k| usage.get(k).and_then(Value::as_i64).unwrap_or(0);
@@ -143,5 +148,37 @@ impl TurnCounter {
                 self.next
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn stats_count_each_api_response_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        let usage = json!({"input_tokens":3,"output_tokens":10,
+                           "cache_read_input_tokens":100,"cache_creation_input_tokens":7});
+        let lines = [
+            json!({"type":"assistant","uuid":"a1","message":{"id":"msg_1","role":"assistant",
+                   "content":[{"type":"text","text":"one"}],"usage":usage}}),
+            json!({"type":"assistant","uuid":"a2","message":{"id":"msg_1","role":"assistant",
+                   "content":[{"type":"tool_use","id":"t1","name":"Read","input":{}}],"usage":usage}}),
+            json!({"type":"assistant","uuid":"a3","message":{"id":"msg_2","role":"assistant",
+                   "content":[{"type":"text","text":"two"}],"usage":usage}}),
+            json!({"type":"assistant","uuid":"a4","message":{"role":"assistant",
+                   "content":[{"type":"text","text":"no id"}],"usage":usage}}),
+        ];
+        let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
+        std::fs::write(&path, text).unwrap();
+        let stats = compute_session_stats(&path).unwrap();
+        assert_eq!(stats.turn_count, 2);
+        assert_eq!(stats.input_tokens, 30);
+        assert_eq!(stats.output_tokens, 30);
+        assert_eq!(stats.cached_tokens, 300);
     }
 }

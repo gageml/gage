@@ -113,8 +113,10 @@ mod tests {
         assert!(content.contains(&format!("\"version\": \"{}\"", VERSION)));
         assert!(!content.contains("%VERSION%"));
 
-        let skill = dir.path().join("skills").join("resolve").join("SKILL.md");
-        assert!(skill.exists());
+        for name in ["resolve", "query", "blame"] {
+            let skill = dir.path().join("skills").join(name).join("SKILL.md");
+            assert!(skill.exists(), "{name}");
+        }
 
         assert!(
             !dir.path()
