@@ -51,6 +51,10 @@ Tables:
 Functions: issue_report('<id>') renders one issue as markdown;
 related_issue('<id>' [, n]) lists the n most similar issues, best first.
 
+`raw`, `input_raw`, and `result_raw` are JSON text. Read a value with
+json_extract(raw, '$.message.usage.output_tokens') or with the -> and ->>
+operators; CAST the text for arithmetic. Do not cast to json or jsonb.
+
 Native source functions read a driver source directly, including sessions
 not in the store: native_session('<source>'), native_message('<source>'),
 native_entry('<source>'), native_tool_use('<source>'). The argument is a

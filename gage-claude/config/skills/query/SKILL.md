@@ -80,6 +80,28 @@ written_by)` describing what notes of that name hold.
 `lines` is the cited line ranges as text, for example `831-838` or
 `211-282,317`, null when the note cites no lines.
 
+## JSON columns
+
+`raw` on `entry`, `message`, and their native forms, and `input_raw` and
+`result_raw` on `tool_use`, are JSON text. `json_extract(json, path)` returns
+one value as text: the path is `$` followed by `.key` and `[index]` steps. A
+string comes back unquoted, any other value as its JSON text, and a missing
+step or JSON null as SQL NULL. CAST the text for arithmetic.
+
+```sql
+SELECT line,
+       CAST(json_extract(raw, '$.message.usage.output_tokens') AS BIGINT) AS out_tokens,
+       json_extract(raw, '$.message.content[0].type') AS first_block
+FROM native_message('claude:')
+WHERE session_id = '<NATIVE_ID>' AND type = 'assistant'
+ORDER BY line;
+```
+
+The `->` and `->>` operators with string keys also work, as `raw->'message'->>'model'`.
+`raw` is already text: `raw::json` and `raw::jsonb` fail with "Unsupported SQL
+type". A comparison directly after `->>` binds the key to the comparison first;
+wrap the extraction in parentheses or use `json_extract`.
+
 ## Commit-bearing link tables
 
 `note_target_link`, `issue_evidence_link`, `scan_note_link`,

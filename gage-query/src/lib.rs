@@ -33,6 +33,7 @@
 //! [`ContextBuilder::skip_system_cols`] hides them for a context that
 //! serves people and models writing queries.
 
+mod json;
 mod native;
 mod print_format;
 mod project;
@@ -55,6 +56,7 @@ use gage_store::{
     scan_table, scan_task_agent_table, scan_task_table, scan_watermark_table, tag_table,
 };
 
+use crate::json::json_extract_udf;
 use crate::native::{NativeTable, NativeTableFn};
 pub use crate::print_format::{PrintFormat, write_yaml, write_yaml_capped};
 use crate::project::project_for_path_udf;
@@ -366,9 +368,8 @@ const NATIVE_TABLES: [NativeTable; 4] = [
 
 /// A context carrying the shared configuration --- the `RowCache`
 /// extension, the PostgreSQL SQL dialect, `information_schema`, the
-/// native table functions, and the `project_for_path` UDF --- with no
-/// named tables registered. It carries only what this crate installs;
-/// gage-query's function suite is not pulled in.
+/// native table functions, the JSON functions, and the
+/// `project_for_path` UDF --- with no named tables registered.
 fn new_context(skip_system_cols: bool, show_agents: bool) -> SessionContext {
     let config = SessionConfig::new()
         .with_information_schema(true)
@@ -378,7 +379,9 @@ fn new_context(skip_system_cols: bool, show_agents: bool) -> SessionContext {
         .with_config(config)
         .with_default_features()
         .build();
-    let ctx = SessionContext::new_with_state(state);
+    let mut ctx = SessionContext::new_with_state(state);
+    datafusion_functions_json::register_all(&mut ctx).unwrap();
+    ctx.register_udf(json_extract_udf());
     for table in NATIVE_TABLES {
         ctx.register_udtf(
             table.function_name(),
