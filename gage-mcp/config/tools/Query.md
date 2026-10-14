@@ -18,8 +18,11 @@ to go on.
 Tables:
 
 - session (id, project, title, model, message_count, line_count, is_empty,
-  created, modified, session_type, driver, content_format, native_id,
-  native_source, native_size, native_mtime)
+  input_tokens, output_tokens, cached_tokens, cost_usd, created, modified,
+  session_type, driver, content_format, native_id, native_source,
+  native_size, native_mtime) - token columns are session totals: every prompt
+  token sent, every token generated, and the cached part of input; cost_usd
+  is the harness's own figure, null when it reports none
 - entry (session_id, line, uuid, type, subtype, timestamp, raw) - one row per
   transcript line, `raw` its JSON
 - message (session_id, line, uuid, type, subtype, timestamp, text,
@@ -62,13 +65,12 @@ Native source functions read a driver source directly, including sessions
 not in the store: native_session('<source>'), native_message('<source>'),
 native_entry('<source>'), native_tool_use('<source>'). The argument is a
 source URL; 'claude:' is the default Claude Code source and 'claude:/path'
-names a projects directory. native_session has its own columns (id, project,
-title, model, message_count, is_empty, content_format, mtime, size,
-input_tokens, output_tokens, cache_read_input_tokens,
-cache_creation_input_tokens); `id` is the native UUID, and no line_count,
-created, or modified. The other three have the stored tables' columns, with
-the native UUID as `session_id`. Use these to look over a session by its
-native id before it is added to the store.
+names a projects directory. native_session returns (id, project, title,
+model, message_count, is_empty, input_tokens, output_tokens, cached_tokens,
+cost_usd, content_format, mtime, size); `id` is the native UUID, and there is
+no line_count, created, or modified. The other three return the stored
+tables' columns, with the native UUID as `session_id`. Use these to look over
+a session by its native id before it is added to the store.
 
 Read a session by `session_id` ordered by `line`, taking
 `substr(text, 1, 800)` over full `text` or `raw` on wide rows.

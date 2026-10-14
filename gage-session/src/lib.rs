@@ -382,6 +382,31 @@ pub trait SessionAttrs {
     /// content is line-structured. This is the last line number the
     /// `entry` table can report for the session.
     fn line_count(&self) -> Option<u64>;
+
+    /// Every prompt token the session sent, cached or not, summed
+    /// over its API responses with each response counted once. A
+    /// harness that reports cached tokens apart from input adds them
+    /// here. The default is that the driver does not report usage.
+    fn input_tokens(&self) -> Option<u64> {
+        None
+    }
+
+    /// Every token the session's model generated, reasoning included,
+    /// summed as `input_tokens` is.
+    fn output_tokens(&self) -> Option<u64> {
+        None
+    }
+
+    /// The part of `input_tokens` served from a prompt cache.
+    fn cached_tokens(&self) -> Option<u64> {
+        None
+    }
+
+    /// The session's cost in US dollars as the harness reported it,
+    /// when it reports one. A presented number, not what was billed.
+    fn cost_usd(&self) -> Option<f64> {
+        None
+    }
 }
 
 /// One normalized row of a stored session, in `entry` table shape.

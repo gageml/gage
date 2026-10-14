@@ -943,6 +943,24 @@ impl SessionAttrs for ClaudeSessionAttrs {
     fn line_count(&self) -> Option<u64> {
         Some(self.line_count)
     }
+
+    fn input_tokens(&self) -> Option<u64> {
+        let total =
+            self.input_tokens + self.cache_read_input_tokens + self.cache_creation_input_tokens;
+        Some(total.max(0) as u64)
+    }
+
+    fn output_tokens(&self) -> Option<u64> {
+        Some(self.output_tokens.max(0) as u64)
+    }
+
+    fn cached_tokens(&self) -> Option<u64> {
+        Some(self.cache_read_input_tokens.max(0) as u64)
+    }
+
+    fn cost_usd(&self) -> Option<f64> {
+        self.cost_usd
+    }
 }
 
 /// The `ClaudeHome` for a resolved root. The env-resolved home carries

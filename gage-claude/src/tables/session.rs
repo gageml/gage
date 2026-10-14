@@ -7,7 +7,7 @@ use std::time::UNIX_EPOCH;
 use crate::index::{ClaudeSessionAttrs, IndexStore};
 use async_trait::async_trait;
 use datafusion::arrow::array::{
-    BooleanBuilder, Int64Builder, StringBuilder, TimestampMillisecondBuilder,
+    BooleanBuilder, Float64Builder, Int64Builder, StringBuilder, TimestampMillisecondBuilder,
 };
 use datafusion::arrow::compute::SortOptions;
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
@@ -27,6 +27,7 @@ use datafusion::physical_plan::{
 };
 use datafusion::prelude::*;
 use futures::stream;
+use gage_session::SessionAttrs;
 
 use super::cache::SessionCache;
 use super::walk::{SummaryPrune, WALK_COLS, walk_sessions};
@@ -46,8 +47,8 @@ const SUMMARY_COLS: &[&str] = &[
     "message_count",
     "input_tokens",
     "output_tokens",
-    "cache_read_input_tokens",
-    "cache_creation_input_tokens",
+    "cached_tokens",
+    "cost_usd",
     "is_empty",
 ];
 
@@ -76,11 +77,12 @@ fn session_schema() -> SchemaRef {
         Field::new("title", DataType::Utf8, true),
         Field::new("model", DataType::Utf8, true),
         Field::new("message_count", DataType::Int64, false),
-        // Token usage
+        // Token usage, as `SessionAttrs` defines it: totals over the
+        // session's API responses, each counted once
         Field::new("input_tokens", DataType::Int64, false),
         Field::new("output_tokens", DataType::Int64, false),
-        Field::new("cache_read_input_tokens", DataType::Int64, false),
-        Field::new("cache_creation_input_tokens", DataType::Int64, false),
+        Field::new("cached_tokens", DataType::Int64, false),
+        Field::new("cost_usd", DataType::Float64, true),
         // Derived flags
         Field::new("is_empty", DataType::Boolean, false),
         // System
@@ -356,8 +358,8 @@ impl SessionExec {
         let mut message_counts = Int64Builder::with_capacity(len);
         let mut input_tokens = Int64Builder::with_capacity(len);
         let mut output_tokens = Int64Builder::with_capacity(len);
-        let mut cache_read = Int64Builder::with_capacity(len);
-        let mut cache_creation = Int64Builder::with_capacity(len);
+        let mut cached_tokens = Int64Builder::with_capacity(len);
+        let mut costs = Float64Builder::with_capacity(len);
         let mut is_empty = BooleanBuilder::with_capacity(len);
 
         let default_summary = ClaudeSessionAttrs {
@@ -407,10 +409,10 @@ impl SessionExec {
                 None => models.append_null(),
             }
             message_counts.append_value(summary.message_count);
-            input_tokens.append_value(summary.input_tokens);
-            output_tokens.append_value(summary.output_tokens);
-            cache_read.append_value(summary.cache_read_input_tokens);
-            cache_creation.append_value(summary.cache_creation_input_tokens);
+            input_tokens.append_value(SessionAttrs::input_tokens(&summary).unwrap_or(0) as i64);
+            output_tokens.append_value(SessionAttrs::output_tokens(&summary).unwrap_or(0) as i64);
+            cached_tokens.append_value(summary.cached_tokens().unwrap_or(0) as i64);
+            costs.append_option(summary.cost_usd());
             is_empty.append_value(summary.is_empty);
         }
 
@@ -427,8 +429,8 @@ impl SessionExec {
                 Arc::new(message_counts.finish()),
                 Arc::new(input_tokens.finish()),
                 Arc::new(output_tokens.finish()),
-                Arc::new(cache_read.finish()),
-                Arc::new(cache_creation.finish()),
+                Arc::new(cached_tokens.finish()),
+                Arc::new(costs.finish()),
                 Arc::new(is_empty.finish()),
                 Arc::new(id_displays.finish()),
                 Arc::new(id_prefixes.finish()),
@@ -449,5 +451,29 @@ impl SessionExec {
         );
 
         Ok(projected)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The listing serves identity, location, format, and system
+    /// columns without opening a transcript; every other column needs
+    /// the derived attributes. A column missing from `SUMMARY_COLS`
+    /// reads as its default when projected alone.
+    #[test]
+    fn summary_cols_name_every_derived_column() {
+        let listing = ["id", "project", "mtime", "size", "content_format"];
+        let mut derived: Vec<String> = session_schema()
+            .fields()
+            .iter()
+            .filter(|f| !gage_session::is_system(f) && !listing.contains(&f.name().as_str()))
+            .map(|f| f.name().to_string())
+            .collect();
+        let mut expected: Vec<String> = SUMMARY_COLS.iter().map(|c| c.to_string()).collect();
+        derived.sort_unstable();
+        expected.sort_unstable();
+        assert_eq!(derived, expected);
     }
 }

@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use datafusion::arrow::array::{
-    BooleanBuilder, Int64Builder, StringBuilder, TimestampMillisecondBuilder,
+    BooleanBuilder, Float64Builder, Int64Builder, StringBuilder, TimestampMillisecondBuilder,
 };
 use datafusion::arrow::compute::SortOptions;
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
@@ -63,6 +63,10 @@ const ATTRS_COLS: &[&str] = &[
     "message_count",
     "is_empty",
     "line_count",
+    "input_tokens",
+    "output_tokens",
+    "cached_tokens",
+    "cost_usd",
 ];
 
 /// The commit's `modified` marker: when the store wrote the version
@@ -114,6 +118,13 @@ fn stored_session_schema() -> SchemaRef {
         // The number of lines in the native content, when the driver
         // reports it
         Field::new("line_count", DataType::Int64, true),
+        // Token totals and cost as `SessionAttrs` defines them: every
+        // prompt token sent, every token generated, the cached part of
+        // the input, and the harness's own dollar figure
+        Field::new("input_tokens", DataType::Int64, true),
+        Field::new("output_tokens", DataType::Int64, true),
+        Field::new("cached_tokens", DataType::Int64, true),
+        Field::new("cost_usd", DataType::Float64, true),
         // System
         // Short display form of the Gage id
         system(Field::new("id_display", DataType::Utf8, false)),
@@ -381,6 +392,10 @@ impl StoredSessionExec {
         let mut message_counts = Int64Builder::with_capacity(len);
         let mut is_empties = BooleanBuilder::with_capacity(len);
         let mut line_counts = Int64Builder::with_capacity(len);
+        let mut input_tokens = Int64Builder::with_capacity(len);
+        let mut output_tokens = Int64Builder::with_capacity(len);
+        let mut cached_tokens = Int64Builder::with_capacity(len);
+        let mut costs = Float64Builder::with_capacity(len);
         let mut projects = StringBuilder::new();
 
         for tip in &tips {
@@ -420,6 +435,10 @@ impl StoredSessionExec {
                 message_counts.append_null();
                 is_empties.append_value(false);
                 line_counts.append_null();
+                input_tokens.append_null();
+                output_tokens.append_null();
+                cached_tokens.append_null();
+                costs.append_null();
                 projects.append_null();
                 continue;
             };
@@ -437,6 +456,10 @@ impl StoredSessionExec {
             message_counts.append_option(summary.message_count.map(|v| v as i64));
             is_empties.append_value(summary.is_empty);
             line_counts.append_option(summary.line_count.map(|v| v as i64));
+            input_tokens.append_option(summary.input_tokens.map(|v| v as i64));
+            output_tokens.append_option(summary.output_tokens.map(|v| v as i64));
+            cached_tokens.append_option(summary.cached_tokens.map(|v| v as i64));
+            costs.append_option(summary.cost_usd);
             projects.append_option(attrs.project.as_deref());
         }
 
@@ -459,6 +482,10 @@ impl StoredSessionExec {
                 Arc::new(message_counts.finish()),
                 Arc::new(is_empties.finish()),
                 Arc::new(line_counts.finish()),
+                Arc::new(input_tokens.finish()),
+                Arc::new(output_tokens.finish()),
+                Arc::new(cached_tokens.finish()),
+                Arc::new(costs.finish()),
                 Arc::new(id_displays.finish()),
                 Arc::new(id_prefixes.finish()),
                 Arc::new(locators.finish()),
@@ -578,7 +605,7 @@ impl ExecutionPlan for StoredSessionExec {
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use datafusion::arrow::array::StringArray;
+    use datafusion::arrow::array::{Array, Float64Array, Int64Array, StringArray};
     use datafusion::prelude::SessionContext;
 
     use super::StoredSessionTable;
@@ -633,5 +660,59 @@ mod tests {
         assert_eq!(native.value(1), "s2");
         assert_eq!(project.value(0), "proj");
         assert_eq!(project.value(1), "proj");
+    }
+
+    /// The token and cost columns come from `attrs.summary`, null
+    /// where the driver reported none.
+    #[tokio::test]
+    async fn session_table_projects_token_totals_and_cost() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        {
+            let sessions = SessionStore::from(&store);
+            let mut with = fake("s1", &[("session.jsonl", "{}\n")]);
+            with.summary.tokens = Some((1200, 300, 1000));
+            with.summary.cost_usd = Some(0.5);
+            sessions.add(&FakeDriver, &mut with).unwrap();
+            sessions
+                .add(&FakeDriver, &mut fake("s2", &[("session.jsonl", "{}\n")]))
+                .unwrap();
+        }
+
+        let ctx = SessionContext::new();
+        ctx.register_table(
+            "session",
+            Arc::new(StoredSessionTable::new(Arc::new(Mutex::new(store)))),
+        )
+        .unwrap();
+        let batches = ctx
+            .sql(
+                "SELECT native_id, input_tokens, output_tokens, cached_tokens, cost_usd \
+                 FROM session ORDER BY native_id",
+            )
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        let batch = batches.first().unwrap();
+        let ints = |i: usize| {
+            batch
+                .column(i)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+        };
+        assert_eq!(ints(1).value(0), 1200);
+        assert_eq!(ints(2).value(0), 300);
+        assert_eq!(ints(3).value(0), 1000);
+        assert!(ints(1).is_null(1) && ints(2).is_null(1) && ints(3).is_null(1));
+        let costs = batch
+            .column(4)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        assert_eq!(costs.value(0), 0.5);
+        assert!(costs.is_null(1));
     }
 }

@@ -24,7 +24,7 @@ use super::derive::ClaudeSessionAttrs;
 /// `ClaudeSessionAttrs` (new field, changed title heuristic, fixed token
 /// accounting, ...). Stale `v{N}` directories are cleaned up by
 /// reconcile.
-pub const VERSION: u32 = 5;
+pub const VERSION: u32 = 6;
 
 fn versioned_dir(cache_dir: &Path) -> PathBuf {
     cache_dir.join("session").join(format!("v{VERSION}"))

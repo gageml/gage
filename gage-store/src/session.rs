@@ -53,7 +53,7 @@ impl<'a> From<&'a Store> for SessionStore<'a> {
 }
 
 /// The `attrs.json` shape of a session.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct SessionAttrsRecord {
     /// `"<driver name> <driver version>"`.
     pub driver: String,
@@ -84,7 +84,7 @@ pub struct SessionAttrsRecord {
 /// `attrs.summary`: the driver's session-level attributes at write
 /// time. Only the driver can compute these; the store copies them
 /// verbatim.
-#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
 pub struct SummaryAttrs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
@@ -98,6 +98,16 @@ pub struct SummaryAttrs {
     /// reports it
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub line_count: Option<u64>,
+    /// Token totals and cost as `SessionAttrs` defines them, when the
+    /// driver reports them
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
 }
 
 fn collect_summary(attrs: &dyn SessionAttrs) -> SummaryAttrs {
@@ -107,6 +117,10 @@ fn collect_summary(attrs: &dyn SessionAttrs) -> SummaryAttrs {
         message_count: attrs.message_count(),
         is_empty: attrs.is_empty(),
         line_count: attrs.line_count(),
+        input_tokens: attrs.input_tokens(),
+        output_tokens: attrs.output_tokens(),
+        cached_tokens: attrs.cached_tokens(),
+        cost_usd: attrs.cost_usd(),
     }
 }
 
@@ -139,7 +153,7 @@ pub enum SessionOutcome {
 }
 
 /// Outcome of removing sessions from the store.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 pub struct SessionRemoveOutcome {
     /// The removed sessions as they were before removal, in argument
     /// order with duplicates dropped.
@@ -150,7 +164,7 @@ pub struct SessionRemoveOutcome {
 }
 
 /// A stored session presented for reading, resolved to its commit.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SessionRecord {
     pub id: String,
     pub commit_sha: String,
@@ -713,11 +727,14 @@ pub(crate) mod tests {
         id: String,
         source: String,
         files: Vec<(String, Vec<u8>)>,
-        summary: FakeAttrs,
+        pub(crate) summary: FakeAttrs,
     }
 
-    struct FakeAttrs {
+    pub(crate) struct FakeAttrs {
         size: u64,
+        /// `(input, output, cached)` when the fake reports usage
+        pub(crate) tokens: Option<(u64, u64, u64)>,
+        pub(crate) cost_usd: Option<f64>,
     }
 
     impl SessionAttrs for FakeAttrs {
@@ -744,6 +761,18 @@ pub(crate) mod tests {
         }
         fn line_count(&self) -> Option<u64> {
             None
+        }
+        fn input_tokens(&self) -> Option<u64> {
+            self.tokens.map(|t| t.0)
+        }
+        fn output_tokens(&self) -> Option<u64> {
+            self.tokens.map(|t| t.1)
+        }
+        fn cached_tokens(&self) -> Option<u64> {
+            self.tokens.map(|t| t.2)
+        }
+        fn cost_usd(&self) -> Option<f64> {
+            self.cost_usd
         }
     }
 
@@ -822,8 +851,41 @@ pub(crate) mod tests {
             id: id.to_string(),
             source: format!("fake:{id}"),
             files: entries,
-            summary: FakeAttrs { size },
+            summary: FakeAttrs {
+                size,
+                tokens: None,
+                cost_usd: None,
+            },
         }
+    }
+
+    /// A session whose driver reports usage, written and read back:
+    /// the totals and cost land in `attrs.summary` and are absent from
+    /// the attrs of a session whose driver reports none.
+    #[test]
+    fn add_records_token_totals_and_cost_when_the_driver_reports_them() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let sessions = SessionStore::from(&store);
+        let mut with = fake("s1", &[("session.jsonl", "{}\n")]);
+        with.summary.tokens = Some((1200, 300, 1000));
+        with.summary.cost_usd = Some(0.0421);
+        let outcome = sessions.add(&FakeDriver, &mut with).unwrap();
+        let record = sessions.at_commit(&outcome.commit_sha).unwrap();
+        assert_eq!(record.attrs.summary.input_tokens, Some(1200));
+        assert_eq!(record.attrs.summary.output_tokens, Some(300));
+        assert_eq!(record.attrs.summary.cached_tokens, Some(1000));
+        assert_eq!(record.attrs.summary.cost_usd, Some(0.0421));
+        let ref_path = format!("refs/gage/1/object/{}", outcome.id);
+        let attrs = cat(&store, &format!("{ref_path}:attrs.json"));
+        assert!(attrs.contains("\"input_tokens\":1200"), "{attrs}");
+
+        let outcome = sessions
+            .add(&FakeDriver, &mut fake("s2", &[("session.jsonl", "{}\n")]))
+            .unwrap();
+        let record = sessions.at_commit(&outcome.commit_sha).unwrap();
+        assert_eq!(record.attrs.summary.input_tokens, None);
+        assert_eq!(record.attrs.summary.cost_usd, None);
     }
 
     fn cat(store: &Store, spec: &str) -> String {

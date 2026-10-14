@@ -17,10 +17,17 @@ not be stored. `native_session(source)`, `native_message(source)`,
 `native_entry(source)`, and `native_tool_use(source)` read the source
 directly. `'claude:'` is the default Claude Code source; `'claude:/path'`
 names a projects directory. The native tables use the native UUID: `id` in
-`native_session`, `session_id` in the other three. `native_session` carries
-`mtime`, `size`, and the four token columns in place of the stored table's
-`line_count`, `created`, and `modified`; the other three match their stored
-tables column for column.
+`native_session`, `session_id` in the other three. The table `native_session`
+returns carries `mtime` and `size` in place of the stored table's
+`line_count`, `created`, and `modified`; both carry the token columns; the
+other three return their stored tables' columns.
+
+Token columns on `session` and on `native_session`'s result are session
+totals, each API response counted once: `input_tokens` is every prompt token
+sent, cached or not; `output_tokens` every token generated, reasoning
+included; `cached_tokens` the part of input served from cache. `cost_usd` is
+the harness's reported figure, null when it reports none. Use these before
+reading usage out of `raw`.
 
 ```sql
 SELECT id, project, message_count FROM native_session('claude:')

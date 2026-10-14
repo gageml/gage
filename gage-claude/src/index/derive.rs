@@ -111,6 +111,10 @@ pub struct ClaudeSessionAttrs {
     pub output_tokens: i64,
     pub cache_read_input_tokens: i64,
     pub cache_creation_input_tokens: i64,
+    /// The running total of the last `cost-state` record, which Claude
+    /// Code writes for sessions started from its CLI
+    #[serde(default)]
+    pub cost_usd: Option<f64>,
     pub is_empty: bool,
     /// The line number of the last parsed entry; a trailing line the
     /// reader could not parse is not counted
@@ -513,6 +517,11 @@ pub fn derive_session(session_id: &str, path: &Path) -> Result<DerivedSession> {
                     has_custom_title = true;
                 }
             }
+            "cost-state" => {
+                if let Some(cost) = entry.get("totalCostUSD").and_then(|v| v.as_f64()) {
+                    attrs.cost_usd = Some(cost);
+                }
+            }
             _ => {}
         }
 
@@ -685,6 +694,24 @@ mod tests {
         assert_eq!(attrs.output_tokens, 30);
         assert_eq!(attrs.cache_read_input_tokens, 300);
         assert_eq!(attrs.cache_creation_input_tokens, 21);
+    }
+
+    #[test]
+    fn cost_is_the_last_cost_state_total() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        let lines = [
+            json!({"type":"user","uuid":"u1","message":{"role":"user","content":"go"}}),
+            json!({"type":"cost-state","sessionId":"s","totalCostUSD":0.5}),
+            json!({"type":"cost-state","sessionId":"s","totalCostUSD":1.25}),
+        ];
+        let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
+        std::fs::write(&path, text).unwrap();
+        let attrs = derive_session("s", &path).unwrap().attrs;
+        assert_eq!(attrs.cost_usd, Some(1.25));
+        let no_cost = dir.path().join("t.jsonl");
+        std::fs::write(&no_cost, format!("{}\n", lines[0])).unwrap();
+        assert_eq!(derive_session("t", &no_cost).unwrap().attrs.cost_usd, None);
     }
 
     fn system_entry(subtype: &str, extra: serde_json::Value) -> serde_json::Value {
