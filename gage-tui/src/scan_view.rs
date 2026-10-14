@@ -24,7 +24,8 @@ use gage_core::stopwatch::Stopwatch;
 use gage_core::style::SPINNER_FRAMES;
 use gage_core::task::{task_display, task_name_display};
 use gage_session::ResolveSession;
-use gage_store::{IssueStatus, StatusReason, url};
+use gage_store::url::{self, LineSelection};
+use gage_store::{IssueStatus, StatusReason};
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{
     self, Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
@@ -2410,14 +2411,12 @@ fn session_target(uri: &str) -> Option<SessionTarget> {
         },
     };
     let mut target = SessionTarget::new(id);
-    if let Some(selection) = selection {
-        let first = selection.split(',').next().unwrap_or(selection);
-        let (start, end) = match first.split_once('-') {
-            Some((s, e)) => (s, Some(e)),
-            None => (first, None),
-        };
-        target.line = start.parse().ok();
-        target.line_end = end.and_then(|e| e.parse().ok());
+    if let Some(selection) = selection
+        && let Ok(selection) = selection.parse::<LineSelection>()
+        && let Some(&(start, end)) = selection.ranges().first()
+    {
+        target.line = Some(start as u32);
+        target.line_end = (start != end).then_some(end as u32);
     }
     Some(target)
 }

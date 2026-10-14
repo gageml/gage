@@ -19,7 +19,8 @@ use gage_query::ContextBuilder;
 use gage_registry::driver::DriverRegistry;
 use gage_session::Driver;
 use gage_session::is_system;
-use gage_store::{NoteEdit, NoteFull, NoteInput, NoteStore, NoteValue, Store, url};
+use gage_store::url::{self, LineSelection};
+use gage_store::{NoteEdit, NoteFull, NoteInput, NoteStore, NoteValue, Store};
 use ratatui::crossterm::terminal;
 use serde_json::Value;
 
@@ -443,17 +444,11 @@ fn target_lines(target: &str) -> Result<(Option<u32>, Option<u32>), Box<dyn Erro
     let Some(fragment) = url::parse(target)?.fragment else {
         return Ok((None, None));
     };
-    let first = fragment.split(',').next().unwrap_or(fragment);
-    let (start, end) = match first.split_once('-') {
-        Some((s, e)) => (s, Some(e)),
-        None => (first, None),
+    let selection: LineSelection = fragment.parse()?;
+    let Some(&(start, end)) = selection.ranges().first() else {
+        return Ok((None, None));
     };
-    let start: u32 = start.parse()?;
-    let end = match end {
-        Some(e) => Some(e.parse::<u32>()?),
-        None => None,
-    };
-    Ok((Some(start), end))
+    Ok((Some(start as u32), (start != end).then_some(end as u32)))
 }
 
 /// The row's non-system columns as a JSON object, for the YAML pane.
