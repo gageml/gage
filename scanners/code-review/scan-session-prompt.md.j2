@@ -40,7 +40,14 @@ and do not write findings.
 Read the conversation by querying the `message` table via `mcp__gage__Query`,
 filtering by `session_id = '{{ session_id }}'`. `message` table columns:
 (session_id, line, uuid, type, subtype, text, timestamp, attachments,
-ide_tags, raw). Code changes appear as Edit and Write tool calls.
+ide_tags, raw).
+
+The code changes are the rows of the `tool_use` table whose `files_changed`
+is non-empty: one row per tool call, with the call's `input_raw` (the edit or
+the shell command) and the harness's `result_raw`. Query
+`SELECT line, name, files_changed, input_raw FROM tool_use WHERE session_id =
+'{{ session_id }}' AND cardinality(files_changed) > 0 ORDER BY line` for the
+full set, then read the conversation around each `line` in `message`.
 
 ## Writing findings
 

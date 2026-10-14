@@ -21,8 +21,8 @@ use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::error::{DataFusionError, Result};
 use datafusion::prelude::Expr;
 use gage_registry::driver::DriverRegistry;
-use gage_session::Driver;
 use gage_session::filter::IdFilter;
+use gage_session::{Driver, StoredSession, tool_use_batch};
 use gage_store::{
     Order, ScanDirLayout, ScanSource, SelectedTip, SessionRecord, SessionStore, Store, StoreError,
 };
@@ -222,17 +222,39 @@ impl SessionSet {
         if let Some(batch) = cache.get(&session.commit) {
             return Ok(batch);
         }
+        let mut stored = self.read_stored(session)?;
+        let batch = Arc::new(derive_batch(&session.id, stored.entries())?);
+        cache.insert(&session.commit, Arc::clone(&batch));
+        Ok(batch)
+    }
+
+    /// The `tool_use` batch of `session`, read and cached as [`rows`]
+    /// reads the derived batch.
+    ///
+    /// [`rows`]: SessionSet::rows
+    pub(crate) fn tool_uses(
+        &self,
+        session: &StoredSessionRef,
+        cache: &RowCache,
+    ) -> Result<Arc<RecordBatch>> {
+        if let Some(batch) = cache.get_tool_uses(&session.commit) {
+            return Ok(batch);
+        }
+        let mut stored = self.read_stored(session)?;
+        let batch = Arc::new(tool_use_batch(&session.id, stored.tool_uses())?);
+        cache.insert_tool_uses(&session.commit, Arc::clone(&batch));
+        Ok(batch)
+    }
+
+    fn read_stored(&self, session: &StoredSessionRef) -> Result<Box<dyn StoredSession>> {
         let driver = self.driver(&session.driver_name)?;
         let content = {
             let store = self.lock();
             SessionStore::from(&*store).content(&session.commit)
         };
-        let mut stored = driver
+        driver
             .read_stored(session.native_id.clone(), &session.content_format, content)
-            .map_err(|e| DataFusionError::External(Box::new(e)))?;
-        let batch = Arc::new(derive_batch(&session.id, stored.entries())?);
-        cache.insert(&session.commit, Arc::clone(&batch));
-        Ok(batch)
+            .map_err(|e| DataFusionError::External(Box::new(e)))
     }
 
     fn driver(&self, name: &str) -> Result<Arc<dyn Driver>> {

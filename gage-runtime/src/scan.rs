@@ -174,8 +174,8 @@ impl ScanContext {
 
     /// The context the Gage query tool runs over for `scope`: the
     /// scan's own context, or a scan-scoped context narrowed to one
-    /// member, with `entry` and `message` narrowed to the line range
-    /// when one is given.
+    /// member, with `entry`, `message`, and `tool_use` narrowed to the
+    /// line range when one is given.
     pub(crate) async fn query_tool_context(
         &self,
         scope: &QueryScope,
@@ -401,7 +401,7 @@ pub(crate) async fn restrict_lines(
     start: u64,
     end: u64,
 ) -> Result<(), DataFusionError> {
-    for table in ["entry", "message"] {
+    for table in ["entry", "message", "tool_use"] {
         let view = ctx
             .sql(&format!(
                 "SELECT * FROM {table} WHERE line >= {start} AND line <= {end}"
@@ -1048,7 +1048,7 @@ mod tests {
         use datafusion::datasource::MemTable;
 
         let ctx = SessionContext::new();
-        for table in ["entry", "message"] {
+        for table in ["entry", "message", "tool_use"] {
             let schema = Arc::new(Schema::new(vec![
                 Field::new("line", DataType::Int64, false),
                 Field::new("text", DataType::Utf8, false),
@@ -1068,7 +1068,7 @@ mod tests {
             .unwrap();
         }
         restrict_lines(&ctx, 2, 3).await.unwrap();
-        for table in ["entry", "message"] {
+        for table in ["entry", "message", "tool_use"] {
             let batches = ctx
                 .sql(&format!("SELECT line FROM {table} ORDER BY line"))
                 .await

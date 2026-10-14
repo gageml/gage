@@ -1,24 +1,25 @@
-//! `session.messages()` and `session.entries()`: builders over the
-//! scan's query context.
+//! `session.messages()`, `session.entries()`, and
+//! `session.tool_uses()`: builders over the scan's query context.
 //!
 //! Each builder captures the session and its constraints and runs
-//! when awaited: one parameterized `SELECT` over the `message` or
-//! `entry` table of the context [`ScanContext::query_context`] serves,
-//! scoped to the dataset's members at the commit the scan links. The
-//! row values, `Message` and `Entry`, and the SQL fragments for
-//! `.type(spec)` are in [`crate::row`].
+//! when awaited: one parameterized `SELECT` over the `message`,
+//! `entry`, or `tool_use` table of the context
+//! [`ScanContext::query_context`] serves, scoped to the dataset's
+//! members at the commit the scan links. The row values, `Message`,
+//! `Entry`, and `ToolUse`, and the SQL fragments for `.type(spec)`
+//! and `.name(spec)` are in [`crate::row`].
 //!
 //! The base builders take no syntaxed argument, so their await is
-//! the list itself. `.type(spec)` moves the chain to a filtered
-//! builder whose await is a `Result`: a spec the caller wrote wrong
-//! is `Error::Args`. A query failure or a failure to reach the store
+//! the list itself. `.type(spec)` and `.name(spec)` move the chain to
+//! a filtered builder whose await is a `Result`: a spec the caller
+//! wrote wrong is `Error::Args`. A query failure or a failure to reach the store
 //! is a VM error, since the SQL is the runtime's and the scanner has
 //! no recourse.
 
 use crate::error::{self, Error};
 use crate::row::{
-    Entry, Message, entries_from_batches, messages_from_batches, push_lines_clause,
-    register_row_types, type_clause,
+    Entry, Message, ToolUse, entries_from_batches, messages_from_batches, name_clause,
+    push_lines_clause, register_row_types, tool_uses_from_batches, type_clause,
 };
 use datafusion::common::ScalarValue;
 use datafusion::prelude::SessionContext;
@@ -62,6 +63,24 @@ pub(crate) fn types_module() -> Result<Module, ContextError> {
     m.associated_function(&Protocol::INTO_FUTURE, |q: FilteredEntryQuery| async move {
         fetch_filtered_entries(q).await
     })?;
+
+    m.ty::<ToolUseQuery>()?;
+    m.function_meta(tool_uses)?;
+    m.function_meta(ToolUseQuery::name)?;
+    m.function_meta(ToolUseQuery::lines)?;
+    m.function_meta(ToolUseQuery::latest_first)?;
+    m.function_meta(ToolUseQuery::limit)?;
+    m.associated_function(&Protocol::INTO_FUTURE, |q: ToolUseQuery| async move {
+        fetch_tool_uses(q).await
+    })?;
+    m.ty::<FilteredToolUseQuery>()?;
+    m.function_meta(FilteredToolUseQuery::lines)?;
+    m.function_meta(FilteredToolUseQuery::latest_first)?;
+    m.function_meta(FilteredToolUseQuery::limit)?;
+    m.associated_function(
+        &Protocol::INTO_FUTURE,
+        |q: FilteredToolUseQuery| async move { fetch_filtered_tool_uses(q).await },
+    )?;
     Ok(m)
 }
 
@@ -210,6 +229,100 @@ impl FilteredEntryQuery {
     }
 }
 
+/// The value of `session.tool_uses()`. Its await is the list itself.
+#[derive(Any)]
+#[rune(item = ::gage)]
+pub struct ToolUseQuery {
+    #[rune(skip)]
+    session_id: String,
+    #[rune(skip)]
+    lines: Option<(u64, u64)>,
+    #[rune(skip)]
+    reverse: bool,
+    #[rune(skip)]
+    limit: Option<u64>,
+}
+
+/// `session.tool_uses()` narrowed by `.name(spec)`. Its await is a
+/// `Result`: a spec is a syntax.
+#[derive(Any)]
+#[rune(item = ::gage)]
+pub struct FilteredToolUseQuery {
+    #[rune(skip)]
+    query: ToolUseQuery,
+    #[rune(skip)]
+    name: Value,
+}
+
+/// The session's tool invocations, read when awaited.
+#[rune::function(instance)]
+fn tool_uses(session: Ref<Session>) -> ToolUseQuery {
+    ToolUseQuery {
+        session_id: session.id.clone(),
+        lines: None,
+        reverse: false,
+        limit: None,
+    }
+}
+
+impl ToolUseQuery {
+    /// Restrict to the tools named by `spec`: a name or a list of
+    /// names.
+    #[rune::function(instance)]
+    fn name(self, spec: Value) -> FilteredToolUseQuery {
+        FilteredToolUseQuery {
+            query: self,
+            name: spec,
+        }
+    }
+
+    /// Restrict to calls made on lines `start` through `end`,
+    /// inclusive.
+    #[rune::function(instance)]
+    fn lines(mut self, start: u64, end: u64) -> Self {
+        self.lines = Some((start, end));
+        self
+    }
+
+    /// Return rows in descending `line` order instead of the default
+    /// ascending order.
+    #[rune::function(instance)]
+    fn latest_first(mut self) -> Self {
+        self.reverse = true;
+        self
+    }
+
+    /// Return at most `n` rows, taken in the query's order.
+    #[rune::function(instance)]
+    fn limit(mut self, n: u64) -> Self {
+        self.limit = Some(n);
+        self
+    }
+}
+
+impl FilteredToolUseQuery {
+    /// As [`ToolUseQuery::lines`].
+    #[rune::function(instance)]
+    fn lines(mut self, start: u64, end: u64) -> Self {
+        self.query.lines = Some((start, end));
+        self
+    }
+
+    /// As [`ToolUseQuery::latest_first`].
+    #[rune::function(instance)]
+    fn latest_first(mut self) -> Self {
+        self.query.reverse = true;
+        self
+    }
+
+    /// As [`ToolUseQuery::limit`].
+    #[rune::function(instance)]
+    fn limit(mut self, n: u64) -> Self {
+        self.query.limit = Some(n);
+        self
+    }
+}
+
 /// The outer error is a VM error; the inner is the scanner's
 /// `Result`.
 type Fetched<T> = Result<Result<T, Error>, VmError>;
@@ -259,6 +372,40 @@ fn entry_sql(q: &EntryQuery, clauses: &[String]) -> String {
     let limit = limit_clause(q.limit);
     format!(
         "SELECT * FROM entry{} ORDER BY line{limit}",
+        where_clause(clauses)
+    )
+}
+
+async fn fetch_tool_uses(q: ToolUseQuery) -> Result<Vec<ToolUse>, VmError> {
+    let (clauses, params) = session_clauses(&q.session_id, q.lines);
+    Ok(tool_uses_from_batches(
+        run(&tool_use_sql(&q, &clauses), params).await?,
+    ))
+}
+
+async fn fetch_filtered_tool_uses(q: FilteredToolUseQuery) -> Fetched<Vec<ToolUse>> {
+    let (mut clauses, mut params) = session_clauses(&q.query.session_id, q.query.lines);
+    let spec = match serde_json::to_value(&q.name) {
+        Ok(spec) => spec,
+        Err(e) => {
+            return Ok(Err(Error::Args(format!(
+                "`.name()` value could not be read: {e}"
+            ))));
+        }
+    };
+    match name_clause(&spec, &mut params) {
+        Ok(clause) => clauses.push(clause),
+        Err(e) => return Ok(Err(e)),
+    }
+    let batches = run(&tool_use_sql(&q.query, &clauses), params).await?;
+    Ok(Ok(tool_uses_from_batches(batches)))
+}
+
+fn tool_use_sql(q: &ToolUseQuery, clauses: &[String]) -> String {
+    let order = if q.reverse { " DESC" } else { "" };
+    let limit = limit_clause(q.limit);
+    format!(
+        "SELECT * FROM tool_use{} ORDER BY line{order}{limit}",
         where_clause(clauses)
     )
 }

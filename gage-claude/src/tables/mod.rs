@@ -11,12 +11,14 @@ pub mod cache;
 pub mod entry;
 pub mod message;
 pub mod session;
+pub mod tool_use;
 pub mod walk;
 
 pub use cache::SessionCache;
 pub use entry::EntryTable;
 pub use message::MessageTable;
 pub use session::SessionTable;
+pub use tool_use::ToolUseTable;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -24,8 +26,8 @@ use std::sync::Arc;
 
 use crate::index::IndexStore;
 
-/// Where a session-row table provider (`EntryTable`, `MessageTable`)
-/// finds its data.
+/// Where a session-row table provider (`EntryTable`, `MessageTable`,
+/// `ToolUseTable`) finds its data.
 ///
 /// `Corpus` scans the corpus for a whole project, reconciling first and
 /// reading through the per-context session cache — the global `gage

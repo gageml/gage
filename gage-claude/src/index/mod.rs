@@ -12,6 +12,7 @@
 mod derive;
 mod reconcile;
 mod summary_cache;
+mod tool_use;
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -28,6 +29,7 @@ pub use derive::{
 pub use reconcile::{
     IndexStore, LockMode, ReconcileEvent, ReconcileOutcome, SOURCE_MARKER, Status,
 };
+pub use tool_use::ToolUseCollector;
 
 /// Cache directory for the cache artifacts of one projects directory:
 /// `<gage_home>/cache/<slug>`, where the slug is the canonical projects

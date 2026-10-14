@@ -195,11 +195,13 @@ pub fn message_rows(derived: &RecordBatch) -> Result<RecordBatch> {
     )?)
 }
 
-/// Derived batches by commit sha, shared by every `entry` and
-/// `message` scan on one query context.
+/// Per-commit batches shared by every row-table scan on one query
+/// context: the derived batch serving `entry` and `message`, and the
+/// `tool_use` batch. Each is read through the driver on first use.
 #[derive(Debug, Default)]
 pub struct RowCache {
-    map: Mutex<HashMap<String, Arc<RecordBatch>>>,
+    derived: Mutex<HashMap<String, Arc<RecordBatch>>>,
+    tool_uses: Mutex<HashMap<String, Arc<RecordBatch>>>,
 }
 
 impl RowCache {
@@ -208,17 +210,24 @@ impl RowCache {
     }
 
     pub fn get(&self, commit: &str) -> Option<Arc<RecordBatch>> {
-        self.map
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get(commit)
-            .cloned()
+        lock(&self.derived).get(commit).cloned()
     }
 
     pub fn insert(&self, commit: &str, batch: Arc<RecordBatch>) {
-        self.map
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(commit.to_string(), batch);
+        lock(&self.derived).insert(commit.to_string(), batch);
     }
+
+    pub fn get_tool_uses(&self, commit: &str) -> Option<Arc<RecordBatch>> {
+        lock(&self.tool_uses).get(commit).cloned()
+    }
+
+    pub fn insert_tool_uses(&self, commit: &str, batch: Arc<RecordBatch>) {
+        lock(&self.tool_uses).insert(commit.to_string(), batch);
+    }
+}
+
+fn lock(
+    map: &Mutex<HashMap<String, Arc<RecordBatch>>>,
+) -> std::sync::MutexGuard<'_, HashMap<String, Arc<RecordBatch>>> {
+    map.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }

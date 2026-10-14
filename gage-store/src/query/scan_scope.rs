@@ -465,8 +465,8 @@ fn session_target(note: &NoteFull) -> Option<(String, Option<String>)> {
         .then(|| (parsed.body.to_string(), parsed.fragment.map(String::from)))
 }
 
-/// Every table of the scan scope other than `session`, `entry`, and
-/// `message`, by name.
+/// Every table of the scan scope other than `session`, `entry`,
+/// `message`, and `tool_use`, by name.
 pub fn scan_scope_tables(
     store: &Arc<Mutex<Store>>,
     source: &ScanSource,

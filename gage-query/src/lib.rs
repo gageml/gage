@@ -7,11 +7,12 @@
 //! data crates and drivers contribute.
 //!
 //! Named tables are store data. `session` is one row per live stored
-//! session object, from [`gage_store::StoredSessionTable`]. `entry`
-//! and `message` are the rows of those sessions: the core resolves
-//! the session set and plans every read ([`scope`]), and the driver
-//! that wrote each session deserializes its bytes into normalized
-//! entries the core turns into batches ([`rows`], [`stored_rows`]).
+//! session object, from [`gage_store::StoredSessionTable`]. `entry`,
+//! `message`, and `tool_use` are the rows of those sessions: the core
+//! resolves the session set and plans every read ([`scope`]), and the
+//! driver that wrote each session deserializes its bytes into
+//! normalized rows the core turns into batches ([`rows`],
+//! [`stored_rows`]).
 //! `note` is one row per live note object, from
 //! [`gage_store::StoredNoteTable`]. `issue` is one row per live issue
 //! object and `issue_event` one row per change entry across them.
@@ -20,8 +21,9 @@
 //! task ran.
 //!
 //! Native session data is reached through driver-provided functions,
-//! present on every context: `native_session`, `native_message`, and
-//! `native_entry` ([`native`]) return a source's native tables, and
+//! present on every context: `native_session`, `native_message`,
+//! `native_entry`, and `native_tool_use` ([`native`]) return a
+//! source's native tables, and
 //! the [`project`] `project_for_path` UDF maps a directory to its
 //! project name for filtering. These are how a user discovers
 //! sessions to add to the store; none is a named table.
@@ -126,7 +128,14 @@ impl ContextBuilder {
             ),
             (
                 "message",
-                Arc::new(StoredRowsTable::new(RowKind::Message, sessions)),
+                Arc::new(StoredRowsTable::new(
+                    RowKind::Message,
+                    Arc::clone(&sessions),
+                )),
+            ),
+            (
+                "tool_use",
+                Arc::new(StoredRowsTable::new(RowKind::ToolUse, sessions)),
             ),
             ("note", Arc::new(StoredNoteTable::new(Arc::clone(&store)))),
             ("dataset", dataset_table(Arc::clone(&store))),
@@ -185,8 +194,8 @@ impl ContextBuilder {
 }
 
 /// Register one scan's tables: `session` at the members' linked
-/// versions, `entry` and `message` over them, and every other table
-/// from the scan source.
+/// versions, `entry`, `message`, and `tool_use` over them, and every
+/// other table from the scan source.
 fn build_scan_scope(
     ctx: SessionContext,
     store: Arc<Mutex<Store>>,
@@ -219,7 +228,14 @@ fn build_scan_scope(
         ),
         (
             "message",
-            Arc::new(StoredRowsTable::new(RowKind::Message, sessions)),
+            Arc::new(StoredRowsTable::new(
+                RowKind::Message,
+                Arc::clone(&sessions),
+            )),
+        ),
+        (
+            "tool_use",
+            Arc::new(StoredRowsTable::new(RowKind::ToolUse, sessions)),
         ),
     ];
     tables.extend(scan_scope_tables(&store, scope.source()));
@@ -331,10 +347,11 @@ pub fn repl_functions() -> Vec<TvfInfo> {
         .collect()
 }
 
-const NATIVE_TABLES: [NativeTable; 3] = [
+const NATIVE_TABLES: [NativeTable; 4] = [
     NativeTable::Session,
     NativeTable::Message,
     NativeTable::Entry,
+    NativeTable::ToolUse,
 ];
 
 /// A context carrying the shared configuration --- the `RowCache`
@@ -706,6 +723,73 @@ mod tests {
         )
         .await;
         assert_eq!(joined, ["hi"]);
+    }
+
+    /// `tool_use` reads a stored session through its driver: one row
+    /// per call, paired with the result entry, under the scope's
+    /// session filter and the `line` filter on the calling entry.
+    #[tokio::test]
+    async fn tool_use_reads_stored_sessions_through_the_driver() {
+        let (_tmp, store) = open_store();
+        let claude_root = tempfile::tempdir().unwrap();
+        let native_id = "11111111-2222-3333-4444-666666666666";
+        let project_dir = claude_root.path().join("projects").join("-w-proj");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        std::fs::write(
+            project_dir.join(format!("{native_id}.jsonl")),
+            concat!(
+                r#"{"type":"user","uuid":"u1","timestamp":"2025-01-01T00:00:00Z","cwd":"/w/proj","message":{"role":"user","content":"fix it"}}"#,
+                "\n",
+                r#"{"type":"assistant","uuid":"a1","timestamp":"2025-01-01T00:00:01Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Edit","input":{"file_path":"/w/proj/a.rs","old_string":"x","new_string":"y"}}]}}"#,
+                "\n",
+                r#"{"type":"user","uuid":"u2","timestamp":"2025-01-01T00:00:02Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"done"}]},"toolUseResult":{"filePath":"/w/proj/a.rs"}}"#,
+                "\n",
+                r#"{"type":"assistant","uuid":"a2","timestamp":"2025-01-01T00:00:03Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"t2","name":"Read","input":{"file_path":"/w/proj/b.rs"}}]}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        let spec = format!("claude:{}", claude_root.path().display());
+        let registry = DriverRegistry::builtin();
+        let driver = registry.driver_for(&spec).unwrap();
+        let source = driver.open_source(&spec).unwrap();
+        let mut native = source.open_native(native_id).unwrap();
+        {
+            let store = store.lock().unwrap();
+            SessionStore::from(&*store)
+                .add(driver.as_ref(), native.as_mut())
+                .unwrap();
+        }
+
+        let ctx = ContextBuilder::new(Some(store)).build().await;
+        let names = strings(&ctx, "SELECT name FROM tool_use ORDER BY line").await;
+        assert_eq!(names, ["Edit", "Read"]);
+
+        let paired = strings(
+            &ctx,
+            "SELECT m.text FROM tool_use t JOIN message m \
+             ON m.session_id = t.session_id AND m.line = t.result_line \
+             WHERE t.id = 't1'",
+        )
+        .await;
+        assert_eq!(paired, ["done"]);
+
+        let changed = strings(
+            &ctx,
+            "SELECT id FROM tool_use WHERE cardinality(files_changed) > 0 AND line >= 2",
+        )
+        .await;
+        assert_eq!(changed, ["t1"]);
+
+        let unjudged = strings(&ctx, "SELECT id FROM tool_use WHERE files_changed IS NULL").await;
+        assert_eq!(unjudged, ["t2"]);
+
+        let native_rows = strings(
+            &ctx,
+            &format!("SELECT name FROM native_tool_use('{spec}') ORDER BY line"),
+        )
+        .await;
+        assert_eq!(native_rows, ["Edit", "Read"]);
     }
 
     /// The default context lists the system columns after the

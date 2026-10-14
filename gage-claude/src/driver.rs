@@ -24,13 +24,13 @@ use gage_session::{
     AgentSession, AgentSpec, AuthInfo, ContentSink, ContentSource, Driver, DriverError,
     DriverStatus, DriverTables, Entry, Field, HarnessInfo, InstallInfo, InstallReport, InstallUi,
     MaintenanceOutcome, MaintenanceStatus, NativeLookupError, NativeSession, ResolveSession,
-    SessionAttrs, Source, StoredSession, split_scheme,
+    SessionAttrs, Source, StoredSession, ToolUse, split_scheme,
 };
 
 use crate::home::ClaudeHome;
 use crate::index::{
-    IndexStore, LockMode, ReconcileEvent, SessionSummary, cache_dir_for, derive_entry,
-    derive_session,
+    IndexStore, LockMode, ReconcileEvent, SessionSummary, ToolUseCollector, cache_dir_for,
+    derive_entry, derive_session,
 };
 use crate::model::{configured_model, resolve_model, resolved_model};
 use crate::plugin;
@@ -42,7 +42,7 @@ use crate::session::{
     is_agent_tmp_slug, projects_dir,
 };
 use crate::session_reader::SessionReader;
-use crate::tables::{EntryTable, MessageTable, SessionTable};
+use crate::tables::{EntryTable, MessageTable, SessionTable, ToolUseTable};
 
 /// MCP server name under which Gage registers in `.mcp.json`.
 const MCP_SERVER_NAME: &str = "gage";
@@ -511,6 +511,7 @@ impl Source for ClaudeSource {
             session: Arc::new(SessionTable::new(Arc::clone(&self.store))),
             message: Arc::new(MessageTable::new(Arc::clone(&self.store))),
             entry: Arc::new(EntryTable::new(Arc::clone(&self.store))),
+            tool_use: Arc::new(ToolUseTable::new(Arc::clone(&self.store))),
         })
     }
 
@@ -1000,6 +1001,26 @@ impl StoredSession for ClaudeStoredSession {
             Ok((line_num, value)) => derive_entry(&native_id, line_num, &value).map(Ok),
             Err(e) => Some(Err(DriverError::Io(e))),
         }))
+    }
+
+    /// The calls of `session.jsonl` paired with their results, through
+    /// the same collector the native table uses. Pairing needs the
+    /// whole file, so the rows are read before the first is yielded;
+    /// read failures follow the rows.
+    fn tool_uses(&mut self) -> Box<dyn Iterator<Item = Result<ToolUse, DriverError>> + '_> {
+        let reader = match self.source.open("session.jsonl") {
+            Ok(r) => SessionReader::new(r),
+            Err(e) => return Box::new(std::iter::once(Err(DriverError::Io(e)))),
+        };
+        let mut collector = ToolUseCollector::new();
+        let mut failures = Vec::new();
+        for item in reader {
+            match item {
+                Ok((line_num, value)) => collector.push(line_num, &value),
+                Err(e) => failures.push(Err(DriverError::Io(e))),
+            }
+        }
+        Box::new(collector.finish().into_iter().map(Ok).chain(failures))
     }
 }
 

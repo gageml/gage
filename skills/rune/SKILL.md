@@ -501,6 +501,12 @@ for s in scan().sessions() {
     for msg in s.messages()
         .type(#{ assistant: "tool_use" }).await? { }         // by role+kind
     // msg.timestamp is a DateTime; msg.as_object(), msg.model(), msg.to_json()
+    for t in s.tool_uses().await { }                          // all tool calls
+    for t in s.tool_uses().name(["Edit", "Write"]).await? { } // by tool name
+    // t.name, t.line, t.result_line, t.output, t.is_error, t.files_changed
+    // (Some(paths), Some([]) for a call that wrote nothing, None when
+    // unknown); t.input() and t.result() are the JSON columns as values;
+    // .lines(a, b), .latest_first(), .limit(n)
     // s.native().await? is Some(Native) with .source and .project_dir,
     // None for another driver's session; Err(Error::Driver) on a
     // driver failure

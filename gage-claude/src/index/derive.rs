@@ -17,10 +17,11 @@ use arrow::array::{Int64Builder, StringBuilder, TimestampMillisecondBuilder};
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use arrow::record_batch::RecordBatch;
 use chrono::DateTime;
-use gage_session::{Entry, Message};
+use gage_session::{Entry, Message, ToolUseBatch};
 use serde::{Deserialize, Serialize};
 
 use super::Result;
+use super::tool_use::ToolUseCollector;
 
 // Derived column indices. The derived schema is a superset serving
 // two tables: `entry` is a projection of every row; `message` is a
@@ -108,6 +109,8 @@ pub struct SessionSummary {
 pub struct DerivedSession {
     pub session_id: String,
     pub batch: RecordBatch,
+    /// The session's `tool_use` rows
+    pub tool_uses: RecordBatch,
     pub summary: SessionSummary,
     pub fingerprint: Fingerprint,
 }
@@ -289,7 +292,7 @@ fn json_to_yaml(v: &serde_json::Value) -> serde_yaml::Value {
 
 /// Extract tool_result text from a content block's `content` field,
 /// which may be a string or an array of content items.
-fn tool_result_text(block: &serde_json::Value) -> String {
+pub(crate) fn tool_result_text(block: &serde_json::Value) -> String {
     match block.get("content") {
         Some(serde_json::Value::String(s)) => s.clone(),
         Some(serde_json::Value::Array(arr)) => {
@@ -401,6 +404,7 @@ pub fn derive_session(session_id: &str, path: &Path) -> Result<DerivedSession> {
     let reader = SessionReader::open(path)?;
 
     let mut b = RowBuilders::new();
+    let mut tool_uses = ToolUseCollector::new();
     let mut summary = SessionSummary {
         is_empty: true,
         ..Default::default()
@@ -472,14 +476,28 @@ pub fn derive_session(session_id: &str, path: &Path) -> Result<DerivedSession> {
         if let Some(row) = derive_entry(session_id, line_num, &entry) {
             b.push(session_id, &row);
         }
+        tool_uses.push(line_num, &entry);
+    }
+
+    let mut tool_use_batch = ToolUseBatch::new();
+    for t in tool_uses.finish() {
+        tool_use_batch.push(session_id, &t);
     }
 
     Ok(DerivedSession {
         session_id: session_id.to_string(),
         batch: b.finish()?,
+        tool_uses: tool_use_batch.finish()?,
         summary,
         fingerprint,
     })
+}
+
+/// The entry's `timestamp` as epoch milliseconds; `None` when absent
+/// or not RFC 3339.
+pub(crate) fn entry_timestamp_ms(entry: &serde_json::Value) -> Option<i64> {
+    let s = entry.get("timestamp").and_then(|v| v.as_str())?;
+    Some(DateTime::parse_from_rfc3339(s).ok()?.timestamp_millis())
 }
 
 /// Normalize one parsed session line into `entry` table shape. This

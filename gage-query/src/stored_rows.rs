@@ -1,6 +1,6 @@
-//! The `entry` and `message` tables over stored sessions.
+//! The `entry`, `message`, and `tool_use` tables over stored sessions.
 //!
-//! One provider type serves both tables; [`RowKind`] selects the
+//! One provider type serves the three tables; [`RowKind`] selects the
 //! shape. A scan resolves the session set through the
 //! [`SessionSet`], then streams one batch per session, reading each
 //! session's rows through its driver on first touch. Filters on
@@ -34,6 +34,7 @@ use gage_session::filter::{self, RowFilter};
 
 use crate::rows::{RowCache, entry_rows, entry_schema, message_rows, message_schema};
 use crate::scope::{SessionSet, StoredSessionRef};
+use gage_session::tool_use_schema;
 
 const SESSION_ID_COL: &str = "session_id";
 
@@ -41,6 +42,7 @@ const SESSION_ID_COL: &str = "session_id";
 pub enum RowKind {
     Entry,
     Message,
+    ToolUse,
 }
 
 impl RowKind {
@@ -48,13 +50,30 @@ impl RowKind {
         match self {
             RowKind::Entry => entry_schema(),
             RowKind::Message => message_schema(),
+            RowKind::ToolUse => tool_use_schema(),
         }
     }
 
-    fn rows(self, derived: &RecordBatch) -> Result<RecordBatch> {
+    /// The rows of one session in this kind's shape.
+    fn rows(
+        self,
+        scope: &SessionSet,
+        session: &StoredSessionRef,
+        cache: &RowCache,
+    ) -> Result<RecordBatch> {
         match self {
-            RowKind::Entry => entry_rows(derived),
-            RowKind::Message => message_rows(derived),
+            RowKind::Entry => entry_rows(scope.rows(session, cache)?.as_ref()),
+            RowKind::Message => message_rows(scope.rows(session, cache)?.as_ref()),
+            RowKind::ToolUse => Ok(scope.tool_uses(session, cache)?.as_ref().clone()),
+        }
+    }
+
+    /// Position of `line` in this kind's schema; `session_id` is
+    /// column 0 of every kind.
+    fn line_col(self) -> usize {
+        match self {
+            RowKind::Entry | RowKind::Message => 1,
+            RowKind::ToolUse => 3,
         }
     }
 }
@@ -222,11 +241,9 @@ impl ExecutionPlan for StoredRowsExec {
         let sessions = (*self.sessions).clone();
 
         let batches = futures::stream::iter(sessions).map(move |session| {
-            let derived = work.scope.rows(&session, &work.cache)?;
-            let mut batch = work.kind.rows(&derived)?;
-            // session_id and line are columns 0 and 1 of both shapes
+            let mut batch = work.kind.rows(&work.scope, &session, &work.cache)?;
             if let Some(f) = &work.row_filter {
-                batch = f.filter_batch(&batch, 0, 1)?;
+                batch = f.filter_batch(&batch, 0, work.kind.line_col())?;
             }
             match &work.projection {
                 Some(p) => Ok(batch.project(p)?),

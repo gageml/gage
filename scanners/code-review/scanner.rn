@@ -314,52 +314,18 @@ pub async fn scan_sessions() {
 }
 
 async fn skip_session(s) {
-    if s
-        .messages()
-        .type(#{ assistant: "tool_use", user: "tool_result" })
-        .await?
-        .iter()
-        .any(edits_files)
-    {
+    if s.tool_uses().await.iter().any(changed_files) {
         Ok(None)
     } else {
         Ok(Some("no file edits"))
     }
 }
 
-fn edits_files(m) {
-    uses_edit_tool(m) || bash_edit(m)
-}
-
-fn uses_edit_tool(m) {
-    m
-        .as_object()
-        .message
-        .content
-        .iter()
-        .any(
-            |block| {
-                block.type == "tool_use" && ["Edit", "Write", "MultiEdit"]
-                    .iter()
-                    .any(|n| n == block.name)
-            },
-        )
-}
-
-fn bash_edit(m) {
-    if let Some(result) = m.as_object().get("toolUseResult") {
-        if result is Object {
-            if let Some(diff) = result.get("bashEditDiff") {
-                if let Some(changed) = diff.get("changedFiles") {
-                    return !changed.is_empty();
-                }
-                if let Some(files) = diff.get("files") {
-                    return !files.is_empty();
-                }
-            }
-        }
+fn changed_files(t) {
+    match t.files_changed {
+        Some(files) => !files.is_empty(),
+        None => false,
     }
-    false
 }
 
 async fn summary_notes_by_attachment() {

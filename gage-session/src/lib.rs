@@ -20,12 +20,14 @@ pub mod agent;
 pub mod filter;
 pub mod status;
 pub mod system_col;
+pub mod tool_use;
 
 pub use agent::{
     AgentEvent, AgentMcp, AgentSession, AgentSpec, SystemPrompt, ToolUseEntries, TurnResult,
 };
 pub use status::{AuthInfo, DriverStatus, Field, HarnessInfo, InstallInfo};
 pub use system_col::{SYSTEM_META_KEY, is_system, system};
+pub use tool_use::{ToolUse, ToolUseBatch, tool_use_batch, tool_use_schema};
 
 pub trait Driver: Send + Sync {
     /// The driver's name, recorded on stored sessions. Not a scheme.
@@ -288,6 +290,7 @@ pub struct DriverTables {
     pub session: Arc<dyn TableProvider>,
     pub message: Arc<dyn TableProvider>,
     pub entry: Arc<dyn TableProvider>,
+    pub tool_use: Arc<dyn TableProvider>,
 }
 
 pub trait NativeSession {
@@ -309,6 +312,10 @@ pub trait StoredSession {
     /// driver deserializes its opaque bytes here; the core builds the
     /// `entry` and `message` tables from the result.
     fn entries(&mut self) -> Box<dyn Iterator<Item = Result<Entry, DriverError>> + '_>;
+    /// The session's tool invocations in `tool_use` table shape, in
+    /// call-line order. The core builds the `tool_use` table from the
+    /// result.
+    fn tool_uses(&mut self) -> Box<dyn Iterator<Item = Result<ToolUse, DriverError>> + '_>;
 }
 
 /// The attributes of a native session. An implementation decides how

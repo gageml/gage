@@ -61,6 +61,7 @@ doc, written_by) that provides documentation for the note.
 ## Scoped contexts
 
 A scan-scoped Query tool may also be constrained to specific sessions and, per
-session, to a line range. `entry` and `message` then return only in-range rows,
+session, to a line range. `entry`, `message`, and `tool_use` then return only
+in-range rows,
 even though the SQL carries no such predicate. Rows outside the scope do not
 exist from the tool's point of view; do not infer their absence from the corpus.
