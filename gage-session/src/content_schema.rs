@@ -6,8 +6,8 @@
 //! hold the driver's native record verbatim, so their shape is the
 //! driver's to state. A driver states it per content format it reads,
 //! keyed by the `content_format` value the session table carries, as
-//! a JSON Schema and an optional prose document. A reader scopes rows
-//! to one content format before reading into a native column.
+//! a JSON Schema. A reader scopes rows to one content format before
+//! reading into a native column.
 
 use std::sync::Arc;
 
@@ -47,8 +47,6 @@ pub struct ContentSchema {
     pub field: ContentField,
     /// A JSON Schema document, complete or partial
     pub schema: String,
-    /// Prose beside the schema, as markdown
-    pub doc: Option<String>,
 }
 
 pub fn content_schema_schema() -> SchemaRef {
@@ -56,7 +54,6 @@ pub fn content_schema_schema() -> SchemaRef {
         Field::new("content_format", DataType::Utf8, false),
         Field::new("name", DataType::Utf8, false),
         Field::new("schema", DataType::Utf8, false),
-        Field::new("doc", DataType::Utf8, true),
     ]))
 }
 
@@ -65,12 +62,10 @@ pub fn content_schema_batch(rows: &[ContentSchema]) -> Result<RecordBatch> {
     let mut formats = StringBuilder::new();
     let mut names = StringBuilder::new();
     let mut schemas = StringBuilder::new();
-    let mut docs = StringBuilder::new();
     for row in rows {
         formats.append_value(&row.content_format);
         names.append_value(row.field.as_str());
         schemas.append_value(&row.schema);
-        docs.append_option(row.doc.as_deref());
     }
     Ok(RecordBatch::try_new(
         content_schema_schema(),
@@ -78,7 +73,6 @@ pub fn content_schema_batch(rows: &[ContentSchema]) -> Result<RecordBatch> {
             Arc::new(formats.finish()),
             Arc::new(names.finish()),
             Arc::new(schemas.finish()),
-            Arc::new(docs.finish()),
         ],
     )?)
 }

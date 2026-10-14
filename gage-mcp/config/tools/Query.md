@@ -52,7 +52,7 @@ Functions: issue_report('<id>') renders one issue as markdown;
 related_issue('<id>' [, n]) lists the n most similar issues, best first.
 
 `raw`, `input_raw`, and `result_raw` are JSON text in the driver's native
-shape. content_schema (content_format, name, schema, doc) holds each shape as
+shape. content_schema (content_format, name, schema) holds each shape as
 a JSON Schema: `name` is entry, tool_use_input, or tool_use_result. Scope rows
 to one `content_format` (from `session`) before reading, with
 json_extract(raw, '$.message.usage.output_tokens') or the -> and ->>

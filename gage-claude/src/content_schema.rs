@@ -27,7 +27,6 @@ pub(crate) fn content_schemas() -> Vec<ContentSchema> {
         content_format: CONTENT_FORMAT.to_string(),
         field,
         schema: schema.to_string(),
-        doc: None,
     })
     .collect()
 }

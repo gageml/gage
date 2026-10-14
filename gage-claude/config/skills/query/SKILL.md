@@ -87,7 +87,7 @@ written_by)` describing what notes of that name hold.
 
 `raw` on `entry`, `message`, and their native forms, and `input_raw` and
 `result_raw` on `tool_use`, are JSON text in the driver's native shape. The
-shape is described in `content_schema (content_format, name, schema, doc)`:
+shape is described in `content_schema (content_format, name, schema)`:
 one row per content format and native field, `schema` a JSON Schema document,
 partial, listing the common fields. Read it before reading into `raw`:
 
