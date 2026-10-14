@@ -13,7 +13,7 @@
 //! commit touching the file and the commit itself. Without git, or
 //! for a file git does not track, every write to the file is a
 //! candidate. The sessions read are those of the file's directory and
-//! its ancestors, as the driver names projects.
+//! its ancestors, as the driver names projects, that wrote the file.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -28,6 +28,7 @@ use datafusion::arrow::array::{
 };
 use datafusion::arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use datafusion::arrow::record_batch::RecordBatch;
+use datafusion::common::ScalarValue;
 use datafusion::prelude::SessionContext;
 use gage_query::ContextBuilder;
 use gage_session::Source;
@@ -358,6 +359,42 @@ fn project_names(source: &dyn Source, path: &Path) -> anyhow::Result<Vec<String>
     Ok(names)
 }
 
+/// Literal ids for an `IN` list. Literal ids reach the session walk
+/// as path pruning; a subquery over the session table does not.
+fn id_list(ids: &[String]) -> String {
+    ids.iter()
+        .map(|id| format!("'{}'", id.replace('\'', "''")))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The sessions among `ids` with a write the driver attributes to the
+/// file. The `array_has` literal reaches the walk, which skips every
+/// session whose summary does not list the file before parsing it.
+async fn writers_of(
+    ctx: &SessionContext,
+    tables: &Tables,
+    ids: &[String],
+    wrote_path: &str,
+) -> anyhow::Result<Vec<String>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let sql = format!(
+        "SELECT DISTINCT t.session_id FROM {tool_use} t \
+         WHERE t.session_id IN ({ids}) AND {wrote_path}",
+        tool_use = tables.tool_use,
+        ids = id_list(ids),
+    );
+    let batches = ctx.sql(&sql).await?.collect().await?;
+    let mut out = Vec::new();
+    for batch in &batches {
+        let col = str_col(batch, 0);
+        out.extend((0..batch.num_rows()).map(|i| col.value(i).to_string()));
+    }
+    Ok(out)
+}
+
 /// The ids of the sessions in `projects`, read through the session
 /// table so the walk prunes by project.
 async fn session_ids(
@@ -441,7 +478,11 @@ async fn blame(
     projects: &[String],
     lines: Vec<BlamedLine>,
 ) -> anyhow::Result<Vec<BlameRow>> {
+    let path = path.to_str().context("path is not UTF-8")?;
+    let quoted_path = path.replace('\'', "''");
+    let wrote_path = format!("array_has(t.files_changed, '{quoted_path}')");
     let ids = session_ids(ctx, tables, projects).await?;
+    let ids = writers_of(ctx, tables, &ids, &wrote_path).await?;
     if ids.is_empty() {
         return Ok(lines
             .into_iter()
@@ -451,17 +492,24 @@ async fn blame(
             })
             .collect());
     }
-    // Literal ids reach the session walk as path pruning; a subquery
-    // over the session table does not
-    let id_list = ids
-        .iter()
-        .map(|id| format!("'{}'", id.replace('\'', "''")))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let path = path.to_str().context("path is not UTF-8")?;
+    let id_list = id_list(&ids);
     ctx.register_batch("blame_line", blame_line_batch(&lines)?)?;
-    let quoted_path = path.replace('\'', "''");
-    let wrote_path = format!("array_has(t.files_changed, '{quoted_path}')");
+    // The union of the lines' windows as literal bounds on the scan,
+    // which the session walk prunes on; the per-line windows in the
+    // join condition reach no scan
+    let ts = |ms: i64| ScalarValue::TimestampMillisecond(Some(ms), Some("UTC".into()));
+    let before = lines.iter().map(|l| l.window_end).max().unwrap_or(0);
+    let after = lines
+        .iter()
+        .map(|l| l.window_start)
+        .reduce(|a, b| Some(a?.min(b?)))
+        .flatten();
+    let mut params = vec![ts(before)];
+    let mut span = "t.result_timestamp <= $1".to_string();
+    if let Some(after) = after {
+        params.push(ts(after));
+        span.push_str(" AND t.result_timestamp > $2");
+    }
     // The winning call per line among the calls in the line's window
     // that satisfy `predicate`: a call the driver attributes to the
     // file over one it could not judge, then the latest
@@ -478,7 +526,7 @@ async fn blame(
                  FROM blame_line b JOIN {tool_use} t \
                    ON t.result_timestamp <= b.window_end \
                   AND (b.window_start IS NULL OR t.result_timestamp > b.window_start) \
-                 WHERE t.session_id IN ({id_list}) AND {predicate} \
+                 WHERE t.session_id IN ({id_list}) AND {span} AND {predicate} \
                ) w \
              ) WHERE rank = 1",
             tool_use = tables.tool_use,
@@ -486,16 +534,17 @@ async fn blame(
     };
     // The text is the evidence for a content match, so a call the
     // driver could not judge (`files_changed` null, as for a shell
-    // command whose result carries no diff) is admitted. The
-    // file-level fallback has only the path list to go on.
+    // command whose result carries no diff) is admitted, within the
+    // sessions known to have written the file. The file-level
+    // fallback has only the path list to go on.
     let by_content = latest(&format!(
         "({wrote_path} OR t.files_changed IS NULL) \
          AND b.match_text IS NOT NULL AND strpos(t.input_raw, b.match_text) > 0"
     ));
     let by_file = latest(&wrote_path);
 
-    let mut found = collect_matches(ctx, &by_content, Match::Content).await?;
-    let fallback = collect_matches(ctx, &by_file, Match::File).await?;
+    let mut found = collect_matches(ctx, &by_content, &params, Match::Content).await?;
+    let fallback = collect_matches(ctx, &by_file, &params, Match::File).await?;
     for (number, attribution) in fallback {
         found.entry(number).or_insert(attribution);
     }
@@ -561,9 +610,15 @@ fn blame_line_batch(lines: &[BlamedLine]) -> anyhow::Result<RecordBatch> {
 async fn collect_matches(
     ctx: &SessionContext,
     sql: &str,
+    params: &[ScalarValue],
     matched: Match,
 ) -> anyhow::Result<std::collections::BTreeMap<u64, Attribution>> {
-    let batches = ctx.sql(sql).await?.collect().await?;
+    let batches = ctx
+        .sql(sql)
+        .await?
+        .with_param_values(params.to_vec())?
+        .collect()
+        .await?;
     let mut out = std::collections::BTreeMap::new();
     for batch in &batches {
         let numbers = int_col(batch, 0);

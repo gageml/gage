@@ -5,9 +5,10 @@ use datafusion::arrow::compute::filter_record_batch;
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::DFSchema;
+use datafusion::common::ScalarValue;
 use datafusion::error::Result;
 use datafusion::execution::context::ExecutionProps;
-use datafusion::logical_expr::TableProviderFilterPushDown;
+use datafusion::logical_expr::{Operator, TableProviderFilterPushDown};
 use datafusion::physical_expr::{PhysicalExpr, create_physical_expr};
 use datafusion::prelude::Expr;
 
@@ -265,10 +266,146 @@ fn id_schema(col_name: &str) -> SchemaRef {
     )]))
 }
 
+/// The bounds a set of pushed filters puts on a timestamp column, as
+/// a walk reads them from each session's first and last entry time
+/// to skip sessions whose span cannot hold a matching row. Only
+/// comparisons of the column against a timestamp literal, and
+/// `BETWEEN`, bound it; any other shape leaves the bound open. The
+/// bounds are inclusive on both sides, which admits a session on the
+/// boundary of a strict comparison and never drops one.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TimeBounds {
+    /// Epoch milliseconds a matching row's time is at or after
+    pub after: Option<i64>,
+    /// Epoch milliseconds a matching row's time is at or before
+    pub before: Option<i64>,
+}
+
+impl TimeBounds {
+    pub fn is_open(&self) -> bool {
+        self.after.is_none() && self.before.is_none()
+    }
+
+    /// Whether a span of `first..=last` can hold a row in the bounds.
+    pub fn admits(&self, first: i64, last: i64) -> bool {
+        self.after.is_none_or(|a| last >= a) && self.before.is_none_or(|b| first <= b)
+    }
+
+    fn narrow_after(&mut self, ms: i64) {
+        self.after = Some(self.after.map_or(ms, |a| a.max(ms)));
+    }
+
+    fn narrow_before(&mut self, ms: i64) {
+        self.before = Some(self.before.map_or(ms, |b| b.min(ms)));
+    }
+}
+
+/// The [`TimeBounds`] the conjunction of `filters` puts on `col`.
+pub fn time_bounds(filters: &[Expr], col: &str) -> TimeBounds {
+    let mut bounds = TimeBounds::default();
+    for f in filters {
+        narrow_bounds(f, col, &mut bounds);
+    }
+    bounds
+}
+
+fn narrow_bounds(expr: &Expr, col: &str, bounds: &mut TimeBounds) {
+    match expr {
+        Expr::BinaryExpr(b) if b.op == Operator::And => {
+            narrow_bounds(&b.left, col, bounds);
+            narrow_bounds(&b.right, col, bounds);
+        }
+        Expr::BinaryExpr(b) => {
+            let (op, ms) = match (is_column(&b.left, col), is_column(&b.right, col)) {
+                (true, false) => match timestamp_ms(&b.right) {
+                    Some(ms) => (b.op, ms),
+                    None => return,
+                },
+                (false, true) => match (timestamp_ms(&b.left), b.op.swap()) {
+                    (Some(ms), Some(op)) => (op, ms),
+                    _ => return,
+                },
+                _ => return,
+            };
+            match op {
+                Operator::Gt | Operator::GtEq => bounds.narrow_after(ms),
+                Operator::Lt | Operator::LtEq => bounds.narrow_before(ms),
+                Operator::Eq => {
+                    bounds.narrow_after(ms);
+                    bounds.narrow_before(ms);
+                }
+                _ => {}
+            }
+        }
+        Expr::Between(b) if !b.negated && is_column(&b.expr, col) => {
+            if let Some(ms) = timestamp_ms(&b.low) {
+                bounds.narrow_after(ms);
+            }
+            if let Some(ms) = timestamp_ms(&b.high) {
+                bounds.narrow_before(ms);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The values `filters` require `col`, a list column, to hold through
+/// `array_has(col, '<value>')`, from the conjunction's top level. A
+/// walk skips a session whose recorded members lack any of them.
+pub fn required_members(filters: &[Expr], col: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for f in filters {
+        collect_members(f, col, &mut out);
+    }
+    out
+}
+
+fn collect_members(expr: &Expr, col: &str, out: &mut Vec<String>) {
+    match expr {
+        Expr::BinaryExpr(b) if b.op == Operator::And => {
+            collect_members(&b.left, col, out);
+            collect_members(&b.right, col, out);
+        }
+        Expr::ScalarFunction(f) if f.func.name() == "array_has" => {
+            if let [haystack, Expr::Literal(ScalarValue::Utf8(Some(needle)), _)] = f.args.as_slice()
+                && is_column(haystack, col)
+            {
+                out.push(needle.clone());
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Whether `expr` is the column `col`, through any cast type coercion
+/// wrapped it in.
+fn is_column(expr: &Expr, col: &str) -> bool {
+    match expr {
+        Expr::Column(c) => c.name == col,
+        Expr::Cast(c) => is_column(&c.expr, col),
+        _ => false,
+    }
+}
+
+/// A timestamp literal as epoch milliseconds, through any cast.
+fn timestamp_ms(expr: &Expr) -> Option<i64> {
+    match expr {
+        Expr::Literal(v, _) => match v {
+            ScalarValue::TimestampSecond(Some(s), _) => Some(s.checked_mul(1_000)?),
+            ScalarValue::TimestampMillisecond(Some(ms), _) => Some(*ms),
+            ScalarValue::TimestampMicrosecond(Some(us), _) => Some(us.div_euclid(1_000)),
+            ScalarValue::TimestampNanosecond(Some(ns), _) => Some(ns.div_euclid(1_000_000)),
+            _ => None,
+        },
+        Expr::Cast(c) => timestamp_ms(&c.expr),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use datafusion::common::ScalarValue;
+    use datafusion::functions_nested::expr_fn::array_has;
     use datafusion::logical_expr::{BinaryExpr, Like, Operator, expr::InList};
 
     fn col(name: &str) -> Expr {
@@ -506,5 +643,93 @@ mod tests {
             false,
         ))];
         assert!(RowFilter::new(&f, "session_id").unwrap().is_none());
+    }
+
+    fn ts(ms: i64) -> Expr {
+        Expr::Literal(
+            ScalarValue::TimestampMillisecond(Some(ms), Some("UTC".into())),
+            None,
+        )
+    }
+
+    fn cmp(left: Expr, op: Operator, right: Expr) -> Expr {
+        Expr::BinaryExpr(BinaryExpr::new(Box::new(left), op, Box::new(right)))
+    }
+
+    #[test]
+    fn time_bounds_narrow_from_comparisons_either_way_round() {
+        let filters = [
+            cmp(col("timestamp"), Operator::Gt, ts(100)),
+            cmp(ts(900), Operator::GtEq, col("timestamp")),
+            cmp(col("timestamp"), Operator::GtEq, ts(50)),
+            cmp(col("other"), Operator::Lt, ts(10)),
+        ];
+        let bounds = time_bounds(&filters, "timestamp");
+        assert_eq!(
+            bounds,
+            TimeBounds {
+                after: Some(100),
+                before: Some(900)
+            }
+        );
+        assert!(bounds.admits(0, 100) && bounds.admits(900, 1000));
+        assert!(!bounds.admits(0, 99) && !bounds.admits(901, 1000));
+    }
+
+    #[test]
+    fn time_bounds_read_between_and_conjunctions_but_not_disjunctions() {
+        let between = Expr::Between(datafusion::logical_expr::Between::new(
+            Box::new(col("timestamp")),
+            false,
+            Box::new(ts(10)),
+            Box::new(ts(20)),
+        ));
+        assert_eq!(
+            time_bounds(std::slice::from_ref(&between), "timestamp"),
+            TimeBounds {
+                after: Some(10),
+                before: Some(20)
+            }
+        );
+        let conj = cmp(
+            cmp(col("timestamp"), Operator::Gt, ts(5)),
+            Operator::And,
+            cmp(col("timestamp"), Operator::Lt, ts(7)),
+        );
+        assert_eq!(
+            time_bounds(std::slice::from_ref(&conj), "timestamp"),
+            TimeBounds {
+                after: Some(5),
+                before: Some(7)
+            }
+        );
+        let disj = cmp(
+            cmp(col("timestamp"), Operator::Gt, ts(5)),
+            Operator::Or,
+            cmp(col("timestamp"), Operator::Lt, ts(7)),
+        );
+        assert!(time_bounds(std::slice::from_ref(&disj), "timestamp").is_open());
+    }
+
+    #[test]
+    fn required_members_come_from_top_level_array_has() {
+        let filters = [
+            array_has(col("files_changed"), lit_str("/w/a.rs")),
+            cmp(
+                array_has(col("files_changed"), lit_str("/w/b.rs")),
+                Operator::And,
+                cmp(col("line"), Operator::Gt, ts(1)),
+            ),
+            cmp(
+                array_has(col("files_changed"), lit_str("/w/c.rs")),
+                Operator::Or,
+                col("files_changed").is_null(),
+            ),
+            array_has(col("other"), lit_str("/w/d.rs")),
+        ];
+        assert_eq!(
+            required_members(&filters, "files_changed"),
+            ["/w/a.rs", "/w/b.rs"]
+        );
     }
 }

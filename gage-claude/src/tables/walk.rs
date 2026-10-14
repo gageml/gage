@@ -1,7 +1,8 @@
 //! Shared session-walk helpers for the session-row table providers
-//! (`message`, `entry`, `session`).
+//! (`message`, `entry`, `tool_use`, `session`).
 
 use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Instant, UNIX_EPOCH};
@@ -15,8 +16,11 @@ use datafusion::prelude::Expr;
 
 use gage_core::style::IdHighlighter;
 
+use crate::index::SessionSummary;
 use crate::session::SessionInfo;
-use gage_session::filter::{ColumnFilter, IdFilter, covered_by};
+use gage_session::filter::{
+    ColumnFilter, IdFilter, TimeBounds, covered_by, required_members, time_bounds,
+};
 
 /// The columns the walk fills from the directory listing alone,
 /// besides the id column: the project slug, the file mtime, and the
@@ -67,6 +71,39 @@ fn walk_batch(schema: &SchemaRef, sessions: &[SessionInfo]) -> Result<RecordBatc
     )?)
 }
 
+/// The row-table columns whose pushed filters prune sessions through
+/// the summary cache, before any parse: a time column bounded by the
+/// session's first and last entry time, and a list column whose
+/// required members the session's recorded set must hold. A session
+/// without a fresh summary is kept.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct SummaryPrune {
+    pub time_col: Option<&'static str>,
+    pub files_col: Option<&'static str>,
+}
+
+impl SummaryPrune {
+    pub const NONE: Self = Self {
+        time_col: None,
+        files_col: None,
+    };
+
+    /// Whether the summary admits a session under `filters`.
+    fn admits(&self, summary: &SessionSummary, bounds: &TimeBounds, paths: &[String]) -> bool {
+        let in_span = match (summary.first_timestamp_ms, summary.last_timestamp_ms) {
+            (Some(first), Some(last)) => bounds.admits(first, last),
+            _ => true,
+        };
+        in_span
+            && paths.iter().all(|p| {
+                summary
+                    .files_changed
+                    .iter()
+                    .any(|f| f.as_os_str() == OsStr::new(p))
+            })
+    }
+}
+
 /// Result of [`walk_sessions`].
 pub(crate) struct WalkOutcome {
     /// Sessions after the walk-column filters and the pushed limit.
@@ -97,6 +134,7 @@ pub(crate) fn walk_sessions(
     id_col: &str,
     limit: Option<usize>,
     with_id_prefix: bool,
+    prune: SummaryPrune,
 ) -> Result<WalkOutcome> {
     let schema = walk_schema(id_col);
     let filter = ColumnFilter::new(filters, Arc::clone(&schema))?;
@@ -124,6 +162,20 @@ pub(crate) fn walk_sessions(
             .filter_map(|(s, keep)| keep.then_some(s))
             .collect();
     }
+    let bounds = prune
+        .time_col
+        .map(|c| time_bounds(filters, c))
+        .unwrap_or_default();
+    let paths = prune
+        .files_col
+        .map(|c| required_members(filters, c))
+        .unwrap_or_default();
+    if !bounds.is_open() || !paths.is_empty() {
+        sessions.retain(|s| match store.session_summary(&s.id, s.mtime) {
+            Some(summary) => prune.admits(&summary, &bounds, &paths),
+            None => true,
+        });
+    }
     if limit_pushed && let Some(n) = limit {
         sessions.truncate(n);
     }
@@ -147,14 +199,15 @@ fn unique_prefix_lens(sessions: &[SessionInfo]) -> HashMap<String, usize> {
         .collect()
 }
 
-/// The same walk, projected to the `(id, path)` pairs the message and
-/// entry providers need.
+/// The same walk, projected to the `(id, path)` pairs the row
+/// providers need.
 pub(crate) fn session_paths(
     store: &IndexStore,
     filters: &[Expr],
     id_col: &str,
+    prune: SummaryPrune,
 ) -> Result<Vec<(String, PathBuf)>> {
-    Ok(walk_sessions(store, filters, id_col, None, false)?
+    Ok(walk_sessions(store, filters, id_col, None, false, prune)?
         .sessions
         .into_iter()
         .map(|s| (s.id, s.src))
@@ -175,5 +228,121 @@ pub(crate) fn lookup_paths(
     match IdFilter::new(filters, "session_id")? {
         Some(f) => f.retain(pairs, |(id, _)| id.as_str()),
         None => Ok(pairs),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use datafusion::common::ScalarValue;
+    use datafusion::functions_nested::expr_fn::array_has;
+    use datafusion::logical_expr::{BinaryExpr, Operator};
+    use std::path::Path;
+
+    fn seed(root: &Path, id: &str) -> PathBuf {
+        let dir = root.join("-w-proj");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("{id}.jsonl"));
+        std::fs::write(
+            &path,
+            "{\"type\":\"user\",\"message\":{\"content\":\"hi\"}}\n",
+        )
+        .unwrap();
+        path
+    }
+
+    fn summary(first: i64, last: i64, files: &[&str]) -> SessionSummary {
+        SessionSummary {
+            first_timestamp_ms: Some(first),
+            last_timestamp_ms: Some(last),
+            files_changed: files.iter().map(PathBuf::from).collect(),
+            ..Default::default()
+        }
+    }
+
+    fn ts(ms: i64) -> Expr {
+        Expr::Literal(
+            ScalarValue::TimestampMillisecond(Some(ms), Some("UTC".into())),
+            None,
+        )
+    }
+
+    fn after(col: &str, ms: i64) -> Expr {
+        Expr::BinaryExpr(BinaryExpr::new(
+            Box::new(Expr::Column(col.into())),
+            Operator::Gt,
+            Box::new(ts(ms)),
+        ))
+    }
+
+    fn wrote(path: &str) -> Expr {
+        array_has(
+            Expr::Column("files_changed".into()),
+            Expr::Literal(ScalarValue::Utf8(Some(path.to_string())), None),
+        )
+    }
+
+    /// Three sessions: one in the window that wrote the file, one in
+    /// the window that did not, one before the window. A fourth has
+    /// no summary and is always kept.
+    #[test]
+    fn summaries_prune_the_walk_by_time_and_by_file() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let store = IndexStore::new(root.path(), cache.path());
+        let ids = [
+            "aaaaaaaa-0000-0000-0000-000000000001",
+            "aaaaaaaa-0000-0000-0000-000000000002",
+            "aaaaaaaa-0000-0000-0000-000000000003",
+            "aaaaaaaa-0000-0000-0000-000000000004",
+        ];
+        for id in ids {
+            seed(root.path(), id);
+        }
+        let summaries = [
+            (ids[0], summary(1_000, 2_000, &["/w/a.rs"])),
+            (ids[1], summary(1_000, 2_000, &["/w/b.rs"])),
+            (ids[2], summary(100, 500, &["/w/a.rs"])),
+        ];
+        for (id, s) in &summaries {
+            store.put_session_summary(id, s).unwrap();
+        }
+        let prune = SummaryPrune {
+            time_col: Some("result_timestamp"),
+            files_col: Some("files_changed"),
+        };
+        let walked = |filters: &[Expr]| -> Vec<String> {
+            let mut ids: Vec<String> = session_paths(&store, filters, "session_id", prune)
+                .unwrap()
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect();
+            ids.sort();
+            ids
+        };
+
+        assert_eq!(walked(&[]), ids);
+        assert_eq!(
+            walked(&[after("result_timestamp", 900)]),
+            [ids[0], ids[1], ids[3]]
+        );
+        assert_eq!(walked(&[wrote("/w/a.rs")]), [ids[0], ids[2], ids[3]]);
+        assert_eq!(
+            walked(&[after("result_timestamp", 900), wrote("/w/a.rs")]),
+            [ids[0], ids[3]]
+        );
+        // A bound on a column the prune does not name has no effect
+        assert_eq!(walked(&[after("timestamp", 900)]), ids);
+        assert_eq!(
+            session_paths(
+                &store,
+                &[after("timestamp", 900)],
+                "session_id",
+                SummaryPrune::NONE
+            )
+            .unwrap()
+            .len(),
+            4
+        );
     }
 }

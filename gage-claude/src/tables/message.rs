@@ -29,8 +29,15 @@ use futures::StreamExt;
 
 use super::SessionSource;
 use super::cache::SessionCache;
-use super::walk::{lookup_paths, session_paths};
+use super::walk::{SummaryPrune, lookup_paths, session_paths};
 use gage_session::filter;
+
+/// The pushed filters the walk prunes sessions on through the summary
+/// cache
+const PRUNE: SummaryPrune = SummaryPrune {
+    time_col: Some("timestamp"),
+    files_col: None,
+};
 
 /// The derived columns serving the `message` table, in table-column
 /// order. `text` is non-null exactly for message rows: user/assistant
@@ -138,7 +145,7 @@ impl TableProvider for MessageTable {
         limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let paths = match &self.source {
-            SessionSource::Corpus(store) => session_paths(store, filters, "session_id")?,
+            SessionSource::Corpus(store) => session_paths(store, filters, "session_id", PRUNE)?,
             SessionSource::Lookup(sessions) => lookup_paths(sessions, filters)?,
         };
         let row_filter = filter::RowFilter::new(filters, "session_id")?;

@@ -29,7 +29,7 @@ use datafusion::prelude::*;
 use futures::stream;
 
 use super::cache::SessionCache;
-use super::walk::{WALK_COLS, walk_sessions};
+use super::walk::{SummaryPrune, WALK_COLS, walk_sessions};
 use crate::driver::{CONTENT_FORMAT, ClaudeNativeSession};
 use crate::session::SessionInfo;
 use gage_core::uuid::short_uuid;
@@ -314,7 +314,14 @@ impl ExecutionPlan for SessionExec {
 impl SessionExec {
     async fn build_batch(self) -> Result<RecordBatch> {
         let exec_start = std::time::Instant::now();
-        let outcome = walk_sessions(&self.store, &self.filters, "id", self.limit, true)?;
+        let outcome = walk_sessions(
+            &self.store,
+            &self.filters,
+            "id",
+            self.limit,
+            true,
+            SummaryPrune::NONE,
+        )?;
         let sessions: Vec<SessionInfo> = outcome.sessions;
 
         let needs_summary = self.projection_needs_summary();

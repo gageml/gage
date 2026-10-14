@@ -24,8 +24,15 @@ use futures::StreamExt;
 
 use super::SessionSource;
 use super::cache::SessionCache;
-use super::walk::{lookup_paths, session_paths};
+use super::walk::{SummaryPrune, lookup_paths, session_paths};
 use gage_session::{filter, tool_use_schema};
+
+/// The pushed filters the walk prunes sessions on through the summary
+/// cache
+const PRUNE: SummaryPrune = SummaryPrune {
+    time_col: Some("result_timestamp"),
+    files_col: Some("files_changed"),
+};
 
 /// Positions of `session_id` and `line` in the `tool_use` schema, the
 /// two columns a `RowFilter` masks on
@@ -90,7 +97,7 @@ impl TableProvider for ToolUseTable {
         limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let paths = match &self.source {
-            SessionSource::Corpus(store) => session_paths(store, filters, "session_id")?,
+            SessionSource::Corpus(store) => session_paths(store, filters, "session_id", PRUNE)?,
             SessionSource::Lookup(sessions) => lookup_paths(sessions, filters)?,
         };
         let row_filter = filter::RowFilter::new(filters, "session_id")?;

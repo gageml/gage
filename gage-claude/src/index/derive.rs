@@ -5,7 +5,7 @@
 //! tables) plus the session-level aggregates. JSONL is parsed only
 //! here; the in-memory cache in `gage-query` holds the results.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
 use std::time::UNIX_EPOCH;
 
@@ -104,6 +104,16 @@ pub struct SessionSummary {
     /// reader could not parse is not counted
     #[serde(default)]
     pub line_count: u64,
+    /// The earliest entry timestamp, epoch milliseconds
+    #[serde(default)]
+    pub first_timestamp_ms: Option<i64>,
+    /// The latest entry timestamp, epoch milliseconds
+    #[serde(default)]
+    pub last_timestamp_ms: Option<i64>,
+    /// Every path a tool call of the session wrote, as the `tool_use`
+    /// rows record, each once, sorted
+    #[serde(default)]
+    pub files_changed: Vec<PathBuf>,
 }
 
 pub struct DerivedSession {
@@ -419,6 +429,10 @@ pub fn derive_session(session_id: &str, path: &Path) -> Result<DerivedSession> {
 
         let entry_type = entry.get("type").and_then(|v| v.as_str());
         summary.line_count = u64::from(line_num);
+        if let Some(ms) = entry_timestamp_ms(&entry) {
+            summary.first_timestamp_ms = Some(summary.first_timestamp_ms.map_or(ms, |f| f.min(ms)));
+            summary.last_timestamp_ms = Some(summary.last_timestamp_ms.map_or(ms, |l| l.max(ms)));
+        }
 
         if summary.is_empty && entry_has_content(&entry) {
             summary.is_empty = false;
@@ -482,7 +496,12 @@ pub fn derive_session(session_id: &str, path: &Path) -> Result<DerivedSession> {
     let mut tool_use_batch = ToolUseBatch::new();
     for t in tool_uses.finish() {
         tool_use_batch.push(session_id, &t);
+        summary
+            .files_changed
+            .extend(t.files_changed.iter().flatten().cloned());
     }
+    summary.files_changed.sort();
+    summary.files_changed.dedup();
 
     Ok(DerivedSession {
         session_id: session_id.to_string(),
@@ -579,6 +598,39 @@ pub fn derive_entry(session_id: &str, line_num: u32, entry: &serde_json::Value) 
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn summary_carries_the_time_span_and_the_files_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        let lines = [
+            json!({"type":"user","uuid":"u1","timestamp":"2025-01-01T00:00:05Z",
+                   "message":{"role":"user","content":"go"}}),
+            json!({"type":"assistant","uuid":"a1","timestamp":"2025-01-01T00:00:01Z",
+                   "message":{"role":"assistant","content":[
+                       {"type":"tool_use","id":"t1","name":"Write",
+                        "input":{"file_path":"/w/b.rs","content":"x"}},
+                       {"type":"tool_use","id":"t2","name":"Write",
+                        "input":{"file_path":"/w/a.rs","content":"x"}}]}}),
+            json!({"type":"user","uuid":"u2","timestamp":"2025-01-01T00:00:09Z",
+                   "message":{"role":"user","content":[
+                       {"type":"tool_result","tool_use_id":"t1","content":"ok"}]}}),
+            json!({"type":"user","uuid":"u3","timestamp":"2025-01-01T00:00:09Z",
+                   "message":{"role":"user","content":[
+                       {"type":"tool_result","tool_use_id":"t2","content":"ok"}]}}),
+            json!({"type":"summary","summary":"s","leafUuid":"a1"}),
+        ];
+        let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
+        std::fs::write(&path, text).unwrap();
+        let derived = derive_session("s", &path).unwrap();
+        assert_eq!(derived.summary.first_timestamp_ms, Some(1_735_689_601_000));
+        assert_eq!(derived.summary.last_timestamp_ms, Some(1_735_689_609_000));
+        assert_eq!(
+            derived.summary.files_changed,
+            [PathBuf::from("/w/a.rs"), PathBuf::from("/w/b.rs")]
+        );
+        assert_eq!(derived.tool_uses.num_rows(), 2);
+    }
 
     fn system_entry(subtype: &str, extra: serde_json::Value) -> serde_json::Value {
         let mut entry = json!({ "type": "system", "subtype": subtype });
