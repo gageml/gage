@@ -21,12 +21,13 @@ use std::time::SystemTime;
 
 use gage_core::config::plugin_marketplace_dir;
 use gage_session::{
-    AgentSession, AgentSpec, AuthInfo, ContentSink, ContentSource, Driver, DriverError,
-    DriverStatus, DriverTables, Entry, Field, HarnessInfo, InstallInfo, InstallReport, InstallUi,
-    MaintenanceOutcome, MaintenanceStatus, NativeLookupError, NativeSession, ResolveSession,
-    SessionAttrs, Source, SourceOptions, StoredSession, ToolUse, split_scheme,
+    AgentSession, AgentSpec, AuthInfo, ContentSchema, ContentSink, ContentSource, Driver,
+    DriverError, DriverStatus, DriverTables, Entry, Field, HarnessInfo, InstallInfo, InstallReport,
+    InstallUi, MaintenanceOutcome, MaintenanceStatus, NativeLookupError, NativeSession,
+    ResolveSession, SessionAttrs, Source, SourceOptions, StoredSession, ToolUse, split_scheme,
 };
 
+use crate::content_schema;
 use crate::home::ClaudeHome;
 use crate::index::{
     IndexStore, LockMode, ReconcileEvent, SessionSummary, ToolUseCollector, cache_dir_for,
@@ -103,6 +104,10 @@ impl Driver for ClaudeDriver {
     }
 
     /// Drops the `claude-` vendor prefix every Claude model name carries
+    fn content_schemas(&self) -> Vec<ContentSchema> {
+        content_schema::content_schemas()
+    }
+
     fn format_model(&self, model: &str) -> String {
         model.strip_prefix("claude-").unwrap_or(model).to_string()
     }

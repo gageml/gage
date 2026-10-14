@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "claude-jsonl 1 tool_use_result",
+  "description": "The result of one tool call as the harness recorded it, the tool_use table's result_raw column and the entry's toolUseResult field. An object whose shape depends on the tool; $defs holds the built-in tools by the tool_use table's name column. A string when the tool failed, holding the error text. An MCP tool's result is that tool's own shape. Partial: the common fields only.",
+  "type": ["object", "string", "array"],
+  "additionalProperties": true,
+  "$defs": {
+    "Bash": { "type": "object", "additionalProperties": true, "properties": {
+      "stdout": { "type": "string" }, "stderr": { "type": "string" },
+      "interrupted": { "type": "boolean" }, "isImage": { "type": "boolean" },
+      "noOutputExpected": { "type": "boolean" },
+      "returnCodeInterpretation": { "type": "string" },
+      "timedOutAfterMs": { "type": "integer" },
+      "backgroundTaskId": { "type": "string", "description": "Present when the command was backgrounded" },
+      "persistedOutputPath": { "type": "string", "description": "Present when output was written to a file instead of the transcript" },
+      "persistedOutputSize": { "type": "integer" },
+      "bashEditDiff": {
+        "description": "Present when the command edited files: the paths and the hunks",
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+          "changedFiles": { "type": "array", "items": { "type": "string" } },
+          "files": { "type": "array", "items": { "type": "object", "additionalProperties": true, "properties": {
+            "filePath": { "type": "string" }, "hunks": { "type": "array" } } } }
+        }
+      } } },
+    "Read": { "type": "object", "additionalProperties": true, "properties": {
+      "type": { "type": "string", "description": "text, image, or pdf" },
+      "file": { "type": "object", "additionalProperties": true, "properties": {
+        "filePath": { "type": "string" }, "content": { "type": "string" },
+        "numLines": { "type": "integer" }, "startLine": { "type": "integer" }, "totalLines": { "type": "integer" },
+        "truncatedByTokenCap": { "type": "boolean" } } } } },
+    "Edit": { "type": "object", "additionalProperties": true, "properties": {
+      "filePath": { "type": "string" }, "oldString": { "type": "string" }, "newString": { "type": "string" },
+      "replaceAll": { "type": "boolean" }, "originalFile": { "type": ["string", "null"] },
+      "structuredPatch": { "type": "array", "description": "Hunks of the change" },
+      "userModified": { "type": "boolean" } } },
+    "Write": { "type": "object", "additionalProperties": true, "properties": {
+      "type": { "type": "string", "description": "create or update" },
+      "filePath": { "type": "string" }, "content": { "type": "string" },
+      "originalFile": { "type": ["string", "null"] }, "structuredPatch": { "type": "array" } } },
+    "Agent": { "type": "object", "additionalProperties": true, "properties": {
+      "agentId": { "type": "string", "description": "The sub-agent's id; its transcript is subagents/agent-<agentId>.jsonl beside the parent transcript" },
+      "agentType": { "type": "string" }, "description": { "type": "string" }, "prompt": { "type": "string" },
+      "status": { "type": "string" }, "isAsync": { "type": "boolean" }, "resolvedModel": { "type": "string" },
+      "content": { "description": "The report as returned to the parent", "type": ["string", "array"] },
+      "totalTokens": { "type": "integer" }, "totalDurationMs": { "type": "integer" }, "totalToolUseCount": { "type": "integer" },
+      "usage": { "type": "object", "description": "The sub-agent's summed usage, in the API usage shape" },
+      "outputFile": { "type": "string" } } },
+    "WebFetch": { "type": "object", "additionalProperties": true, "properties": {
+      "url": { "type": "string" }, "code": { "type": "integer" }, "codeText": { "type": "string" },
+      "result": { "type": "string" }, "bytes": { "type": "integer" }, "durationMs": { "type": "integer" } } },
+    "WebSearch": { "type": "object", "additionalProperties": true, "properties": {
+      "query": { "type": "string" }, "results": { "type": "array" }, "searchCount": { "type": "integer" }, "durationSeconds": { "type": "number" } } },
+    "ToolSearch": { "type": "object", "additionalProperties": true, "properties": {
+      "query": { "type": "string" }, "matches": { "type": "array" }, "total_deferred_tools": { "type": "integer" } } },
+    "Skill": { "type": "object", "additionalProperties": true, "properties": {
+      "commandName": { "type": "string" }, "success": { "type": "boolean" }, "allowedTools": { "type": "array" } } },
+    "TodoWrite": { "type": "object", "additionalProperties": true, "properties": {
+      "oldTodos": { "type": "array" }, "newTodos": { "type": "array" } } }
+  }
+}

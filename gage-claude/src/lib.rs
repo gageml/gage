@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod config;
+mod content_schema;
 pub mod driver;
 pub mod entry;
 pub mod home;

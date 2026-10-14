@@ -17,6 +17,7 @@ use std::time::SystemTime;
 use datafusion::datasource::TableProvider;
 
 pub mod agent;
+pub mod content_schema;
 pub mod filter;
 pub mod status;
 pub mod system_col;
@@ -24,6 +25,9 @@ pub mod tool_use;
 
 pub use agent::{
     AgentEvent, AgentMcp, AgentSession, AgentSpec, SystemPrompt, ToolUseEntries, TurnResult,
+};
+pub use content_schema::{
+    ContentField, ContentSchema, content_schema_batch, content_schema_schema,
 };
 pub use status::{AuthInfo, DriverStatus, Field, HarnessInfo, InstallInfo};
 pub use system_col::{SYSTEM_META_KEY, is_system, system};
@@ -117,6 +121,14 @@ pub trait Driver: Send + Sync {
     /// the name as stored.
     fn format_project(&self, name: &str, _max_chars: usize) -> String {
         name.to_string()
+    }
+
+    /// The driver's description of the native content it writes: one
+    /// row per content format it reads and native field. The default
+    /// is none, for a driver that leaves its native columns
+    /// undescribed.
+    fn content_schemas(&self) -> Vec<ContentSchema> {
+        Vec::new()
     }
 
     /// Start an agent on this driver's harness and return the handle

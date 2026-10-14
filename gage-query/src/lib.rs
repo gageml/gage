@@ -27,6 +27,9 @@
 //! the [`project`] `project_for_path` UDF maps a directory to its
 //! project name for filtering. These are how a user discovers
 //! sessions to add to the store; none is a named table.
+//! `content_schema` is on every context too: each builtin driver's
+//! description of what it writes into `raw`, `input_raw`, and
+//! `result_raw`, per content format.
 //!
 //! Session tables carry [`system_cols`], the columns a program needs
 //! to render or address a row. A context includes them by default;
@@ -48,7 +51,9 @@ use std::sync::{Arc, Mutex};
 use datafusion::datasource::{MemTable, TableProvider, ViewTable};
 use datafusion::execution::session_state::SessionStateBuilder;
 use datafusion::prelude::{SessionConfig, SessionContext};
+use gage_registry::driver::DriverRegistry;
 use gage_registry::scanner::ScannerRegistry;
+use gage_session::{ContentSchema, content_schema_batch, content_schema_schema};
 use gage_store::{
     LinkKind, NoteDocRow, Store, StoredNoteTable, StoredSessionTable, attachment_file_table,
     attachment_table, dataset_table, issue_event_table, issue_report_fn, issue_table, link_table,
@@ -368,8 +373,9 @@ const NATIVE_TABLES: [NativeTable; 4] = [
 
 /// A context carrying the shared configuration --- the `RowCache`
 /// extension, the PostgreSQL SQL dialect, `information_schema`, the
-/// native table functions, the JSON functions, and the
-/// `project_for_path` UDF --- with no named tables registered.
+/// native table functions, the JSON functions, the `project_for_path`
+/// UDF, and the `content_schema` table --- with no store tables
+/// registered.
 fn new_context(skip_system_cols: bool, show_agents: bool) -> SessionContext {
     let config = SessionConfig::new()
         .with_information_schema(true)
@@ -393,7 +399,23 @@ fn new_context(skip_system_cols: bool, show_agents: bool) -> SessionContext {
         );
     }
     ctx.register_udf(project_for_path_udf());
+    ctx.register_table("content_schema", content_schema_table())
+        .unwrap();
     ctx
+}
+
+/// Every builtin driver's content schemas as one table
+fn content_schema_table() -> Arc<dyn TableProvider> {
+    let rows: Vec<ContentSchema> = DriverRegistry::builtin()
+        .drivers()
+        .iter()
+        .flat_map(|d| d.content_schemas())
+        .collect();
+    let batch = content_schema_batch(&rows).expect("content schema rows are plain strings");
+    Arc::new(
+        MemTable::try_new(content_schema_schema(), vec![vec![batch]])
+            .expect("content schema batch matches its schema"),
+    )
 }
 
 #[cfg(test)]
@@ -630,6 +652,31 @@ mod tests {
     /// `project` and `mtime` predicates and the limit reach the
     /// driver's walk: the plan carries no filter of its own, and the
     /// rows are the walk's answer.
+    #[tokio::test]
+    async fn content_schema_lists_every_builtin_driver_format() {
+        let ctx = ContextBuilder::new(None).build().await;
+        let rows = strings(
+            &ctx,
+            "SELECT content_format || ' ' || name FROM content_schema ORDER BY 1",
+        )
+        .await;
+        assert_eq!(
+            rows,
+            [
+                "claude-jsonl 1 entry",
+                "claude-jsonl 1 tool_use_input",
+                "claude-jsonl 1 tool_use_result",
+            ]
+        );
+        let schema = strings(
+            &ctx,
+            "SELECT schema FROM content_schema WHERE name = 'entry'",
+        )
+        .await;
+        let parsed: serde_json::Value = serde_json::from_str(&schema[0]).unwrap();
+        assert_eq!(parsed["type"], "object");
+    }
+
     #[tokio::test]
     async fn native_session_pushes_project_and_mtime_filters_into_the_walk() {
         use std::time::{Duration, UNIX_EPOCH};

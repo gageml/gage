@@ -51,18 +51,24 @@ Tables:
 Functions: issue_report('<id>') renders one issue as markdown;
 related_issue('<id>' [, n]) lists the n most similar issues, best first.
 
-`raw`, `input_raw`, and `result_raw` are JSON text. Read a value with
-json_extract(raw, '$.message.usage.output_tokens') or with the -> and ->>
+`raw`, `input_raw`, and `result_raw` are JSON text in the driver's native
+shape. content_schema (content_format, name, schema, doc) holds each shape as
+a JSON Schema: `name` is entry, tool_use_input, or tool_use_result. Scope rows
+to one `content_format` (from `session`) before reading, with
+json_extract(raw, '$.message.usage.output_tokens') or the -> and ->>
 operators; CAST the text for arithmetic. Do not cast to json or jsonb.
 
 Native source functions read a driver source directly, including sessions
 not in the store: native_session('<source>'), native_message('<source>'),
 native_entry('<source>'), native_tool_use('<source>'). The argument is a
 source URL; 'claude:' is the default Claude Code source and 'claude:/path'
-names a projects directory. The columns are the driver's own: session `id`
-is the native UUID, and message, entry, and tool_use rows carry that UUID as
-`session_id`. Use these to look over a session by its native id before it
-is added to the store.
+names a projects directory. native_session has its own columns (id, project,
+title, model, message_count, is_empty, content_format, mtime, size,
+input_tokens, output_tokens, cache_read_input_tokens,
+cache_creation_input_tokens); `id` is the native UUID, and no line_count,
+created, or modified. The other three have the stored tables' columns, with
+the native UUID as `session_id`. Use these to look over a session by its
+native id before it is added to the store.
 
 Read a session by `session_id` ordered by `line`, taking
 `substr(text, 1, 800)` over full `text` or `raw` on wide rows.

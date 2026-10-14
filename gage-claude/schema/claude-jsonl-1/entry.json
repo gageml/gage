@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "claude-jsonl 1 entry",
+  "description": "One line of a Claude Code transcript, the `raw` column of the entry and message tables. Partial: the fields listed are the common and useful ones; a line carries more. Measured on Claude Code 2.1.29x transcripts, October 2026. Read a value with json_extract(raw, '$.path') after scoping rows to content_format 'claude-jsonl 1'.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["type"],
+  "properties": {
+    "type": {
+      "description": "The record kind. user, assistant, system, and attachment carry the conversation envelope below; the others are session state records that carry only `sessionId` and their own fields.",
+      "enum": ["user", "assistant", "system", "attachment", "summary", "cost-state", "queue-operation", "last-prompt", "file-history-snapshot", "file-history-delta", "permission-mode", "atis-latch", "agent-name", "custom-title", "ai-title", "mode"]
+    },
+    "uuid": { "type": "string", "description": "This record's id; the entry table's uuid column" },
+    "parentUuid": { "type": ["string", "null"], "description": "The uuid of the record this one follows; null on the first" },
+    "timestamp": { "type": "string", "format": "date-time", "description": "RFC 3339; the entry table's timestamp column" },
+    "sessionId": { "type": "string", "description": "The native session id, the transcript's file stem" },
+    "cwd": { "type": "string" },
+    "gitBranch": { "type": "string" },
+    "version": { "type": "string", "description": "The Claude Code version that wrote the line" },
+    "entrypoint": { "type": "string", "description": "How Claude Code was run: cli, claude-vscode, sdk-cli" },
+    "isSidechain": { "type": "boolean", "description": "True on a sub-agent's own transcript" },
+    "userType": { "type": "string" },
+    "isMeta": { "type": "boolean", "description": "True on a user row the harness wrote rather than the person" },
+    "slug": { "type": "string" },
+    "subtype": { "type": "string", "description": "On system rows: stop_hook_summary, turn_duration, local_command, compact_boundary, informational, and others" },
+    "message": {
+      "description": "On user and assistant rows. On an assistant row this is one API response, written as one row per content block: every row of a response repeats the same `id` and `usage`. Count a response once by grouping on `message.id`.",
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "id": { "type": "string", "description": "The API response id, shared by every row of one response; absent on user rows" },
+        "role": { "enum": ["user", "assistant"] },
+        "model": { "type": "string", "description": "The model that produced the response; the session table's model column takes the first" },
+        "content": {
+          "description": "A string for a plain prompt, else the content blocks of this row",
+          "oneOf": [
+            { "type": "string" },
+            { "type": "array", "items": { "$ref": "#/$defs/block" } }
+          ]
+        },
+        "usage": {
+          "description": "The response's token usage, repeated on every row of the response",
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "input_tokens": { "type": "integer" },
+            "output_tokens": { "type": "integer" },
+            "cache_read_input_tokens": { "type": "integer" },
+            "cache_creation_input_tokens": { "type": "integer" },
+            "service_tier": { "type": "string" }
+          }
+        },
+        "stop_reason": { "type": ["string", "null"], "description": "end_turn, tool_use, max_tokens, or null while streaming" }
+      }
+    },
+    "toolUseResult": {
+      "description": "On a user row carrying a tool_result block: the tool's result as the harness recorded it, the value of the tool_use table's result_raw column. An object for most tools, a string on an error. The shape per tool is in the tool_use_result schema.",
+      "type": ["object", "string", "array"]
+    },
+    "requestId": { "type": "string", "description": "On assistant rows: the API request id" },
+    "apiBlockIndex": { "type": "integer", "description": "On assistant rows: this row's index among the response's content blocks" },
+    "effort": { "type": "string" },
+    "requestedModel": { "type": "string" },
+    "thinkingDurationMs": { "type": "integer" },
+    "permissionDecision": {
+      "description": "On tool-result rows: how the call was approved",
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "decision": { "type": "string", "description": "accept or reject" },
+        "source": { "type": "string", "description": "config, user, or the like" },
+        "reasonType": { "type": "string", "description": "rule or classifier" }
+      }
+    },
+    "permissionMode": { "type": "string" },
+    "promptId": { "type": "string", "description": "On user rows: the prompt this row belongs to" },
+    "sourceToolAssistantUUID": { "type": "string", "description": "On tool-result rows: the uuid of the assistant row holding the tool_use block" },
+    "durationMs": { "type": "integer", "description": "On system turn_duration rows" },
+    "hookCount": { "type": "integer", "description": "On system stop_hook_summary rows, with hookErrors, hookInfos, toolUseID, stopReason, preventedContinuation" },
+    "attachment": { "type": "object", "description": "On attachment rows: content the harness injected beside a turn" },
+    "totalCostUSD": { "type": "number", "description": "On cost-state rows, with modelUsage per model and the duration and line totals; the last row is the running total" },
+    "modelUsage": { "type": "object" }
+  },
+  "$defs": {
+    "block": {
+      "description": "One content block. `type` selects the fields: text has text; thinking has thinking and signature; tool_use has id, name, input, and caller; tool_result has tool_use_id, content, and is_error.",
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["type"],
+      "properties": {
+        "type": { "enum": ["text", "thinking", "tool_use", "tool_result", "image"] },
+        "text": { "type": "string" },
+        "thinking": { "type": "string" },
+        "signature": { "type": "string" },
+        "id": { "type": "string", "description": "The tool call id; the tool_use table's id column" },
+        "name": { "type": "string", "description": "The tool name; the tool_use table's name column" },
+        "input": { "type": "object", "description": "The call's arguments; the tool_use table's input_raw column" },
+        "tool_use_id": { "type": "string" },
+        "content": { "description": "The result text or blocks as the model saw them", "type": ["string", "array"] },
+        "is_error": { "type": "boolean" }
+      }
+    }
+  }
+}

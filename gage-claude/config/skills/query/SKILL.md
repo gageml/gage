@@ -17,7 +17,10 @@ not be stored. `native_session(source)`, `native_message(source)`,
 `native_entry(source)`, and `native_tool_use(source)` read the source
 directly. `'claude:'` is the default Claude Code source; `'claude:/path'`
 names a projects directory. The native tables use the native UUID: `id` in
-`native_session`, `session_id` in the other three.
+`native_session`, `session_id` in the other three. `native_session` carries
+`mtime`, `size`, and the four token columns in place of the stored table's
+`line_count`, `created`, and `modified`; the other three match their stored
+tables column for column.
 
 ```sql
 SELECT id, project, message_count FROM native_session('claude:')
@@ -83,10 +86,23 @@ written_by)` describing what notes of that name hold.
 ## JSON columns
 
 `raw` on `entry`, `message`, and their native forms, and `input_raw` and
-`result_raw` on `tool_use`, are JSON text. `json_extract(json, path)` returns
-one value as text: the path is `$` followed by `.key` and `[index]` steps. A
-string comes back unquoted, any other value as its JSON text, and a missing
-step or JSON null as SQL NULL. CAST the text for arithmetic.
+`result_raw` on `tool_use`, are JSON text in the driver's native shape. The
+shape is described in `content_schema (content_format, name, schema, doc)`:
+one row per content format and native field, `schema` a JSON Schema document,
+partial, listing the common fields. Read it before reading into `raw`:
+
+```sql
+SELECT name, schema FROM content_schema WHERE content_format = 'claude-jsonl 1';
+```
+
+A path is valid for one content format. Scope the rows first through
+`session.content_format` (or `native_session.content_format`); on rows of
+another format the path yields NULL without an error.
+
+`json_extract(json, path)` returns one value as text: the path is `$` followed
+by `.key` and `[index]` steps. A string comes back unquoted, any other value
+as its JSON text, and a missing step or JSON null as SQL NULL. CAST the text
+for arithmetic.
 
 ```sql
 SELECT line,
@@ -95,6 +111,18 @@ SELECT line,
 FROM native_message('claude:')
 WHERE session_id = '<NATIVE_ID>' AND type = 'assistant'
 ORDER BY line;
+```
+
+In `claude-jsonl 1`, one API response is written as one row per content block
+and every row repeats the response's `usage`. Sum usage per response, not per
+row:
+
+```sql
+SELECT sum(out) AS output_tokens
+FROM (SELECT max(CAST(json_extract(raw, '$.message.usage.output_tokens') AS BIGINT)) AS out
+      FROM native_message('claude:')
+      WHERE session_id = '<NATIVE_ID>' AND type = 'assistant'
+      GROUP BY json_extract(raw, '$.message.id'));
 ```
 
 The `->` and `->>` operators with string keys also work, as `raw->'message'->>'model'`.

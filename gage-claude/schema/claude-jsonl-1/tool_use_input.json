@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "claude-jsonl 1 tool_use_input",
+  "description": "The arguments of one tool call, the tool_use table's input_raw column. The shape is the tool's own input schema: $defs holds the built-in tools by the tool_use table's name column. A tool named mcp__<server>__<tool> takes that MCP tool's schema, which this document does not hold. Partial: the common arguments only.",
+  "type": "object",
+  "additionalProperties": true,
+  "$defs": {
+    "Bash": { "type": "object", "additionalProperties": true, "required": ["command"], "properties": {
+      "command": { "type": "string" }, "description": { "type": "string" },
+      "timeout": { "type": "integer", "description": "Milliseconds" }, "run_in_background": { "type": "boolean" } } },
+    "Read": { "type": "object", "additionalProperties": true, "required": ["file_path"], "properties": {
+      "file_path": { "type": "string" }, "offset": { "type": "integer" }, "limit": { "type": "integer" } } },
+    "Edit": { "type": "object", "additionalProperties": true, "required": ["file_path", "old_string", "new_string"], "properties": {
+      "file_path": { "type": "string" }, "old_string": { "type": "string" }, "new_string": { "type": "string" }, "replace_all": { "type": "boolean" } } },
+    "Write": { "type": "object", "additionalProperties": true, "required": ["file_path", "content"], "properties": {
+      "file_path": { "type": "string" }, "content": { "type": "string" } } },
+    "Agent": { "type": "object", "additionalProperties": true, "required": ["prompt"], "properties": {
+      "prompt": { "type": "string" }, "description": { "type": "string" },
+      "subagent_type": { "type": "string", "description": "The agent definition, as plugin:name or a built-in name" },
+      "model": { "type": "string" }, "run_in_background": { "type": "boolean" } } },
+    "WebSearch": { "type": "object", "additionalProperties": true, "required": ["query"], "properties": {
+      "query": { "type": "string" }, "mode": { "type": "string" } } },
+    "WebFetch": { "type": "object", "additionalProperties": true, "required": ["url"], "properties": {
+      "url": { "type": "string" }, "prompt": { "type": "string" }, "offset": { "type": "integer" } } },
+    "ToolSearch": { "type": "object", "additionalProperties": true, "required": ["query"], "properties": {
+      "query": { "type": "string" }, "max_results": { "type": "integer" } } },
+    "Skill": { "type": "object", "additionalProperties": true, "required": ["skill"], "properties": {
+      "skill": { "type": "string" }, "args": { "type": "string" } } },
+    "TodoWrite": { "type": "object", "additionalProperties": true, "required": ["todos"], "properties": {
+      "todos": { "type": "array" } } }
+  }
+}
