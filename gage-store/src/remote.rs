@@ -74,7 +74,7 @@ impl Repository {
     pub fn from_url(url: &str) -> Repository {
         Repository {
             spec: url.to_string(),
-            name: redact_password(url),
+            name: redact_userinfo(url),
             remote: false,
         }
     }
@@ -85,7 +85,7 @@ impl Repository {
     }
 
     /// The repository as a report and a merge entry name it: the
-    /// remote name, or the URL with any password removed. A merge
+    /// remote name, or the URL with any userinfo removed. A merge
     /// entry is object content and travels to every other store.
     pub fn name(&self) -> &str {
         &self.name
@@ -97,19 +97,26 @@ impl Repository {
     }
 }
 
-/// `scheme://user:password@host/...` with the password removed. Other
-/// forms, including scp-style `user@host:path`, carry no password and
-/// pass through.
-fn redact_password(url: &str) -> String {
-    let Some((scheme, rest)) = url.split_once("://") else {
-        return url.to_string();
-    };
-    let (authority, path) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
-    let Some((userinfo, host)) = authority.rsplit_once('@') else {
-        return url.to_string();
-    };
-    let user = userinfo.split_once(':').map_or(userinfo, |(user, _)| user);
-    format!("{scheme}://{user}@{host}{path}")
+/// The URL with its userinfo removed, as Git prints a URL. The
+/// username goes too: hosts such as GitHub issue tokens in the
+/// username position of `https://<token>@host/...`. Scheme URLs lose
+/// everything between `://` and the `@` of the authority; scp-style
+/// `user@host:path` loses `user@`. Paths, URLs with no `@`, and an
+/// `@` inside the path pass through.
+fn redact_userinfo(url: &str) -> String {
+    if let Some((scheme, rest)) = url.split_once("://") {
+        let (authority, path) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
+        return match authority.rsplit_once('@') {
+            Some((_, host)) => format!("{scheme}://{host}{path}"),
+            None => url.to_string(),
+        };
+    }
+    match url.split_once('@') {
+        Some((_, host_path)) if host_path.contains(':') && !url.contains('/') => {
+            host_path.to_string()
+        }
+        _ => url.to_string(),
+    }
 }
 
 /// The root of the transient namespaces a URL fetch writes under:
@@ -595,19 +602,31 @@ mod tests {
     }
 
     #[test]
-    fn url_repository_redacts_the_password_and_names_a_valid_transient_prefix() {
+    fn url_repository_redacts_the_userinfo_and_names_a_valid_transient_prefix() {
         let url = Repository::from_url("https://me:s3cret@host/x.git");
         assert_eq!(url.spec(), "https://me:s3cret@host/x.git");
-        assert_eq!(url.name(), "https://me@host/x.git");
+        assert_eq!(url.name(), "https://host/x.git");
         assert!(!url.is_remote());
         let source = FetchSource::from(url);
         assert!(source.is_transient());
+        for (with_userinfo, redacted) in [
+            (
+                "https://ghp_t0ken@github.com/o/x.git",
+                "https://github.com/o/x.git",
+            ),
+            ("https://me@host/x.git", "https://host/x.git"),
+            ("https://me:s3cret@host", "https://host"),
+            ("ssh://git@host:22/x.git", "ssh://host:22/x.git"),
+            ("git@host:x.git", "host:x.git"),
+            ("me:s3cret@host:x.git", "host:x.git"),
+        ] {
+            assert_eq!(Repository::from_url(with_userinfo).name(), redacted);
+        }
         for plain in [
-            "git@host:x.git",
             "/srv/x.git",
+            "./me@host/x.git",
             "https://host/x.git",
-            "https://me@host/x.git",
-            "ssh://git@host:22/x.git",
+            "https://host/me@x.git",
             "https://host",
         ] {
             assert_eq!(Repository::from_url(plain).name(), plain);
