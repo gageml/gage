@@ -4,6 +4,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize, de};
 
@@ -111,6 +112,34 @@ pub fn gage_home() -> PathBuf {
         let home = env::var("HOME").expect("HOME should be set");
         PathBuf::from(home).join(".gage")
     }
+}
+
+/// A process-global cache-root override. `None` in production, where
+/// [`cache_root`] falls back to `<gage_home>/cache`. Tests set it to
+/// an isolated directory so a source opened against a temp corpus
+/// does not write into the user's real `~/.gage/cache`.
+static CACHE_ROOT_OVERRIDE: OnceLock<PathBuf> = OnceLock::new();
+
+/// The base directory for per-source derived caches. `<gage_home>/cache`
+/// unless a test set an override through [`use_test_cache_root`].
+pub fn cache_root() -> PathBuf {
+    CACHE_ROOT_OVERRIDE
+        .get()
+        .cloned()
+        .unwrap_or_else(|| gage_home().join("cache"))
+}
+
+/// Point [`cache_root`] at a process-unique temp directory, once.
+/// Idempotent and memory-safe under the parallel test runner: every
+/// caller computes the same pid-keyed path and the first `set` wins.
+/// Call it before opening a session source in a test. The directory
+/// is left for the OS to reclaim; one per test process.
+pub fn use_test_cache_root() {
+    CACHE_ROOT_OVERRIDE.get_or_init(|| {
+        let dir = env::temp_dir().join(format!("gage-test-cache-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("test cache root should be creatable under the temp dir");
+        dir
+    });
 }
 
 /// Returns the agent session corpus root: `<gage_home>/claude`. Agent

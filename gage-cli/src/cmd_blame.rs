@@ -923,6 +923,7 @@ committer-time 0
     /// predate every session.
     #[tokio::test]
     async fn blame_finds_the_session_call_that_wrote_a_line() {
+        gage_core::config::use_test_cache_root();
         let repo = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(repo.path()).unwrap();
         assert!(
