@@ -32,6 +32,7 @@ fn install_panic_hook() {
 mod author;
 mod cmd_attachment;
 mod cmd_backup;
+mod cmd_blame;
 mod cmd_config;
 mod cmd_dataset;
 mod cmd_fetch;
@@ -228,6 +229,14 @@ enum Command {
     /// Query sessions with SQL
     Query(cmd_query::QueryArgs),
 
+    /// Find sessions that wrote lines of a file
+    ///
+    /// Follows git blame: each line's commit bounds a window, and the
+    /// session tool call that wrote the file in that window with the
+    /// line's text is reported with the span from the prompt before
+    /// it to the call
+    Blame(cmd_blame::BlameArgs),
+
     /// Update Gage index
     Index(cmd_index::IndexArgs),
 
@@ -359,6 +368,7 @@ async fn main() -> ExitCode {
             Command::Resolve(args) => cmd_resolve::run(args),
             Command::Mcp => run_mcp().await.context("gage mcp").map_err(CliError::from),
             Command::Query(args) => cmd_query::main(args).await,
+            Command::Blame(args) => cmd_blame::run(args).await,
             Command::Index(args) => cmd_index::run(args).await,
             Command::Push(args) => cmd_push::main(args).await,
             Command::Fetch(args) => cmd_fetch::main(args),

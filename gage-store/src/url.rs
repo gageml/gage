@@ -3,6 +3,9 @@
 //! "Gage URLs" section. Parsing is syntactic; what a body names is the
 //! owning module's business.
 
+use std::fmt;
+use std::str::FromStr;
+
 use crate::StoreError;
 
 /// A Gage URL split into its parts, borrowed from the input.
@@ -40,24 +43,72 @@ pub fn parse(url: &str) -> Result<GageUrl<'_>, StoreError> {
 /// Check a line selection fragment: parts joined by `,`, each a
 /// 1-based line or an inclusive `start-end` range with `start <= end`.
 pub fn validate_line_selection(fragment: &str) -> Result<(), StoreError> {
-    let bad = || StoreError::BadLineSelection(fragment.to_string());
-    if fragment.is_empty() {
-        return Err(bad());
+    fragment.parse::<LineSelection>().map(|_| ())
+}
+
+/// A line selection as a session URL fragment carries it: one or more
+/// 1-based lines or inclusive `start-end` ranges, in the order given.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LineSelection {
+    ranges: Vec<(u64, u64)>,
+}
+
+impl LineSelection {
+    /// The selected `(start, end)` ranges, inclusive; a single line is
+    /// a range of one.
+    pub fn ranges(&self) -> &[(u64, u64)] {
+        &self.ranges
     }
-    for part in fragment.split(',') {
-        let (start, end) = match part.split_once('-') {
-            Some((s, e)) => (s, Some(e)),
-            None => (part, None),
-        };
-        let start = parse_line(start).ok_or_else(bad)?;
-        if let Some(end) = end {
-            let end = parse_line(end).ok_or_else(bad)?;
+
+    pub fn contains(&self, line: u64) -> bool {
+        self.ranges
+            .iter()
+            .any(|&(start, end)| (start..=end).contains(&line))
+    }
+}
+
+impl FromStr for LineSelection {
+    type Err = StoreError;
+
+    fn from_str(fragment: &str) -> Result<Self, StoreError> {
+        let bad = || StoreError::BadLineSelection(fragment.to_string());
+        if fragment.is_empty() {
+            return Err(bad());
+        }
+        let mut ranges = Vec::new();
+        for part in fragment.split(',') {
+            let (start, end) = match part.split_once('-') {
+                Some((s, e)) => (s, Some(e)),
+                None => (part, None),
+            };
+            let start = parse_line(start).ok_or_else(bad)?;
+            let end = match end {
+                Some(end) => parse_line(end).ok_or_else(bad)?,
+                None => start,
+            };
             if end < start {
                 return Err(bad());
             }
+            ranges.push((start, end));
         }
+        Ok(Self { ranges })
     }
-    Ok(())
+}
+
+impl fmt::Display for LineSelection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (i, &(start, end)) in self.ranges.iter().enumerate() {
+            if i > 0 {
+                f.write_str(",")?;
+            }
+            if start == end {
+                write!(f, "{start}")?;
+            } else {
+                write!(f, "{start}-{end}")?;
+            }
+        }
+        Ok(())
+    }
 }
 
 fn parse_line(text: &str) -> Option<u64> {
@@ -92,6 +143,15 @@ mod tests {
                 "{bad}"
             );
         }
+    }
+
+    #[test]
+    fn line_selection_parses_and_prints_its_ranges() {
+        let sel: LineSelection = "100-200,315,7-7".parse().unwrap();
+        assert_eq!(sel.ranges(), [(100, 200), (315, 315), (7, 7)]);
+        assert_eq!(sel.to_string(), "100-200,315,7");
+        assert!(sel.contains(150) && sel.contains(315) && sel.contains(7));
+        assert!(!sel.contains(99) && !sel.contains(316));
     }
 
     #[test]
