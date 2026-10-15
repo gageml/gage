@@ -1,6 +1,7 @@
 //! The Gage tools. Each module exports `pub const TOOL: ToolDef`
 //! built from its companion `.md` under `config/tools/`.
 
+pub mod issue_assign;
 pub mod issue_comment;
 pub mod issue_pending_resolve;
 pub mod issue_update;

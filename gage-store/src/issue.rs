@@ -70,9 +70,10 @@ pub enum IssueStatus {
     /// open or closes it as a duplicate
     Pending,
     Open,
-    /// Claimed by a session working toward a close. Set from open
-    /// only; a release returns it to open, and a close ends it
-    Resolving,
+    /// Assigned to a session working toward a close. Set from open by
+    /// [`IssueStore::assign`]; a release returns it to open, and a
+    /// close ends it
+    Assigned,
     Closed,
     /// A status this build does not know, written by a newer build.
     /// Read only: no writer accepts it.
@@ -84,7 +85,7 @@ impl IssueStatus {
     pub const ALL: [IssueStatus; 4] = [
         IssueStatus::Pending,
         IssueStatus::Open,
-        IssueStatus::Resolving,
+        IssueStatus::Assigned,
         IssueStatus::Closed,
     ];
 
@@ -92,7 +93,7 @@ impl IssueStatus {
         match self {
             IssueStatus::Pending => "pending",
             IssueStatus::Open => "open",
-            IssueStatus::Resolving => "resolving",
+            IssueStatus::Assigned => "assigned",
             IssueStatus::Closed => "closed",
             IssueStatus::Unknown => "unknown",
         }
@@ -576,11 +577,10 @@ impl IssueStore<'_> {
                 status: status.as_str().to_string(),
             });
         }
-        if status == IssueStatus::Resolving && attrs.status != IssueStatus::Open {
-            return Err(StoreError::IssueInput(format!(
-                "an issue is set resolving from open only, not from {}",
-                attrs.status
-            )));
+        if status == IssueStatus::Assigned {
+            return Err(StoreError::IssueInput(
+                "an issue is assigned through assign, not set_status".to_string(),
+            ));
         }
         let reason = match (status, reason) {
             (IssueStatus::Closed, reason) => Some(reason.unwrap_or(StatusReason::Completed)),
@@ -606,6 +606,54 @@ impl IssueStore<'_> {
             None => format!("issue status: {status}"),
         };
         self.append_change(&object, attrs, &change, message, &commit_message)
+    }
+
+    /// Assign an open issue to `session`, recording the session as the
+    /// message of the `status` change entry. An issue already assigned
+    /// is refused unless `force`, which reassigns it. A pending or
+    /// closed issue is refused. Returns the resolved id.
+    pub fn assign(
+        &self,
+        id_or_prefix: &str,
+        author: &str,
+        session: &str,
+        force: bool,
+    ) -> Result<String, StoreError> {
+        let object = self.store.resolve_typed(id_or_prefix, OBJECT_TYPE)?;
+        let mut attrs = decode_attrs(&object)?;
+        match attrs.status {
+            IssueStatus::Open => {}
+            IssueStatus::Assigned if force => {}
+            IssueStatus::Assigned => {
+                return Err(StoreError::IssueInput(format!(
+                    "issue {} is assigned to another session",
+                    object.header.id
+                )));
+            }
+            other => {
+                return Err(StoreError::IssueInput(format!(
+                    "issue {} is {other}, not open",
+                    object.header.id
+                )));
+            }
+        }
+        let change = ChangeAttrs {
+            author: author.to_string(),
+            event: ChangeEvent::Status,
+            from_status: Some(attrs.status),
+            to_status: Some(IssueStatus::Assigned),
+            reason: None,
+            of: None,
+        };
+        attrs.status = IssueStatus::Assigned;
+        attrs.status_reason = None;
+        self.append_change(
+            &object,
+            attrs,
+            &change,
+            Some(session),
+            "issue status: assigned",
+        )
     }
 
     /// Close an issue as a duplicate of `of`, recording the surviving
@@ -1592,47 +1640,53 @@ mod tests {
     }
 
     #[test]
-    fn resolving_is_set_from_open_only_and_releases_to_open() {
+    fn assign_takes_an_open_issue_and_force_reassigns_it() {
         let tmp = tempfile::tempdir().unwrap();
         let (store, _fsck) = open_store(tmp.path());
         let issues = IssueStore::from(&store);
         let pending = issue(&store, IssueStatus::Pending, &[]);
         assert!(matches!(
-            issues.set_status(&pending, IssueStatus::Resolving, None, "user:test", None),
+            issues.assign(&pending, "user:test", "session a", false),
             Err(StoreError::IssueInput(_))
         ));
 
         let id = issue(&store, IssueStatus::Open, &[]);
-        issues
-            .set_status(
-                &id,
-                IssueStatus::Resolving,
-                None,
-                "user:test",
-                Some("session abc"),
-            )
-            .unwrap();
+        issues.assign(&id, "user:test", "session a", false).unwrap();
         let full = issues.get(&id).unwrap();
-        assert_eq!(full.status, IssueStatus::Resolving);
+        assert_eq!(full.status, IssueStatus::Assigned);
         assert_eq!(full.status_reason, None);
-        let claim = full.changes.last().unwrap();
-        assert_eq!(claim.to_status, Some(IssueStatus::Resolving));
-        assert_eq!(claim.message.as_deref(), Some("session abc"));
+        let event = full.changes.last().unwrap();
+        assert_eq!(event.to_status, Some(IssueStatus::Assigned));
+        assert_eq!(event.message.as_deref(), Some("session a"));
+
+        assert!(matches!(
+            issues.assign(&id, "user:test", "session b", false),
+            Err(StoreError::IssueInput(_))
+        ));
+        issues.assign(&id, "user:test", "session b", true).unwrap();
+        let full = issues.get(&id).unwrap();
+        assert_eq!(full.status, IssueStatus::Assigned);
+        assert_eq!(
+            full.changes.last().unwrap().message.as_deref(),
+            Some("session b")
+        );
 
         issues
             .set_status(&id, IssueStatus::Open, None, "user:test", None)
             .unwrap();
         assert_eq!(issues.get(&id).unwrap().status, IssueStatus::Open);
+        assert!(matches!(
+            issues.set_status(&id, IssueStatus::Assigned, None, "user:test", None),
+            Err(StoreError::IssueInput(_))
+        ));
 
-        issues
-            .set_status(&id, IssueStatus::Resolving, None, "user:test", None)
-            .unwrap();
+        issues.assign(&id, "user:test", "session a", false).unwrap();
         issues
             .set_status(&id, IssueStatus::Closed, None, "user:test", None)
             .unwrap();
         assert_eq!(issues.get(&id).unwrap().status, IssueStatus::Closed);
         assert!(matches!(
-            issues.set_status(&id, IssueStatus::Resolving, None, "user:test", None),
+            issues.assign(&id, "user:test", "session a", true),
             Err(StoreError::IssueInput(_))
         ));
     }

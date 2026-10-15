@@ -1898,6 +1898,7 @@ mod tests {
                 GageTool::Query(_)
                 | GageTool::NoteWrite(_)
                 | GageTool::IssueUpdate(_)
+                | GageTool::IssueAssign(_)
                 | GageTool::IssueComment(_)
                 | GageTool::IssuePendingResolve(_) => None,
             })

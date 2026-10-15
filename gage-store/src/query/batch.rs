@@ -101,6 +101,17 @@ pub(crate) fn string_literal(e: &Expr) -> Option<String> {
     }
 }
 
+/// A table function argument given as a numeric literal
+pub(crate) fn f64_literal(e: &Expr) -> Option<f64> {
+    match e {
+        Expr::Literal(ScalarValue::Float64(Some(n)), _) => Some(*n),
+        Expr::Literal(ScalarValue::Float32(Some(n)), _) => Some(f64::from(*n)),
+        Expr::Literal(ScalarValue::Int64(Some(n)), _) => Some(*n as f64),
+        Expr::Literal(ScalarValue::Int32(Some(n)), _) => Some(f64::from(*n)),
+        _ => None,
+    }
+}
+
 /// The length of each id's shortest unique prefix within `ids`.
 pub(crate) fn unique_prefix_lens(ids: Vec<String>) -> HashMap<String, usize> {
     let highlighter = IdHighlighter::new(ids.clone());

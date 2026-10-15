@@ -439,6 +439,7 @@ async fn run_mcp() -> anyhow::Result<()> {
                 note_names,
             )),
             gage_mcp::GageTool::IssueUpdate(writer.clone()),
+            gage_mcp::GageTool::IssueAssign(writer.clone()),
             gage_mcp::GageTool::IssueComment(writer.clone()),
             gage_mcp::GageTool::IssuePendingResolve(writer),
         ],

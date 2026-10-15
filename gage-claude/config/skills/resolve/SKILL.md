@@ -41,11 +41,6 @@ follows:
 - Phase 2 takes up open issues among them. With one such issue, take it up
   directly. With several, list them and ask which to take up first.
 
-- An ID matching neither a pending nor an open issue is reported to the user and
-  otherwise ignored. An issue in scope assigned to another session is reported
-  as such. Take it up only when the user says so: release it with `IssueUpdate`
-  and `status=open`, then assign it.
-
 Scope restricts which issues are processed, not which issues they are compared
 against. Related-issue queries in phase 1 draw from the full issue set. A scoped
 pending issue can duplicate an issue outside the scope, and must close against
@@ -53,7 +48,7 @@ it.
 
 With no arguments, all pending and open issues are in scope.
 
-## Phase 1: Pending issue resolution
+## Phase 1: Pending issue reconciliation
 
 **Background**
 
@@ -69,9 +64,9 @@ Phase 1 performs this reconciliation for all pending issues.
 **Instructions**
 
 Do not ask the user for permission to run phase 1. Only ask the user for input
-as per step 7 below.
+as per step 8 below.
 
-Sub-agents judge clusters of related issues and provide recommendations; they do
+Sub-agents judge groups of related issues and provide recommendations; they do
 not modify issue status. You are the sole writer in this phase and apply the
 resolutions with `mcp__plugin_gage_gage__IssuePendingResolve`.
 
@@ -81,22 +76,19 @@ resolutions with `mcp__plugin_gage_gage__IssuePendingResolve`.
    SELECT id, title FROM issue WHERE status = 'pending'
    ```
 
-   If there are rows, skip to phase 2.
+   If there are no rows, skip to phase 2.
 
 2. For each pending issue, list duplicate candidates using the `related_issue`
-   TVF. returns issues most similar to the subject, best first and at most five,
-   drawn from every issue in any status.
+   TVF. It returns issues similar enough to the subject to be duplicate
+   candidates, best first, drawn from every issue in any status.
 
    ```sql
-   SELECT r.related_id, r.score, i.title, i.status, i.status_reason
+   SELECT r.related_id, i.title, i.status, i.status_reason
    FROM related_issue('<issue_id>') r JOIN issue i ON i.id = r.related_id
-   WHERE r.score > 0.15 LIMIT 5
    ```
 
-   The value 0.15 is based on preliminary experience and is not set in stone.
-
-3. If `related_issues` returns 0 rows for a pending issue, designate it for
-   `open` status (to be applied in step 5 below)
+3. If `related_issue` returns 0 rows for a pending issue, designate it for
+   `open` status (to be applied in step 7 below)
 
 4. Create groups of potentially related issues. To form a group, combine a
    pending issue with its related issue candidates from step 2. Merge groups
@@ -182,8 +174,8 @@ its own right without pre-judging it.
    FROM issue WHERE status = 'open' ORDER BY created DESC
    ```
 
-   These issues, in this order, are the pool for every `IssueAssign` call in
-   this session. An issue opened after this listing is not in the pool.
+   These issues, in this order, are the pool for `IssueAssign` until the next
+   listing. An issue opened after this listing is not in the pool.
 
 2. Present the open issues using the table format below. Do not use issue names
    in your summary. Issue names are internal values and do not have meaning to a
@@ -195,8 +187,9 @@ its own right without pre-judging it.
    | {short_id} | {title} | {age} |
    ```
 
-3. If there is one issue, tell the issue and assume you will take it up. If
-   there is more than one issue, ask:
+   `age` is the time from `created` to now.
+
+3. With one open issue, proceed to phase 2b with it. With more than one, ask:
 
    > Would you like to start with a specific issue or should I take the first in
    > order?
@@ -216,16 +209,18 @@ As per **Concurrency** above, you may be running alongside other sessions
 working on the same set of issues. To resolve an issue it must be assigned to
 you. Once assigned, the issue will not be assigned to another session.
 
-Use `mcp__plugin_gage_gage__IssueAssign` to request assignment. The tool
-requires a `pool` input, which is the list of candidate issues for assignment.
+Use `mcp__plugin_gage_gage__IssueAssign` to request assignment. The tool takes
+one of two inputs:
 
-If you are resolving a specific issue, you can request it with the `issue`
-input. If that issue has already been assigned, you can request another.
-Alternatively, you can omit `issue` to receive the next available issue from the
-pool according to the issue order in the pool input.
+- `pool` - a list of issue IDs in order. The tool assigns you the first one that
+  is open. Use this to take up the next issue from the listing.
 
-If for some reason you need to forcibly take up an already assigned issue (for
-example, the user has directed you to do so) use the `force` flag.
+- `issue` - one issue ID. The tool assigns you that issue if it is open. Use
+  this to take up a specific issue. If the issue is assigned to another session
+  the tool refuses, unless `force` is set, in which case it reassigns the issue
+  to you. Use `force` only when the user directs you to.
+
+If the tool reports that no issue was assigned, return to phase 2a.
 
 **Verify that the issue is valid**
 
@@ -277,7 +272,7 @@ Applies to `{project_1}`, `{project_2}`
     the issue as reported is not accurate
 
 - `implication` - One or two sentences describing what the issue means for the
-  user. This is where answer, "What does this mean to me?" and is the most
+  user. This is where you answer "What does this mean to me?" and is the most
   important summary of the issue presentation.
 
 - `recommendation` - How to proceed
@@ -314,6 +309,4 @@ If the user decides to not fix the issue, close it with `status=closed` and
 
 If the user defers the issue, or stops work on it without closing, release it
 with `mcp__plugin_gage_gage__IssueUpdate` and `status=open` so another session
-can take it up. After a close or a release, return to phase 2a. When the user
-has asked for issues in order. Take the next one with `IssueAssign` instead of
-asking again.
+can take it up. After a close or a release, return to phase 2a.

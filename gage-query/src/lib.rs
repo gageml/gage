@@ -529,7 +529,8 @@ mod tests {
 
     /// `related_issue` ranks the docket by TF-IDF cosine over title
     /// and description, leaves the subject and issues under the score
-    /// floor out, and discounts an issue of another name.
+    /// floor out, discounts an issue of another name, and honors a
+    /// floor given as the second argument.
     #[tokio::test]
     async fn related_issue_ranks_the_docket_against_the_subject() {
         let (_tmp, store) = open_store();
@@ -587,6 +588,13 @@ mod tests {
             2,
             "the help issue shares one term and the parser issue none: {rows:?}"
         );
+        let floor = (first_score + second_score) / 2.0;
+        let raised = strings(
+            &ctx,
+            &format!("SELECT related_id FROM related_issue('{subject}', {floor})"),
+        )
+        .await;
+        assert_eq!(raised, [same], "a floor between the two scores keeps one");
         let unknown = strings(&ctx, "SELECT related_id FROM related_issue('nope')").await;
         assert!(unknown.is_empty());
     }

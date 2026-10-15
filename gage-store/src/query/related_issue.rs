@@ -1,7 +1,8 @@
-//! `related_issue(issue_id)`: the issues similar enough to one issue
-//! to be duplicate candidates, as `(related_id, score)` rows, best
-//! first. The retrieval stage of duplicate detection: a reader judges
-//! the candidates it returns.
+//! `related_issue(issue_id [, min_score])`: the issues similar enough
+//! to one issue to be duplicate candidates, as `(related_id, score)`
+//! rows, best first. `min_score` is the lowest score returned (default
+//! `MIN_SCORE`). The retrieval stage of duplicate detection: a reader
+//! judges the candidates it returns.
 //!
 //! The score is TF-IDF weighted cosine similarity over title and
 //! description. IDF is computed over every live issue, so vocabulary
@@ -11,13 +12,13 @@
 //! subject's keeps 80% of its score: two scanners can report one
 //! condition, so the name is a signal and not a gate. Status is not
 //! considered; join `issue` to narrow or to read titles. The subject
-//! is never a row, and nor is an issue scoring under `MIN_SCORE`. An
+//! is never a row, and nor is an issue scoring under `min_score`. An
 //! unknown id gives zero rows; an ambiguous prefix is an error.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use super::batch::{BatchSource, BatchTable, external, readable, string_literal};
+use super::batch::{BatchSource, BatchTable, external, f64_literal, readable, string_literal};
 use crate::{IssueFull, IssueStore, Store, StoreError};
 use datafusion::arrow::array::{Float64Builder, StringBuilder};
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
@@ -27,10 +28,10 @@ use datafusion::datasource::TableProvider;
 use datafusion::error::{DataFusionError, Result};
 use datafusion::prelude::Expr;
 
-/// The lowest score returned. Calibrated on a docket of 20 issues over
-/// two resolve sessions: every duplicate scored 0.19 or higher against
-/// its survivor, and every novel issue's best candidate scored below
-/// 0.16.
+/// The lowest score returned when the call names none. Calibrated on
+/// a docket of 20 issues over two resolve sessions: every duplicate
+/// scored 0.19 or higher against its survivor, and every novel issue's
+/// best candidate scored below 0.16.
 const MIN_SCORE: f64 = 0.15;
 const OTHER_NAME_WEIGHT: f64 = 0.8;
 
@@ -53,17 +54,31 @@ struct RelatedIssueFn {
 
 impl TableFunctionImpl for RelatedIssueFn {
     fn call(&self, args: &[Expr]) -> Result<Arc<dyn TableProvider>> {
-        let [id_arg] = args else {
-            return Err(DataFusionError::Plan(
-                "related_issue(issue_id) takes one argument".into(),
-            ));
+        let (id_arg, min_score) = match args {
+            [id] => (id, MIN_SCORE),
+            [id, min_score] => {
+                let min_score = f64_literal(min_score).ok_or_else(|| {
+                    DataFusionError::Plan(
+                        "related_issue: min_score must be a numeric literal".into(),
+                    )
+                })?;
+                (id, min_score)
+            }
+            _ => {
+                return Err(DataFusionError::Plan(
+                    "related_issue(issue_id [, min_score]) takes one or two arguments".into(),
+                ));
+            }
         };
         let issue_id = string_literal(id_arg).ok_or_else(|| {
             DataFusionError::Plan("related_issue: issue_id must be a string literal".into())
         })?;
         Ok(Arc::new(BatchTable::new(
             Arc::clone(&self.store),
-            Arc::new(RelatedIssueSource { issue_id }),
+            Arc::new(RelatedIssueSource {
+                issue_id,
+                min_score,
+            }),
         )))
     }
 }
@@ -71,6 +86,7 @@ impl TableFunctionImpl for RelatedIssueFn {
 #[derive(Debug)]
 struct RelatedIssueSource {
     issue_id: String,
+    min_score: f64,
 }
 
 impl BatchSource for RelatedIssueSource {
@@ -91,7 +107,7 @@ impl BatchSource for RelatedIssueSource {
                 docket.push(issue);
             }
         }
-        let related = related(&subject, &docket);
+        let related = related(&subject, &docket, self.min_score);
         let mut ids = StringBuilder::new();
         let mut scores = Float64Builder::new();
         for (id, score) in related {
@@ -105,9 +121,13 @@ impl BatchSource for RelatedIssueSource {
     }
 }
 
-/// The issues of `docket` scoring at least `MIN_SCORE` against
+/// The issues of `docket` scoring at least `min_score` against
 /// `subject`, best first, excluding the subject.
-fn related<'a>(subject: &IssueFull, docket: &'a [IssueFull]) -> Vec<(&'a str, f64)> {
+fn related<'a>(
+    subject: &IssueFull,
+    docket: &'a [IssueFull],
+    min_score: f64,
+) -> Vec<(&'a str, f64)> {
     let corpus = Corpus::new(docket.iter().chain(std::iter::once(subject)));
     let subject_vec = corpus.vector(&subject.id);
     let mut scored: Vec<(&str, f64)> = docket
@@ -118,7 +138,7 @@ fn related<'a>(subject: &IssueFull, docket: &'a [IssueFull]) -> Vec<(&'a str, f6
             if issue.name != subject.name {
                 score *= OTHER_NAME_WEIGHT;
             }
-            (score >= MIN_SCORE).then_some((issue.id.as_str(), score))
+            (score >= min_score).then_some((issue.id.as_str(), score))
         })
         .collect();
     scored.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(b.0)));

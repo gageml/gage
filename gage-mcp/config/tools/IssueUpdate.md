@@ -9,7 +9,7 @@ description = "Issue ID or unique prefix"
 [parameters.status]
 type = "string"
 required = true
-description = "The new status: open, resolving, or closed"
+description = "The new status: open or closed"
 
 [parameters.status_reason]
 type = "string"
@@ -24,21 +24,19 @@ description = "The surviving issue's ID when status_reason is duplicate. Require
 [parameters.message]
 type = "string"
 required = false
-description = "A message recorded with the status change. A resolving claim puts the session ID here"
+description = "A message recorded with the status change"
 
 [annotations]
 read_only_hint = false
 idempotent_hint = false
 +++
 
-Use to open, claim, or close an issue. The change is recorded as a
-status event in the issue's history, with your message when given.
+Use to open or close an issue. The change is recorded as a status
+event in the issue's history, with your message when given.
 
 `status=open` promotes a pending issue, reopens a closed one, or
-releases a resolving one. `status=resolving` claims an open issue for
-the session working toward its close; put the session ID in
-`message`. `status=closed` closes a pending, open, or resolving issue,
-and `status_reason` says why: `completed` when the condition was fixed or acted on,
+releases an assigned one. `status=closed` closes a pending, open, or
+assigned issue, and `status_reason` says why: `completed` when the condition was fixed or acted on,
 `wontfix` when it will not be addressed, `duplicate` when another
 issue already describes the condition. A duplicate close names the
 surviving issue in `of`, so the link between the two is data rather

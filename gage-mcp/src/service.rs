@@ -44,6 +44,7 @@ pub enum GageTool {
     IssueWrite(IssueWriteConfig),
     NoteWrite(NoteWriteConfig),
     IssueUpdate(StoreWriterConfig),
+    IssueAssign(StoreWriterConfig),
     IssueComment(StoreWriterConfig),
     IssuePendingResolve(StoreWriterConfig),
 }
@@ -56,6 +57,7 @@ impl GageTool {
             GageTool::IssueWrite(_) => tools::issue_write::NAME,
             GageTool::NoteWrite(_) => tools::note_write::NAME,
             GageTool::IssueUpdate(_) => tools::issue_update::NAME,
+            GageTool::IssueAssign(_) => tools::issue_assign::NAME,
             GageTool::IssueComment(_) => tools::issue_comment::NAME,
             GageTool::IssuePendingResolve(_) => tools::issue_pending_resolve::NAME,
         }
@@ -153,6 +155,7 @@ pub struct ToolsConfig {
     pub issue_write: Option<IssueWriteConfig>,
     pub note_write: Option<NoteWriteConfig>,
     pub issue_update: Option<StoreWriterConfig>,
+    pub issue_assign: Option<StoreWriterConfig>,
     pub issue_comment: Option<StoreWriterConfig>,
     pub issue_pending_resolve: Option<StoreWriterConfig>,
 }
@@ -243,6 +246,10 @@ fn build_server(spec: &ToolSpec) -> GageServer {
             GageTool::IssueUpdate(c) => {
                 config.issue_update = Some(c.clone());
                 router = router.with_route((tools::issue_update::TOOL)());
+            }
+            GageTool::IssueAssign(c) => {
+                config.issue_assign = Some(c.clone());
+                router = router.with_route((tools::issue_assign::TOOL)());
             }
             GageTool::IssueComment(c) => {
                 config.issue_comment = Some(c.clone());

@@ -258,7 +258,7 @@ fn validate(issues: &IssueStore<'_>, resolutions: &[Resolution]) -> Result<Vec<P
         }
         let target = issues.get(of).map_err(|e| format!("of: {e}"))?;
         match target.status {
-            IssueStatus::Open | IssueStatus::Resolving => {
+            IssueStatus::Open | IssueStatus::Assigned => {
                 if *reopen {
                     return Err(format!(
                         "issue {} sets reopen for {}, which is not closed",
