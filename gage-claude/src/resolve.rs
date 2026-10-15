@@ -29,8 +29,7 @@ pub(crate) fn resolve_command(
     let session_id = uuid::Uuid::new_v4().to_string();
     let mut cmd = Command::new(claude_bin);
     cmd.arg("--session-id").arg(&session_id);
-    cmd.arg("-n")
-        .arg(format!("Resolve Gage issues {}", &session_id[..8]));
+    cmd.arg("-n").arg("Resolve Gage issues");
     cmd.arg("--model").arg(model);
     cmd.args(extra_args);
     cmd.arg(prompt);
