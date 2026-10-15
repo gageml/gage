@@ -6,6 +6,23 @@ pub fn now_ms() -> i64 {
     i64::try_from(now).unwrap_or(i64::MAX)
 }
 
+/// The time since `ms` as a short relative phrase: `12s ago`,
+/// `5m ago`, `3h ago`, `2d ago`; `future` for a time not yet reached.
+pub fn format_elapsed_ms(ms: i64) -> String {
+    let secs = (now_ms() - ms) / 1000;
+    if secs < 0 {
+        "future".to_string()
+    } else if secs < 60 {
+        format!("{secs}s ago")
+    } else if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 86400 {
+        format!("{}h ago", secs / 3600)
+    } else {
+        format!("{}d ago", secs / 86400)
+    }
+}
+
 pub fn ms_to_iso8601(ms: i64) -> String {
     let secs = ms.div_euclid(1000) as u64;
     let millis = ms.rem_euclid(1000) as u64;

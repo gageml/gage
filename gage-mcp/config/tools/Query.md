@@ -52,7 +52,8 @@ Tables:
   modified); attachment_file (attachment_id, path, size, text)
 
 Functions: issue_report('<id>') renders one issue as markdown;
-related_issue('<id>' [, min_score]) lists the issues similar enough to be duplicate candidates, best first.
+related_issue('<id>' [, min_score]) lists the issues similar enough to be duplicate candidates, best first;
+age(ts) renders the time since a timestamp, as in 3h ago.
 blame('<file>' [, lines]) and native_blame('<source>', '<file>' [, lines])
 give one row per file line with the call that wrote it: (line, text,
 session_id, lines, tool_use_id, tool_name, timestamp); `lines` is the session

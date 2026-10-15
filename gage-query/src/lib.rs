@@ -36,6 +36,7 @@
 //! [`ContextBuilder::skip_system_cols`] hides them for a context that
 //! serves people and models writing queries.
 
+mod age;
 mod blame;
 mod json;
 mod native;
@@ -62,6 +63,7 @@ use gage_store::{
     scan_table, scan_task_agent_table, scan_task_table, scan_watermark_table, tag_table,
 };
 
+use crate::age::age_udf;
 use crate::blame::{blame_fn, blame_schema, native_blame_fn};
 use crate::json::json_extract_udf;
 use crate::native::{NativeTable, NativeTableFn};
@@ -428,6 +430,7 @@ pub(crate) fn new_context(skip_system_cols: bool, show_agents: bool) -> SessionC
         );
     }
     ctx.register_udf(project_for_path_udf());
+    ctx.register_udf(age_udf());
     ctx.register_table("content_schema", content_schema_table())
         .unwrap();
     ctx
@@ -525,6 +528,21 @@ mod tests {
                 key: None,
             })
             .unwrap()
+    }
+
+    /// `age` renders the time since a timestamp column as the CLI
+    /// does.
+    #[tokio::test]
+    async fn age_renders_time_since_a_timestamp() {
+        let (_tmp, store) = open_store();
+        {
+            let store = store.lock().unwrap();
+            add_issue(&store, "general", "Something", "Details.");
+        }
+        let ctx = ContextBuilder::new(Some(Arc::clone(&store))).build().await;
+        let ages = strings(&ctx, "SELECT age(created) FROM issue").await;
+        assert_eq!(ages.len(), 1);
+        assert!(ages[0].ends_with("s ago"), "{ages:?}");
     }
 
     /// `related_issue` ranks the docket by TF-IDF cosine over title

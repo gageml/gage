@@ -1,18 +1,4 @@
-pub fn format_elapsed_ms(ms: i64) -> String {
-    let now_ms = gage_core::datetime::now_ms();
-    let secs = (now_ms - ms) / 1000;
-    if secs < 0 {
-        "future".to_string()
-    } else if secs < 60 {
-        format!("{secs}s ago")
-    } else if secs < 3600 {
-        format!("{}m ago", secs / 60)
-    } else if secs < 86400 {
-        format!("{}h ago", secs / 3600)
-    } else {
-        format!("{}d ago", secs / 86400)
-    }
-}
+pub use gage_core::datetime::format_elapsed_ms;
 
 pub fn format_duration(d: std::time::Duration) -> String {
     let secs = d.as_secs();

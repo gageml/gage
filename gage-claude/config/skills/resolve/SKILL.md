@@ -170,7 +170,7 @@ its own right without pre-judging it.
    resolution changes which issues are open.
 
    ```sql
-   SELECT id, title, created
+   SELECT id, title, age(created) AS age
    FROM issue WHERE status = 'open' ORDER BY created DESC
    ```
 
@@ -186,8 +186,6 @@ its own right without pre-judging it.
    | ---------- | ------- | ----- |
    | {short_id} | {title} | {age} |
    ```
-
-   `age` is the time from `created` to now.
 
 3. With one open issue, proceed to phase 2b with it. With more than one, ask:
 
