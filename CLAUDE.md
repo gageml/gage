@@ -4,6 +4,23 @@
   responsible for their own commits. This is an important part of the
   contribution policy and must not be violated.
 
+## Design rules
+
+- If the codebase shows a consistent design construct, use that as the starting
+  point for design proposals.
+
+- If there are design inconsistencies in the codebase, bring those to user's
+  attention for resolution. Proceed only when inconsistencies are resolved.
+
+- If you sense the user may misunderstand something in a design decision, bring
+  that topic to the user's attention before proceeding. In such cases the user
+  may be proceeding under false impressions that should be clarified before
+  proceeding.
+
+- The user determines the design after due consideration. Follow clearly
+  communicated design decisions as stated. Ask for clarification if you are
+  unsure about the user's intentions.
+
 ## Rust Rules
 
 These rules apply to ALL Rust code in this workspace. They are non-negotiable.
@@ -72,6 +89,19 @@ These rules apply to ALL Rust code in this workspace. They are non-negotiable.
 - Run `just check` before declaring any change complete. It runs the full gate —
   clippy (no warnings), fmt, tests — as one command; partial verification is not
   an option.
+
+- **New or changed behavior gets a test.** A passing gate proves only that the
+  existing tests still pass; it says nothing about behavior no test exercises. A
+  change that adds or alters behavior adds a regression test that covers the new
+  path. Manual smoke runs and `just check` are not a substitute. When a change
+  genuinely cannot be tested, say so and why rather than leaving the gap silent.
+
+- **A failing assertion is fixed or raised, never deleted to pass the gate.** A
+  test that fails is reporting either a bug in the code or a stale expectation.
+  Diagnose which. Correct the code or correct the assertion to the right
+  expected value. Deleting the assertion, or weakening it until it passes,
+  discards the signal and hides the defect. When the right expectation is
+  unclear, raise it with the user instead of removing the check.
 
 - **Prefer imports over fully qualified references.** Keep symbol use short to
   improve readability. The test: before writing `a::b::C` inline, look at the
