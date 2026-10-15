@@ -8,11 +8,9 @@ use crate::proc::find_claude;
 
 /// Command that starts an interactive Claude Code session running the
 /// gage resolve skill, scoped to `issue_ids` (all pending and open
-/// issues when empty). The session gets a fresh session ID up front so
-/// its display name can carry the short form. `model` maps to
-/// `--model` and is required — a claude session never starts on the
-/// user's default model; `extra_args` pass to claude verbatim, ahead
-/// of the prompt.
+/// issues when empty). `model` maps to `--model` and is required — a
+/// claude session never starts on the user's default model;
+/// `extra_args` pass to claude verbatim, ahead of the prompt.
 pub(crate) fn resolve_command(
     issue_ids: &[String],
     model: &str,
@@ -26,9 +24,7 @@ pub(crate) fn resolve_command(
         prompt.push_str(id);
     }
 
-    let session_id = uuid::Uuid::new_v4().to_string();
     let mut cmd = Command::new(claude_bin);
-    cmd.arg("--session-id").arg(&session_id);
     cmd.arg("-n").arg("Resolve Gage issues");
     cmd.arg("--model").arg(model);
     cmd.args(extra_args);
