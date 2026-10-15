@@ -1,7 +1,7 @@
-//! `related_issue(issue_id [, limit])`: the issues most similar to one
-//! issue, as `(related_id, score)` rows, best first, at most `limit`
-//! rows (default 5). The retrieval stage of duplicate detection: a
-//! reader judges the candidates it returns.
+//! `related_issue(issue_id)`: the issues similar enough to one issue
+//! to be duplicate candidates, as `(related_id, score)` rows, best
+//! first. The retrieval stage of duplicate detection: a reader judges
+//! the candidates it returns.
 //!
 //! The score is TF-IDF weighted cosine similarity over title and
 //! description. IDF is computed over every live issue, so vocabulary
@@ -11,13 +11,13 @@
 //! subject's keeps 80% of its score: two scanners can report one
 //! condition, so the name is a signal and not a gate. Status is not
 //! considered; join `issue` to narrow or to read titles. The subject
-//! is never a row, and nor is an issue with no term in common with it.
-//! An unknown id gives zero rows; an ambiguous prefix is an error.
+//! is never a row, and nor is an issue scoring under `MIN_SCORE`. An
+//! unknown id gives zero rows; an ambiguous prefix is an error.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use super::batch::{BatchSource, BatchTable, external, readable, string_literal, usize_literal};
+use super::batch::{BatchSource, BatchTable, external, readable, string_literal};
 use crate::{IssueFull, IssueStore, Store, StoreError};
 use datafusion::arrow::array::{Float64Builder, StringBuilder};
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
@@ -27,7 +27,11 @@ use datafusion::datasource::TableProvider;
 use datafusion::error::{DataFusionError, Result};
 use datafusion::prelude::Expr;
 
-const DEFAULT_LIMIT: usize = 5;
+/// The lowest score returned. Calibrated on a docket of 20 issues over
+/// two resolve sessions: every duplicate scored 0.19 or higher against
+/// its survivor, and every novel issue's best candidate scored below
+/// 0.16.
+const MIN_SCORE: f64 = 0.15;
 const OTHER_NAME_WEIGHT: f64 = 0.8;
 
 /// The store-bound `related_issue` table function.
@@ -49,28 +53,17 @@ struct RelatedIssueFn {
 
 impl TableFunctionImpl for RelatedIssueFn {
     fn call(&self, args: &[Expr]) -> Result<Arc<dyn TableProvider>> {
-        let (id_arg, limit) = match args {
-            [id] => (id, DEFAULT_LIMIT),
-            [id, limit] => {
-                let limit = usize_literal(limit).ok_or_else(|| {
-                    DataFusionError::Plan(
-                        "related_issue: limit must be a non-negative integer literal".into(),
-                    )
-                })?;
-                (id, limit)
-            }
-            _ => {
-                return Err(DataFusionError::Plan(
-                    "related_issue(issue_id [, limit]) takes one or two arguments".into(),
-                ));
-            }
+        let [id_arg] = args else {
+            return Err(DataFusionError::Plan(
+                "related_issue(issue_id) takes one argument".into(),
+            ));
         };
         let issue_id = string_literal(id_arg).ok_or_else(|| {
             DataFusionError::Plan("related_issue: issue_id must be a string literal".into())
         })?;
         Ok(Arc::new(BatchTable::new(
             Arc::clone(&self.store),
-            Arc::new(RelatedIssueSource { issue_id, limit }),
+            Arc::new(RelatedIssueSource { issue_id }),
         )))
     }
 }
@@ -78,7 +71,6 @@ impl TableFunctionImpl for RelatedIssueFn {
 #[derive(Debug)]
 struct RelatedIssueSource {
     issue_id: String,
-    limit: usize,
 }
 
 impl BatchSource for RelatedIssueSource {
@@ -99,7 +91,7 @@ impl BatchSource for RelatedIssueSource {
                 docket.push(issue);
             }
         }
-        let related = related(&subject, &docket, self.limit);
+        let related = related(&subject, &docket);
         let mut ids = StringBuilder::new();
         let mut scores = Float64Builder::new();
         for (id, score) in related {
@@ -113,9 +105,9 @@ impl BatchSource for RelatedIssueSource {
     }
 }
 
-/// The `limit` best-scoring issues of `docket` against `subject`,
-/// best first, excluding the subject and every issue scoring zero.
-fn related<'a>(subject: &IssueFull, docket: &'a [IssueFull], limit: usize) -> Vec<(&'a str, f64)> {
+/// The issues of `docket` scoring at least `MIN_SCORE` against
+/// `subject`, best first, excluding the subject.
+fn related<'a>(subject: &IssueFull, docket: &'a [IssueFull]) -> Vec<(&'a str, f64)> {
     let corpus = Corpus::new(docket.iter().chain(std::iter::once(subject)));
     let subject_vec = corpus.vector(&subject.id);
     let mut scored: Vec<(&str, f64)> = docket
@@ -126,11 +118,10 @@ fn related<'a>(subject: &IssueFull, docket: &'a [IssueFull], limit: usize) -> Ve
             if issue.name != subject.name {
                 score *= OTHER_NAME_WEIGHT;
             }
-            (score > 0.0).then_some((issue.id.as_str(), score))
+            (score >= MIN_SCORE).then_some((issue.id.as_str(), score))
         })
         .collect();
     scored.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(b.0)));
-    scored.truncate(limit);
     scored
 }
 
