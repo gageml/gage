@@ -220,11 +220,10 @@ async fn start_in_span(c: CallAgent, span: Span) -> Result<Agent, Error> {
     let sink = OUTPUT_SINK.try_with(|s| s.clone()).ok();
     spec.builtin_tools = tool::builtin_names(&c.tools)?;
     let tool_uses: tool::ToolUseSlot = Arc::new(OnceLock::new());
-    let service = if c.tools.len() == spec.builtin_tools.len() {
+    let (tool_spec, tool_names) = tool::consume(&c.tools, &ctx, sink.as_ref(), &tool_uses).await?;
+    let service = if tool_names.is_empty() {
         None
     } else {
-        let (tool_spec, tool_names) =
-            tool::consume(&c.tools, &ctx, sink.as_ref(), &tool_uses).await?;
         let host = ctx
             .mcp_host()
             .await

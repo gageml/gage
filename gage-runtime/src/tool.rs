@@ -1854,6 +1854,23 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn a_duplicated_builtin_leaves_no_tool_to_serve() {
+        let tmp = tempfile::tempdir().unwrap();
+        let list = tools(
+            r#"
+            use gage::tools::Builtin;
+            pub fn main() { [Builtin::new("Agent"), Builtin::new("Agent")] }
+            "#,
+        );
+        let (spec, names) = consume(&list, &scan_ctx(&tmp), None, &no_tool_uses())
+            .await
+            .unwrap();
+        assert!(names.is_empty());
+        assert!(spec.gage.is_empty());
+        assert!(spec.custom.is_empty());
+    }
+
     #[test]
     fn tool_values_accept_tools_and_gage_configs_only() {
         let err = match tool_from_value(&rune::to_value(7i64).unwrap()) {
