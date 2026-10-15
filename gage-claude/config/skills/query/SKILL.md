@@ -30,6 +30,24 @@ included; `cached_tokens` the part of input served from cache. `cost_usd` is
 the harness's reported figure, null when it reports none. Use these before
 reading usage out of `raw`.
 
+## Sessions that wrote a file: the blame functions
+
+`native_blame(source, file [, lines])` and `blame(file [, lines])` return one
+row per line of a file with the session tool call that wrote it:
+`(line, text, session_id, lines, tool_use_id, tool_name, timestamp)`.
+`native_blame` reads a native source and `blame` the stored sessions. `file`
+is a path; `lines` is optional and selects lines as a number (`42`) or as
+text (`'10-20,42'`). A line is attributed to the earliest call, inside the
+window git gives the line's commit, whose input carries the line's text with
+whitespace collapsed; `session_id` is null when no call does. `lines` on the
+row is the session selection to read, from the human prompt before the call
+through the call, in the form a session target carries.
+
+```sql
+SELECT line, session_id, lines, tool_name
+FROM native_blame('', '/path/to/file.rs', '10-20');
+```
+
 ```sql
 SELECT id, project, message_count FROM native_session('claude:')
 WHERE id LIKE '3fefde6c%';

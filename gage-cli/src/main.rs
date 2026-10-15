@@ -232,9 +232,9 @@ enum Command {
     /// Find sessions that wrote lines of a file
     ///
     /// Follows git blame: each line's commit bounds a window, and the
-    /// session tool call that wrote the file in that window with the
-    /// line's text is reported with the span from the prompt before
-    /// it to the call
+    /// earliest session tool call in that window whose input carries
+    /// the line's text is reported with the session lines from the
+    /// prompt before it to the call
     Blame(cmd_blame::BlameArgs),
 
     /// Update Gage index

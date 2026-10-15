@@ -85,7 +85,7 @@ impl TableFunctionImpl for NativeTableFn {
     }
 }
 
-fn string_literal(e: &Expr) -> Option<String> {
+pub(crate) fn string_literal(e: &Expr) -> Option<String> {
     match e {
         Expr::Literal(ScalarValue::Utf8(Some(s)), _)
         | Expr::Literal(ScalarValue::LargeUtf8(Some(s)), _)

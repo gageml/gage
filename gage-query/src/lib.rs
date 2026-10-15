@@ -36,6 +36,7 @@
 //! [`ContextBuilder::skip_system_cols`] hides them for a context that
 //! serves people and models writing queries.
 
+mod blame;
 mod json;
 mod native;
 mod print_format;
@@ -61,6 +62,7 @@ use gage_store::{
     scan_table, scan_task_agent_table, scan_task_table, scan_watermark_table, tag_table,
 };
 
+use crate::blame::{blame_fn, blame_schema, native_blame_fn};
 use crate::json::json_extract_udf;
 use crate::native::{NativeTable, NativeTableFn};
 pub use crate::print_format::{PrintFormat, write_yaml, write_yaml_capped};
@@ -128,6 +130,7 @@ impl ContextBuilder {
     pub async fn build(self) -> SessionContext {
         let ctx = new_context(self.skip_system_cols, self.show_agents);
         let Some(store) = self.store else {
+            register_blame_functions(&ctx, None, self.show_agents);
             return ctx;
         };
         if let Some(scope) = self.scope {
@@ -179,6 +182,7 @@ impl ContextBuilder {
         ctx.register_table("note_doc", registry_note_doc_table())
             .expect("register the note doc table on a fresh context");
         register_issue_functions(&ctx, &store);
+        register_blame_functions(&ctx, Some(&store), self.show_agents);
         // Views are planned over the raw providers, so they survive the
         // user-facing context hiding what they read
         for (name, sql) in VIEWS {
@@ -277,6 +281,19 @@ fn register_issue_functions(ctx: &SessionContext, store: &Arc<Mutex<Store>>) {
     ctx.register_udtf("related_issue", related_issue_fn(Arc::clone(store)));
 }
 
+/// The blame functions are for a store-wide or a native context. A
+/// scan-scoped context does not register them.
+fn register_blame_functions(
+    ctx: &SessionContext,
+    store: Option<&Arc<Mutex<Store>>>,
+    show_agents: bool,
+) {
+    ctx.register_udtf("native_blame", native_blame_fn(show_agents));
+    if let Some(store) = store {
+        ctx.register_udtf("blame", blame_fn(Arc::clone(store)));
+    }
+}
+
 /// The `note_doc` table of the store scope: every `writes` declaration
 /// of every registered scanner, read once when the context is built.
 fn registry_note_doc_table() -> Arc<dyn TableProvider> {
@@ -361,6 +378,18 @@ pub fn repl_functions() -> Vec<TvfInfo> {
             args: "source text",
             schema: None,
         })
+        .chain([
+            TvfInfo {
+                name: "blame",
+                args: "file text [, lines text]",
+                schema: Some(blame_schema()),
+            },
+            TvfInfo {
+                name: "native_blame",
+                args: "source text, file text [, lines text]",
+                schema: Some(blame_schema()),
+            },
+        ])
         .collect()
 }
 
@@ -376,7 +405,7 @@ const NATIVE_TABLES: [NativeTable; 4] = [
 /// native table functions, the JSON functions, the `project_for_path`
 /// UDF, and the `content_schema` table --- with no store tables
 /// registered.
-fn new_context(skip_system_cols: bool, show_agents: bool) -> SessionContext {
+pub(crate) fn new_context(skip_system_cols: bool, show_agents: bool) -> SessionContext {
     let config = SessionConfig::new()
         .with_information_schema(true)
         .with_extension(Arc::new(RowCache::new()))
@@ -499,8 +528,8 @@ mod tests {
     }
 
     /// `related_issue` ranks the docket by TF-IDF cosine over title
-    /// and description, leaves the subject and zero-score issues out,
-    /// discounts an issue of another name, and honors the limit.
+    /// and description, leaves the subject and issues under the score
+    /// floor out, and discounts an issue of another name.
     #[tokio::test]
     async fn related_issue_ranks_the_docket_against_the_subject() {
         let (_tmp, store) = open_store();
@@ -527,6 +556,12 @@ mod tests {
             add_issue(
                 &store,
                 "general",
+                "Fetch help text is stale",
+                "The fetch command help names an option that was removed.",
+            );
+            add_issue(
+                &store,
+                "general",
                 "Missing parser coverage",
                 "Parser lacks tests.",
             );
@@ -547,14 +582,11 @@ mod tests {
             (second_score - first_score * 0.8).abs() < 0.002,
             "another name keeps 80%: {rows:?}"
         );
-        assert_eq!(rows.len(), 2, "the parser issue shares no term: {rows:?}");
-
-        let limited = strings(
-            &ctx,
-            &format!("SELECT related_id FROM related_issue('{subject}', 1)"),
-        )
-        .await;
-        assert_eq!(limited, [same]);
+        assert_eq!(
+            rows.len(),
+            2,
+            "the help issue shares one term and the parser issue none: {rows:?}"
+        );
         let unknown = strings(&ctx, "SELECT related_id FROM related_issue('nope')").await;
         assert!(unknown.is_empty());
     }
@@ -631,6 +663,20 @@ mod tests {
         )
         .await;
         assert_eq!(events, [survivor]);
+    }
+
+    /// `native_blame` is on every context outside a scan scope; `blame`
+    /// needs the store.
+    #[tokio::test]
+    async fn blame_functions_follow_the_context_scope() {
+        let ctx = ContextBuilder::new(None).build().await;
+        assert!(ctx.table_function("native_blame").is_ok());
+        assert!(ctx.table_function("blame").is_err());
+
+        let (_tmp, store) = open_store();
+        let ctx = ContextBuilder::new(Some(store)).build().await;
+        assert!(ctx.table_function("native_blame").is_ok());
+        assert!(ctx.table_function("blame").is_ok());
     }
 
     /// A store-backed context registers `session` and exposes it
@@ -1155,6 +1201,10 @@ mod tests {
             .scope(ScanScope::scan_dir(&root))
             .build()
             .await;
+        assert!(
+            ctx.table_function("native_blame").is_err() && ctx.table_function("blame").is_err(),
+            "a scan-scoped context has no blame functions"
+        );
         assert_eq!(
             strings(&ctx, "SELECT task FROM scan_task ORDER BY num").await,
             ["greet", "fail", "after"]

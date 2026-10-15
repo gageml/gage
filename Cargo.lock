@@ -2353,6 +2353,7 @@ dependencies = [
 name = "gage-query"
 version = "0.2.0-pre.1"
 dependencies = [
+ "aho-corasick",
  "arrow",
  "async-trait",
  "clap",
@@ -2368,6 +2369,7 @@ dependencies = [
  "serde_yaml",
  "tempfile",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

@@ -52,7 +52,12 @@ Tables:
   modified); attachment_file (attachment_id, path, size, text)
 
 Functions: issue_report('<id>') renders one issue as markdown;
-related_issue('<id>' [, n]) lists the n most similar issues, best first.
+related_issue('<id>') lists the issues similar enough to be duplicate candidates, best first.
+blame('<file>' [, lines]) and native_blame('<source>', '<file>' [, lines])
+give one row per file line with the call that wrote it: (line, text,
+session_id, lines, tool_use_id, tool_name, timestamp); `lines` is the session
+lines to read, from the prompt before the call through it; session_id is null
+when no call's input carries the line. lines is a number or '10-20,42'.
 
 `raw`, `input_raw`, and `result_raw` are JSON text in the driver's native
 shape. content_schema (content_format, name, schema) holds each shape as

@@ -7,6 +7,7 @@ edition.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
+aho-corasick = { workspace = true }
 arrow = { workspace = true, features = ["prettyprint"] }
 async-trait = { workspace = true }
 clap = { workspace = true }
@@ -18,11 +19,12 @@ gage-registry = { path = "../gage-registry" }
 gage-session = { path = "../gage-session" }
 gage-store = { path = "../gage-store" }
 rustyline = { workspace = true }
+serde_json = { workspace = true }
 serde_yaml = { workspace = true }
+tracing = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros"] }
-serde_json = { workspace = true }
 tempfile = { workspace = true }
 
 [lints]
