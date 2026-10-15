@@ -448,7 +448,9 @@ fn target_lines(target: &str) -> Result<(Option<u32>, Option<u32>), Box<dyn Erro
     let Some(&(start, end)) = selection.ranges().first() else {
         return Ok((None, None));
     };
-    Ok((Some(start as u32), (start != end).then_some(end as u32)))
+    let start = u32::try_from(start)?;
+    let end = u32::try_from(end)?;
+    Ok((Some(start), (start != end).then_some(end)))
 }
 
 /// The row's non-system columns as a JSON object, for the YAML pane.
@@ -569,6 +571,13 @@ pub(crate) mod tests {
             target_lines("session:abc#12-20,31").unwrap(),
             (Some(12), Some(20))
         );
+    }
+
+    #[test]
+    fn target_lines_rejects_a_line_beyond_u32() {
+        let beyond = u64::from(u32::MAX) + 1;
+        assert!(target_lines(&format!("session:abc#{beyond}")).is_err());
+        assert!(target_lines(&format!("session:abc#1-{beyond}")).is_err());
     }
 
     /// The store backend reads the session, its entries, and its

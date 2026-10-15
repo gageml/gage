@@ -2414,9 +2414,11 @@ fn session_target(uri: &str) -> Option<SessionTarget> {
     if let Some(selection) = selection
         && let Ok(selection) = selection.parse::<LineSelection>()
         && let Some(&(start, end)) = selection.ranges().first()
+        && let Ok(start) = u32::try_from(start)
+        && let Ok(end) = u32::try_from(end)
     {
-        target.line = Some(start as u32);
-        target.line_end = (start != end).then_some(end as u32);
+        target.line = Some(start);
+        target.line_end = (start != end).then_some(end);
     }
     Some(target)
 }
@@ -3825,5 +3827,22 @@ mod tests {
         state.handle_session_dialog_key(close_key());
         assert!(matches!(state.dialog, Dialog::None));
         assert!(state.session_ui.contains_key("s1"));
+    }
+
+    #[test]
+    fn session_target_reads_the_first_range() {
+        let target = session_target("session:abc#12-20,31").unwrap();
+        assert_eq!((target.line, target.line_end), (Some(12), Some(20)));
+        let target = session_target("session:abc:7").unwrap();
+        assert_eq!((target.line, target.line_end), (Some(7), None));
+        assert!(session_target("scan:abc").is_none());
+    }
+
+    #[test]
+    fn session_target_leaves_a_line_beyond_u32_unset() {
+        let beyond = u64::from(u32::MAX) + 1;
+        let target = session_target(&format!("session:abc#{beyond}")).unwrap();
+        assert_eq!(target.session_id, "abc");
+        assert_eq!((target.line, target.line_end), (None, None));
     }
 }
