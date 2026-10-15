@@ -1,12 +1,13 @@
 //! `gage fetch`: adopt what a remote has.
 //!
 //! The source is a configured remote or a bare Git URL or path. With
-//! no objects named, every Gage ref the source advertises is fetched
-//! into its tracking refs and decided; with objects named, those
-//! objects and everything they link. A divergence the type can merge
-//! is merged; one it cannot is reported as a conflict and left, and
-//! `--ours` or `--theirs` on a later run of the named objects resolves
-//! it.
+//! objects named, those objects and everything they link are fetched;
+//! with `--all`, every Gage ref the source advertises is fetched into
+//! its tracking refs and decided. One of the two is required, or
+//! `--list` to see what the remote has without fetching. A divergence
+//! the type can merge is merged; one it cannot is reported as a
+//! conflict and left, and `--ours` or `--theirs` on a later run of the
+//! named objects resolves it.
 //!
 //! A URL is fetched into a transient namespace that is deleted before
 //! the command exits, so the store keeps no record of the URL. The
