@@ -5,9 +5,9 @@
 //! Each returns one of the driver's native tables for a source, so a
 //! user can see what a source holds and choose which sessions to add
 //! to the store. The source is opened through the builtin driver
-//! registry and the provider taken from what it returns. An empty or
-//! omitted argument names the default source; `'claude:/path'` names
-//! one.
+//! registry and the provider taken from what it returns. The argument
+//! is required: `''` names the default source and `'claude:/path'`
+//! names one.
 
 use std::sync::Arc;
 
@@ -62,17 +62,14 @@ pub struct NativeTableFn {
 impl TableFunctionImpl for NativeTableFn {
     fn call(&self, args: &[Expr]) -> Result<Arc<dyn TableProvider>> {
         let name = self.table.function_name();
-        let source = match args {
-            [] => String::new(),
-            [arg] => string_literal(arg).ok_or_else(|| {
-                DataFusionError::Plan(format!("{name}(source): source must be a string literal"))
-            })?,
-            _ => {
-                return Err(DataFusionError::Plan(format!(
-                    "{name} takes at most one argument"
-                )));
-            }
+        let [arg] = args else {
+            return Err(DataFusionError::Plan(format!(
+                "{name}(source) takes one argument; '' names the default source"
+            )));
         };
+        let source = string_literal(arg).ok_or_else(|| {
+            DataFusionError::Plan(format!("{name}(source): source must be a string literal"))
+        })?;
         let registry = DriverRegistry::builtin();
         let mut options = SourceOptions::new(&source);
         options.show_agents(self.show_agents);
@@ -99,4 +96,43 @@ fn string_literal(e: &Expr) -> Option<String> {
 
 fn external(e: gage_session::DriverError) -> DataFusionError {
     DataFusionError::External(Box::new(e))
+}
+
+#[cfg(test)]
+mod tests {
+    use datafusion::prelude::lit;
+
+    use super::*;
+
+    fn session_fn() -> NativeTableFn {
+        NativeTableFn {
+            table: NativeTable::Session,
+            skip_system_cols: false,
+            show_agents: false,
+        }
+    }
+
+    #[test]
+    fn source_argument_is_required() {
+        let err = session_fn().call(&[]).err().unwrap();
+        assert!(
+            matches!(err, DataFusionError::Plan(ref m) if m.contains("'' names the default source")),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_second_argument_is_rejected() {
+        let err = session_fn().call(&[lit(""), lit("")]).err().unwrap();
+        assert!(matches!(err, DataFusionError::Plan(_)), "{err}");
+    }
+
+    #[test]
+    fn source_must_be_a_string_literal() {
+        let err = session_fn().call(&[lit(1)]).err().unwrap();
+        assert!(
+            matches!(err, DataFusionError::Plan(ref m) if m.contains("string literal")),
+            "{err}"
+        );
+    }
 }

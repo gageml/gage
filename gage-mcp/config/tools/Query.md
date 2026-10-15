@@ -63,14 +63,15 @@ operators; CAST the text for arithmetic. Do not cast to json or jsonb.
 
 Native source functions read a driver source directly, including sessions
 not in the store: native_session('<source>'), native_message('<source>'),
-native_entry('<source>'), native_tool_use('<source>'). The argument is a
-source URL; 'claude:' is the default Claude Code source and 'claude:/path'
-names a projects directory. native_session returns (id, project, title,
-model, message_count, is_empty, input_tokens, output_tokens, cached_tokens,
-cost_usd, content_format, mtime, size); `id` is the native UUID, and there is
-no line_count, created, or modified. The other three return the stored
-tables' columns, with the native UUID as `session_id`. Use these to look over
-a session by its native id before it is added to the store.
+native_entry('<source>'), native_tool_use('<source>'). The argument is
+required and is a source URL: '' names the default source, 'claude:' is the
+default Claude Code source, and 'claude:/path' names a projects directory.
+native_session returns (id, project, title, model, message_count, is_empty,
+input_tokens, output_tokens, cached_tokens, cost_usd, content_format, mtime,
+size); `id` is the native UUID, and there is no line_count, created, or
+modified. The other three return the stored tables' columns, with the native
+UUID as `session_id`. Use these to look over a session by its native id
+before it is added to the store.
 
 Read a session by `session_id` ordered by `line`, taking
 `substr(text, 1, 800)` over full `text` or `raw` on wide rows.

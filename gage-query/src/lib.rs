@@ -358,7 +358,7 @@ pub fn repl_functions() -> Vec<TvfInfo> {
         .iter()
         .map(|t| TvfInfo {
             name: t.function_name(),
-            args: "[source text]",
+            args: "source text",
             schema: None,
         })
         .collect()

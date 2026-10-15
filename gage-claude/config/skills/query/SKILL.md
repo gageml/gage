@@ -15,8 +15,9 @@ The `session`, `entry`, `message`, and `tool_use` tables hold stored sessions
 only. A session named by its native UUID (the Claude Code transcript id) may
 not be stored. `native_session(source)`, `native_message(source)`,
 `native_entry(source)`, and `native_tool_use(source)` read the source
-directly. `'claude:'` is the default Claude Code source; `'claude:/path'`
-names a projects directory. The native tables use the native UUID: `id` in
+directly. The argument is required: `''` names the default source,
+`'claude:'` is the default Claude Code source, and `'claude:/path'` names a
+projects directory. The native tables use the native UUID: `id` in
 `native_session`, `session_id` in the other three. The table `native_session`
 returns carries `mtime` and `size` in place of the stored table's
 `line_count`, `created`, and `modified`; both carry the token columns; the
