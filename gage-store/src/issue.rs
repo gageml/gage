@@ -231,7 +231,7 @@ pub struct IssueChange {
     pub reason: Option<StatusReason>,
     /// The surviving issue a `duplicate` close names, when the close
     /// went through [`IssueStore::close_duplicate`]
-    pub of: Option<String>,
+    pub duplicate_of: Option<String>,
     /// The free-form body from `message.txt`
     pub message: Option<String>,
 }
@@ -310,7 +310,7 @@ struct ChangeAttrs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     reason: Option<StatusReason>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    of: Option<String>,
+    duplicate_of: Option<String>,
 }
 
 impl IssueStore<'_> {
@@ -597,7 +597,7 @@ impl IssueStore<'_> {
             from_status: Some(attrs.status),
             to_status: Some(status),
             reason,
-            of: None,
+            duplicate_of: None,
         };
         attrs.status = status;
         attrs.status_reason = reason;
@@ -643,7 +643,7 @@ impl IssueStore<'_> {
             from_status: Some(attrs.status),
             to_status: Some(IssueStatus::Assigned),
             reason: None,
-            of: None,
+            duplicate_of: None,
         };
         attrs.status = IssueStatus::Assigned;
         attrs.status_reason = None;
@@ -656,20 +656,20 @@ impl IssueStore<'_> {
         )
     }
 
-    /// Close an issue as a duplicate of `of`, recording the surviving
-    /// issue on the `status` change entry. `of` is the id or unique
-    /// prefix of a live issue other than the one closed. An issue
+    /// Close an issue as a duplicate of `duplicate_of`, recording the
+    /// surviving issue on the `status` change entry. `duplicate_of` is
+    /// the id or unique prefix of a live issue other than the one closed. An issue
     /// already closed is [`StoreError::IssueStatusUnchanged`]. Returns
     /// the resolved id of the closed issue.
     pub fn close_duplicate(
         &self,
         id_or_prefix: &str,
-        of: &str,
+        duplicate_of: &str,
         author: &str,
         message: Option<&str>,
     ) -> Result<String, StoreError> {
         let object = self.store.resolve_typed(id_or_prefix, OBJECT_TYPE)?;
-        let survivor = self.store.resolve_typed(of, OBJECT_TYPE)?;
+        let survivor = self.store.resolve_typed(duplicate_of, OBJECT_TYPE)?;
         if survivor.header.id == object.header.id {
             return Err(StoreError::IssueInput(format!(
                 "issue {} cannot be a duplicate of itself",
@@ -689,7 +689,7 @@ impl IssueStore<'_> {
             from_status: Some(attrs.status),
             to_status: Some(IssueStatus::Closed),
             reason: Some(StatusReason::Duplicate),
-            of: Some(survivor.header.id.clone()),
+            duplicate_of: Some(survivor.header.id.clone()),
         };
         attrs.status = IssueStatus::Closed;
         attrs.status_reason = Some(StatusReason::Duplicate);
@@ -721,7 +721,7 @@ impl IssueStore<'_> {
             from_status: None,
             to_status: None,
             reason: None,
-            of: None,
+            duplicate_of: None,
         };
         self.append_change(&object, attrs, &change, Some(message), "issue comment")
     }
@@ -819,7 +819,7 @@ impl IssueStore<'_> {
                 from_status: Some(from.0),
                 to_status: Some(chosen.0),
                 reason: chosen.1,
-                of: None,
+                duplicate_of: None,
             };
             let json = json_line(&change, "issue change")?;
             let message = format!("Resolved divergence with {remote_name}: kept {kept}");
@@ -977,7 +977,7 @@ fn decode_change(
         from_status: attrs.from_status,
         to_status: attrs.to_status,
         reason: attrs.reason,
-        of: attrs.of,
+        duplicate_of: attrs.duplicate_of,
         message,
     })
 }
@@ -1111,7 +1111,7 @@ fn create_change(input: &IssueInput) -> ChangeAttrs {
         from_status: None,
         to_status: Some(input.status),
         reason: None,
-        of: None,
+        duplicate_of: None,
     }
 }
 
@@ -1125,7 +1125,7 @@ fn replace_change(input: &IssueInput, prev_status: IssueStatus) -> ChangeAttrs {
             from_status: None,
             to_status: None,
             reason: None,
-            of: None,
+            duplicate_of: None,
         };
     }
     ChangeAttrs {
@@ -1134,7 +1134,7 @@ fn replace_change(input: &IssueInput, prev_status: IssueStatus) -> ChangeAttrs {
         from_status: Some(prev_status),
         to_status: Some(input.status),
         reason: None,
-        of: None,
+        duplicate_of: None,
     }
 }
 
@@ -1739,11 +1739,11 @@ mod tests {
         assert_eq!(full.status_reason, Some(StatusReason::Duplicate));
         let change = &full.changes[1];
         assert_eq!(change.reason, Some(StatusReason::Duplicate));
-        assert_eq!(change.of.as_deref(), Some(survivor.as_str()));
+        assert_eq!(change.duplicate_of.as_deref(), Some(survivor.as_str()));
         assert_eq!(change.message.as_deref(), Some("same condition"));
         // A plain close carries no survivor, and a closed issue cannot
         // be closed again
-        assert_eq!(issues.get(&survivor).unwrap().changes[0].of, None);
+        assert_eq!(issues.get(&survivor).unwrap().changes[0].duplicate_of, None);
         assert!(matches!(
             issues.close_duplicate(&pending, &survivor, "user:test", None),
             Err(StoreError::IssueStatusUnchanged { .. })

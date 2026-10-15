@@ -159,9 +159,9 @@ fn render_change(out: &mut String, change: &IssueChange) {
         (ChangeEvent::Status, Some(from), Some(to)) => format!("{from} → {to}"),
         (event, _, _) => event.as_str().to_string(),
     };
-    match (change.reason, &change.of) {
-        (Some(StatusReason::Duplicate), Some(of)) => {
-            label.push_str(&format!(" (duplicate of {of})"));
+    match (change.reason, &change.duplicate_of) {
+        (Some(StatusReason::Duplicate), Some(duplicate_of)) => {
+            label.push_str(&format!(" (duplicate of {duplicate_of})"));
         }
         (Some(reason), _) => label.push_str(&format!(" ({reason})")),
         (None, _) => {}

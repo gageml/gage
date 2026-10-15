@@ -417,7 +417,7 @@ pub async fn show(args: IssueShowArgs) -> Result<(), CliError> {
         .await
         .context("gage issue show")?;
     let events_sql = format!(
-        "SELECT event, author, timestamp, from_status, to_status, reason, \"of\", message \
+        "SELECT event, author, timestamp, from_status, to_status, reason, duplicate_of, message \
          FROM issue_event WHERE issue_id = '{id}' ORDER BY event_id"
     );
     let events = run_query(&ctx, &events_sql)
@@ -622,15 +622,17 @@ pub(crate) fn event_label(
     from: Option<&str>,
     to: Option<&str>,
     reason: Option<&str>,
-    of: Option<&str>,
+    duplicate_of: Option<&str>,
 ) -> String {
     let mut label = match (event, from, to) {
         ("create", _, Some(to)) => format!("created {to}"),
         ("status", Some(from), Some(to)) => format!("{from} → {to}"),
         (other, _, _) => other.to_string(),
     };
-    match (reason, of) {
-        (Some(reason), Some(of)) => label.push_str(&format!(" ({reason} of {})", short_uuid(of))),
+    match (reason, duplicate_of) {
+        (Some(reason), Some(duplicate_of)) => {
+            label.push_str(&format!(" ({reason} of {})", short_uuid(duplicate_of)))
+        }
         (Some(reason), None) => label.push_str(&format!(" ({reason})")),
         (None, _) => {}
     }

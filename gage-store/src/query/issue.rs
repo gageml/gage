@@ -71,7 +71,7 @@ pub(crate) fn issue_event_schema() -> SchemaRef {
         // Set when `to_status` is `closed`
         Field::new("reason", DataType::Utf8, true),
         // The surviving issue a `duplicate` close names
-        Field::new("of", DataType::Utf8, true),
+        Field::new("duplicate_of", DataType::Utf8, true),
         Field::new("message", DataType::Utf8, true),
     ]))
 }
@@ -220,7 +220,7 @@ pub(crate) fn issue_event_rows<'a>(
     let mut from_statuses = StringBuilder::new();
     let mut to_statuses = StringBuilder::new();
     let mut reasons = StringBuilder::new();
-    let mut ofs = StringBuilder::new();
+    let mut duplicate_ofs = StringBuilder::new();
     let mut messages = StringBuilder::new();
     for (issue_id, changes) in issues {
         for change in changes {
@@ -232,7 +232,7 @@ pub(crate) fn issue_event_rows<'a>(
             from_statuses.append_option(change.from_status.map(|s| s.as_str()));
             to_statuses.append_option(change.to_status.map(|s| s.as_str()));
             reasons.append_option(change.reason.map(|r| r.as_str()));
-            ofs.append_option(change.of.as_deref());
+            duplicate_ofs.append_option(change.duplicate_of.as_deref());
             messages.append_option(change.message.as_deref());
         }
     }
@@ -247,7 +247,7 @@ pub(crate) fn issue_event_rows<'a>(
             Arc::new(from_statuses.finish()),
             Arc::new(to_statuses.finish()),
             Arc::new(reasons.finish()),
-            Arc::new(ofs.finish()),
+            Arc::new(duplicate_ofs.finish()),
             Arc::new(messages.finish()),
         ],
     )?)

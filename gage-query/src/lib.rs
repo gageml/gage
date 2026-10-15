@@ -684,7 +684,7 @@ mod tests {
         let events = strings(
             &ctx,
             &format!(
-                "SELECT \"of\" FROM issue_event WHERE issue_id = '{subject}' AND event = 'status'"
+                "SELECT duplicate_of FROM issue_event WHERE issue_id = '{subject}' AND event = 'status'"
             ),
         )
         .await;

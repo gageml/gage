@@ -16,7 +16,7 @@ type = "string"
 required = false
 description = "Why the issue is closed: completed, wontfix, or duplicate. Closing only; default completed"
 
-[parameters.of]
+[parameters.duplicate_of]
 type = "string"
 required = false
 description = "The surviving issue's ID when status_reason is duplicate. Required then, not allowed otherwise"
@@ -39,7 +39,7 @@ releases an assigned one. `status=closed` closes a pending, open, or
 assigned issue, and `status_reason` says why: `completed` when the condition was fixed or acted on,
 `wontfix` when it will not be addressed, `duplicate` when another
 issue already describes the condition. A duplicate close names the
-surviving issue in `of`, so the link between the two is data rather
+surviving issue in `duplicate_of`, so the link between the two is data rather
 than prose; record any insight the survivor lacks on the survivor
 with `IssueComment`.
 

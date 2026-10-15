@@ -55,7 +55,7 @@ enum Update {
     Close(StatusReason),
     /// Close as a duplicate of the surviving issue
     Duplicate {
-        of: String,
+        duplicate_of: String,
     },
 }
 
@@ -90,12 +90,12 @@ pub fn execute(config: &StoreWriterConfig, params: JsonObject) -> Result<CallToo
             ),
             format!("closed ({reason})"),
         ),
-        Update::Duplicate { of } => match issues.get(of) {
+        Update::Duplicate { duplicate_of } => match issues.get(duplicate_of) {
             Ok(survivor) => (
                 issues.close_duplicate(&issue.id, &survivor.id, author, message),
                 format!("closed (duplicate of {})", short_uuid(&survivor.id)),
             ),
-            Err(e) => return Ok(domain_error(format!("of: {e}"))),
+            Err(e) => return Ok(domain_error(format!("duplicate_of: {e}"))),
         },
     };
     match result {
@@ -121,21 +121,24 @@ fn parse_update(params: &JsonObject) -> Result<Update, McpError> {
         })?),
         None => None,
     };
-    let of = optional_string(params, "of")?;
-    match (status, reason, of) {
+    let duplicate_of = optional_string(params, "duplicate_of")?;
+    match (status, reason, duplicate_of) {
         (IssueStatus::Open, None, None) => Ok(Update::Open),
         (IssueStatus::Open, Some(_), _) => Err(McpError::invalid_params(
             "`status_reason` applies to closing only",
             None,
         )),
-        (IssueStatus::Closed, Some(StatusReason::Duplicate), Some(of)) => {
-            Ok(Update::Duplicate { of })
+        (IssueStatus::Closed, Some(StatusReason::Duplicate), Some(duplicate_of)) => {
+            Ok(Update::Duplicate { duplicate_of })
         }
-        (IssueStatus::Closed, Some(StatusReason::Duplicate), None) => Err(
-            McpError::invalid_params("a duplicate close names the surviving issue in `of`", None),
-        ),
+        (IssueStatus::Closed, Some(StatusReason::Duplicate), None) => {
+            Err(McpError::invalid_params(
+                "a duplicate close names the surviving issue in `duplicate_of`",
+                None,
+            ))
+        }
         (_, _, Some(_)) => Err(McpError::invalid_params(
-            "`of` applies to a duplicate close only",
+            "`duplicate_of` applies to a duplicate close only",
             None,
         )),
         (IssueStatus::Closed, reason, None) => {
@@ -219,7 +222,7 @@ mod tests {
             &config,
             object(
                 json!({"issue_id": pending, "status": "closed", "status_reason": "duplicate",
-                          "of": survivor, "message": "same condition"}),
+                          "duplicate_of": survivor, "message": "same condition"}),
             ),
         )
         .unwrap();
@@ -229,7 +232,10 @@ mod tests {
             let store = config.store.lock().unwrap();
             let full = IssueStore::from(&*store).get(&pending).unwrap();
             assert_eq!(full.status_reason, Some(StatusReason::Duplicate));
-            assert_eq!(full.changes[1].of.as_deref(), Some(survivor.as_str()));
+            assert_eq!(
+                full.changes[1].duplicate_of.as_deref(),
+                Some(survivor.as_str())
+            );
             assert_eq!(full.changes[1].author, "user:t");
         }
 
@@ -269,7 +275,7 @@ mod tests {
             json!({"issue_id": id, "status": "pending"}),
             json!({"issue_id": id, "status": "open", "status_reason": "completed"}),
             json!({"issue_id": id, "status": "closed", "status_reason": "duplicate"}),
-            json!({"issue_id": id, "status": "closed", "status_reason": "completed", "of": "x"}),
+            json!({"issue_id": id, "status": "closed", "status_reason": "completed", "duplicate_of": "x"}),
         ] {
             assert!(
                 execute(&config, object(params.clone())).is_err(),

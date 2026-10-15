@@ -133,19 +133,19 @@ resolutions with `mcp__plugin_gage_gage__IssuePendingResolve`.
    orders the writes so each surviving issue is in its final state before a
    duplicate names it. Each object:
    - `new` - `{issue, action: "open"}`
-   - `duplicate` - `{issue, action: "duplicate", of: related, comment}`
+   - `duplicate` - `{issue, action: "duplicate", duplicate_of: related, comment}`
 
-   The plan must name each pending issue at most once, and a duplicate's `of`
+   The plan must name each pending issue at most once, and a duplicate's `duplicate_of`
    must be an issue the plan promotes or an issue already open, assigned, or
    closed.
 
 8. Present the `reopen` issues to the user as one batch, grouped by `related`,
    with the prior close reason and the agent's `summary`. For each, the user
    chooses one of three outcomes:
-   - Already resolved - `{issue, action: "duplicate", of: related}`; the closed
+   - Already resolved - `{issue, action: "duplicate", duplicate_of: related}`; the closed
      issue stays closed
    - Condition recurred -
-     `{issue, action: "duplicate", of: related, reopen: true, comment}`;
+     `{issue, action: "duplicate", duplicate_of: related, reopen: true, comment}`;
      `reopen` returns the closed issue to open before the close
    - Stands on its own - `{issue, action: "open"}`
 

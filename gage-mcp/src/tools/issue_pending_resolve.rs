@@ -65,7 +65,7 @@ struct Resolution {
 enum Action {
     Open,
     Duplicate {
-        of: String,
+        duplicate_of: String,
         comment: Option<String>,
         reopen: bool,
     },
@@ -78,7 +78,7 @@ enum Planned {
     },
     Duplicate {
         issue: String,
-        of: String,
+        duplicate_of: String,
         comment: Option<String>,
         reopen: bool,
     },
@@ -140,23 +140,23 @@ fn parse_resolution(item: &Value) -> Result<Resolution, McpError> {
     let action = required_field(obj, "action")?;
     let action = match action.as_str() {
         "open" => {
-            if obj.contains_key("of") {
+            if obj.contains_key("duplicate_of") {
                 return Err(McpError::invalid_params(
-                    "`of` applies to a duplicate, not to open",
+                    "`duplicate_of` applies to a duplicate, not to open",
                     None,
                 ));
             }
             Action::Open
         }
         "duplicate" => {
-            let Some(of) = optional_string(obj, "of")? else {
+            let Some(duplicate_of) = optional_string(obj, "duplicate_of")? else {
                 return Err(McpError::invalid_params(
-                    "a duplicate names the surviving issue in `of`",
+                    "a duplicate names the surviving issue in `duplicate_of`",
                     None,
                 ));
             };
             Action::Duplicate {
-                of,
+                duplicate_of,
                 comment: optional_string(obj, "comment")?,
                 reopen: parse_reopen(obj)?,
             }
@@ -210,12 +210,15 @@ fn validate(issues: &IssueStore<'_>, resolutions: &[Resolution]) -> Result<Vec<P
         plan.push(match &r.action {
             Action::Open => Planned::Open { issue: subject.id },
             Action::Duplicate {
-                of,
+                duplicate_of,
                 comment,
                 reopen,
             } => Planned::Duplicate {
                 issue: subject.id,
-                of: issues.get(of).map_err(|e| format!("of: {e}"))?.id,
+                duplicate_of: issues
+                    .get(duplicate_of)
+                    .map_err(|e| format!("duplicate_of: {e}"))?
+                    .id,
                 comment: comment.clone(),
                 reopen: *reopen,
             },
@@ -224,18 +227,21 @@ fn validate(issues: &IssueStore<'_>, resolutions: &[Resolution]) -> Result<Vec<P
 
     for p in &plan {
         let Planned::Duplicate {
-            issue, of, reopen, ..
+            issue,
+            duplicate_of,
+            reopen,
+            ..
         } = p
         else {
             continue;
         };
-        if of == issue {
+        if duplicate_of == issue {
             return Err(format!(
                 "issue {} closed as a duplicate of itself",
                 short_uuid(issue)
             ));
         }
-        if let Some(target) = plan.iter().find(|t| t.issue() == *of) {
+        if let Some(target) = plan.iter().find(|t| t.issue() == *duplicate_of) {
             // The target is disposed in this plan: valid only as a
             // promoted survivor. A target closed as a duplicate is a
             // chain the caller must flatten.
@@ -244,26 +250,28 @@ fn validate(issues: &IssueStore<'_>, resolutions: &[Resolution]) -> Result<Vec<P
                     "issue {} closes against {}, which itself closes as a duplicate; \
                      flatten the chain to the final target",
                     short_uuid(issue),
-                    short_uuid(of)
+                    short_uuid(duplicate_of)
                 ));
             }
             if *reopen {
                 return Err(format!(
                     "issue {} sets reopen for {}, which this plan promotes rather than closes",
                     short_uuid(issue),
-                    short_uuid(of)
+                    short_uuid(duplicate_of)
                 ));
             }
             continue;
         }
-        let target = issues.get(of).map_err(|e| format!("of: {e}"))?;
+        let target = issues
+            .get(duplicate_of)
+            .map_err(|e| format!("duplicate_of: {e}"))?;
         match target.status {
             IssueStatus::Open | IssueStatus::Assigned => {
                 if *reopen {
                     return Err(format!(
                         "issue {} sets reopen for {}, which is not closed",
                         short_uuid(issue),
-                        short_uuid(of)
+                        short_uuid(duplicate_of)
                     ));
                 }
             }
@@ -271,7 +279,7 @@ fn validate(issues: &IssueStore<'_>, resolutions: &[Resolution]) -> Result<Vec<P
                 return Err(format!(
                     "issue {} closes against pending issue {}, which this plan does not promote",
                     short_uuid(issue),
-                    short_uuid(of)
+                    short_uuid(duplicate_of)
                 ));
             }
             IssueStatus::Closed => {}
@@ -279,7 +287,7 @@ fn validate(issues: &IssueStore<'_>, resolutions: &[Resolution]) -> Result<Vec<P
                 return Err(format!(
                     "issue {} closes against issue {}, whose status this build does not read",
                     short_uuid(issue),
-                    short_uuid(of)
+                    short_uuid(duplicate_of)
                 ));
             }
         }
@@ -314,20 +322,27 @@ fn apply(issues: &IssueStore<'_>, plan: &[Planned], author: &str) -> CallToolRes
     }
     for p in plan {
         if let Planned::Duplicate {
-            of, reopen: true, ..
+            duplicate_of,
+            reopen: true,
+            ..
         } = p
-            && !reopened.contains(&of.as_str())
+            && !reopened.contains(&duplicate_of.as_str())
         {
-            if let Err(e) = issues.set_status(of, IssueStatus::Open, None, author, None) {
-                return apply_failed(issues, "reopening", of, &e.to_string(), counts);
+            if let Err(e) = issues.set_status(duplicate_of, IssueStatus::Open, None, author, None) {
+                return apply_failed(issues, "reopening", duplicate_of, &e.to_string(), counts);
             }
-            reopened.push(of);
+            reopened.push(duplicate_of);
             counts.reopened += 1;
         }
     }
     for p in plan {
-        if let Planned::Duplicate { issue, of, .. } = p {
-            if let Err(e) = issues.close_duplicate(issue, of, author, None) {
+        if let Planned::Duplicate {
+            issue,
+            duplicate_of,
+            ..
+        } = p
+        {
+            if let Err(e) = issues.close_duplicate(issue, duplicate_of, author, None) {
                 return apply_failed(issues, "closing", issue, &e.to_string(), counts);
             }
             counts.closed += 1;
@@ -335,13 +350,19 @@ fn apply(issues: &IssueStore<'_>, plan: &[Planned], author: &str) -> CallToolRes
     }
     for p in plan {
         if let Planned::Duplicate {
-            of,
+            duplicate_of,
             comment: Some(comment),
             ..
         } = p
         {
-            if let Err(e) = issues.comment(of, author, comment) {
-                return apply_failed(issues, "commenting on", of, &e.to_string(), counts);
+            if let Err(e) = issues.comment(duplicate_of, author, comment) {
+                return apply_failed(
+                    issues,
+                    "commenting on",
+                    duplicate_of,
+                    &e.to_string(),
+                    counts,
+                );
             }
             counts.comments += 1;
         }
@@ -403,8 +424,8 @@ mod tests {
             &cfg,
             object(json!({"resolutions": [
                 {"issue": novel, "action": "open"},
-                {"issue": dup, "action": "duplicate", "of": live, "comment": "insight"},
-                {"issue": recur, "action": "duplicate", "of": done, "reopen": true},
+                {"issue": dup, "action": "duplicate", "duplicate_of": live, "comment": "insight"},
+                {"issue": recur, "action": "duplicate", "duplicate_of": done, "reopen": true},
             ]})),
         )
         .unwrap();
@@ -417,7 +438,7 @@ mod tests {
         assert_eq!(dup_full.status, IssueStatus::Closed);
         assert_eq!(dup_full.status_reason, Some(StatusReason::Duplicate));
         assert_eq!(
-            dup_full.changes.last().unwrap().of.as_deref(),
+            dup_full.changes.last().unwrap().duplicate_of.as_deref(),
             Some(live.as_str())
         );
         assert_eq!(issues.get(&live).unwrap().status, IssueStatus::Open);
@@ -457,8 +478,8 @@ mod tests {
         let r = execute(
             &cfg,
             object(json!({"resolutions": [
-                {"issue": a, "action": "duplicate", "of": b},
-                {"issue": b, "action": "duplicate", "of": live},
+                {"issue": a, "action": "duplicate", "duplicate_of": b},
+                {"issue": b, "action": "duplicate", "duplicate_of": live},
             ]})),
         )
         .unwrap();

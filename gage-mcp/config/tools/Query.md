@@ -40,8 +40,8 @@ Tables:
 - issue (id, name, title, description, status, status_reason, author,
   created, modified, scan, key) - issues in scope; issue_event
   (issue_id, event_id, timestamp, author, event, from_status, to_status,
-  reason, of, message); issue_evidence (issue_id, note_id); session_issue
-  (session_id, issue_id)
+  reason, duplicate_of, message); issue_evidence (issue_id, note_id);
+  session_issue (session_id, issue_id)
 - scan (id, runtime, started, stopped, canceled, tasks, completed, failed,
   dataset, created, modified); scan_session (scan_id, session_num,
   session_id); scan_note (scan_id, note_id, carried); scan_issue (scan_id,
@@ -53,7 +53,7 @@ Tables:
 
 Functions: issue_report('<id>') renders one issue as markdown;
 related_issue('<id>' [, min_score]) lists the issues similar enough to be duplicate candidates, best first;
-age(ts) renders the time since a timestamp, as in 3h ago.
+age(ts) renders time since a timestamp, as in 3h ago.
 blame('<file>' [, lines]) and native_blame('<source>', '<file>' [, lines])
 give one row per file line with the call that wrote it: (line, text,
 session_id, lines, tool_use_id, tool_name, timestamp); `lines` is the session
@@ -76,8 +76,8 @@ native_session returns (id, project, title, model, message_count, is_empty,
 input_tokens, output_tokens, cached_tokens, cost_usd, content_format, mtime,
 size); `id` is the native UUID, and there is no line_count, created, or
 modified. The other three return the stored tables' columns, with the native
-UUID as `session_id`. Use these to look over a session by its native id
-before it is added to the store.
+UUID as `session_id`. Use these to read a session by native id before it
+is added to the store.
 
 Read a session by `session_id` ordered by `line`, taking
 `substr(text, 1, 800)` over full `text` or `raw` on wide rows.

@@ -543,7 +543,7 @@ impl ScanHost for StoreHost {
                         c.from_status.map(IssueStatus::as_str),
                         c.to_status.map(IssueStatus::as_str),
                         c.reason.map(StatusReason::as_str),
-                        c.of.as_deref(),
+                        c.duplicate_of.as_deref(),
                     ),
                     author: c.author.clone(),
                     timestamp: gage_core::datetime::ms_to_iso8601(c.timestamp_ms),
@@ -968,7 +968,7 @@ impl StoreHost {
         let mut events: HashMap<String, Vec<EventItem>> = HashMap::new();
         for batch in &query(
             ctx,
-            "SELECT issue_id, timestamp, author, event, from_status, to_status, reason, \"of\", \
+            "SELECT issue_id, timestamp, author, event, from_status, to_status, reason, duplicate_of, \
                     message \
              FROM issue_event ORDER BY timestamp",
         )

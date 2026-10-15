@@ -21,7 +21,8 @@ Each resolution object has these fields:
 - `issue` (string, required) - pending issue ID or unique prefix
 - `action` (string, required) - `open` promotes the issue; `duplicate`
   closes it against another issue
-- `of` (string) - the surviving issue a duplicate closes against.
+- `duplicate_of` (string) - the surviving issue a duplicate closes
+  against.
   Required for `duplicate`.
 - `comment` (string, optional) - comment added to the surviving issue,
   carrying insight the survivor lacks
