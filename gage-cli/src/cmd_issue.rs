@@ -231,6 +231,10 @@ pub async fn list(args: IssueListArgs) -> Result<(), CliError> {
         clauses.push(format!("name = '{}'", sql_str(name)));
     }
     let where_clause = format!(" WHERE {}", clauses.join(" AND "));
+    let name_where = match &args.name {
+        Some(name) => format!(" WHERE name = '{}'", sql_str(name)),
+        None => String::new(),
+    };
     let limit_clause = match args.limit.fetch_limit() {
         Some(n) => format!(" LIMIT {n}"),
         None => String::new(),
@@ -244,7 +248,18 @@ pub async fn list(args: IssueListArgs) -> Result<(), CliError> {
         .await
         .context("gage issue list")?;
     if total == 0 {
-        println!("No issues found");
+        let any = if args.closed {
+            0
+        } else {
+            count_rows(&ctx, &format!("SELECT COUNT(*) FROM issue{name_where}"))
+                .await
+                .context("gage issue list")?
+        };
+        let (message, hint) = empty_message(args.closed, any);
+        match hint {
+            Some(hint) => println!("{message} {}", style(hint).dim()),
+            None => println!("{message}"),
+        }
         return Ok(());
     }
 
@@ -311,6 +326,19 @@ pub async fn list(args: IssueListArgs) -> Result<(), CliError> {
 
     args.limit.print_summary(shown, total, "issue");
     Ok(())
+}
+
+/// The line printed when a listing is empty, as a message and an optional
+/// trailing hint the caller renders dim. `any` is the count of issues matching
+/// the name filter at any status, consulted only for the open view.
+fn empty_message(closed: bool, any: usize) -> (&'static str, Option<&'static str>) {
+    if closed {
+        ("No closed issues", None)
+    } else if any > 0 {
+        ("No open issues", Some("(use -c to show closed issues)"))
+    } else {
+        ("No issues found", None)
+    }
 }
 
 fn sql_str(s: &str) -> String {
@@ -992,5 +1020,28 @@ fn prompt_message(
                 .interact()?;
             Ok(if m.trim().is_empty() { None } else { Some(m) })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::empty_message;
+
+    #[test]
+    fn empty_message_open_view_with_no_issues_at_all() {
+        assert_eq!(empty_message(false, 0), ("No issues found", None));
+    }
+
+    #[test]
+    fn empty_message_open_view_with_closed_issues_present() {
+        assert_eq!(
+            empty_message(false, 3),
+            ("No open issues", Some("(use -c to show closed issues)"))
+        );
+    }
+
+    #[test]
+    fn empty_message_closed_view() {
+        assert_eq!(empty_message(true, 0), ("No closed issues", None));
     }
 }
