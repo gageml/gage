@@ -15,8 +15,7 @@ pub enum ConfigCommand {
     ///
     /// List effective configuration. Every setting is printed as
     /// "name = value" with its working value, which is the value in
-    /// ~/.gage/config.toml or the default when the file does not set
-    /// it.
+    /// config file or the default when the file does not set it.
     List,
 
     /// Show effective value of a setting
@@ -31,8 +30,10 @@ pub enum ConfigCommand {
 
     /// Edit config file in system editor
     ///
-    /// Edit config file in system editor. Opens ~/.gage/config.toml in
-    /// $VISUAL or $EDITOR, creating it with default values if absent.
+    /// Edit config file in system editor. Opens config file in $VISUAL
+    /// or $EDITOR, creating it with default values if absent. Config
+    /// file is ~/.gage/config.toml, or $GAGE_HOME/config.toml when
+    /// GAGE_HOME is set.
     Edit,
 }
 
