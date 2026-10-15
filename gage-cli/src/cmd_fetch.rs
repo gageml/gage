@@ -160,12 +160,72 @@ fn list_remote(
     remote: &str,
 ) -> Result<(), StoreError> {
     let advertised = remotes.ls_remote(source.repository())?;
+    let mut local: BTreeMap<String, Option<String>> = BTreeMap::new();
+    for name in advertised.keys() {
+        local.insert(name.clone(), store.rev_parse(name)?);
+    }
+    let listing = classify_advertised(&advertised, &local);
+    let objects = listing.objects();
+    if listing.tags.is_empty() && objects == 0 {
+        println!("Nothing on {remote}");
+        return Ok(());
+    }
+    if !listing.tags.is_empty() {
+        let header = vec!["Tag".to_string(), "State".to_string()];
+        let table = Table::from_iter(std::iter::once(header).chain(listing.tags))
+            .with(Style::rounded())
+            .modify(Rows::first(), style::tty(Color::FG_BRIGHT_YELLOW))
+            .modify(
+                Columns::one(0).not(Rows::first()),
+                style::tty(Color::FG_BRIGHT_CYAN),
+            )
+            .to_string();
+        println!("{table}");
+    }
+    if objects > 0 {
+        let parts: Vec<String> = [
+            ("new", listing.new),
+            ("same", listing.same),
+            ("differs", listing.differs),
+        ]
+        .into_iter()
+        .filter(|(_, n)| *n > 0)
+        .map(|(label, n)| format!("{n} {label}"))
+        .collect();
+        println!("{} ({})", count(objects, "object"), parts.join(", "));
+    }
+    Ok(())
+}
+
+/// The remote's advertised refs split against the local store: the
+/// tag rows as `[tag, state]`, and the object counts by state.
+struct RemoteListing {
+    tags: Vec<Vec<String>>,
+    new: usize,
+    same: usize,
+    differs: usize,
+}
+
+impl RemoteListing {
+    fn objects(&self) -> usize {
+        self.new + self.same + self.differs
+    }
+}
+
+/// Decide each advertised ref's state from the local sha alone.
+/// `new` is a ref the store does not have, `same` is a local commit
+/// equal to the remote's, `differs` is any other local commit. Refs
+/// that are neither tags nor objects are left out.
+fn classify_advertised(
+    advertised: &BTreeMap<String, String>,
+    local: &BTreeMap<String, Option<String>>,
+) -> RemoteListing {
     let mut tags: Vec<Vec<String>> = Vec::new();
     let (mut new, mut same, mut differs) = (0usize, 0usize, 0usize);
-    for (name, remote_sha) in &advertised {
-        let state = match store.rev_parse(name)? {
+    for (name, remote_sha) in advertised {
+        let state = match local.get(name).and_then(Option::as_deref) {
             None => "new",
-            Some(local) if local == *remote_sha => "same",
+            Some(local) if local == remote_sha.as_str() => "same",
             Some(_) => "differs",
         };
         if let Some(tag) = name.strip_prefix(TAG_REFS) {
@@ -178,32 +238,12 @@ fn list_remote(
             }
         }
     }
-    let objects = new + same + differs;
-    if tags.is_empty() && objects == 0 {
-        println!("Nothing on {remote}");
-        return Ok(());
+    RemoteListing {
+        tags,
+        new,
+        same,
+        differs,
     }
-    if !tags.is_empty() {
-        let header = vec!["Tag".to_string(), "State".to_string()];
-        let table = Table::from_iter(std::iter::once(header).chain(tags))
-            .with(Style::rounded())
-            .modify(Rows::first(), style::tty(Color::FG_BRIGHT_YELLOW))
-            .modify(
-                Columns::one(0).not(Rows::first()),
-                style::tty(Color::FG_BRIGHT_CYAN),
-            )
-            .to_string();
-        println!("{table}");
-    }
-    if objects > 0 {
-        let parts: Vec<String> = [("new", new), ("same", same), ("differs", differs)]
-            .into_iter()
-            .filter(|(_, n)| *n > 0)
-            .map(|(label, n)| format!("{n} {label}"))
-            .collect();
-        println!("{} ({})", count(objects, "object"), parts.join(", "));
-    }
-    Ok(())
 }
 
 /// What the dialog settled: the remote's advertised refs, and the
@@ -443,5 +483,46 @@ fn print_report(source: &str, report: &FetchReport) {
     println!("Fetched from {source}: {}", parts.join(", "));
     if report.conflicts().next().is_some() {
         println!("Resolve a conflict with: gage fetch {source} <OBJECT>... --ours | --theirs");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classify_advertised_splits_tags_and_counts_objects_by_state() {
+        let advertised: BTreeMap<String, String> = [
+            (format!("{OBJECT_REFS}new-obj"), "r1"),
+            (format!("{OBJECT_REFS}same-obj"), "r2"),
+            (format!("{OBJECT_REFS}diff-obj"), "r3"),
+            (format!("{TAG_REFS}v1"), "r4"),
+            (format!("{TAG_REFS}v2"), "r5"),
+            (format!("{KEY_REFS}k1"), "r6"),
+        ]
+        .into_iter()
+        .map(|(name, sha)| (name, sha.to_string()))
+        .collect();
+        let local: BTreeMap<String, Option<String>> = [
+            (format!("{OBJECT_REFS}same-obj"), Some("r2".to_string())),
+            (format!("{OBJECT_REFS}diff-obj"), Some("other".to_string())),
+            (format!("{TAG_REFS}v2"), Some("r5".to_string())),
+        ]
+        .into_iter()
+        .collect();
+
+        let listing = classify_advertised(&advertised, &local);
+
+        assert_eq!(listing.new, 1);
+        assert_eq!(listing.same, 1);
+        assert_eq!(listing.differs, 1);
+        assert_eq!(listing.objects(), 3);
+        assert_eq!(
+            listing.tags,
+            vec![
+                vec!["v1".to_string(), "new".to_string()],
+                vec!["v2".to_string(), "same".to_string()],
+            ]
+        );
     }
 }

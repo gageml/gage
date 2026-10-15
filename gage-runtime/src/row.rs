@@ -788,4 +788,32 @@ mod tests {
         assert_eq!(attr(second, "files_changed"), json!(null));
         assert_eq!(attr(second, "result_raw"), json!(null));
     }
+
+    #[test]
+    fn tool_use_timestamps_expose_a_datetime_option() {
+        let mut batch = ToolUseBatch::new();
+        batch.push("s1", &row("t1", None));
+        let rows = tool_uses_from_batches(vec![batch.finish().unwrap()]);
+        let first = &rows[0];
+
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the test owns the only handle to the extracted value"
+        )]
+        let timestamp: Option<DateTime> = rune::from_value(first.get("timestamp")).unwrap();
+        assert_eq!(
+            timestamp.unwrap().to_rfc3339(),
+            DateTime::from_millis(1_000).to_rfc3339()
+        );
+
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the test owns the only handle to the extracted value"
+        )]
+        let result: Option<DateTime> = rune::from_value(first.get("result_timestamp")).unwrap();
+        assert_eq!(
+            result.unwrap().to_rfc3339(),
+            DateTime::from_millis(2_000).to_rfc3339()
+        );
+    }
 }
