@@ -3,7 +3,6 @@ use gage::{
     Template,
     call_agent,
     carry_forward_notes_named,
-    params,
     scan,
     tools::{IssueWrite, Query},
     watermark,
@@ -21,7 +20,6 @@ pub const SCANNER = #{
             },
         },
     },
-    params: #{ devmode: true },
 };
 
 const REPORT_KEY = ("findings", "report", 1);
@@ -39,7 +37,9 @@ pub async fn review_findings() {
     }
 
     // Construct agent prompt with findings
-    let prompt = Template::new(include_str!("prompt.md.j2"))?
+    let prompt = Template::new(include_str!(
+        "review-findings-prompt.md.j2"
+    ))?
         .render(
             #{
                 findings: findings
@@ -48,16 +48,12 @@ pub async fn review_findings() {
                         |f| #{
                             id: f.id,
                             name: f.name,
-                            target: f.target.unwrap_or_default(),
+                            target: f.target.unwrap_or(""),
                         },
-                    ),
+                    )
+                    .collect::<Vec>(),
             },
         )?;
-
-    if params().devmode {
-        println(prompt);
-        return;
-    }
 
     // Run agent with tools to query sessions and report issues
     let agent = call_agent(prompt)
