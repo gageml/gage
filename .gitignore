@@ -1,5 +1,6 @@
 # Local
-.claude
+.claude/*
+!.claude/skills
 .gage
 .jj
 .local.*
