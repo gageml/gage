@@ -6,71 +6,88 @@ The following notes need to be analyzed:
 - `{{ f.id }}` ({{ f.name }}{% if f.target %}, {{ f.target }}{% endif %})
 {% endfor %}
 
-Read findings with `mcp__gage__Query`. A finding is a `note` row whose name
-ends in `[finding]`; `text` holds the finding:
+A note is a finding of some type, which is indicated by the note name. Finding
+notes are named `<type>[finding]`.
 
-`SELECT id, name, target, text, metadata FROM note WHERE name LIKE '%[finding]'`
+Use `mcp__gage__Query` to read docs for finding note types.
 
-The table also holds findings carried from earlier scans and reported then.
-Read those to judge repetition; write issues for the listed findings only.
-Page with `LIMIT` and `OFFSET` as needed.
+```sql
+SELECT note_name, doc FROM note_doc
+WHERE note_name LIKE '%[finding]'
+```
 
-Each finding kind has a doc stating what its notes contain and how they were
-produced. Read the docs before interpreting findings:
+Next, read the above notes with `mcp__gage__Query` by running:
 
-`SELECT note_name, doc FROM note_doc WHERE note_name LIKE '%[finding]'`
+```sql
+SELECT id, name, target, text FROM note
+WHERE id IN ({{ findings | map(attribute='id') | sql_in_list }})
+```
 
-A finding's `target` is `session:<session_id>`, with cited lines after `#`.
-To investigate, read the session's `message` rows by `session_id`.
+Look for issues to report from the notes.
 
-An issue is an underlying problem that explains findings and that the user can
-act on. Report an issue when both hold:
+An issue is a problem the user should be aware of and be able to act on.
 
-- The evidence supports a real problem. Confidence comes from repetition
-  across sessions, from verifying a concrete claim against session or project
-  content, or from a single instance severe enough to stand alone. Weigh each
-  finding as its doc describes: checkable claims invite verification;
-  single-session observations gain weight through repetition.
-- An intervention exists: a change to the project, its configuration, or the
-  rules, skills, and memory files that direct its agents. A real problem with
-  no intervention stays a finding and gains weight if it recurs.
-{% if wontfix %}
-The user has ruled out these conditions. A finding that shows one of them is
-not an issue, whatever its evidence:
+Criteria for reporting an issue:
 
-{% for w in wontfix -%}
-- {{ w }}
-{% endfor %}
-{% endif %}
-An issue is one condition with one intervention. Findings that share a cause
-and an intervention are one issue, however many sessions they span. Findings
-that need different interventions are separate issues: if fixing one leaves
-another unfixed, they are distinct.
+1. Sufficient evidence in the notes
+2. Problem will persist or recur until fixed
+3. Issue contains a single conceptual problem
 
-A detect-and-fix cycle within a session is normal and is not an issue. The
-same cycle repeating across sessions may be.
+The phrase "sufficient evidence" is intentionally open ended. Use your best
+judgement. You are asked to cite evidence below when you report an issue.
 
-Write each issue with `mcp__gage__IssueWrite`. Cite the supporting note IDs in
-`evidence`; an issue reaches its sessions through the notes it cites. The
-sessions record another agent's behavior: refer to that agent in the third
-person, and do not write advice to it, since its model cannot be changed.
+Some issues persist unless they're fixed. This includes any malformed artifact
+(e.g. buggy source code, inconsistent or poorly worded project rules, invalid
+configuration, etc.)
 
-Use this description skeleton:
+A malformed artifact may result from the omission of content (e.g. model failed
+to act on something agreed upon or that was requested by the user).
+
+Malformed artifacts and other persistent problems should be reported as an
+issue.
+
+Some issues are ephemeral. They did not result in a malformed artifact but
+nonetheless appear in the session (e.g. communication friction, model ignored
+project rules, etc.) Such issues should be reported if they are likely to recur.
+If you see the same problem repeated in the notes, odds are higher the issue
+will recur.
+
+A problem that was resolved during a session must not be reported as an issue.
+However, recurring errors or problems, even when fixed, may pose a problem to
+efficiency. This may be an ephemeral problem that is likely to occur again.
+
+You may find multiple problems. Use one issue per problem. Do not report an
+issue that consists of multiple, unrelated problems.
+
+When you identify an issue, report it using `mcp__gage__IssueWrite`.
+
+- Provide a short, descriptive `title`
+
+- Provide `evidence` as note IDs. Notes target sessions and even specific lines.
+  This information is used to validate the issue claim and help fix it.
+
+- Use this skeleton for `description`:
 
 ```markdown
 ## Summary
 
 Two or three sentences stating the problem.
 
+## Implication
+
+State what the problem means for the user. Why is it a problem?
+
 ## Evidence
 
-Specific instances, with quotes or session/line references.
-
-## Basis for confidence
-
-Why the evidence supports a real problem: a pattern across sessions, a
-verified single instance, or other grounds. State the actual scope of the
-evidence without overclaiming.
+State the evidence from the cited notes and explain why the evidence supports
+your above claims.
 ```
+
+Guidelines for issue `description`:
+
+- The notes that provide evidence target historical sessions that are not
+  active. Do not offer advice to session models.
+
+- Refer to models acting in original sessions in the third person.
 
 Reply with whether you wrote issues. Do not restate them.

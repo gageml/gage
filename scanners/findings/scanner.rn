@@ -21,12 +21,7 @@ pub const SCANNER = #{
             },
         },
     },
-    params: #{
-        wontfix: #{
-            value: [],
-            description: "Conditions the user has ruled out; a finding showing one is not an issue",
-        },
-    },
+    params: #{ devmode: true },
 };
 
 const REPORT_KEY = ("findings", "report", 1);
@@ -40,7 +35,7 @@ pub async fn review_findings() {
     let findings = scan().notes().name("*[finding]").unseen(REPORT_KEY).await?;
     if findings.is_empty() {
         log::info!("no unreported findings for this scan");
-        return Ok(());
+        return;
     }
 
     // Construct agent prompt with findings
@@ -56,9 +51,13 @@ pub async fn review_findings() {
                             target: f.target.unwrap_or_default(),
                         },
                     ),
-                wontfix: params().wontfix,
             },
         )?;
+
+    if params().devmode {
+        println(prompt);
+        return;
+    }
 
     // Run agent with tools to query sessions and report issues
     let agent = call_agent(prompt)

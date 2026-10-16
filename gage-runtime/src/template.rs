@@ -5,8 +5,9 @@
 //! error as `gage::Error::Template`. `render(ctx)` renders the
 //! compiled template with a Rune object as its variables; a render
 //! error (an unknown filter or function, an operation on incompatible
-//! values) is the same error type. Undefined variables render empty
-//! and test false. Neither function performs I/O, so neither is
+//! values, a context value of a type the serializer does not render,
+//! such as an iterator) is the same error type. Undefined variables
+//! render empty and test false. Neither function performs I/O, so neither is
 //! async. The environment carries minijinja's built-in filters,
 //! tests, and globals, the filters in [`crate::filters`], and never
 //! escapes output. Context serialization is [`crate::ser`]'s.
@@ -136,6 +137,15 @@ mod tests {
         let findings = rune::to_value(findings).unwrap();
         let out = t.render(&object(&[("findings", findings)])).unwrap();
         assert_eq!(out, "WHERE id IN ('a1', 'b2')");
+    }
+
+    #[test]
+    fn render_rejects_a_context_value_it_cannot_serialize() {
+        let t = Template::compile("{% for x in pair %}{{ x }}{% endfor %}".to_string()).unwrap();
+        let pair = rune::to_value((1i64, 2i64)).unwrap();
+        let err = t.render(&object(&[("pair", pair)])).err().unwrap();
+        assert!(matches!(err, Error::Template(_)), "{err:?}");
+        assert!(err.to_string().contains("cannot be rendered"), "{err}");
     }
 
     #[test]

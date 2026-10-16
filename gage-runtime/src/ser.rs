@@ -2,7 +2,7 @@
 //! conversion of a minijinja error into `gage::Error::Template`.
 
 use rune::runtime::{Object, Value};
-use serde::ser::{Serialize, SerializeMap, SerializeSeq, Serializer};
+use serde::ser::{Error as _, Serialize, SerializeMap, SerializeSeq, Serializer};
 
 use crate::error::Error;
 use crate::row::{Entry, Message};
@@ -64,6 +64,9 @@ impl Serialize for SerValue<'_> {
         if let Ok(Some(inner)) = self.0.borrow_ref::<Option<Value>>().as_deref() {
             return SerValue(inner).serialize(ser);
         }
-        ser.serialize_none()
+        Err(S::Error::custom(format!(
+            "a {} value cannot be rendered in a template context",
+            self.0.type_info()
+        )))
     }
 }
