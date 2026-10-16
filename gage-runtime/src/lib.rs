@@ -15,6 +15,7 @@ mod compress;
 pub mod datetime;
 pub mod error;
 mod fail;
+mod filters;
 mod ignore;
 mod io;
 mod issue;
