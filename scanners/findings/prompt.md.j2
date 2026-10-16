@@ -1,11 +1,11 @@
 Analyze finding notes and report issues
 
-These findings were written by this scan's finding tasks and are not yet
-reported:
+The following notes need to be analyzed:
 
 {% for f in findings -%}
 - `{{ f.id }}` ({{ f.name }}{% if f.target %}, {{ f.target }}{% endif %})
 {% endfor %}
+
 Read findings with `mcp__gage__Query`. A finding is a `note` row whose name
 ends in `[finding]`; `text` holds the finding:
 

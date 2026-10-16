@@ -3,8 +3,15 @@ name = "Query"
 
 [parameters.sql]
 type = "string"
-required = true
-description = "SQL (DataFusion dialect) to run against the session data in scope."
+description = "SQL (DataFusion dialect) to run against the session data in scope. The result is written under a cursor and page 1 is returned. Give sql or cursor, not both."
+
+[parameters.cursor]
+type = "string"
+description = "Cursor of a result an earlier call returned, to read one of its pages. A result expires one hour after it was written."
+
+[parameters.page]
+type = "integer"
+description = "Page of the cursor's result to return, starting at 1 (default 1). Goes with cursor."
 
 [annotations]
 read_only_hint = true
@@ -12,8 +19,7 @@ idempotent_hint = true
 +++
 
 Run SQL (DataFusion dialect) over the sessions in scope and the notes and
-issues they hold. Results are YAML rows, capped per page; a cut page says how
-to go on.
+issues they hold. Results are YAML pages; a page names its cursor and the next page.
 
 Tables:
 
