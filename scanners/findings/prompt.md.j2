@@ -2,21 +2,23 @@ Analyze finding notes and report issues
 
 The following notes need to be analyzed:
 
+| Id | Name | Target |
+| -- | ---- | ------ |
 {% for f in findings -%}
-- `{{ f.id }}` ({{ f.name }}{% if f.target %}, {{ f.target }}{% endif %})
+| {{ f.id }} | {{ f.name }} | {{ f.target }} |
 {% endfor %}
 
 A note is a finding of some type, which is indicated by the note name. Finding
 notes are named `<type>[finding]`.
 
-Use `mcp__gage__Query` to read docs for finding note types.
+Use `mcp__gage__Query` to read docs for finding note types by running:
 
 ```sql
 SELECT note_name, doc FROM note_doc
 WHERE note_name LIKE '%[finding]'
 ```
 
-Next, read the above notes with `mcp__gage__Query` by running:
+Next, read the above notes by running:
 
 ```sql
 SELECT id, name, target, text FROM note
