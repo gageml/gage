@@ -1255,6 +1255,7 @@ mod tests {
     use std::slice;
 
     use datafusion::arrow::array::StringArray;
+    use gage_core::config::ScannerConfig;
     use gage_registry::scanner::{ScannerDef, parse_scanner_file};
     use gage_session::{
         AgentEvent, AgentMcp, AgentSession, AgentSpec, ContentSink, ContentSource, DriverError,
@@ -1282,14 +1283,15 @@ mod tests {
         let path = dir.path().join("scanner.rn");
         std::fs::write(&path, source).unwrap();
         let def = parse_scanner_file(&path).unwrap();
-        let scanner = Scanner::from_spec(&def, params, "scanner.rn").unwrap();
+        let scanner =
+            Scanner::from_spec(&def, &ScannerConfig::default(), params, "scanner.rn").unwrap();
         let compiled = compile(&scanner);
         (dir, compiled)
     }
 
     /// Compile `def` as its own explicit selection with default params.
     fn compile_def(def: &ScannerDef) -> Result<CompiledScanner, Error> {
-        compile(&Scanner::from_spec(def, None, &def.name).unwrap())
+        compile(&Scanner::from_spec(def, &ScannerConfig::default(), None, &def.name).unwrap())
     }
 
     /// The driver a test scan runs agents with when it runs none
@@ -2352,6 +2354,44 @@ mod tests {
         .await;
         outcome.unwrap();
         assert_eq!(outputs(&events), [&Output::Println("query 0".into())]);
+    }
+
+    #[tokio::test]
+    async fn params_carry_a_list_value_into_a_template() {
+        let (_dir, compiled) = compile_source_with_params(
+            r#"
+            use gage::{Template, params};
+
+            pub const SCANNER = #{
+                name: "list-params",
+                description: "Renders a list param",
+                params: #{ wontfix: #{ value: [] } },
+                tasks: #{ show: #{} },
+            };
+
+            pub fn show() {
+                let text = Template::new(
+                    "{% if wontfix %}ruled out:{% for w in wontfix %} {{ w }};{% endfor %}{% else %}none{% endif %}"
+                )?
+                .render(#{ wontfix: params().wontfix })?;
+                println!("{}", text);
+            }
+            "#,
+            Some(r#"#{ wontfix: ["approval", "style"] }"#),
+        );
+        let (tmp, store) = open_store();
+        let (outcome, events) = run_all(
+            &store,
+            &tmp.path().join("scans"),
+            &[compiled.unwrap()],
+            &CancellationToken::new(),
+        )
+        .await;
+        outcome.unwrap();
+        assert_eq!(
+            outputs(&events),
+            [&Output::Println("ruled out: approval; style;".into())]
+        );
     }
 
     #[tokio::test]

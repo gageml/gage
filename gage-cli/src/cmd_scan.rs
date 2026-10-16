@@ -1610,14 +1610,18 @@ async fn prepare_scan_dialog(
     let (group_names, prompted) = resolve_group_names(&args, &selected, registry, config)?;
     let mut scanners: Vec<Scanner<'_>> = Vec::new();
     for resolved in &selected {
-        scanners.push(resolved.scanner().map_err(DialogError::Failed)?);
+        scanners.push(
+            resolved
+                .scanner(&config.scanners)
+                .map_err(DialogError::Failed)?,
+        );
     }
     for name in &group_names {
         let def = registry
             .get_def(name)
             .expect("group members come from the registry");
-        let scanner =
-            Scanner::from_spec(def, None, name).map_err(|e| DialogError::Failed(format!("{e}")))?;
+        let scanner = Scanner::from_spec(def, &config.scanners, None, name)
+            .map_err(|e| DialogError::Failed(format!("{e}")))?;
         scanners.push(scanner);
     }
     // The multi-select has already displayed the user's choice;

@@ -311,15 +311,13 @@ pub(crate) fn handle_key(
         }
         Dialog::Options => {
             match key.code {
-                KeyCode::Char('d') => {
-                    state.dialog = Dialog::None;
-                    state.toggle_detail();
-                }
-                KeyCode::Char('t') => {
-                    state.dialog = Dialog::None;
-                    state.toggle_turns();
-                }
-                KeyCode::Char('q') | KeyCode::Char('v') | KeyCode::Esc => {
+                KeyCode::Char('a') => state.toggle_assistant(),
+                KeyCode::Char('u') => state.toggle_user(),
+                KeyCode::Char('t') => state.toggle_tools(),
+                KeyCode::Char('e') => state.toggle_all_entries(),
+                KeyCode::Char('d') => state.toggle_details(),
+                KeyCode::Char('n') => state.toggle_turns(),
+                KeyCode::Enter | KeyCode::Esc => {
                     state.dialog = Dialog::None;
                 }
                 _ => {}
@@ -530,6 +528,7 @@ pub(crate) struct AppState {
     outline_viewport: u16,
     highlighter: Highlighter,
     dialog: Dialog,
+    view: ViewOptions,
     turns: Option<Vec<Option<usize>>>,
     source: DocSource,
     /// Whether the backend writes notes; gates the note keys
@@ -547,12 +546,11 @@ impl AppState {
         let outline = Outline::new(
             session_note_ids,
             entry_note_ids,
-            entry_hidden(&doc),
-            options.show_detail,
+            entry_hidden(&doc, options),
         );
         let mut list_state = ListState::default();
         list_state.select(Some(0));
-        let turns = options.show_turns.then(|| compute_turns(&doc));
+        let turns = options.turns.then(|| compute_turns(&doc));
         Self {
             doc,
             username: resolve_username(),
@@ -565,6 +563,7 @@ impl AppState {
             outline_viewport: 0,
             highlighter: Highlighter::new(),
             dialog: Dialog::None,
+            view: options.clone(),
             turns,
             source,
             notes_writable,
@@ -752,7 +751,7 @@ impl AppState {
             self.turns = Some(compute_turns(&doc));
         }
         let (session_note_ids, entry_note_ids) = note_projection(&doc);
-        let hidden = entry_hidden(&doc);
+        let hidden = entry_hidden(&doc, &self.view);
         self.doc = doc;
         self.outline
             .reload(session_note_ids, entry_note_ids, hidden);
@@ -768,16 +767,38 @@ impl AppState {
         Ok(())
     }
 
-    /// Toggle the entry filter, keeping the selection when its row
-    /// survives the rebuild.
-    fn toggle_detail(&mut self) {
+    fn toggle_assistant(&mut self) {
+        self.view.assistant = !self.view.assistant;
+        self.view.all_entries = false;
+        self.apply_filter();
+    }
+
+    fn toggle_user(&mut self) {
+        self.view.user = !self.view.user;
+        self.view.all_entries = false;
+        self.apply_filter();
+    }
+
+    fn toggle_tools(&mut self) {
+        self.view.tools = !self.view.tools;
+        self.view.all_entries = false;
+        self.apply_filter();
+    }
+
+    fn toggle_all_entries(&mut self) {
+        self.view.all_entries = !self.view.all_entries;
+        self.apply_filter();
+    }
+
+    /// Recompute the membership mask and reapply it, keeping the selection
+    /// when its row survives the rebuild.
+    fn apply_filter(&mut self) {
         let prior = self
             .list_state
             .selected()
             .and_then(|i| self.outline.row(i))
             .map(|r| r.kind.clone());
-        let detail = !self.outline.detail();
-        self.outline.set_detail(detail);
+        self.outline.set_hidden(entry_hidden(&self.doc, &self.view));
         // Reselect the same row; a filtered-out entry falls back to
         // the nearest preceding visible entry
         let new_sel = prior
@@ -795,7 +816,14 @@ impl AppState {
         self.list_state.select(new_sel);
     }
 
+    /// Toggle raw entry detail in the content pane. Independent of the
+    /// tree filter.
+    fn toggle_details(&mut self) {
+        self.view.details = !self.view.details;
+    }
+
     fn toggle_turns(&mut self) {
+        self.view.turns = !self.view.turns;
         self.turns = match self.turns.take() {
             Some(_) => None,
             None => Some(compute_turns(&self.doc)),
@@ -809,7 +837,7 @@ impl AppState {
             self.turns = Some(compute_turns(&doc));
         }
         let (session_note_ids, entry_note_ids) = note_projection(&doc);
-        let hidden = entry_hidden(&doc);
+        let hidden = entry_hidden(&doc, &self.view);
         self.doc = doc;
         self.outline
             .reload(session_note_ids, entry_note_ids, hidden);
@@ -951,19 +979,29 @@ fn same_row(a: &RowKind, b: &RowKind) -> bool {
     }
 }
 
-/// Entries hidden by the default view filter. Only content-bearing
-/// types show — user and assistant text, thinking, tool use, tool
-/// results (a successful result can contain the actual error), system
-/// entries, and continuation summaries — minus user meta entries.
-/// Everything else is session bookkeeping (queue-operation,
-/// file-history-snapshot, atis-latch, ...), a set that grows with each
-/// Claude Code release.
-fn entry_hidden(doc: &Document) -> Vec<bool> {
-    const VISIBLE_TYPES: &[&str] = &["user", "assistant", "system", "summary"];
+/// Per-entry filter mask: `true` marks an entry the membership options
+/// exclude from the outline.
+fn entry_hidden(doc: &Document, view: &ViewOptions) -> Vec<bool> {
     doc.entries
         .iter()
-        .map(|e| e.label() == "meta" || !VISIBLE_TYPES.contains(&e.entry_type()))
+        .map(|e| !entry_visible(e.label(), view))
         .collect()
+}
+
+/// Whether an entry's outline label is admitted by the membership options.
+/// `all_entries` admits every label; otherwise the three message groups
+/// select their labels and everything else (meta, summary, system, and
+/// bookkeeping types) stays hidden.
+fn entry_visible(label: &str, view: &ViewOptions) -> bool {
+    if view.all_entries {
+        return true;
+    }
+    match label {
+        "assistant" | "thinking" => view.assistant,
+        "user" => view.user,
+        "tool_use" | "tool_result" => view.tools,
+        _ => false,
+    }
 }
 
 /// Outline projection of the document's notes — session-level note ids, then
@@ -1184,9 +1222,7 @@ pub(crate) fn draw_in(frame: &mut Frame, area: Rect, state: &mut AppState) {
         Layout::horizontal([Constraint::Length(32), Constraint::Min(0)]).areas(area);
     draw_outline(frame, state, outline_area);
     draw_body(frame, state, body_area);
-    let detail = state.outline.detail();
-    let turns = state.turns.is_some();
-    draw_dialog(frame, &mut state.dialog, detail, turns);
+    draw_dialog(frame, &mut state.dialog, &state.view);
 }
 
 pub(crate) fn footer_hint(state: &AppState) -> Line<'static> {
@@ -1231,7 +1267,7 @@ fn draw_outline(frame: &mut Frame, state: &mut AppState, area: Rect) {
         .map(|(i, row)| row_to_item(row, &state.doc, Some(i) == selected, state.turns.as_deref()))
         .collect();
 
-    let title = if state.outline.detail() {
+    let title = if state.view.all_entries {
         Line::from("Entries")
     } else {
         Line::from(vec![
@@ -1480,7 +1516,7 @@ fn draw_entry(frame: &mut Frame, state: &mut AppState, entry: &EntrySnap, area: 
     let mut sections: Vec<Section> = Vec::new();
     // Filtered view hides the raw YAML behind the rendered message;
     // entries with no message keep it, or the pane would be blank
-    let show_raw = state.outline.detail() || entry.message.is_none();
+    let show_raw = state.view.details || entry.message.is_none();
     if let Some(message) = &entry.message {
         let panel = Paragraph::new(message::render(message))
             .wrap(Wrap { trim: false })
@@ -1585,10 +1621,10 @@ fn draw_body_scrollbar(frame: &mut Frame, state: &AppState, active: bool, area: 
     );
 }
 
-fn draw_dialog(frame: &mut Frame, dialog: &mut Dialog, detail: bool, turns: bool) {
+fn draw_dialog(frame: &mut Frame, dialog: &mut Dialog, view: &ViewOptions) {
     match dialog {
         Dialog::None => {}
-        Dialog::Options => draw_options(frame, detail, turns),
+        Dialog::Options => draw_options(frame, view),
         Dialog::NotesUnavailable => {
             crate::dialog::draw_wrapped_message(frame, NOTES_UNAVAILABLE, "Enter dismiss")
         }
@@ -1610,15 +1646,48 @@ fn draw_dialog(frame: &mut Frame, dialog: &mut Dialog, detail: bool, turns: bool
     }
 }
 
-/// View-options toggles: each key's label names the action it takes
-/// from the current state.
-fn draw_options(frame: &mut Frame, detail: bool, turns: bool) {
-    let label = |on: bool| if on { "hide" } else { "show" };
+/// View-options menu: each key toggles one option; the checkbox shows
+/// whether it is on. While "All entries" is on the membership checkboxes
+/// render dim, since the filter is overridden, but their keys still
+/// toggle.
+fn draw_options(frame: &mut Frame, view: &ViewOptions) {
+    let dim = view.all_entries;
     let lines = vec![
-        Line::raw(format!("  d {} session detail", label(detail))).left_aligned(),
-        Line::raw(format!("  t {} turns", label(turns))).left_aligned(),
+        Line::raw("Entry types:"),
+        Line::raw(""),
+        option_line('a', view.assistant, dim, "Assistant messages"),
+        option_line('u', view.user, dim, "User messages"),
+        option_line('t', view.tools, dim, "Tool calls"),
+        option_line('e', view.all_entries, false, "All entries"),
+        Line::raw(""),
+        Line::raw("Additional info:"),
+        Line::raw(""),
+        option_line('d', view.details, false, "Entry details"),
+        option_line('n', view.turns, false, "Turns"),
     ];
-    crate::dialog::draw_lines_titled(frame, Some("View options"), lines, "q cancel");
+    let hint = Line::from(vec![
+        Span::styled("Enter", styles::Dialog::key()),
+        Span::raw(" close"),
+    ]);
+    crate::dialog::draw_menu(frame, "View options", lines, hint);
+}
+
+/// One menu row: the key in the key color, a checkbox, and the label.
+/// When `dim_box` is set the whole checkbox renders dim to mark the
+/// option as overridden, while its mark still reads.
+fn option_line(key: char, on: bool, dim_box: bool, label: &str) -> Line<'static> {
+    let mark = if on { "x" } else { " " };
+    let checkbox = if dim_box {
+        Span::styled(format!("[{mark}]"), styles::Dialog::dim())
+    } else {
+        Span::raw(format!("[{mark}]"))
+    };
+    Line::from(vec![
+        Span::styled(key.to_string(), styles::Dialog::key()),
+        Span::raw(" "),
+        checkbox,
+        Span::raw(format!(" {label}")),
+    ])
 }
 
 /// Note-type chooser: which kind of note `n` will add.
@@ -1681,6 +1750,27 @@ mod tests {
 
     fn press(state: &mut AppState, backend: &Backend, code: KeyCode) -> KeyOutcome {
         handle_key(state, KeyEvent::new(code, KeyModifiers::NONE), backend).unwrap()
+    }
+
+    /// Background color of the first `ch` in the first row that contains
+    /// `marker`, for asserting a cell's style.
+    fn cell_bg(terminal: &Terminal<TestBackend>, marker: &str, ch: char) -> ratatui::style::Color {
+        let buffer = terminal.backend().buffer();
+        let needle = ch.to_string();
+        for y in 0..buffer.area.height {
+            let row: String = (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect();
+            if !row.contains(marker) {
+                continue;
+            }
+            for x in 0..buffer.area.width {
+                if buffer[(x, y)].symbol() == needle {
+                    return buffer[(x, y)].bg;
+                }
+            }
+        }
+        panic!("no '{ch}' in a row containing {marker:?}");
     }
 
     fn type_text(state: &mut AppState, backend: &Backend, text: &str) {
@@ -1811,6 +1901,159 @@ mod tests {
         let text = screen(&terminal);
         assert!(text.contains("Delete this note?"), "{text}");
         assert!(text.contains("y / n"), "{text}");
+    }
+
+    #[test]
+    fn membership_maps_labels_to_groups() {
+        let mut v = ViewOptions::default();
+        assert!(v.assistant && v.user && !v.tools && !v.all_entries);
+        assert!(entry_visible("assistant", &v));
+        assert!(entry_visible("thinking", &v));
+        assert!(entry_visible("user", &v));
+        assert!(!entry_visible("tool_use", &v));
+        assert!(!entry_visible("tool_result", &v));
+        for other in ["meta", "summary", "system", "api_error", "queue-operation"] {
+            assert!(!entry_visible(other, &v), "{other}");
+        }
+        v.tools = true;
+        assert!(entry_visible("tool_use", &v));
+        assert!(entry_visible("tool_result", &v));
+    }
+
+    #[test]
+    fn all_entries_admits_every_label() {
+        let v = ViewOptions {
+            assistant: false,
+            user: false,
+            tools: false,
+            all_entries: true,
+            details: false,
+            turns: false,
+        };
+        for label in [
+            "user",
+            "meta",
+            "summary",
+            "system",
+            "api_error",
+            "atis-latch",
+        ] {
+            assert!(entry_visible(label, &v), "{label}");
+        }
+    }
+
+    /// The `v` menu lists the toggles with their checkbox state, and a
+    /// toggle key flips the box without closing the menu.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn view_menu_shows_checkboxes_and_toggles_in_place() {
+        let f = fixture();
+        let backend = Backend::stored(f.store).await;
+        let doc = backend.load(&f.session_id).await.unwrap();
+        let mut state = AppState::new(doc, &ViewOptions::default(), DocSource::Backend, true);
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+
+        press(&mut state, &backend, KeyCode::Char('v'));
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let text = screen(&terminal);
+        assert!(text.contains("a [x] Assistant messages"), "{text}");
+        assert!(text.contains("t [ ] Tool calls"), "{text}");
+        assert!(text.contains("d [ ] Entry details"), "{text}");
+        assert!(text.contains("Enter close"), "{text}");
+        // Two spaces inside the border, and option rows are not indented
+        // under their headers: both sit two columns in from the border.
+        assert!(text.contains("│  Entry types:"), "{text}");
+        assert!(text.contains("│  a [x] Assistant messages"), "{text}");
+        assert!(!text.contains("│   a [x]"), "{text}");
+
+        press(&mut state, &backend, KeyCode::Char('t'));
+        assert!(matches!(state.dialog, Dialog::Options));
+        assert!(state.view.tools);
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        assert!(screen(&terminal).contains("t [x] Tool calls"));
+
+        // "All entries" keeps each membership checkbox visible rather
+        // than replacing it, so the stored state still reads.
+        press(&mut state, &backend, KeyCode::Char('e'));
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let text = screen(&terminal);
+        assert!(text.contains("e [x] All entries"), "{text}");
+        assert!(text.contains("a [x] Assistant messages"), "{text}");
+        assert!(!text.contains('~'), "{text}");
+
+        // Enter closes the menu.
+        press(&mut state, &backend, KeyCode::Enter);
+        assert!(matches!(state.dialog, Dialog::None));
+    }
+
+    /// The menu keys use the key color, the hint's "Enter" is a key and
+    /// "close" is normal, and an overridden checkbox renders dim.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn view_menu_styles_keys_hint_and_overridden_boxes() {
+        use ratatui::style::Color;
+
+        let f = fixture();
+        let backend = Backend::stored(f.store).await;
+        let doc = backend.load(&f.session_id).await.unwrap();
+        let mut state = AppState::new(doc, &ViewOptions::default(), DocSource::Backend, true);
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+
+        press(&mut state, &backend, KeyCode::Char('v'));
+        press(&mut state, &backend, KeyCode::Char('e'));
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+
+        // The key color is cyan on the reversed surface.
+        assert_eq!(cell_bg(&terminal, "Assistant messages", 'a'), Color::Cyan);
+        // The hint splits into a cyan key and a plain label.
+        assert_eq!(cell_bg(&terminal, "Enter close", 'E'), Color::Cyan);
+        assert_ne!(cell_bg(&terminal, "Enter close", 'c'), Color::Cyan);
+        // "All entries" dims the other checkboxes whole, bracket and
+        // mark alike, but not its own.
+        assert_eq!(
+            cell_bg(&terminal, "Assistant messages", '['),
+            Color::DarkGray
+        );
+        assert_eq!(
+            cell_bg(&terminal, "Assistant messages", 'x'),
+            Color::DarkGray
+        );
+        assert_ne!(cell_bg(&terminal, "All entries", '['), Color::DarkGray);
+    }
+
+    /// Toggling a membership option releases "All entries"; the content
+    /// detail and turns toggles leave membership untouched.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn toggling_a_type_releases_all_entries() {
+        let f = fixture();
+        let backend = Backend::stored(f.store).await;
+        let doc = backend.load(&f.session_id).await.unwrap();
+        let mut state = AppState::new(doc, &ViewOptions::default(), DocSource::Backend, true);
+
+        state.toggle_all_entries();
+        assert!(state.view.all_entries);
+        state.toggle_assistant();
+        assert!(!state.view.all_entries);
+        assert!(!state.view.assistant);
+
+        state.toggle_all_entries();
+        assert!(state.view.all_entries);
+        state.toggle_details();
+        assert!(state.view.details);
+        assert!(
+            state.view.all_entries,
+            "details is independent of membership"
+        );
+    }
+
+    /// Turning off the user type hides the user entry from the tree.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn toggling_user_off_hides_the_user_entry() {
+        let f = fixture();
+        let backend = Backend::stored(f.store).await;
+        let doc = backend.load(&f.session_id).await.unwrap();
+        let mut state = AppState::new(doc, &ViewOptions::default(), DocSource::Backend, true);
+        assert_eq!(outline_labels(&state), ["<Session>", "entry 0", "entry 1"]);
+        state.toggle_user();
+        assert_eq!(outline_labels(&state), ["<Session>", "entry 1"]);
     }
 
     /// The notice wraps inside a terminal narrower than its text, so

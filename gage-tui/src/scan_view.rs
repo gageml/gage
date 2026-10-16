@@ -1352,7 +1352,7 @@ impl ViewState {
         self.dialog = match hit {
             Some(hit) => {
                 let options = crate::ViewOptions {
-                    show_turns: true,
+                    turns: true,
                     ..Default::default()
                 };
                 let mut view = app::AppState::new(hit.doc, &options, hit.source, false);
@@ -1461,7 +1461,7 @@ impl ViewState {
             Some((doc, source, backend)) => {
                 let entry_index = target.line.and_then(|l| entry_index_for_line(&doc, l));
                 let options = crate::ViewOptions {
-                    show_turns: true,
+                    turns: true,
                     ..Default::default()
                 };
                 let mut view = app::AppState::new(doc, &options, source, false);
@@ -1834,7 +1834,7 @@ impl ViewState {
             }
         };
         let options = crate::ViewOptions {
-            show_turns: true,
+            turns: true,
             ..Default::default()
         };
         let mut view = app::AppState::new(doc, &options, source, false);

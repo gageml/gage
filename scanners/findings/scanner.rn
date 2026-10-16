@@ -3,6 +3,7 @@ use gage::{
     Template,
     call_agent,
     carry_forward_notes_named,
+    params,
     scan,
     tools::{IssueWrite, Query},
     watermark,
@@ -18,6 +19,12 @@ pub const SCANNER = #{
             issues: #{
                 writes: #{ "findings": "Issue derived from finding notes" },
             },
+        },
+    },
+    params: #{
+        wontfix: #{
+            value: [],
+            description: "Conditions the user has ruled out; a finding showing one is not an issue",
         },
     },
 };
@@ -49,6 +56,7 @@ pub async fn review_findings() {
                             target: f.target.unwrap_or_default(),
                         },
                     ),
+                wontfix: params().wontfix,
             },
         )?;
 

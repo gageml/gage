@@ -18,6 +18,7 @@ use cliclack as cli;
 use datafusion::arrow::array::{
     Array, Int64Array, ListArray, StringArray, TimestampMillisecondArray,
 };
+use gage_core::config::Config;
 use gage_core::path::shorten_home;
 use gage_core::uuid::short_uuid;
 use gage_query::ContextBuilder;
@@ -329,10 +330,14 @@ async fn add_from_scanners(
         .resolve_id(dataset_prefix)
         .map_err(|e| DialogError::Failed(format!("--dataset {dataset_prefix}: {e}")))?;
     let registry = ScannerRegistry::load();
+    let config = Config::load_user()
+        .map_err(|e| DialogError::Failed(format!("gage attachment add: reading config: {e}")))?;
     let selected = scanner_spec::resolve(&registry, names).map_err(DialogError::Failed)?;
     let mut compiled = Vec::with_capacity(selected.len());
     for resolved in &selected {
-        let scanner = resolved.scanner().map_err(DialogError::Failed)?;
+        let scanner = resolved
+            .scanner(&config.scanners)
+            .map_err(DialogError::Failed)?;
         compiled
             .push(gage_scan::compile(&scanner).map_err(|e| DialogError::Failed(e.to_string()))?);
     }

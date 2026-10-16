@@ -151,13 +151,23 @@ pub struct SessionViewArgs {
     /// Session to view (ID or prefix)
     pub session: Option<String>,
 
-    /// Comma separated list of view options
+    /// View options
     ///
-    /// Options:
-    ///   turns   show model turns in outline
-    ///   detail  show all entries, not only high-signal ones
-    #[arg(short = 'v', long, value_delimiter = ',', verbatim_doc_comment)]
-    pub options: Vec<String>,
+    /// Comma separated list of the following values:
+    ///
+    /// Entry types in outline:
+    ///   a, assistant  assistant messages and thinking (default on)
+    ///   u, user       user messages (default on)
+    ///   t, tools      tool calls (default off)
+    ///   e, entries    all entries, including system and bookkeeping
+    ///
+    /// Content and extras:
+    ///   d, details    raw entry detail in content pane
+    ///   n, turns      turn markers in outline
+    ///
+    /// A leading "!" turns an option off, as in "!user"
+    #[arg(short = 'v', long, verbatim_doc_comment)]
+    pub options: Option<String>,
 }
 
 #[derive(Args)]
@@ -1139,8 +1149,8 @@ pub async fn view(
     stored: bool,
     args: SessionViewArgs,
 ) -> Result<(), CliError> {
-    let options =
-        ViewOptions::parse(&args.options).map_err(|e| anyhow!("gage session view: {e}"))?;
+    let options = ViewOptions::parse(args.options.as_deref().unwrap_or_default())
+        .map_err(|e| anyhow!("gage session view: {e}"))?;
     // No session arg: the view opens with its session picker dialog.
     let result = if stored {
         view_stored(args.session.as_deref(), options).await

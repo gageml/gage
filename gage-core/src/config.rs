@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::env;
 use std::fmt;
 use std::fs;
@@ -7,6 +8,7 @@ use std::str::FromStr;
 use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize, de};
+use serde_json as json;
 
 use crate::glob::glob_match;
 
@@ -245,6 +247,27 @@ pub struct ScannerConfig {
     /// `enable`.
     #[serde(default)]
     pub disable: Vec<String>,
+
+    /// Per-scanner settings, one `[scanners.<name>]` table each
+    #[serde(default, flatten)]
+    pub entries: BTreeMap<String, ScannerEntry>,
+}
+
+/// Settings for one scanner.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct ScannerEntry {
+    /// Values for the scanner's declared params, set under
+    /// `[scanners.<name>.params]`. A value here replaces the default
+    /// the scanner declares; a `--scanner` override replaces both.
+    #[serde(default, skip_serializing_if = "json::Map::is_empty")]
+    pub params: json::Map<String, json::Value>,
+}
+
+impl ScannerConfig {
+    /// The params the config sets for the named scanner.
+    pub fn params(&self, name: &str) -> Option<&json::Map<String, json::Value>> {
+        self.entries.get(name).map(|e| &e.params)
+    }
 }
 
 impl Config {
@@ -294,6 +317,7 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::Config;
+    use serde_json as json;
 
     #[test]
     fn scanner_enable_disable_globs() {
@@ -301,5 +325,46 @@ mod tests {
         config.scanners.disable.push("hidden-*".to_string());
         assert!(!config.is_scanner_enabled("hidden-thinking"));
         assert!(config.is_scanner_enabled("general"));
+    }
+
+    #[test]
+    fn scanner_params_are_read_from_a_per_scanner_table() {
+        let config: Config = toml::from_str(
+            r#"
+[scanners]
+disable = ["hidden-*"]
+
+[scanners.findings.params]
+wontfix = ["Actions taken without approval."]
+budget = 3
+"#,
+        )
+        .unwrap();
+        assert_eq!(config.scanners.disable, ["hidden-*"]);
+        let params = config.scanners.params("findings").unwrap();
+        assert_eq!(
+            params["wontfix"],
+            json::json!(["Actions taken without approval."])
+        );
+        assert_eq!(params["budget"], json::json!(3));
+        assert!(config.scanners.params("general").is_none());
+    }
+
+    #[test]
+    fn scanner_params_survive_a_save_and_load() {
+        let mut config = Config::default();
+        config
+            .scanners
+            .entries
+            .entry("findings".to_string())
+            .or_default()
+            .params
+            .insert("wontfix".to_string(), json::json!(["a", "b"]));
+        let text = toml::to_string_pretty(&config).unwrap();
+        let loaded: Config = toml::from_str(&text).unwrap();
+        assert_eq!(
+            loaded.scanners.params("findings").unwrap()["wontfix"],
+            json::json!(["a", "b"])
+        );
     }
 }

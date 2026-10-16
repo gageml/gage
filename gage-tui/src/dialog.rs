@@ -173,11 +173,23 @@ pub(crate) fn draw_lines_titled(
     frame.render_widget(Paragraph::new(lines).centered(), content);
 }
 
-/// Draw the dialog surface, border, and hint row for content
-/// `text_width` wide and `content_height` tall, centered on the
-/// frame, and return the content area: the border's interior less
-/// one row of padding above and below. The interior is four columns
-/// wider than the text, two each side, and is clipped to the frame.
+/// Draw a left-aligned option menu: the title in the border, rows inset
+/// two columns so they clear the border with padding on each side, and a
+/// key-hint footer below it. The hint carries its own key styling.
+pub(crate) fn draw_menu(frame: &mut Frame, title: &str, lines: Vec<Line>, hint: Line<'static>) {
+    let text_width = lines.iter().map(|l| l.width()).max().unwrap_or(0) as u16;
+    let content = draw_chrome_line(frame, Some(title), text_width, lines.len() as u16, hint);
+    let body = Rect {
+        x: content.x + 2,
+        y: content.y,
+        width: content.width.saturating_sub(4),
+        height: content.height,
+    };
+    frame.render_widget(Paragraph::new(lines).left_aligned(), body);
+}
+
+/// [`draw_chrome_line`] with the hint styled dim, the default for the
+/// key-hint footer.
 fn draw_chrome(
     frame: &mut Frame,
     title: Option<&str>,
@@ -185,10 +197,31 @@ fn draw_chrome(
     content_height: u16,
     hint: &str,
 ) -> Rect {
+    let line = if hint.is_empty() {
+        Line::raw("")
+    } else {
+        Line::from(Span::styled(hint.to_string(), styles::Dialog::dim()))
+    };
+    draw_chrome_line(frame, title, text_width, content_height, line)
+}
+
+/// Draw the dialog surface, border, and hint row for content
+/// `text_width` wide and `content_height` tall, centered on the
+/// frame, and return the content area: the border's interior less
+/// one row of padding above and below. The interior is four columns
+/// wider than the text, two each side, and is clipped to the frame.
+fn draw_chrome_line(
+    frame: &mut Frame,
+    title: Option<&str>,
+    text_width: u16,
+    content_height: u16,
+    hint: Line<'static>,
+) -> Rect {
     let frame_area = frame.area();
-    let width = (text_width.max(hint.width() as u16) + 6).min(frame_area.width.saturating_sub(2));
+    let hint_width = hint.width() as u16;
+    let width = (text_width.max(hint_width) + 6).min(frame_area.width.saturating_sub(2));
     // An empty hint takes no row: the border closes the dialog
-    let hint_rows = u16::from(!hint.is_empty());
+    let hint_rows = u16::from(hint_width > 0);
     let height = (content_height + 4 + hint_rows).min(frame_area.height.saturating_sub(2));
     let area = Rect {
         x: frame_area.x + (frame_area.width.saturating_sub(width)) / 2,
@@ -215,10 +248,7 @@ fn draw_chrome(
     ])
     .areas(inner);
     if hint_rows > 0 {
-        frame.render_widget(
-            Paragraph::new(Span::styled(hint.to_string(), styles::Dialog::dim())).centered(),
-            hint_row,
-        );
+        frame.render_widget(Paragraph::new(hint).centered(), hint_row);
     }
     content
 }

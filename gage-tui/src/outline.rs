@@ -16,11 +16,9 @@ pub struct Outline {
     /// `i`'s line. Mutated when notes are added or removed; outline rebuilds
     /// from this projection.
     entry_note_ids: Vec<Vec<String>>,
-    /// `entry_hidden[i]` marks entry `i` as low signal, omitted from the
-    /// rows unless `detail` is on or the entry carries notes.
+    /// `entry_hidden[i]` marks entry `i` as filtered out, omitted from the
+    /// rows unless the entry carries notes.
     entry_hidden: Vec<bool>,
-    /// Show all entries, overriding `entry_hidden`.
-    detail: bool,
     visible: Vec<Row>,
 }
 
@@ -55,7 +53,6 @@ impl Outline {
         session_note_ids: Vec<String>,
         entry_note_ids: Vec<Vec<String>>,
         entry_hidden: Vec<bool>,
-        detail: bool,
     ) -> Self {
         let mut o = Self {
             session_expanded: false,
@@ -63,19 +60,16 @@ impl Outline {
             session_note_ids,
             entry_note_ids,
             entry_hidden,
-            detail,
             visible: Vec::new(),
         };
         o.rebuild();
         o
     }
 
-    pub fn detail(&self) -> bool {
-        self.detail
-    }
-
-    pub fn set_detail(&mut self, detail: bool) {
-        self.detail = detail;
+    /// Replace the filter mask and rebuild, preserving notes and expansion.
+    /// Used when a view-option toggle changes which entries qualify.
+    pub fn set_hidden(&mut self, entry_hidden: Vec<bool>) {
+        self.entry_hidden = entry_hidden;
         self.rebuild();
     }
 
@@ -265,10 +259,7 @@ impl Outline {
         for (i, notes) in self.entry_note_ids.iter().enumerate() {
             // A noted entry always shows: a note declares the entry
             // mattered to someone
-            if !self.detail
-                && self.entry_hidden.get(i).copied().unwrap_or(false)
-                && notes.is_empty()
-            {
+            if self.entry_hidden.get(i).copied().unwrap_or(false) && notes.is_empty() {
                 continue;
             }
             let has_children = !notes.is_empty();
@@ -315,17 +306,17 @@ mod tests {
     fn filter_hides_marked_entries() {
         let notes = vec![Vec::new(), Vec::new(), Vec::new()];
         let hidden = vec![false, true, false];
-        let o = Outline::new(Vec::new(), notes, hidden, false);
+        let o = Outline::new(Vec::new(), notes, hidden);
         assert_eq!(entry_indices(&o), [0, 2]);
     }
 
     #[test]
-    fn detail_shows_all_entries() {
+    fn set_hidden_revises_the_filter() {
         let notes = vec![Vec::new(), Vec::new()];
         let hidden = vec![true, true];
-        let mut o = Outline::new(Vec::new(), notes, hidden, false);
+        let mut o = Outline::new(Vec::new(), notes, hidden);
         assert_eq!(entry_indices(&o), [] as [usize; 0]);
-        o.set_detail(true);
+        o.set_hidden(vec![false, false]);
         assert_eq!(entry_indices(&o), [0, 1]);
     }
 
@@ -333,14 +324,14 @@ mod tests {
     fn expansion_round_trips() {
         let notes = vec![vec!["n1".to_string()], vec!["n2".to_string()]];
         let hidden = vec![false, false];
-        let mut o = Outline::new(vec!["s1".to_string()], notes.clone(), hidden.clone(), false);
+        let mut o = Outline::new(vec!["s1".to_string()], notes.clone(), hidden.clone());
         let session_row = 0;
         let entry1_row = 2;
         o.toggle(session_row);
         o.toggle(entry1_row);
         let (session_expanded, entry_expanded) = o.expansion();
 
-        let mut fresh = Outline::new(vec!["s1".to_string()], notes, hidden, false);
+        let mut fresh = Outline::new(vec!["s1".to_string()], notes, hidden);
         fresh.set_expansion(session_expanded, entry_expanded);
         let expanded: Vec<bool> = fresh.rows().iter().map(|r| r.expanded).collect();
         // session (expanded), s1, entry 0 (expanded), n1, entry 1
@@ -350,7 +341,7 @@ mod tests {
     #[test]
     fn set_expansion_drops_stale_entries() {
         let notes = vec![vec!["n1".to_string()]];
-        let mut o = Outline::new(Vec::new(), notes, vec![false], false);
+        let mut o = Outline::new(Vec::new(), notes, vec![false]);
         o.set_expansion(false, HashSet::from([0, 5]));
         let (_, entry_expanded) = o.expansion();
         assert_eq!(entry_expanded, HashSet::from([0]));
@@ -360,7 +351,7 @@ mod tests {
     fn noted_entry_survives_filter() {
         let notes = vec![vec!["n1".to_string()], Vec::new()];
         let hidden = vec![true, true];
-        let o = Outline::new(Vec::new(), notes, hidden, false);
+        let o = Outline::new(Vec::new(), notes, hidden);
         assert_eq!(entry_indices(&o), [0]);
     }
 }

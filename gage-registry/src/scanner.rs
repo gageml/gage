@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use gage_core::config::ScannerConfig;
 use gage_core::glob::glob_match;
 use gage_core::path::shorten_home_in;
 use rune::SourceId;
@@ -438,42 +439,28 @@ impl<'a> Scanner<'a> {
         }
     }
 
-    /// Build a `Scanner` from an already-resolved `ScannerDef` and an
-    /// optional params override string. Name resolution happens at the
-    /// caller — ad-hoc scanners loaded via `-f` are resolved by the
-    /// CLI, not the registry.
+    /// Build a `Scanner` from an already-resolved `ScannerDef`, the
+    /// user config, and an optional params override string. Params
+    /// resolve in layers: the declared default, then the config's
+    /// `[scanners.<name>.params]`, then the override. Name resolution
+    /// happens at the caller — ad-hoc scanners loaded via `-f` are
+    /// resolved by the CLI, not the registry.
     pub fn from_spec(
         def: &'a ScannerDef,
+        config: &ScannerConfig,
         params_override: Option<&str>,
         spec_for_diagnostics: &str,
     ) -> Result<Self, ScannerSpecError> {
         let mut params = resolve_params(&def.params_def());
 
+        if let Some(configured) = config.params(&def.name) {
+            apply_params(&mut params, configured.clone(), &def.name, "config");
+        }
+
         if let Some(override_src) = params_override {
             let overrides = parse_object_repr(override_src)
                 .map_err(|e| ScannerSpecError::Params(spec_for_diagnostics.to_string(), e))?;
-
-            if let Some(ref mut params_json) = params {
-                let map = params_json.as_object_mut().unwrap();
-                for (key, val) in overrides {
-                    if map.contains_key(&key) {
-                        map.insert(key, val);
-                    } else {
-                        tracing::warn!(
-                            scanner = %def.name,
-                            key,
-                            "ignoring unknown params key in override"
-                        );
-                    }
-                }
-            } else if !overrides.is_empty() {
-                let keys: Vec<_> = overrides.keys().collect();
-                tracing::warn!(
-                    scanner = %def.name,
-                    ?keys,
-                    "scanner has no params; ignoring overrides"
-                );
-            }
+            apply_params(&mut params, overrides, &def.name, "override");
         }
 
         Ok(Scanner {
@@ -481,6 +468,44 @@ impl<'a> Scanner<'a> {
             params,
             only_tasks: None,
         })
+    }
+}
+
+/// Replace declared params with the values of one layer. A key the
+/// scanner does not declare is ignored with a warning naming the
+/// layer.
+fn apply_params(
+    params: &mut Option<json::Value>,
+    layer: json::Map<String, json::Value>,
+    scanner: &str,
+    layer_name: &str,
+) {
+    match params {
+        Some(params_json) => {
+            let map = params_json.as_object_mut().unwrap();
+            for (key, val) in layer {
+                if map.contains_key(&key) {
+                    map.insert(key, val);
+                } else {
+                    tracing::warn!(
+                        scanner,
+                        key,
+                        layer = layer_name,
+                        "ignoring unknown params key"
+                    );
+                }
+            }
+        }
+        None if !layer.is_empty() => {
+            let keys: Vec<_> = layer.keys().collect();
+            tracing::warn!(
+                scanner,
+                ?keys,
+                layer = layer_name,
+                "scanner has no params; ignoring values"
+            );
+        }
+        None => {}
     }
 }
 
@@ -1392,7 +1417,17 @@ fn parse_param_entry(source: &str, expr: &ast::Expr) -> Option<Object> {
     Some(entry)
 }
 
+/// The value of a literal expression: a number, string, or bool, or a
+/// vec of those. Any other expression yields nothing.
 fn expr_to_value(source: &str, expr: &ast::Expr) -> Option<Value> {
+    if let ast::Expr::Vec(vec_expr) = expr {
+        let items = vec_expr
+            .items
+            .iter()
+            .map(|(item_expr, _)| expr_to_value(source, item_expr))
+            .collect::<Option<Vec<Value>>>()?;
+        return Some(rune::to_value(items).unwrap());
+    }
     let ast::Expr::Lit(lit) = expr else {
         return expr_str(source, expr).map(|s| rune::to_value(s).unwrap());
     };
@@ -1676,6 +1711,77 @@ pub const SCANNER = #{
                 "budget": 3,
                 "verbose": true,
                 "mode": "roadmap",
+            })
+        );
+    }
+
+    #[test]
+    fn parse_params_accepts_a_vec_value() {
+        let source = r#"
+pub const SCANNER = #{
+    name: "demo",
+    params: #{
+        wontfix: #{ value: [], description: "Conditions ruled out" },
+        tags: ["a", "b"],
+        mixed: #{ value: [1, "x", true] },
+        unsupported: #{ value: [foo()] },
+    },
+};
+"#;
+        let def = parse_scanner(source, "demo", Path::new("/tmp/demo/scanner.rn")).unwrap();
+        let params = resolve_params(&def.params_def()).unwrap();
+        assert_eq!(
+            params,
+            json::json!({
+                "wontfix": [],
+                "tags": ["a", "b"],
+                "mixed": [1, "x", true],
+            })
+        );
+    }
+
+    #[test]
+    fn from_spec_layers_config_params_under_the_override() {
+        let source = r#"
+pub const SCANNER = #{
+    name: "demo",
+    params: #{ wontfix: #{ value: [] }, mode: "roadmap", budget: 0 },
+};
+"#;
+        let def = parse_scanner(source, "demo", Path::new("/tmp/demo/scanner.rn")).unwrap();
+        let config: ScannerConfig = toml::from_str(
+            r#"
+[demo.params]
+wontfix = ["Actions taken without approval."]
+mode = "query"
+unknown = 1
+"#,
+        )
+        .unwrap();
+
+        let configured = Scanner::from_spec(&def, &config, None, "demo").unwrap();
+        assert_eq!(
+            configured.params.unwrap(),
+            json::json!({
+                "wontfix": ["Actions taken without approval."],
+                "mode": "query",
+                "budget": 0,
+            })
+        );
+
+        let overridden = Scanner::from_spec(
+            &def,
+            &config,
+            Some(r#"#{ mode: "plan", budget: 2 }"#),
+            "demo",
+        )
+        .unwrap();
+        assert_eq!(
+            overridden.params.unwrap(),
+            json::json!({
+                "wontfix": ["Actions taken without approval."],
+                "mode": "plan",
+                "budget": 2,
             })
         );
     }

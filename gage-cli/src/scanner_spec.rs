@@ -10,6 +10,7 @@
 
 use std::path::{Path, PathBuf};
 
+use gage_core::config::ScannerConfig;
 use gage_registry::scanner::{Scanner, ScannerDef, ScannerRegistry, parse_scanner_file};
 
 /// Where a resolved `--scanner` value's definition lives.
@@ -37,9 +38,11 @@ pub(crate) struct ResolvedSpec<'a> {
 }
 
 impl ResolvedSpec<'_> {
-    /// The scanner with its params override applied.
-    pub(crate) fn scanner(&self) -> Result<Scanner<'_>, String> {
-        Scanner::from_spec(self.source.def(), self.params, self.spec).map_err(|e| e.to_string())
+    /// The scanner with the config's params and its params override
+    /// applied.
+    pub(crate) fn scanner(&self, config: &ScannerConfig) -> Result<Scanner<'_>, String> {
+        Scanner::from_spec(self.source.def(), config, self.params, self.spec)
+            .map_err(|e| e.to_string())
     }
 }
 
