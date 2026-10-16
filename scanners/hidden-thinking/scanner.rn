@@ -1,0 +1,109 @@
+use gage::{Files, Mark, Target, attach, scan, watermark, write_issue, write_note};
+
+const SETTINGS = ["settings.json", "settings.local.json"];
+const CHECK_SESSIONS_KEY = ("hidden-thinking", "check-sessions", 1);
+
+pub const SCANNER = #{
+    name: "hidden-thinking",
+    description: "Detect sessions where model thinking is hidden",
+    groups: ["default"],
+    tasks: #{
+        attach_config: #{ attaches: ["claude-config"] },
+        check_sessions: #{
+            attachments: #{ wants: ["claude-config"] },
+            notes: #{
+                writes: #{
+                    "empty-thinking": include_str!(
+                        "thinking-empty-note.md"
+                    ),
+                },
+            },
+            issues: #{
+                writes: #{
+                    "hidden-thinking": "Thinking blocks are hidden",
+                },
+            },
+        },
+    },
+};
+
+pub async fn attach_config() {
+    attach(Files::include(SETTINGS).root("~/.claude"))
+        .name("claude-config")
+        .await?;
+}
+
+pub async fn check_sessions() {
+    let config = read_config().await?;
+    let sessions = scan()
+        .sessions()
+        .newest_first()
+        .unseen(CHECK_SESSIONS_KEY)
+        .await?;
+    let latest = None;
+
+    for (s, (start, end)) in sessions {
+        for msg in s
+            .messages()
+            .lines(start, end)
+            .type(#{ "assistant": "thinking" })
+            .latest_first()
+            .await?
+        {
+            let newer = match latest {
+                Some((latest_msg, _)) => msg.timestamp > latest_msg.timestamp,
+                None => true,
+            };
+            if newer {
+                latest = Some((msg, s.id));
+            }
+            break;
+        }
+        watermark(Mark::session(s), CHECK_SESSIONS_KEY).await?;
+    }
+
+    if let Some((msg, session_id)) = latest {
+        let empty = msg.text == "";
+        let note = write_note("empty-thinking", empty)
+            .target(Target::session_line(session_id, msg.line))
+            .metadata(#{
+                msg_timestamp: msg.timestamp,
+                model: msg.model(),
+                config,
+            })
+            .await?;
+        if empty {
+            write_issue(
+                "hidden-thinking",
+                "Thinking blocks hidden in recent session",
+                include_str!("issue-description.md"),
+            )
+            .key("hidden-thinking")
+            .evidence(note)
+            .await?;
+        }
+    }
+}
+
+async fn read_config() {
+    let config = #{};
+    let attachments = scan()
+        .attachments()
+        .name("claude-config")
+        .await?;
+    match attachments.next() {
+        Some(att) => {
+            for name in SETTINGS {
+                if let Some(f) = att.file(name).await {
+                    if let Ok(settings) = f.json() {
+                        if let Some(val) = settings.get("showThinkingSummaries") {
+                            config.insert("showThinkingSummaries", val);
+                        }
+                    }
+                }
+            }
+        }
+        None => {}
+    }
+    Ok(config)
+}
