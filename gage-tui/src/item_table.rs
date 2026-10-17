@@ -27,6 +27,9 @@ pub(crate) struct ItemTable {
     /// Visible row count, recorded at render time so paging keys know
     /// the page size before the next frame
     viewport: usize,
+    /// A centering requested before the first render, applied once
+    /// the viewport is known
+    center_pending: bool,
 }
 
 impl ItemTable {
@@ -83,8 +86,13 @@ impl ItemTable {
     }
 
     /// Scroll so the selected row sits at the middle of the last
-    /// rendered viewport
+    /// rendered viewport. Before the first render the viewport is
+    /// unknown, and the centering is applied by that render instead.
     pub fn center_selected(&mut self) {
+        if self.viewport == 0 {
+            self.center_pending = true;
+            return;
+        }
         let Some(sel) = self.table.selected() else {
             return;
         };
@@ -107,6 +115,10 @@ impl ItemTable {
         active: bool,
     ) {
         self.viewport = area.height.saturating_sub(3) as usize;
+        if self.center_pending {
+            self.center_pending = false;
+            self.center_selected();
+        }
         frame.render_stateful_widget(table, area, &mut self.table);
         let max_offset = len.saturating_sub(self.viewport);
         let mut sb_state = ScrollbarState::new(max_offset).position(self.table.offset());
@@ -137,6 +149,11 @@ pub(crate) fn scrollbar(active: bool) -> Scrollbar<'static> {
 
 #[cfg(test)]
 mod tests {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::layout::Constraint;
+    use ratatui::widgets::{Cell, Row};
+
     use super::*;
 
     #[test]
@@ -159,5 +176,27 @@ mod tests {
         *table.table.offset_mut() = 7;
         table.center_selected();
         assert_eq!(table.table.offset(), 7);
+    }
+
+    #[test]
+    fn center_selected_before_the_first_render_waits_for_the_viewport() {
+        let ids: Vec<String> = (0..50).map(|i| i.to_string()).collect();
+        let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
+        let mut table = ItemTable::new();
+        table.select_index(30, &ids);
+        table.center_selected();
+        assert_eq!(table.table.offset(), 0);
+        assert!(table.center_pending);
+
+        // The first render records a 10-row viewport and centers
+        let rows = ids.iter().map(|id| Row::new(vec![Cell::from(*id)]));
+        let widget = Table::new(rows, [Constraint::Length(4)]);
+        let mut terminal = Terminal::new(TestBackend::new(20, 13)).unwrap();
+        terminal
+            .draw(|frame| table.render(frame, frame.area(), widget, ids.len(), true))
+            .unwrap();
+        assert_eq!(table.viewport, 10);
+        assert_eq!(table.table.offset(), 25);
+        assert!(!table.center_pending);
     }
 }

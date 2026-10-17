@@ -22,13 +22,12 @@ use gage_core::datetime::ms_to_iso8601;
 use gage_core::uuid::short_uuid;
 use gage_store::object::{LinkFile, ObjectHeader, ObjectRef};
 use gage_store::{CommitMeta, EntryKind, Store, StoreError, TagRef, TagStore, TreeEntry};
-use ratatui::backend::Backend;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Cell, Paragraph, Row, Table};
-use ratatui::{DefaultTerminal, Frame, Terminal};
+use ratatui::{DefaultTerminal, Frame};
 
 use crate::hint;
 use crate::item_table::ItemTable;
@@ -58,7 +57,8 @@ fn run_inner(terminal: &mut DefaultTerminal, store: Store, select: Option<&str>)
     let mut state = ViewState::new(store);
     state.reload();
     if let Some(prefix) = select {
-        open_at(terminal, &mut state, prefix)?;
+        state.select_object(prefix);
+        state.table.center_selected();
     }
     loop {
         terminal.draw(|frame| draw(frame, &mut state))?;
@@ -72,21 +72,6 @@ fn run_inner(terminal: &mut DefaultTerminal, store: Store, select: Option<&str>)
             }
         }
     }
-}
-
-/// Select the object matching `prefix` and scroll it to the middle of
-/// the tree, as Ctrl+l does. Centering needs the viewport height, which
-/// the table records on render, so one frame is drawn first; the loop
-/// redraws before blocking on input.
-fn open_at<B: Backend>(
-    terminal: &mut Terminal<B>,
-    state: &mut ViewState,
-    prefix: &str,
-) -> Result<(), B::Error> {
-    state.select_object(prefix);
-    terminal.draw(|frame| draw(frame, state))?;
-    state.table.center_selected();
-    Ok(())
 }
 
 enum ExitAction {
@@ -1219,6 +1204,7 @@ mod tests {
     use super::*;
     use gage_session::SourceOptions;
     use gage_store::{NoteInput, NoteStore, NoteValue};
+    use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
     /// The rendered screen as one string, rows joined by newlines
@@ -1235,7 +1221,7 @@ mod tests {
     }
 
     #[test]
-    fn open_at_centers_the_selected_object() {
+    fn initial_selection_is_centered_by_the_first_draw() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("store.git");
         gage_store::init(&path).unwrap();
@@ -1262,7 +1248,8 @@ mod tests {
         state.reload();
         let height = 24;
         let mut terminal = Terminal::new(TestBackend::new(120, height)).unwrap();
-        open_at(&mut terminal, &mut state, &last).unwrap();
+        state.select_object(&last);
+        state.table.center_selected();
         terminal.draw(|f| draw(f, &mut state)).unwrap();
 
         let label = format!("note {}", short_uuid(&last));

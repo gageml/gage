@@ -530,6 +530,9 @@ pub(crate) struct AppState {
     body_max_scroll: u16,
     body_viewport: u16,
     outline_viewport: u16,
+    /// A centering requested before the first draw, applied once the
+    /// outline viewport is known
+    center_pending: bool,
     highlighter: Highlighter,
     dialog: Dialog,
     view: ViewOptions,
@@ -565,6 +568,7 @@ impl AppState {
             body_max_scroll: 0,
             body_viewport: 0,
             outline_viewport: 0,
+            center_pending: false,
             highlighter: Highlighter::new(),
             dialog: Dialog::None,
             view: options.clone(),
@@ -861,7 +865,14 @@ impl AppState {
         self.source = DocSource::Backend;
     }
 
+    /// Scroll so the selected row sits at the middle of the outline.
+    /// Before the first draw the viewport is unknown, and the
+    /// centering is applied by that draw instead.
     fn center_selected(&mut self) {
+        if self.outline_viewport == 0 {
+            self.center_pending = true;
+            return;
+        }
         let Some(sel) = self.list_state.selected() else {
             return;
         };
@@ -1270,6 +1281,10 @@ fn draw_outline(frame: &mut Frame, state: &mut AppState, area: Rect) {
     let active = state.focus == Focus::Outline;
 
     state.outline_viewport = area.height.saturating_sub(2);
+    if state.center_pending {
+        state.center_pending = false;
+        state.center_selected();
+    }
 
     let selected = state.list_state.selected();
     let items: Vec<ListItem> = state
@@ -1746,6 +1761,7 @@ mod tests {
     use ratatui::crossterm::event::KeyEvent;
 
     use super::*;
+    use crate::doc::{Entry, Session};
     use crate::session::tests::fixture;
 
     /// The rendered screen as one string, rows joined by newlines
@@ -1832,6 +1848,44 @@ mod tests {
         // A line before the first entry leaves the selection alone
         state.select_line(0);
         assert_eq!(state.selected_entry_index(), Some(1));
+    }
+
+    /// A document of `count` user entries, one per JSONL line
+    fn doc_with_entries(count: u32) -> Document {
+        Document {
+            session: Session {
+                id: "s1".into(),
+                value: serde_json::json!({}),
+            },
+            entries: (1..=count)
+                .map(|line| Entry {
+                    line,
+                    uuid: Some(format!("u{line}")),
+                    entry_type: "user".into(),
+                    message_subtype: Some("text".into()),
+                    value: serde_json::json!({"type": "user"}),
+                })
+                .collect(),
+            notes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn select_line_before_the_first_draw_centers_on_that_draw() {
+        let doc = doc_with_entries(60);
+        let mut state = AppState::new(doc, &ViewOptions::default(), DocSource::Backend, false);
+        state.select_line(50);
+        let selected = state.list_state.selected().unwrap();
+        assert_eq!(state.selected_entry_index(), Some(49));
+        assert_eq!(state.list_state.offset(), 0);
+        assert!(state.center_pending);
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let half = usize::from(state.outline_viewport / 2);
+        assert!(half > 0);
+        assert_eq!(state.list_state.offset(), selected - half);
+        assert!(!state.center_pending);
     }
 
     #[tokio::test(flavor = "multi_thread")]
