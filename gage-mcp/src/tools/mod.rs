@@ -6,6 +6,7 @@ pub mod issue_comment;
 pub mod issue_pending_resolve;
 pub mod issue_update;
 pub mod issue_write;
+pub mod issues_free;
 pub mod note_write;
 pub mod query;
 

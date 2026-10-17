@@ -17,6 +17,7 @@ pub use host::{HostError, McpHost, ServiceHandle};
 pub use rmcp::model::ToolAnnotations;
 pub use service::{
     CustomToolCallback, CustomToolDef, CustomToolOutcome, GageTool, IssueWriteCallback,
-    IssueWriteConfig, IssueWriteInput, NoteWriteCallback, NoteWriteConfig, NoteWriteInput,
-    QueryConfig, StoreWriterConfig, ToolSpec, ToolsConfig, build_mcp_service, serve_stdio,
+    IssueWriteConfig, IssueWriteInput, IssuesFreeConfig, NoteWriteCallback, NoteWriteConfig,
+    NoteWriteInput, QueryConfig, SessionLivenessFn, StoreWriterConfig, ToolSpec, ToolsConfig,
+    build_mcp_service, serve_stdio,
 };

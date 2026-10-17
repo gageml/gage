@@ -24,8 +24,10 @@ use gage_session::{
     AgentSession, AgentSpec, AuthInfo, ContentSchema, ContentSink, ContentSource, Driver,
     DriverError, DriverStatus, DriverTables, Entry, Field, HarnessInfo, InstallInfo, InstallReport,
     InstallUi, MaintenanceOutcome, MaintenanceStatus, NativeLookupError, NativeSession,
-    ResolveSession, SessionAttrs, Source, SourceOptions, StoredSession, ToolUse, split_scheme,
+    ResolveSession, SessionAttrs, SessionLiveError, Source, SourceOptions, StoredSession, ToolUse,
+    split_scheme,
 };
+use serde::Deserialize;
 
 use crate::content_schema;
 use crate::home::ClaudeHome;
@@ -645,9 +647,114 @@ impl Source for ClaudeSource {
         Ok(self.projects()?.get(name).cloned())
     }
 
+    fn is_session_live(&self, session_id: &str) -> Result<bool, SessionLiveError> {
+        session_live(&self.root, session_id)
+    }
+
     fn close(self: Box<Self>) -> Result<(), DriverError> {
         Ok(())
     }
+}
+
+/// Whether Claude Code records `session_id` as a live session now.
+/// Claude Code writes one `sessions/<pid>.json` file per running
+/// session under the state root, each carrying the session id, its
+/// process id, and the pidDomain that id belongs to. A session is
+/// live when a matching entry's process is running on this host.
+/// Absent entry is `Ok(false)`: the session is not live. An entry in
+/// another pidDomain cannot be probed from here, so it is
+/// [`SessionLiveError::Unknown`].
+fn session_live(root: &Path, session_id: &str) -> Result<bool, SessionLiveError> {
+    let dir = root.join("sessions");
+    let entries = match fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(DriverError::Io(e).into()),
+    };
+    let mut newest: Option<SessionRegistryEntry> = None;
+    for entry in entries {
+        let path = entry.map_err(DriverError::Io)?.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            // The registry file was removed between the listing and the
+            // read: a session that exited mid-scan is simply not here.
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(DriverError::Io(e).into()),
+        };
+        // A half-written or foreign-shaped entry carries no usable
+        // session id, so it cannot confirm this session; skip it.
+        let Ok(parsed) = serde_json::from_slice::<SessionRegistryEntry>(&bytes) else {
+            continue;
+        };
+        if parsed.session_id != session_id {
+            continue;
+        }
+        let newer = newest
+            .as_ref()
+            .is_none_or(|held| parsed.updated_at.unwrap_or(0) >= held.updated_at.unwrap_or(0));
+        if newer {
+            newest = Some(parsed);
+        }
+    }
+    let Some(entry) = newest else {
+        return Ok(false);
+    };
+    match local_pid_domain() {
+        Some(local) if entry.pid_domain.as_deref() == Some(local.as_str()) => {
+            Ok(pid_alive(entry.pid))
+        }
+        _ => Err(SessionLiveError::Unknown(format!(
+            "session {session_id} is recorded in pidDomain {:?}, which this host cannot probe",
+            entry.pid_domain
+        ))),
+    }
+}
+
+/// The fields of a `sessions/<pid>.json` entry this probe reads. Other
+/// fields of the entry are ignored.
+#[derive(Deserialize)]
+struct SessionRegistryEntry {
+    #[serde(rename = "sessionId")]
+    session_id: String,
+    pid: i32,
+    #[serde(default, rename = "pidDomain")]
+    pid_domain: Option<String>,
+    #[serde(default, rename = "updatedAt")]
+    updated_at: Option<i64>,
+}
+
+/// This host's Claude Code pidDomain, `linux:<machine-id>:pid:[<pid
+/// namespace inode>]`, or `None` when either part cannot be read. A
+/// `None` result makes every registered session unprobeable, which is
+/// reported as unknown rather than guessed.
+fn local_pid_domain() -> Option<String> {
+    let machine_id = fs::read_to_string("/etc/machine-id").ok()?;
+    let machine_id = machine_id.trim();
+    if machine_id.is_empty() {
+        return None;
+    }
+    let ns = fs::read_link("/proc/self/ns/pid").ok()?;
+    let ns = ns.to_str()?;
+    Some(format!("linux:{machine_id}:{ns}"))
+}
+
+/// Whether `pid` names a process that exists on this host. A signal of
+/// 0 sends nothing; it only reports whether the process is there and
+/// whether this process could signal it.
+fn pid_alive(pid: i32) -> bool {
+    if pid <= 0 {
+        return false;
+    }
+    // SAFETY: kill with signal 0 performs the permission and existence
+    // check without delivering a signal.
+    let ret = unsafe { libc::kill(pid, 0) };
+    if ret == 0 {
+        return true;
+    }
+    io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 /// Slug to cwd for every project the root's registry records. A
@@ -1313,5 +1420,68 @@ mod tests {
             accepted.map(|s| s.content_format().to_string()).unwrap(),
             CONTENT_FORMAT
         );
+    }
+
+    fn write_registry_entry(root: &Path, file: &str, json: &str) {
+        let dir = root.join("sessions");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(file), json).unwrap();
+    }
+
+    #[test]
+    fn session_live_is_false_when_no_registry_dir() {
+        let tmp = TempDir::new().unwrap();
+        assert!(!session_live(tmp.path(), "whatever").unwrap());
+    }
+
+    #[test]
+    fn session_live_is_false_when_the_session_is_absent() {
+        let tmp = TempDir::new().unwrap();
+        write_registry_entry(
+            tmp.path(),
+            "100.json",
+            r#"{"sessionId":"other","pid":100,"pidDomain":"linux:m:pid:[1]"}"#,
+        );
+        assert!(!session_live(tmp.path(), "target").unwrap());
+    }
+
+    #[test]
+    fn session_live_is_unknown_for_a_foreign_pid_domain() {
+        let tmp = TempDir::new().unwrap();
+        write_registry_entry(
+            tmp.path(),
+            "100.json",
+            r#"{"sessionId":"target","pid":100,"pidDomain":"linux:another-machine:pid:[999]"}"#,
+        );
+        let err = session_live(tmp.path(), "target").unwrap_err();
+        assert!(matches!(err, SessionLiveError::Unknown(_)), "{err}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn session_live_is_true_for_a_running_process_in_this_domain() {
+        let tmp = TempDir::new().unwrap();
+        let domain = local_pid_domain().expect("a Linux host has a pidDomain");
+        let pid = std::process::id();
+        let json =
+            format!(r#"{{"sessionId":"target","pid":{pid},"pidDomain":"{domain}","updatedAt":1}}"#);
+        write_registry_entry(tmp.path(), &format!("{pid}.json"), &json);
+        assert!(session_live(tmp.path(), "target").unwrap());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn session_live_is_false_for_a_dead_process_in_this_domain() {
+        let tmp = TempDir::new().unwrap();
+        let domain = local_pid_domain().expect("a Linux host has a pidDomain");
+        // Spawn and reap a child, so its pid names a process that has
+        // exited by the time the probe runs.
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        let json =
+            format!(r#"{{"sessionId":"target","pid":{pid},"pidDomain":"{domain}","updatedAt":1}}"#);
+        write_registry_entry(tmp.path(), &format!("{pid}.json"), &json);
+        assert!(!session_live(tmp.path(), "target").unwrap());
     }
 }

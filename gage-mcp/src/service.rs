@@ -47,6 +47,7 @@ pub enum GageTool {
     IssueAssign(StoreWriterConfig),
     IssueComment(StoreWriterConfig),
     IssuePendingResolve(StoreWriterConfig),
+    IssuesFree(IssuesFreeConfig),
 }
 
 impl GageTool {
@@ -60,6 +61,7 @@ impl GageTool {
             GageTool::IssueAssign(_) => tools::issue_assign::NAME,
             GageTool::IssueComment(_) => tools::issue_comment::NAME,
             GageTool::IssuePendingResolve(_) => tools::issue_pending_resolve::NAME,
+            GageTool::IssuesFree(_) => tools::issues_free::NAME,
         }
     }
 }
@@ -83,6 +85,21 @@ impl StoreWriterConfig {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
+}
+
+/// Reports whether a session is a live instance now. `Ok(true)` is a
+/// positive live signal, `Ok(false)` a positive not-live signal, and
+/// `Err(reason)` is returned when liveness cannot be determined; the
+/// reason is surfaced in the tool result. The runtime wires this to
+/// the session source's own liveness probe.
+pub type SessionLivenessFn = Arc<dyn Fn(&str) -> Result<bool, String> + Send + Sync>;
+
+/// The `IssuesFree` tool's data: the store it reopens issues through
+/// and the probe it asks whether a holding session is still live.
+#[derive(Clone)]
+pub struct IssuesFreeConfig {
+    pub writer: StoreWriterConfig,
+    pub liveness: SessionLivenessFn,
 }
 
 /// The `Query` tool's data: the DataFusion context its SQL runs on
@@ -158,6 +175,7 @@ pub struct ToolsConfig {
     pub issue_assign: Option<StoreWriterConfig>,
     pub issue_comment: Option<StoreWriterConfig>,
     pub issue_pending_resolve: Option<StoreWriterConfig>,
+    pub issues_free: Option<IssuesFreeConfig>,
 }
 
 /// One scanner-defined tool: the wire-visible definition plus the
@@ -258,6 +276,10 @@ fn build_server(spec: &ToolSpec) -> GageServer {
             GageTool::IssuePendingResolve(c) => {
                 config.issue_pending_resolve = Some(c.clone());
                 router = router.with_route((tools::issue_pending_resolve::TOOL)());
+            }
+            GageTool::IssuesFree(c) => {
+                config.issues_free = Some(c.clone());
+                router = router.with_route((tools::issues_free::TOOL)());
             }
         }
     }

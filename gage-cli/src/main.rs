@@ -418,6 +418,28 @@ async fn run_mcp() -> anyhow::Result<()> {
         store,
         author: author::resolve_author(None),
     };
+    // IssuesFree probes session liveness through the default session
+    // source. When the source cannot be opened the tool still routes,
+    // reporting every session's liveness as undetermined rather than
+    // failing the server's startup.
+    let liveness: gage_mcp::SessionLivenessFn = {
+        use gage_session::Source;
+        match source::open_source("gage mcp", "") {
+            Ok(opened) => {
+                let opened: Arc<dyn Source> = Arc::from(opened);
+                Arc::new(move |id: &str| opened.is_session_live(id).map_err(|e| e.to_string()))
+            }
+            Err(e) => {
+                let reason = match e {
+                    CliError::Exit { message, .. } => {
+                        message.unwrap_or_else(|| "session source unavailable".to_string())
+                    }
+                    CliError::Other(err) => format!("session source unavailable: {err:#}"),
+                };
+                Arc::new(move |_id: &str| Err(reason.clone()))
+            }
+        }
+    };
     // The names an interactive session may write notes under; scanner
     // output names stay with the scanners that declare them
     let note_names = std::collections::BTreeMap::from([(
@@ -441,7 +463,8 @@ async fn run_mcp() -> anyhow::Result<()> {
             gage_mcp::GageTool::IssueUpdate(writer.clone()),
             gage_mcp::GageTool::IssueAssign(writer.clone()),
             gage_mcp::GageTool::IssueComment(writer.clone()),
-            gage_mcp::GageTool::IssuePendingResolve(writer),
+            gage_mcp::GageTool::IssuePendingResolve(writer.clone()),
+            gage_mcp::GageTool::IssuesFree(gage_mcp::IssuesFreeConfig { writer, liveness }),
         ],
         custom: Vec::new(),
     };

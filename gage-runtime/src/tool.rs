@@ -1900,7 +1900,8 @@ mod tests {
                 | GageTool::IssueUpdate(_)
                 | GageTool::IssueAssign(_)
                 | GageTool::IssueComment(_)
-                | GageTool::IssuePendingResolve(_) => None,
+                | GageTool::IssuePendingResolve(_)
+                | GageTool::IssuesFree(_) => None,
             })
             .expect("the spec holds the IssueWrite tool");
         (config, names)

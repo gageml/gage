@@ -5,20 +5,27 @@ description:
 disable-model-invocation: true
 ---
 
-Your task is to help the user process Gage issues. There are two phases:
+Your task is to help the user process Gage issues. There are three phases:
 
-1. _Pending issue reconciliation_ - Reconcile pending issues against other
+1. **Pending issue reconciliation.** Reconcile pending issues against other
    issues, closing duplicates and promoting novel issues to open. This phase
    does not require user input except where noted below.
 
-2. _Open issue resolution_ - Take up open issues and work with the user to
+2. **Free abandoned issues**. Run `IssuesFree` tool to free assigned issues that
+   have been abandoned. Issue assignment is described below in **Concurrency**.
+   This phase does not require user input.
+
+3. **Open issue resolution.** Take up open issues and work with the user to
    resolve them.
 
-Run phase 1 to completion before starting phase 2.
+Run phases 1 and 2 to completion before starting phase 3.
 
-Do not use "phase 1" and "phase 2" in status messages to the user. Use
-"reconciling pending issues" and "resolving open issues" when describing this
-activity.
+Do not use the term "phase" in status messages or your correspondence with the
+user. Use these terms instead:
+
+- Phase 1 -> "reconcile pending issues"
+- Phase 2 -> "free abandoned issues"
+- Phase 3 -> "resolve open issues"
 
 ## Concurrency
 
@@ -38,7 +45,11 @@ follows:
 
 - Phase 1 resolves only the pending issues among them.
 
-- Phase 2 takes up open issues among them. With one such issue, take it up
+- Phase 2 frees _all_ abandoned issues as a side-effect of running this skill.
+  This is an intentional deviation from phase 1 and phase 3, which are scoped.
+  Phase 2 acts as a lazy sweep over assigned issues.
+
+- Phase 3 takes up open issues among them. With one such issue, take it up
   directly. With several, list them and ask which to take up first.
 
 Scope restricts which issues are processed, not which issues they are compared
@@ -133,17 +144,18 @@ resolutions with `mcp__plugin_gage_gage__IssuePendingResolve`.
    orders the writes so each surviving issue is in its final state before a
    duplicate names it. Each object:
    - `new` - `{issue, action: "open"}`
-   - `duplicate` - `{issue, action: "duplicate", duplicate_of: related, comment}`
+   - `duplicate` -
+     `{issue, action: "duplicate", duplicate_of: related, comment}`
 
-   The plan must name each pending issue at most once, and a duplicate's `duplicate_of`
-   must be an issue the plan promotes or an issue already open, assigned, or
-   closed.
+   The plan must name each pending issue at most once, and a duplicate's
+   `duplicate_of` must be an issue the plan promotes or an issue already open,
+   assigned, or closed.
 
 8. Present the `reopen` issues to the user as one batch, grouped by `related`,
    with the prior close reason and the agent's `summary`. For each, the user
    chooses one of three outcomes:
-   - Already resolved - `{issue, action: "duplicate", duplicate_of: related}`; the closed
-     issue stays closed
+   - Already resolved - `{issue, action: "duplicate", duplicate_of: related}`;
+     the closed issue stays closed
    - Condition recurred -
      `{issue, action: "duplicate", duplicate_of: related, reopen: true, comment}`;
      `reopen` returns the closed issue to open before the close
@@ -154,7 +166,13 @@ resolutions with `mcp__plugin_gage_gage__IssuePendingResolve`.
 9. Briefly report what was resolved: how many issues were promoted, how many
    closed as duplicates, and against what.
 
-## Phase 2: Open issue resolution
+## Phase 2: Free abandoned issues
+
+Run `mcp__plugin_gage_gage__IssuesFree` with no inputs to free abandoned issues
+in preparation for phase 3. The tool determines when an assigned issue no longer
+has an active session and changes its status to `open`.
+
+## Phase 3: Open issue resolution
 
 Each open issue identifies something the user should attend to. A well written
 issue describes an underlying condition and provides evidence where available.
@@ -164,9 +182,9 @@ Issues are not necessarily related to source code. Issues often touch on
 methods, best practices, tool configuration, and so on. Look at each issue in
 its own right without pre-judging it.
 
-### Phase 2a: Choose an issue
+### Phase 3a: Choose an issue
 
-1. List the open issues. Run this query only after phase 1 completes -
+1. List the open issues. Run this query only after phase 2 completes -
    resolution changes which issues are open.
 
    ```sql
@@ -187,14 +205,14 @@ its own right without pre-judging it.
    | {short_id} | {title} | {age} |
    ```
 
-3. With one open issue, proceed to phase 2b with it. With more than one, ask:
+3. With one open issue, proceed to phase 3b with it. With more than one, ask:
 
    > Would you like to start with a specific issue or should I take the first in
    > order?
 
 For the next phase you work with the user to resolve each issue in turn.
 
-### Phase 2b: Resolve an issue
+### Phase 3b: Resolve an issue
 
 Gage issues are user-directed and it's important the user understand what is
 being presented. Do not assume the user knows what an issue is based on its
@@ -218,7 +236,7 @@ one of two inputs:
   the tool refuses, unless `force` is set, in which case it reassigns the issue
   to you. Use `force` only when the user directs you to.
 
-If the tool reports that no issue was assigned, return to phase 2a.
+If the tool reports that no issue was assigned, return to phase 3a.
 
 **Verify that the issue is valid**
 
@@ -307,4 +325,4 @@ If the user decides to not fix the issue, close it with `status=closed` and
 
 If the user defers the issue, or stops work on it without closing, release it
 with `mcp__plugin_gage_gage__IssueUpdate` and `status=open` so another session
-can take it up. After a close or a release, return to phase 2a.
+can take it up. After a close or a release, return to phase 3a.

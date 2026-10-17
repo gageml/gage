@@ -324,6 +324,19 @@ pub trait Source: Send + Sync {
     /// one.
     fn project_path(&self, name: &str) -> Result<Option<PathBuf>, DriverError>;
 
+    /// Whether the session `session_id` is a live instance in the
+    /// harness right now. `Ok(true)` is a positive signal the instance
+    /// is running; `Ok(false)` is a positive signal it is not. A driver
+    /// that cannot determine liveness returns
+    /// [`SessionLiveError::Unknown`], which the default does for every
+    /// driver that does not override this.
+    fn is_session_live(&self, _session_id: &str) -> Result<bool, SessionLiveError> {
+        Err(SessionLiveError::Unknown(format!(
+            "source {} does not report session liveness",
+            self.source()
+        )))
+    }
+
     /// Release the handle.
     fn close(self: Box<Self>) -> Result<(), DriverError>;
 }
@@ -504,6 +517,41 @@ impl From<std::io::Error> for DriverError {
     }
 }
 
+/// Why [`Source::is_session_live`] could not answer yes or no.
+#[derive(Debug)]
+pub enum SessionLiveError {
+    /// Liveness cannot be determined. The string names why: the driver
+    /// has no mechanism to tell, or the holder runs where this host
+    /// cannot probe it.
+    Unknown(String),
+    /// An underlying driver error, such as a failed registry read.
+    Driver(DriverError),
+}
+
+impl fmt::Display for SessionLiveError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SessionLiveError::Unknown(why) => write!(f, "session liveness unknown: {why}"),
+            SessionLiveError::Driver(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for SessionLiveError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            SessionLiveError::Driver(e) => Some(e),
+            SessionLiveError::Unknown(_) => None,
+        }
+    }
+}
+
+impl From<DriverError> for SessionLiveError {
+    fn from(e: DriverError) -> Self {
+        SessionLiveError::Driver(e)
+    }
+}
+
 #[derive(Debug)]
 pub enum NativeLookupError {
     NoMatch(String),
@@ -571,5 +619,44 @@ mod tests {
         assert_eq!(split_scheme(":body"), None);
         assert_eq!(split_scheme("1abc:x"), None);
         assert_eq!(split_scheme("~/x:y"), None);
+    }
+
+    struct BareSource(String);
+
+    impl Source for BareSource {
+        fn source(&self) -> &str {
+            &self.0
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+        fn tables(&self) -> Result<DriverTables, DriverError> {
+            unimplemented!()
+        }
+        fn find_native(&self, _prefix: &str) -> Result<String, NativeLookupError> {
+            unimplemented!()
+        }
+        fn open_native(&self, _native_id: &str) -> Result<Box<dyn NativeSession>, DriverError> {
+            unimplemented!()
+        }
+        fn delete_native(&self, _native_id: &str) -> Result<(), DriverError> {
+            unimplemented!()
+        }
+        fn project_name(&self, _path: &Path) -> Result<String, DriverError> {
+            unimplemented!()
+        }
+        fn project_path(&self, _name: &str) -> Result<Option<PathBuf>, DriverError> {
+            unimplemented!()
+        }
+        fn close(self: Box<Self>) -> Result<(), DriverError> {
+            unimplemented!()
+        }
+    }
+
+    #[test]
+    fn is_session_live_defaults_to_unknown() {
+        let source = BareSource("claude:/tmp/foo".to_string());
+        let err = source.is_session_live("abc").unwrap_err();
+        assert!(matches!(err, SessionLiveError::Unknown(_)), "{err}");
     }
 }
