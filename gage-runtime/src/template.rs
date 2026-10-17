@@ -149,6 +149,20 @@ mod tests {
     }
 
     #[test]
+    fn render_error_names_the_context_path_and_bare_type() {
+        let t = Template::compile("{{ notes[0].value }}".to_string()).unwrap();
+        let pair = rune::to_value((1i64, 2i64)).unwrap();
+        let inner = object(&[("value", pair)]);
+        let notes = rune::to_value(vec![inner]).unwrap();
+        let err = t.render(&object(&[("notes", notes)])).err().unwrap();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("notes[0].value holds a std::tuple::Tuple value"),
+            "{msg}"
+        );
+    }
+
+    #[test]
     fn render_never_escapes_output() {
         let t = Template::compile("{{ text }}".to_string()).unwrap();
         let text = rune::to_value("<session_id> & \"quoted\"").unwrap();
