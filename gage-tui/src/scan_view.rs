@@ -2519,7 +2519,7 @@ fn draw_prompt(frame: &mut Frame, prompt: &mut Prompt) {
                 StatusReason::Duplicate => "Comment — name the surviving issue ID",
                 _ => "Comment (optional)",
             };
-            dialog::draw_editor(
+            dialog::draw_text_area(
                 frame,
                 &format!("Close issue ({})", reason.as_str()),
                 Some(comment_prompt),
@@ -2560,14 +2560,14 @@ fn draw_prompt(frame: &mut Frame, prompt: &mut Prompt) {
                 rows,
             );
         }
-        Prompt::Open { status, editor, .. } => dialog::draw_editor(
+        Prompt::Open { status, editor, .. } => dialog::draw_text_area(
             frame,
             &format!("Open issue ({})", status.as_str()),
             Some("Comment (optional)"),
             editor,
             "Enter open · Shift-Enter newline · Esc cancel",
         ),
-        Prompt::Comment { editor, .. } => dialog::draw_editor(
+        Prompt::Comment { editor, .. } => dialog::draw_text_area(
             frame,
             "Comment issue",
             Some("Comment"),

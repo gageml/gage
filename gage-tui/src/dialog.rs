@@ -102,7 +102,7 @@ pub(crate) fn draw_wrapped_message(frame: &mut Frame, message: &str, hint: &str)
 /// the editor body inside a titled border, with a key-hint footer
 /// below the border. A scrollbar appears once the text outgrows the
 /// body.
-pub(crate) fn draw_editor(
+pub(crate) fn draw_text_area(
     frame: &mut Frame,
     title: &str,
     prompt: Option<&str>,
@@ -153,6 +153,37 @@ pub(crate) fn draw_editor(
             .position(editor.visual_cursor_row(text_area.width));
         frame.render_stateful_widget(scrollbar(true), bar_area, &mut state);
     }
+}
+
+/// Draw a single-line input dialog: a dim label above a one-row field
+/// inside a border, with a key-hint footer below it. `value` is the
+/// field contents and `cursor` the caller's cursor offset in cells
+/// from the field's left edge, where the terminal cursor is placed.
+pub(crate) fn draw_input(
+    frame: &mut Frame,
+    label: &str,
+    value: &str,
+    cursor: usize,
+    hint: Line<'static>,
+) {
+    let frame_area = frame.area();
+    let field_width = frame_area.width.saturating_sub(8).clamp(20, 40);
+    let content = draw_chrome_line(frame, None, field_width, 2, hint);
+    let [_, column, _] = Layout::horizontal([
+        Constraint::Fill(1),
+        Constraint::Length(field_width),
+        Constraint::Fill(1),
+    ])
+    .areas(content);
+    let [label_area, field] =
+        Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(column);
+    frame.render_widget(
+        Paragraph::new(Span::styled(label.to_string(), styles::Dialog::dim())),
+        label_area,
+    );
+    frame.render_widget(Paragraph::new(value.to_string()), field);
+    let cursor_x = field.x + (cursor as u16).min(field.width.saturating_sub(1));
+    frame.set_cursor_position((cursor_x, field.y));
 }
 
 /// Draw centered content lines with a key-hint footer below the

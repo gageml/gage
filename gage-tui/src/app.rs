@@ -334,6 +334,30 @@ pub(crate) fn handle_key(
             }
             return Ok(KeyOutcome::Consumed);
         }
+        Dialog::GotoEntry { input, cursor } => {
+            match key.code {
+                KeyCode::Char(c) if c.is_ascii_digit() => {
+                    input.insert(*cursor, c);
+                    *cursor += 1;
+                }
+                KeyCode::Backspace if *cursor > 0 => {
+                    *cursor -= 1;
+                    input.remove(*cursor);
+                }
+                KeyCode::Left => *cursor = cursor.saturating_sub(1),
+                KeyCode::Right => *cursor = (*cursor + 1).min(input.len()),
+                KeyCode::Char('g') | KeyCode::Enter => {
+                    let target = input.parse::<usize>().ok();
+                    state.dialog = Dialog::None;
+                    if let Some(n) = target.filter(|n| *n > 0) {
+                        state.goto_entry(n - 1);
+                    }
+                }
+                KeyCode::Char('q') | KeyCode::Esc => state.dialog = Dialog::None,
+                _ => {}
+            }
+            return Ok(KeyOutcome::Consumed);
+        }
         Dialog::None => {}
     }
     let outcome = match key.code {
@@ -437,6 +461,13 @@ pub(crate) fn handle_key(
             state.reload(backend)?;
             KeyOutcome::Consumed
         }
+        KeyCode::Char(c) if c.is_ascii_digit() => {
+            state.dialog = Dialog::GotoEntry {
+                input: c.to_string(),
+                cursor: 1,
+            };
+            KeyOutcome::Consumed
+        }
         _ => KeyOutcome::Ignored,
     };
     Ok(outcome)
@@ -521,6 +552,12 @@ enum Dialog {
     Options,
     /// Notice that `n` has nothing to write to over a native source
     NotesUnavailable,
+    /// Go-to-entry field (`0`..`9`): the typed digits and the cursor
+    /// offset within them
+    GotoEntry {
+        input: String,
+        cursor: usize,
+    },
 }
 
 const NOTES_UNAVAILABLE: &str = "Notes cannot be added to native sessions. \
@@ -662,6 +699,22 @@ impl AppState {
         self.list_state.select(Some(row));
         self.body_scroll = 0;
         self.center_selected();
+    }
+
+    /// Select entry `index`'s outline row, or the nearest visible entry
+    /// row before it when that entry is filtered out. Only entry rows
+    /// are selected, never a note row. Does nothing when no entry at or
+    /// before `index` is visible.
+    fn goto_entry(&mut self, index: usize) {
+        let row = self.outline.rows().iter().rposition(|r| match r.kind {
+            RowKind::Entry { index: i } => i <= index,
+            _ => false,
+        });
+        if let Some(row) = row {
+            self.list_state.select(Some(row));
+            self.body_scroll = 0;
+            self.center_selected();
+        }
     }
 
     fn author(&self) -> String {
@@ -1706,6 +1759,10 @@ fn draw_dialog(frame: &mut Frame, dialog: &mut Dialog, view: &ViewOptions) {
             draw_confirm(frame, "Delete this note? This cannot be undone.")
         }
         Dialog::OpenSession { picker, .. } => picker.draw(frame),
+        Dialog::GotoEntry { input, cursor } => {
+            let hint = hint::dialog_line(&[("g", "go"), ("Esc", "cancel")]);
+            crate::dialog::draw_input(frame, "Go to entry", input, *cursor, hint)
+        }
     }
 }
 
@@ -1765,7 +1822,7 @@ fn draw_note_type(frame: &mut Frame) {
 const EDITOR_HINT: &str = "Enter save · Shift/Alt+Enter or Ctrl+J newline · Esc cancel";
 
 fn draw_editor(frame: &mut Frame, title: &str, editor: &mut TextArea) {
-    crate::dialog::draw_editor(frame, title, None, editor, EDITOR_HINT);
+    crate::dialog::draw_text_area(frame, title, None, editor, EDITOR_HINT);
 }
 
 fn draw_confirm(frame: &mut Frame, message: &str) {
@@ -2278,5 +2335,196 @@ mod tests {
             .expect("the notice should be on screen");
         assert!(rows[first + 1].contains("to the store"), "{text}");
         assert!(rows.iter().any(|r| r.contains("Enter dismiss")), "{text}");
+    }
+
+    /// A doc-only backend for key tests that never read the store
+    async fn test_backend() -> Backend {
+        Backend::stored(fixture().store).await
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_digit_opens_the_goto_entry_dialog_seeded_with_it() {
+        let backend = test_backend().await;
+        let mut state = AppState::new(
+            doc_with_entries(10),
+            &ViewOptions::default(),
+            DocSource::Backend,
+            false,
+        );
+        press(&mut state, &backend, KeyCode::Char('3'));
+        match &state.dialog {
+            Dialog::GotoEntry { input, cursor } => {
+                assert_eq!(input, "3");
+                assert_eq!(*cursor, 1);
+            }
+            _ => panic!("a digit should open the go-to-entry dialog"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn goto_entry_selects_the_entry_whose_number_was_typed() {
+        let backend = test_backend().await;
+        let mut state = AppState::new(
+            doc_with_entries(10),
+            &ViewOptions::default(),
+            DocSource::Backend,
+            false,
+        );
+        // Entry number 3 is entry index 2
+        type_text(&mut state, &backend, "3");
+        press(&mut state, &backend, KeyCode::Char('g'));
+        assert!(matches!(state.dialog, Dialog::None));
+        assert_eq!(state.selected_entry_index(), Some(2));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn goto_entry_edits_the_field_with_backspace() {
+        let backend = test_backend().await;
+        let mut state = AppState::new(
+            doc_with_entries(10),
+            &ViewOptions::default(),
+            DocSource::Backend,
+            false,
+        );
+        type_text(&mut state, &backend, "19");
+        press(&mut state, &backend, KeyCode::Backspace);
+        press(&mut state, &backend, KeyCode::Enter);
+        // "19" backspaced to "1" selects entry number 1, entry index 0
+        assert_eq!(state.selected_entry_index(), Some(0));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn goto_a_hidden_entry_selects_the_prior_visible_entry() {
+        let backend = test_backend().await;
+        let mut state = AppState::new(
+            doc_with_alternating_entries(10),
+            &ViewOptions::default(),
+            DocSource::Backend,
+            false,
+        );
+        // Hide the assistant entries, the odd indices
+        state.toggle_assistant();
+        // Entry number 4 is entry index 3, assistant and now hidden; the
+        // prior visible entry is index 2
+        type_text(&mut state, &backend, "4");
+        press(&mut state, &backend, KeyCode::Char('g'));
+        assert_eq!(state.selected_entry_index(), Some(2));
+    }
+
+    /// The selected row kind, panicking when nothing is selected
+    fn selected_kind(state: &AppState) -> RowKind {
+        let i = state.list_state.selected().unwrap();
+        state.outline.row(i).unwrap().kind.clone()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn goto_a_hidden_entry_lands_on_an_entry_not_a_note() {
+        use crate::doc::Note;
+        use gage_store::NoteValue;
+
+        let backend = test_backend().await;
+        let mut doc = doc_with_alternating_entries(10);
+        // A note on entry index 0, anchored at its line
+        doc.add_note(Note {
+            id: "n0".into(),
+            name: "comment".into(),
+            value: NoteValue::Text("on entry 0".into()),
+            author: "user:someone".into(),
+            line: Some(doc.entries[0].line),
+            line_end: None,
+            metadata: None,
+            created_ms: 0,
+            modified_ms: 0,
+        });
+        let mut state = AppState::new(doc, &ViewOptions::default(), DocSource::Backend, false);
+        // Hide the assistant entries, the odd indices, so entry index 1
+        // is filtered out while entry 0 and its note stay
+        state.toggle_assistant();
+        // Expand entry 0 so its note row sits between it and entry 1's slot
+        let entry0_row = state
+            .outline
+            .rows()
+            .iter()
+            .position(|r| matches!(r.kind, RowKind::Entry { index: 0 }))
+            .unwrap();
+        state.outline.expand(entry0_row);
+        // Entry number 2 is entry index 1, now hidden; the prior visible
+        // entry is index 0, and its note row is not a valid landing
+        type_text(&mut state, &backend, "2");
+        press(&mut state, &backend, KeyCode::Char('g'));
+        assert!(matches!(selected_kind(&state), RowKind::Entry { index: 0 }));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn goto_entry_with_no_earlier_visible_entry_is_a_no_op() {
+        let backend = test_backend().await;
+        let mut state = AppState::new(
+            doc_with_alternating_entries(10),
+            &ViewOptions::default(),
+            DocSource::Backend,
+            false,
+        );
+        // Hide the user entries, the even indices, including index 0
+        state.toggle_user();
+        let before = state.selected_entry_index();
+        // Entry number 1 is entry index 0, now hidden, with nothing before
+        type_text(&mut state, &backend, "1");
+        press(&mut state, &backend, KeyCode::Char('g'));
+        assert!(matches!(state.dialog, Dialog::None));
+        assert_eq!(state.selected_entry_index(), before);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn goto_entry_on_an_empty_outline_is_a_no_op() {
+        let backend = test_backend().await;
+        let mut state = AppState::new(
+            doc_with_entries(0),
+            &ViewOptions::default(),
+            DocSource::Backend,
+            false,
+        );
+        type_text(&mut state, &backend, "5");
+        press(&mut state, &backend, KeyCode::Char('g'));
+        assert!(matches!(state.dialog, Dialog::None));
+        assert_eq!(state.selected_entry_index(), None);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn goto_entry_cancels_without_moving_the_selection() {
+        let backend = test_backend().await;
+        let mut state = AppState::new(
+            doc_with_entries(10),
+            &ViewOptions::default(),
+            DocSource::Backend,
+            false,
+        );
+        let before = state.selected_entry_index();
+        type_text(&mut state, &backend, "4");
+        press(&mut state, &backend, KeyCode::Esc);
+        assert!(matches!(state.dialog, Dialog::None));
+        assert_eq!(state.selected_entry_index(), before);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn goto_entry_hint_colors_the_keys_apart_from_the_labels() {
+        use ratatui::style::Color;
+
+        let backend = test_backend().await;
+        let mut state = AppState::new(
+            doc_with_entries(10),
+            &ViewOptions::default(),
+            DocSource::Backend,
+            false,
+        );
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        press(&mut state, &backend, KeyCode::Char('2'));
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+
+        // The key color is cyan on the reversed dialog surface; the keys
+        // "g" and "Esc" carry it and the labels "go" and "cancel" do not.
+        assert_eq!(cell_bg(&terminal, "g go", 'g'), Color::Cyan);
+        assert_ne!(cell_bg(&terminal, "g go", 'o'), Color::Cyan);
+        assert_eq!(cell_bg(&terminal, "g go", 'E'), Color::Cyan);
+        assert_ne!(cell_bg(&terminal, "g go", 'n'), Color::Cyan);
     }
 }
