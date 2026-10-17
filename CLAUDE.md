@@ -313,6 +313,11 @@ These rules keep a store readable by every Gage build that touches it. A store
 is shared: `gage fetch` brings in objects other builds wrote, so an older build
 reading a newer object is a normal condition, not an upgrade-window edge case.
 
+When applying a rule, confirm with the user before applying it. There may be a
+reason for an exception. When raising the point, cite the rule below and explain
+why you intent to apply it. Proceed only after the user has explicitly granted
+permission.
+
 - **An attribute added to an existing type is optional and defaulted forever.**
   The field carries `#[serde(default, skip_serializing_if = ..)]` and every
   reader handles its absence. A required attribute, a rename, a removal, or a
