@@ -38,6 +38,7 @@ use super::issue::{IssueRow, issue_event_rows, issue_event_schema, issue_rows, i
 use super::note::note_rows;
 use super::note_doc::{note_doc_rows, note_doc_rows_from_plan, note_doc_schema};
 use super::scan::{ScanRow, scan_rows, scan_schema};
+use super::scan_log::{ScanLogRow, scan_log_rows, scan_log_schema, stored_scan_log_rows};
 use super::scan_task::{
     agent_rows_of, scan_task_agent_rows, scan_task_agent_schema, scan_task_rows, scan_task_schema,
     task_rows_of,
@@ -291,6 +292,40 @@ impl ScanSource {
                     .map_err(external)
             }
             ScanSource::Dataset(_) => Ok(None),
+        }
+    }
+
+    /// The scan's logs, `out`, `err`, and `records`, as the directory
+    /// holds them for an active scan and as the object lists them for
+    /// a stored one. A log the scan has not written is absent.
+    fn logs(&self, store: &Store) -> Result<Vec<ScanLogRow>> {
+        match self {
+            ScanSource::ScanDir(dir) => {
+                let scan_id = self.scan_id(store)?;
+                let files = DirFiles::new(&dir.object_dir());
+                let mut rows = Vec::new();
+                for name in files.list_files("logs").map_err(external)? {
+                    let bytes = files
+                        .read(&format!("logs/{name}"))
+                        .map_err(external)?
+                        .ok_or_else(|| {
+                            external(StoreError::Parse(format!(
+                                "scan {scan_id} lists log {name} but holds no such file"
+                            )))
+                        })?;
+                    rows.push(ScanLogRow {
+                        scan_id: scan_id.clone(),
+                        name,
+                        bytes,
+                    });
+                }
+                Ok(rows)
+            }
+            ScanSource::Stored(id) => {
+                let record = ScanStore::from(store).get(id).map_err(external)?;
+                stored_scan_log_rows(store, &record)
+            }
+            ScanSource::Dataset(_) => Err(not_a_scan()),
         }
     }
 
@@ -555,6 +590,14 @@ pub fn scan_scope_tables(
                 s.agent_result(store, scanner, task, agent)
             })?;
             scan_task_agent_rows(&rows)
+        }),
+    ));
+
+    let s = src(source);
+    tables.push((
+        "scan_log",
+        table(store, scan_log_schema(), move |store| {
+            scan_log_rows(&s.logs(store)?)
         }),
     ));
 

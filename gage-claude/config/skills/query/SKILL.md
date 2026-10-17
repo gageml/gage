@@ -101,6 +101,17 @@ agent a task ran. `session_id` is the agent's stored session, `native_id`
 its native UUID, and `result` the harness's result message verbatim. An
 agent still running has its `native_id` and null result columns.
 
+## Scan logs: `scan_log`
+
+`scan_log (scan_id, name, text)` is one row per log a scan wrote, at most
+three: `name` is `out` (what the scanners printed), `err` (Gage's status
+lines and task failures), or `records` (the `tracing` records of the run,
+one line each). Read a failed scan's `err` first:
+
+```sql
+SELECT text FROM scan_log WHERE scan_id = '<SCAN_ID>' AND name = 'err';
+```
+
 ## Notes
 
 `note (id, name, target, author, value, text, metadata, created, modified,

@@ -19,7 +19,7 @@ idempotent_hint = true
 +++
 
 Run SQL (DataFusion dialect) over the sessions in scope and the notes and
-issues they hold. Results are YAML pages; a page names its cursor and the next page.
+issues they hold. Results are YAML pages naming their cursor and next page.
 
 Tables:
 
@@ -28,7 +28,7 @@ Tables:
   session_type, driver, content_format, native_id, native_source,
   native_size, native_mtime, files_changed, files_referenced) - token columns
   are session totals: prompt tokens sent, tokens generated, cached part of
-  input; cost_usd is the harness's figure, null when none; files_changed are
+  input; cost_usd is the harness's figure or null; files_changed are
   paths a call wrote, files_referenced other paths its input named
 - entry (session_id, line, uuid, type, subtype, timestamp, raw) - one row per
   transcript line, `raw` its JSON
@@ -50,7 +50,8 @@ Tables:
   reason, duplicate_of, message); issue_evidence (issue_id, note_id);
   session_issue (session_id, issue_id)
 - scan (id, runtime, started, stopped, canceled, tasks, completed, failed,
-  dataset, created, modified); scan_session (scan_id, session_num,
+  dataset, created, modified); scan_log (scan_id, name, text) - a scan's
+  logs, name out, err, or records; scan_session (scan_id, session_num,
   session_id); scan_note (scan_id, note_id, carried); scan_issue (scan_id,
   issue_id)
 - dataset (id, origin, created, modified); dataset_session (dataset_id,
@@ -76,13 +77,13 @@ operators; CAST the text for arithmetic. Do not cast to json or jsonb.
 
 Native source functions read a driver source directly, including sessions
 not in the store: native_session('<source>'), native_message('<source>'),
-native_entry('<source>'), native_tool_use('<source>'). The argument is
-required and is a source URL: '' names the default source, 'claude:' is the
-default Claude Code source, and 'claude:/path' names a projects directory.
-native_session returns the same columns minus line_count, created, and
-modified, plus content_format, mtime, and size; `id` is the native UUID. The other three return the stored tables' columns, with the native
-UUID as `session_id`. Use these to read a session by native id before it
-is added to the store.
+native_entry('<source>'), native_tool_use('<source>'). The argument is a
+source URL: '' is the default source, 'claude:' the default Claude Code
+source, and 'claude:/path' a projects directory. native_session returns
+the same columns minus line_count, created, and modified, plus
+content_format, mtime, and size; `id` is the native UUID; the other three
+return the stored tables' columns with it as `session_id`. Use these to
+read a session before it is added to the store.
 
 Read a session by `session_id` ordered by `line`, taking
 `substr(text, 1, 800)` over full `text` or `raw` on wide rows.

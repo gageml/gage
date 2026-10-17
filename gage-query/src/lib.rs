@@ -17,8 +17,8 @@
 //! [`gage_store::StoredNoteTable`]. `issue` is one row per live issue
 //! object and `issue_event` one row per change entry across them.
 //! `scan` is one row per live scan object, `scan_task` one row per
-//! task of those scans, and `scan_task_agent` one row per agent a
-//! task ran.
+//! task of those scans, `scan_task_agent` one row per agent a task
+//! ran, and `scan_log` one row per log a scan wrote.
 //!
 //! Native session data is reached through driver-provided functions,
 //! present on every context: `native_session`, `native_message`,
@@ -60,8 +60,9 @@ use gage_session::{ContentSchema, content_schema_batch, content_schema_schema};
 use gage_store::{
     LinkKind, NoteDocRow, Store, StoredNoteTable, StoredSessionTable, attachment_file_table,
     attachment_table, dataset_table, issue_event_table, issue_report_fn, issue_table, link_table,
-    note_doc_rows, note_doc_schema, object_key_table, related_issue_fn, scan_scope_tables,
-    scan_table, scan_task_agent_table, scan_task_table, scan_watermark_table, tag_table,
+    note_doc_rows, note_doc_schema, object_key_table, related_issue_fn, scan_log_table,
+    scan_scope_tables, scan_table, scan_task_agent_table, scan_task_table, scan_watermark_table,
+    tag_table,
 };
 
 use crate::age::age_udf;
@@ -168,6 +169,7 @@ impl ContextBuilder {
             ("scan", scan_table(Arc::clone(&store))),
             ("scan_task", scan_task_table(Arc::clone(&store))),
             ("scan_task_agent", scan_task_agent_table(Arc::clone(&store))),
+            ("scan_log", scan_log_table(Arc::clone(&store))),
             ("issue", issue_table(Arc::clone(&store))),
             ("issue_event", issue_event_table(Arc::clone(&store))),
             ("tag", tag_table(Arc::clone(&store))),
@@ -1269,6 +1271,8 @@ mod tests {
         );
         // An agent still running: its record is the native id alone
         write("tasks/hello/greet/agents/AGENT2/native_id", "native-2\n");
+        write("logs/out", "hello, world\n");
+        write("logs/err", "task hello:fail failed\nboom\n");
         root
     }
 
@@ -1334,6 +1338,60 @@ mod tests {
             )
             .await,
             ["AGENT2"]
+        );
+    }
+
+    /// `scan_log` serves the logs a scan wrote and no row for one it
+    /// did not: from the directory while the scan is active, and from
+    /// the object in the store scope and the stored scan scope.
+    #[tokio::test]
+    async fn scan_log_serves_the_logs_a_scan_wrote_in_every_scope() {
+        let (tmp, store) = open_store();
+        let root = write_scan_dir(tmp.path());
+        let active = ContextBuilder::new(Some(Arc::clone(&store)))
+            .scope(ScanScope::scan_dir(&root))
+            .build()
+            .await;
+        assert_eq!(
+            strings(&active, "SELECT name FROM scan_log ORDER BY name").await,
+            ["err", "out"]
+        );
+        assert_eq!(
+            strings(&active, "SELECT text FROM scan_log WHERE name = 'err'").await,
+            ["task hello:fail failed\nboom\n"]
+        );
+
+        std::fs::write(
+            root.join("scan").join("attrs.json"),
+            r#"{"runtime":"gage 1","started":1000,"stopped":1500,"canceled":false,"tasks":{"total":3,"completed":1,"failed":1}}"#,
+        )
+        .unwrap();
+        {
+            let store = store.lock().unwrap();
+            ScanStore::from(&*store)
+                .create("SCAN1", &root.join("scan"))
+                .unwrap();
+        }
+        let ctx = ContextBuilder::new(Some(Arc::clone(&store))).build().await;
+        assert_eq!(
+            strings(
+                &ctx,
+                "SELECT scan_id || ' ' || name FROM scan_log ORDER BY name"
+            )
+            .await,
+            ["SCAN1 err", "SCAN1 out"]
+        );
+        assert_eq!(
+            strings(&ctx, "SELECT text FROM scan_log WHERE name = 'out'").await,
+            ["hello, world\n"]
+        );
+        let scoped = ContextBuilder::new(Some(store))
+            .scope(ScanScope::stored("SCAN1"))
+            .build()
+            .await;
+        assert_eq!(
+            strings(&scoped, "SELECT name FROM scan_log ORDER BY name").await,
+            ["err", "out"]
         );
     }
 
