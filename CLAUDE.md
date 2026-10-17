@@ -418,6 +418,9 @@ reading a newer object is a normal condition, not an upgrade-window edge case.
   - App level names its object where bare `cancel` would be ambiguous: `q quit`,
     `q cancel scan`.
 
+- Key chars in key help use `Dialog::key()` when shown in a dialog and
+  `Panel::footer_key()` when shown in a footer. Labels are unstyled.
+
 ## Other rules
 
 - Do NOT edit files under /docs in this project unless instructed to do so. User
