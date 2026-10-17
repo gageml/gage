@@ -3396,7 +3396,7 @@ fn draw_notes(frame: &mut Frame, area: Rect, state: &mut ViewState) {
         .map(|(i, n)| {
             Row::new(vec![
                 Cell::from(id_span(&n.id, selected == Some(i))),
-                Cell::from(n.name.clone()),
+                Cell::from(name_line(&n.name, selected == Some(i))),
                 Cell::from(ellipsize(&n.value, value_width)),
                 Cell::from(n.target_cell.clone()),
             ])
@@ -3422,6 +3422,19 @@ fn draw_notes(frame: &mut Frame, area: Rect, state: &mut ViewState) {
     state
         .notes
         .render(frame, area, table, count, state.focus == Focus::Notes);
+}
+
+/// A note name with its `[kind]` suffix dim, so `general[finding]`
+/// reads as the name `general` with a secondary kind. The selected
+/// row drops the dim, as [`id_span`] does.
+fn name_line(name: &str, selected: bool) -> Line<'static> {
+    match name.find('[') {
+        Some(at) if !selected => Line::from(vec![
+            Span::raw(name[..at].to_string()),
+            Span::styled(name[at..].to_string(), styles::Text::dim()),
+        ]),
+        _ => Line::from(name.to_string()),
+    }
 }
 
 fn draw_issues(frame: &mut Frame, area: Rect, state: &mut ViewState) {
@@ -3844,5 +3857,35 @@ mod tests {
         let target = session_target(&format!("session:abc#{beyond}")).unwrap();
         assert_eq!(target.session_id, "abc");
         assert_eq!((target.line, target.line_end), (None, None));
+    }
+
+    #[test]
+    fn name_line_dims_the_bracket_suffix() {
+        let line = name_line("general[finding]", false);
+        let spans: Vec<(&str, Style)> = line
+            .spans
+            .iter()
+            .map(|s| (s.content.as_ref(), s.style))
+            .collect();
+        assert_eq!(
+            spans,
+            vec![
+                ("general", Style::new()),
+                ("[finding]", styles::Text::dim())
+            ]
+        );
+    }
+
+    #[test]
+    fn name_line_keeps_a_selected_row_and_a_plain_name_raw() {
+        for name in ["general[finding]", "general"] {
+            let line = name_line(name, true);
+            assert_eq!(line.spans.len(), 1);
+            assert_eq!(line.spans[0].content.as_ref(), name);
+            assert_eq!(line.spans[0].style, Style::new());
+        }
+        let line = name_line("general", false);
+        assert_eq!(line.spans.len(), 1);
+        assert_eq!(line.spans[0].style, Style::new());
     }
 }
