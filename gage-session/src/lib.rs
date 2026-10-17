@@ -8,8 +8,10 @@
 //! and reads a stored session back through a [`ContentSource`]. A
 //! driver may also run an agent on its harness; see [`agent`].
 
+use std::any::Any;
+use std::error::Error;
 use std::fmt;
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -203,10 +205,10 @@ pub trait Driver: Send + Sync {
 pub trait ResolveSession: Send {
     /// Block until the session ends. Returns the exit code, or -1
     /// when the process was signaled.
-    fn wait(&mut self) -> std::io::Result<i32>;
+    fn wait(&mut self) -> io::Result<i32>;
 
     /// Terminate the session.
-    fn kill(&mut self) -> std::io::Result<()>;
+    fn kill(&mut self) -> io::Result<()>;
 }
 
 /// Progress sink for an install or uninstall. The CLI implements it
@@ -265,7 +267,7 @@ pub trait Source: Send + Sync {
     /// The source value the handle was opened with, as given
     fn source(&self) -> &str;
 
-    fn as_any(&self) -> &dyn std::any::Any;
+    fn as_any(&self) -> &dyn Any;
 
     /// The source's session-derived table providers. Consumers
     /// register them on a DataFusion context; every read pushes
@@ -360,7 +362,7 @@ pub trait NativeSession {
     /// stores it as the session's `native_source`.
     fn source(&self) -> &str;
     fn attrs(&self) -> &dyn SessionAttrs;
-    fn as_any(&self) -> &dyn std::any::Any;
+    fn as_any(&self) -> &dyn Any;
 }
 
 pub trait StoredSession {
@@ -459,15 +461,15 @@ pub struct Message {
 
 /// A read-only view of the byte tree a stored session carries.
 pub trait ContentSource: Send + Sync {
-    fn paths(&self) -> std::io::Result<Vec<String>>;
-    fn open(&self, path: &str) -> std::io::Result<Box<dyn Read + Send>>;
+    fn paths(&self) -> io::Result<Vec<String>>;
+    fn open(&self, path: &str) -> io::Result<Box<dyn Read + Send>>;
 }
 
 /// A write-only sink for the byte tree a native session serializes
 /// into. `create` returns a writer bound to the sink; only one writer
 /// is open at a time.
 pub trait ContentSink {
-    fn create<'a>(&'a mut self, path: &str) -> std::io::Result<Box<dyn Write + 'a>>;
+    fn create<'a>(&'a mut self, path: &str) -> io::Result<Box<dyn Write + 'a>>;
 }
 
 /// Split a source value into `(scheme, body)` when it starts with a
@@ -489,7 +491,7 @@ pub fn split_scheme(source: &str) -> Option<(&str, &str)> {
 
 #[derive(Debug)]
 pub enum DriverError {
-    Io(std::io::Error),
+    Io(io::Error),
     Other(String),
 }
 
@@ -502,8 +504,8 @@ impl fmt::Display for DriverError {
     }
 }
 
-impl std::error::Error for DriverError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+impl Error for DriverError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             DriverError::Io(e) => Some(e),
             _ => None,
@@ -511,8 +513,8 @@ impl std::error::Error for DriverError {
     }
 }
 
-impl From<std::io::Error> for DriverError {
-    fn from(e: std::io::Error) -> Self {
+impl From<io::Error> for DriverError {
+    fn from(e: io::Error) -> Self {
         DriverError::Io(e)
     }
 }
@@ -537,8 +539,8 @@ impl fmt::Display for SessionLiveError {
     }
 }
 
-impl std::error::Error for SessionLiveError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+impl Error for SessionLiveError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             SessionLiveError::Driver(e) => Some(e),
             SessionLiveError::Unknown(_) => None,
@@ -578,7 +580,7 @@ impl fmt::Display for NativeLookupError {
     }
 }
 
-impl std::error::Error for NativeLookupError {}
+impl Error for NativeLookupError {}
 
 impl From<DriverError> for NativeLookupError {
     fn from(e: DriverError) -> Self {
@@ -627,7 +629,7 @@ mod tests {
         fn source(&self) -> &str {
             &self.0
         }
-        fn as_any(&self) -> &dyn std::any::Any {
+        fn as_any(&self) -> &dyn Any {
             self
         }
         fn tables(&self) -> Result<DriverTables, DriverError> {

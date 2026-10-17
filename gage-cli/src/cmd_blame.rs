@@ -1,6 +1,7 @@
 //! `gage blame`: the sessions that wrote the lines of a file, read
 //! through the `native_blame` and `blame` table functions.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -143,8 +144,7 @@ fn print_rows(
 ) {
     // The attribution of each covered source line: the session id, the
     // session lines to read, and the call time, keyed by line number
-    let mut attributed: std::collections::HashMap<u64, (String, String, String)> =
-        std::collections::HashMap::new();
+    let mut attributed: HashMap<u64, (String, String, String)> = HashMap::new();
     for batch in batches {
         let starts = int_col(batch, 0);
         let ends = batch

@@ -1,9 +1,17 @@
+use std::collections::BTreeMap;
 use std::process::ExitCode;
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
+use gage_mcp::{
+    GageTool, IssueWriteConfig, IssuesFreeConfig, NoteWriteConfig, QueryConfig, SessionLivenessFn,
+    StoreWriterConfig, ToolSpec, serve_stdio,
+};
+use gage_query::ContextBuilder;
+use gage_session::Source;
+use gage_store::{IssueStatus, Store, store_path};
 use humantime::DurationError;
 use tokio_util::sync::CancellationToken;
 
@@ -405,16 +413,11 @@ fn exit_code(result: Result<(), CliError>) -> ExitCode {
 }
 
 async fn run_mcp() -> anyhow::Result<()> {
-    use std::sync::{Arc, Mutex};
-
-    let path = gage_store::store_path();
-    let store = gage_store::Store::open(&path)
-        .with_context(|| format!("open store at {}", path.display()))?;
+    let path = store_path();
+    let store = Store::open(&path).with_context(|| format!("open store at {}", path.display()))?;
     let store = Arc::new(Mutex::new(store));
-    let context = gage_query::ContextBuilder::new(Some(Arc::clone(&store)))
-        .build()
-        .await;
-    let writer = gage_mcp::StoreWriterConfig {
+    let context = ContextBuilder::new(Some(Arc::clone(&store))).build().await;
+    let writer = StoreWriterConfig {
         store,
         author: author::resolve_author(None),
     };
@@ -422,8 +425,7 @@ async fn run_mcp() -> anyhow::Result<()> {
     // source. When the source cannot be opened the tool still routes,
     // reporting every session's liveness as undetermined rather than
     // failing the server's startup.
-    let liveness: gage_mcp::SessionLivenessFn = {
-        use gage_session::Source;
+    let liveness: SessionLivenessFn = {
         match source::open_source("gage mcp", "") {
             Ok(opened) => {
                 let opened: Arc<dyn Source> = Arc::from(opened);
@@ -442,33 +444,28 @@ async fn run_mcp() -> anyhow::Result<()> {
     };
     // The names an interactive session may write notes under; scanner
     // output names stay with the scanners that declare them
-    let note_names = std::collections::BTreeMap::from([(
+    let note_names = BTreeMap::from([(
         "comment".to_string(),
         "A remark about a session or the work at hand".to_string(),
     )]);
-    let spec = gage_mcp::ToolSpec {
+    let spec = ToolSpec {
         gage: vec![
-            gage_mcp::GageTool::Query(gage_mcp::QueryConfig {
+            GageTool::Query(QueryConfig {
                 context: Arc::new(context),
             }),
-            gage_mcp::GageTool::IssueWrite(gage_mcp::IssueWriteConfig::with_store(
+            GageTool::IssueWrite(IssueWriteConfig::with_store(
                 writer.clone(),
                 "user-issue".to_string(),
-                gage_store::IssueStatus::Open,
+                IssueStatus::Open,
             )),
-            gage_mcp::GageTool::NoteWrite(gage_mcp::NoteWriteConfig::with_store(
-                writer.clone(),
-                note_names,
-            )),
-            gage_mcp::GageTool::IssueUpdate(writer.clone()),
-            gage_mcp::GageTool::IssueAssign(writer.clone()),
-            gage_mcp::GageTool::IssueComment(writer.clone()),
-            gage_mcp::GageTool::IssuePendingResolve(writer.clone()),
-            gage_mcp::GageTool::IssuesFree(gage_mcp::IssuesFreeConfig { writer, liveness }),
+            GageTool::NoteWrite(NoteWriteConfig::with_store(writer.clone(), note_names)),
+            GageTool::IssueUpdate(writer.clone()),
+            GageTool::IssueAssign(writer.clone()),
+            GageTool::IssueComment(writer.clone()),
+            GageTool::IssuePendingResolve(writer.clone()),
+            GageTool::IssuesFree(IssuesFreeConfig { writer, liveness }),
         ],
         custom: Vec::new(),
     };
-    gage_mcp::serve_stdio(spec)
-        .await
-        .map_err(|e| anyhow::anyhow!("{e}"))
+    serve_stdio(spec).await.map_err(|e| anyhow::anyhow!("{e}"))
 }

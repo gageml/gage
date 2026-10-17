@@ -144,10 +144,10 @@ mod tests {
     use gage_store::IssueStore;
 
     use super::*;
-    use crate::service::{IssuesFreeConfig, SessionLivenessFn};
+    use crate::service::{IssuesFreeConfig, SessionLivenessFn, StoreWriterConfig};
     use crate::tools::store_test::{config, issue, text_of};
 
-    fn status(writer: &crate::service::StoreWriterConfig, id: &str) -> IssueStatus {
+    fn status(writer: &StoreWriterConfig, id: &str) -> IssueStatus {
         let store = writer.store.lock().unwrap();
         IssueStore::from(&*store).get(id).unwrap().status
     }
