@@ -41,7 +41,7 @@ pub enum Error {
     #[rune(constructor)]
     Decode(#[rune(get)] String),
 
-    /// Template rendering failed.
+    /// Template compilation failed.
     #[rune(constructor)]
     Template(#[rune(get)] String),
 

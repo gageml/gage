@@ -157,7 +157,7 @@ pub async fn summarize_projects() {
             progress.tick();
             continue;
         }
-        let prompt = t.render(#{ project_dir, sections })?;
+        let prompt = t.render(#{ project_dir, sections });
         agents.add(
             call_agent(prompt)
                 .name("summarize-project")
@@ -279,7 +279,7 @@ pub async fn scan_sessions() {
             continue;
         }
         let summaries = session_summaries(s, summary_notes).await?;
-        let prompt = t.render(#{ session_id: s.id, summaries })?;
+        let prompt = t.render(#{ session_id: s.id, summaries });
         agents.add(
             call_agent(prompt)
                 .name("code-review")

@@ -37,23 +37,10 @@ pub async fn review_findings() {
     }
 
     // Construct agent prompt with findings
-    let prompt = Template::new(include_str!(
+    let t = Template::new(include_str!(
         "review-findings-prompt.md.j2"
-    ))?
-        .render(
-            #{
-                findings: findings
-                    .iter()
-                    .map(
-                        |f| #{
-                            id: f.id,
-                            name: f.name,
-                            target: f.target.unwrap_or(""),
-                        },
-                    )
-                    .collect::<Vec>(),
-            },
-        )?;
+    ))?;
+    let prompt = t.render(#{ findings });
 
     // Run agent with tools to query sessions and report issues
     let agent = call_agent(prompt)

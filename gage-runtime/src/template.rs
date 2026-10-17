@@ -2,21 +2,23 @@
 //! objects.
 //!
 //! `Template::new(source)` compiles the source and reports a syntax
-//! error as `gage::Error::Template`. `render(ctx)` renders the
-//! compiled template with a Rune object as its variables; a render
-//! error (an unknown filter or function, an operation on incompatible
-//! values, a context value of a type the serializer does not render,
-//! such as an iterator) is the same error type. Undefined variables
-//! render empty and test false. Neither function performs I/O, so neither is
-//! async. The environment carries minijinja's built-in filters,
-//! tests, and globals, the filters in [`crate::filters`], and never
-//! escapes output. Context serialization is [`crate::ser`]'s.
+//! error as `gage::Error::Template`; the source is caller input, and
+//! a caller may test it. `render(ctx)` renders the compiled template
+//! with a Rune object as its variables and has no recoverable error:
+//! an unknown filter or function, an operation on incompatible
+//! values, or a context value of a type the serializer does not
+//! render is a defect in the template or the context, and raises a
+//! VM fault that carries the script location. Undefined variables
+//! render empty and test false. Neither function performs I/O, so
+//! neither is async. The environment carries minijinja's built-in
+//! filters, tests, and globals, the filters in [`crate::filters`],
+//! and never escapes output. Context serialization is [`crate::ser`]'s.
 
 use crate::error::Error;
 use crate::filters;
 use crate::ser::SerObject;
 use minijinja::{AutoEscape, Environment};
-use rune::runtime::{Object, Ref};
+use rune::runtime::{Object, Ref, VmError};
 use rune::{Any, ContextError, Module};
 
 pub(crate) fn module() -> Result<Module, ContextError> {
@@ -47,22 +49,27 @@ impl Template {
         let mut env = Environment::new();
         env.set_auto_escape_callback(|_| AutoEscape::None);
         env.add_filter("sql_in_list", filters::sql_in_list);
-        env.add_template_owned(NAME, source)?;
+        env.add_template_owned(NAME, source)
+            .map_err(|e| Error::Template(e.to_string()))?;
         Ok(Template { env })
     }
 
-    fn render(&self, context: &Object) -> Result<String, Error> {
+    fn render(&self, context: &Object) -> Result<String, VmError> {
         let template = self
             .env
             .get_template(NAME)
             .expect("the template is added at construction");
-        Ok(template.render(SerObject(context))?)
+        template.render(SerObject(context)).map_err(fault)
     }
 }
 
 #[rune::function(instance)]
-fn render(this: Ref<Template>, context: Object) -> Result<String, Error> {
+fn render(this: Ref<Template>, context: Object) -> Result<String, VmError> {
     this.render(&context)
+}
+
+fn fault(e: minijinja::Error) -> VmError {
+    VmError::panic(e.to_string())
 }
 
 #[cfg(test)]
@@ -70,6 +77,7 @@ mod tests {
     use rune::runtime::Value;
 
     use super::*;
+    use crate::note::Note;
 
     fn object(pairs: &[(&str, Value)]) -> Object {
         let mut obj = Object::new();
@@ -105,7 +113,7 @@ mod tests {
     fn render_reports_an_unknown_filter() {
         let t = Template::compile("{{ name | nosuchfilter }}".to_string()).unwrap();
         let err = t.render(&object(&[])).err().unwrap();
-        assert!(matches!(err, Error::Template(_)), "{err:?}");
+        assert!(err.to_string().contains("nosuchfilter"), "{err}");
     }
 
     #[test]
@@ -144,7 +152,6 @@ mod tests {
         let t = Template::compile("{% for x in pair %}{{ x }}{% endfor %}".to_string()).unwrap();
         let pair = rune::to_value((1i64, 2i64)).unwrap();
         let err = t.render(&object(&[("pair", pair)])).err().unwrap();
-        assert!(matches!(err, Error::Template(_)), "{err:?}");
         assert!(err.to_string().contains("cannot be rendered"), "{err}");
     }
 
@@ -160,6 +167,45 @@ mod tests {
             msg.contains("notes[0].value holds a std::tuple::Tuple value"),
             "{msg}"
         );
+    }
+
+    #[test]
+    fn notes_render_their_fields() {
+        let t = Template::compile(
+            "{% for n in notes %}{{ n.name }}={{ n.value.text }} [{{ n.target or \"\" }}]{{ n.created }};{% endfor %}"
+                .to_string(),
+        )
+        .unwrap();
+        let value = rune::to_value(object(&[("text", rune::to_value("hi").unwrap())])).unwrap();
+        let notes = vec![
+            note("a[finding]", value.clone(), Some("session:s1".into())),
+            note("b[finding]", value, None),
+        ];
+        let notes = rune::to_value(notes).unwrap();
+        let out = t.render(&object(&[("notes", notes)])).unwrap();
+        assert_eq!(out, "a[finding]=hi [session:s1]7;b[finding]=hi []7;");
+    }
+
+    #[test]
+    fn note_field_errors_name_the_note_path() {
+        let t = Template::compile("{{ notes[0].value }}".to_string()).unwrap();
+        let pair = rune::to_value((1i64, 2i64)).unwrap();
+        let notes = rune::to_value(vec![note("a", pair, None)]).unwrap();
+        let err = t.render(&object(&[("notes", notes)])).err().unwrap();
+        assert!(err.to_string().contains("notes[0].value holds a "), "{err}");
+    }
+
+    fn note(name: &str, value: Value, target: Option<String>) -> Note {
+        Note {
+            id: "n1".into(),
+            name: name.into(),
+            value,
+            author: "me".into(),
+            target,
+            metadata: rune::to_value(Object::new()).unwrap(),
+            created: 7,
+            commit: None,
+        }
     }
 
     #[test]

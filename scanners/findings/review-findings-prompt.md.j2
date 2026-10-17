@@ -5,7 +5,7 @@ The following notes need to be analyzed:
 | Id | Name | Target |
 | -- | ---- | ------ |
 {% for f in findings -%}
-| {{ f.id }} | {{ f.name }} | {{ f.target }} |
+| {{ f.id }} | {{ f.name }} | {{ f.target or "" }} |
 {% endfor %}
 
 A note is a finding of some type, which is indicated by the note name. Finding

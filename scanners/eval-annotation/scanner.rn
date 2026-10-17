@@ -35,7 +35,7 @@ pub async fn annotate() {
     let sessions = scan().sessions().await;
 
     // FUTURE: Template
-    let t = Template::new(include_str!("annotate-prompt.md.j2")).await?;
+    let t = Template::new(include_str!("annotate-prompt.md.j2"))?;
 
     // One tick per session: skipped sessions tick during queueing,
     // annotated sessions tick as their agents complete
@@ -50,7 +50,7 @@ pub async fn annotate() {
             progress.tick();
             continue;
         }
-        let prompt = t.render(#{ session_id: s.id }).await?;
+        let prompt = t.render(#{ session_id: s.id });
         runner.add(
             // FUTURE: call_agent. The agent sees this session only
             call_agent(prompt)

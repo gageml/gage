@@ -291,7 +291,7 @@ scan's `.unseen(KEY)` reads only what is above the mark.
 let agents = AgentRunner::new();
 for (s, range) in sessions {
     let prompt = Template::new(include_str!("scan-session-prompt.md.j2"))?
-        .render(#{ session_id: s.id })?;
+        .render(#{ session_id: s.id });
     agents.add(
         call_agent(prompt)
             .name("code-review")
@@ -324,7 +324,7 @@ while let Some(next) = results.next().await {
 - The built-in `tools::Query`, `tools::IssueWrite`, and `tools::NoteWrite` give
   an agent read and write access.
 
-- `Template::new(include_str!("..md.j2"))?.render(#{ .. })?` renders a prompt.
+- `Template::new(include_str!("..md.j2"))?.render(#{ .. })` renders a prompt.
   `Progress::new(n)` with `.tick()` reports progress.
 
 ## Patterns

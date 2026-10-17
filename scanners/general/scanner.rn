@@ -52,7 +52,7 @@ pub async fn scan_sessions() {
         }
 
         let session_id = s.id;
-        let prompt = t.render(#{ session_id })?;
+        let prompt = t.render(#{ session_id });
 
         agents.add(
             call_agent(prompt)

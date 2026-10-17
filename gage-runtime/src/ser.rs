@@ -1,19 +1,12 @@
-//! Rune values as serde data for template contexts, and the
-//! conversion of a minijinja error into `gage::Error::Template`.
+//! Rune values as serde data for template contexts.
 
 use std::fmt;
 
 use rune::runtime::{Object, Value};
 use serde::ser::{Error as _, Serialize, SerializeMap, SerializeSeq, Serializer};
 
-use crate::error::Error;
+use crate::note::Note;
 use crate::row::{Entry, Message};
-
-impl From<minijinja::Error> for Error {
-    fn from(e: minijinja::Error) -> Self {
-        Error::Template(e.to_string())
-    }
-}
 
 /// A Rune object as a serde map, for template contexts.
 pub struct SerObject<'a>(pub &'a Object);
@@ -99,6 +92,9 @@ impl Serialize for SerValue<'_> {
         if let Ok(entry) = v.borrow_ref::<Entry>() {
             return serialize_object(&entry.inner, Some(self.path), ser);
         }
+        if let Ok(note) = v.borrow_ref::<Note>() {
+            return self.serialize_note(&note, ser);
+        }
         if let Ok(vec) = v.borrow_ref::<rune::runtime::Vec>() {
             let mut seq = ser.serialize_seq(Some(vec.len()))?;
             for (i, item) in vec.iter().enumerate() {
@@ -129,5 +125,47 @@ impl Serialize for SerValue<'_> {
             "{} holds a {ty} value, which cannot be rendered in a template context",
             self.path
         )))
+    }
+}
+
+impl SerValue<'_> {
+    /// The fields a script reads on a note, under the same names
+    fn serialize_note<S: Serializer>(&self, note: &Note, ser: S) -> Result<S::Ok, S::Error> {
+        let mut map = ser.serialize_map(Some(7))?;
+        map.serialize_entry("id", &note.id)?;
+        map.serialize_entry("name", &note.name)?;
+        map.serialize_entry("value", &self.field("value", &note.value))?;
+        map.serialize_entry("author", &note.author)?;
+        map.serialize_entry("target", &note.target)?;
+        map.serialize_entry("metadata", &self.field("metadata", &note.metadata))?;
+        map.serialize_entry("created", &note.created)?;
+        map.end()
+    }
+
+    fn field<'b>(&'b self, key: &'b str, value: &'b Value) -> SerField<'b> {
+        SerField {
+            value,
+            path: Path {
+                parent: Some(self.path),
+                segment: Segment::Key(key),
+            },
+        }
+    }
+}
+
+/// A nested value that owns its path segment, for fields read off a
+/// Rust struct rather than a Rune object
+struct SerField<'a> {
+    value: &'a Value,
+    path: Path<'a>,
+}
+
+impl Serialize for SerField<'_> {
+    fn serialize<S: Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
+        SerValue {
+            value: self.value,
+            path: &self.path,
+        }
+        .serialize(ser)
     }
 }

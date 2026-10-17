@@ -1395,8 +1395,8 @@ mod tests {
 
             pub async fn main() {
                 let t = Template::new("Review {{ session_id }}{% if extra %} ({{ extra }}){% endif %}")?;
-                println!("{}", t.render(#{ session_id: "S1" })?);
-                println!("{}", t.render(#{ session_id: "S2", extra: "more" })?);
+                println!("{}", t.render(#{ session_id: "S1" }));
+                println!("{}", t.render(#{ session_id: "S2", extra: "more" }));
                 match Template::new("{% if") {
                     Err(gage::Error::Template(_)) => println!("template error"),
                     other => println!("unexpected: {other:?}"),
@@ -1420,6 +1420,55 @@ mod tests {
                 &Output::Println("Review S2 (more)".into()),
                 &Output::Println("template error".into()),
             ]
+        );
+    }
+
+    /// A template defect is a VM fault, so the task's diagnostic
+    /// carries the script location of the call that raised it.
+    #[tokio::test]
+    async fn template_fault_points_at_the_failing_call() {
+        let (_dir, compiled) = compile_source(
+            r#"
+            use gage::Template;
+
+            pub const SCANNER = #{
+                name: "tpl",
+                description: "Renders an unrenderable value",
+                tasks: #{ main: #{} },
+            };
+
+            pub async fn main() {
+                let t = Template::new("{{ pair }}")?;
+                let pair = (1, 2);
+                println!("{}", t.render(#{ pair }));
+            }
+            "#,
+        );
+        let (tmp, store) = open_store();
+        let (_outcome, events) = run_all(
+            &store,
+            &tmp.path().join("scans"),
+            &[compiled.unwrap()],
+            &CancellationToken::new(),
+        )
+        .await;
+        let failure = events
+            .iter()
+            .find_map(|e| match e {
+                Event::TaskFinished {
+                    error: Some(message),
+                    ..
+                } => Some(message.clone()),
+                _ => None,
+            })
+            .expect("the task should fail");
+        assert!(
+            failure.contains("pair holds a std::tuple::Tuple value"),
+            "{failure}"
+        );
+        assert!(
+            failure.contains("println!(\"{}\", t.render(#{ pair }));"),
+            "the diagnostic excerpts the render call:\n{failure}"
         );
     }
 
@@ -2373,7 +2422,7 @@ mod tests {
                 let text = Template::new(
                     "{% if wontfix %}ruled out:{% for w in wontfix %} {{ w }};{% endfor %}{% else %}none{% endif %}"
                 )?
-                .render(#{ wontfix: params().wontfix })?;
+                .render(#{ wontfix: params().wontfix });
                 println!("{}", text);
             }
             "#,
