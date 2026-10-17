@@ -467,6 +467,16 @@ pub(crate) struct SavedUi {
     focus_body: bool,
     session_expanded: bool,
     entry_expanded: HashSet<usize>,
+    view: ViewOptions,
+}
+
+impl SavedUi {
+    /// The view options in effect when the snapshot was taken. A host
+    /// rebuilding the view passes these to [`AppState::new`] so the
+    /// outline is filtered as the user left it.
+    pub(crate) fn view(&self) -> &ViewOptions {
+        &self.view
+    }
 }
 
 enum Dialog {
@@ -578,6 +588,12 @@ impl AppState {
         }
     }
 
+    /// The view options in effect
+    #[cfg(test)]
+    pub(crate) fn view(&self) -> &ViewOptions {
+        &self.view
+    }
+
     pub(crate) fn save_ui(&self) -> SavedUi {
         let (session_expanded, entry_expanded) = self.outline.expansion();
         SavedUi {
@@ -591,6 +607,7 @@ impl AppState {
             focus_body: self.focus == Focus::Body,
             session_expanded,
             entry_expanded,
+            view: self.view.clone(),
         }
     }
 
@@ -1844,6 +1861,25 @@ mod tests {
 
     /// Adding, editing, and deleting a note through the keys writes
     /// the store and keeps the outline in step with it.
+    #[test]
+    fn save_ui_carries_the_view_options() {
+        let doc = Document {
+            session: Session {
+                id: "s1".into(),
+                value: serde_json::json!({}),
+            },
+            entries: Vec::new(),
+            notes: Vec::new(),
+        };
+        let mut state = AppState::new(doc, &ViewOptions::default(), DocSource::Backend, false);
+        state.toggle_tools();
+        state.toggle_turns();
+        let saved = state.save_ui();
+        assert!(saved.view().tools);
+        assert!(saved.view().turns);
+        assert!(saved.view().user);
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn select_line_opens_at_the_entry_for_a_session_line() {
         let f = fixture();

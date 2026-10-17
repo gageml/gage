@@ -52,7 +52,7 @@ use crate::session::Backend;
 use crate::session_view::{pop_keyboard_enhancements, push_keyboard_enhancements};
 use crate::text::{ellipsize, fmt_duration, fmt_duration_live};
 use crate::textarea::TextArea;
-use crate::{app, hint, markdown, styles};
+use crate::{ViewOptions, app, hint, markdown, styles};
 
 /// The data behind the view, supplied by the host: the legacy
 /// database or the store. Every method runs on the event loop's
@@ -1351,11 +1351,8 @@ impl ViewState {
         let return_to = Box::new(std::mem::replace(&mut self.dialog, Dialog::None));
         self.dialog = match hit {
             Some(hit) => {
-                let options = crate::ViewOptions {
-                    turns: true,
-                    ..Default::default()
-                };
-                let mut view = app::AppState::new(hit.doc, &options, hit.source, false);
+                let mut view =
+                    app::AppState::new(hit.doc, &session_view_options(), hit.source, false);
                 view.select_entry(hit.entry_index);
                 Dialog::Session {
                     id: hit.item.id,
@@ -1459,11 +1456,7 @@ impl ViewState {
         let return_to = Box::new(std::mem::replace(&mut self.dialog, Dialog::None));
         self.dialog = match loaded {
             Some((doc, source, backend)) => {
-                let options = crate::ViewOptions {
-                    turns: true,
-                    ..Default::default()
-                };
-                let mut view = app::AppState::new(doc, &options, source, false);
+                let mut view = app::AppState::new(doc, &session_view_options(), source, false);
                 if let Some(line) = target.line {
                     view.select_line(line);
                 }
@@ -1832,12 +1825,10 @@ impl ViewState {
                 return;
             }
         };
-        let options = crate::ViewOptions {
-            turns: true,
-            ..Default::default()
-        };
+        let saved = self.session_ui.get(&item.id);
+        let options = saved.map_or_else(session_view_options, |s| s.view().clone());
         let mut view = app::AppState::new(doc, &options, source, false);
-        if let Some(saved) = self.session_ui.get(&item.id) {
+        if let Some(saved) = saved {
             view.restore_ui(saved);
         }
         self.dialog = Dialog::Session {
@@ -2778,6 +2769,17 @@ fn load_session_doc(id: &str, backend: &Backend) -> Result<(Document, app::DocSo
     }
 }
 
+/// The view options a session dialog opens with. Scan sessions are
+/// agent runs, so the tool calls and turn markers are on from the
+/// start.
+fn session_view_options() -> ViewOptions {
+    ViewOptions {
+        tools: true,
+        turns: true,
+        ..Default::default()
+    }
+}
+
 /// Content embedded in the session dialog — a note's or issue's
 /// detail-dialog lines inside a full border, wrapped to fit the
 /// dialog width.
@@ -3633,6 +3635,10 @@ fn id_span(id: &str, selected: bool) -> Span<'static> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
+    use gage_store::Store;
+
     use super::*;
     use crate::doc::{Document, Session};
 
@@ -3683,6 +3689,54 @@ mod tests {
         }
     }
 
+    /// A host whose session backend reads the fixture store
+    struct StoreHost(Arc<Mutex<Store>>);
+
+    impl ScanHost for StoreHost {
+        fn list_scans(&self) -> io::Result<Vec<ScanPickRow>> {
+            NullHost.list_scans()
+        }
+        fn load(&self, scan_id: &str) -> io::Result<ScanModel> {
+            NullHost.load(scan_id)
+        }
+        fn session_backend(&self) -> io::Result<Backend> {
+            let store = Arc::clone(&self.0);
+            Ok(tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(Backend::shared(store))
+            }))
+        }
+        fn read_logs(&self, log_key: &str) -> io::Result<ScanLogs> {
+            NullHost.read_logs(log_key)
+        }
+        fn issue_status(&self, issue_id: &str) -> Result<IssueStatusUpdate, String> {
+            NullHost.issue_status(issue_id)
+        }
+        fn set_issue_status(
+            &self,
+            issue_id: &str,
+            status: IssueStatus,
+            reason: Option<StatusReason>,
+            author: &str,
+            message: Option<&str>,
+        ) -> Result<(), String> {
+            NullHost.set_issue_status(issue_id, status, reason, author, message)
+        }
+        fn add_issue_comment(
+            &self,
+            issue_id: &str,
+            author: &str,
+            message: &str,
+        ) -> Result<(), String> {
+            NullHost.add_issue_comment(issue_id, author, message)
+        }
+        fn start_resolve_session(
+            &self,
+            issue_ids: &[String],
+        ) -> io::Result<Box<dyn ResolveSession>> {
+            NullHost.start_resolve_session(issue_ids)
+        }
+    }
+
     fn state_with_session_dialog(nav: SessionNav) -> ViewState {
         let model = ScanModel {
             scan_id: "scan1".into(),
@@ -3708,12 +3762,7 @@ mod tests {
             entries: Vec::new(),
             notes: Vec::new(),
         };
-        let view = app::AppState::new(
-            doc,
-            &crate::ViewOptions::default(),
-            app::DocSource::Backend,
-            false,
-        );
+        let view = app::AppState::new(doc, &ViewOptions::default(), app::DocSource::Backend, false);
         let backend = tokio::runtime::Builder::new_current_thread()
             .build()
             .unwrap()
@@ -3833,6 +3882,76 @@ mod tests {
         state.handle_session_dialog_key(close_key());
         assert!(matches!(state.dialog, Dialog::None));
         assert!(state.session_ui.contains_key("s1"));
+    }
+
+    fn key(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+
+    fn dialog_view(state: &ViewState) -> &app::AppState {
+        match &state.dialog {
+            Dialog::Session { view, .. } => view,
+            other => panic!("expected a session dialog, got {}", dialog_name(other)),
+        }
+    }
+
+    fn dialog_name(dialog: &Dialog) -> &'static str {
+        match dialog {
+            Dialog::None => "None",
+            Dialog::Session { .. } => "Session",
+            _ => "other",
+        }
+    }
+
+    /// A session opened from the scan view shows tool calls and turn
+    /// markers from the start; an option the user turns off stays off
+    /// when the dialog is closed and the session re-opened.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn session_dialog_opens_with_tools_and_keeps_toggled_options() {
+        let f = crate::session::tests::fixture();
+        let model = ScanModel {
+            scan_id: "scan1".into(),
+            label: None,
+            tasks: Vec::new(),
+            sessions: Vec::new(),
+            notes: Vec::new(),
+            issues: Vec::new(),
+            total: 0,
+            progress: 0,
+            errors: 0,
+            cost: None,
+            finished: true,
+            elapsed: None,
+            log_key: None,
+        };
+        let host = StoreHost(Arc::new(Mutex::new(f.store)));
+        let mut state = ViewState::new(model, Arc::new(host));
+        let item = SessionItem {
+            id: f.session_id.clone(),
+            title: "s".into(),
+            native_id: None,
+            notes: 0,
+            issues: 0,
+        };
+
+        state.open_session_dialog(&item, SessionNav::Sessions);
+        let view = dialog_view(&state).view();
+        assert!(view.tools);
+        assert!(view.turns);
+        assert!(view.user);
+
+        // v opens the options menu; t toggles tools off
+        state.handle_session_dialog_key(key('v'));
+        state.handle_session_dialog_key(key('t'));
+        state.handle_session_dialog_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!dialog_view(&state).view().tools);
+
+        state.handle_session_dialog_key(close_key());
+        assert!(matches!(state.dialog, Dialog::None));
+        state.open_session_dialog(&item, SessionNav::Sessions);
+        let view = dialog_view(&state).view();
+        assert!(!view.tools);
+        assert!(view.turns);
     }
 
     #[test]
