@@ -698,10 +698,12 @@ fn session_live(root: &Path, session_id: &str) -> Result<bool, SessionLiveError>
             Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
             Err(e) => return Err(DriverError::Io(e).into()),
         };
-        // A half-written or foreign-shaped entry carries no usable
-        // session id, so it cannot confirm this session; skip it.
-        let Ok(parsed) = serde_json::from_slice::<SessionRegistryEntry>(&bytes) else {
-            continue;
+        let parsed = match serde_json::from_slice::<SessionRegistryEntry>(&bytes) {
+            Ok(parsed) => parsed,
+            Err(e) => {
+                tracing::error!(path = %path.display(), "unreadable session registry entry: {e}");
+                continue;
+            }
         };
         if parsed.session_id != session_id {
             continue;
@@ -1508,6 +1510,19 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let domain = local_pid_domain().expect("a Linux host has a pidDomain");
         let pid = std::process::id();
+        let json =
+            format!(r#"{{"sessionId":"target","pid":{pid},"pidDomain":"{domain}","updatedAt":1}}"#);
+        write_registry_entry(tmp.path(), &format!("{pid}.json"), &json);
+        assert!(session_live(tmp.path(), "target").unwrap());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn session_live_skips_an_unreadable_entry_beside_the_target() {
+        let tmp = TempDir::new().unwrap();
+        let domain = local_pid_domain().expect("a Linux host has a pidDomain");
+        let pid = std::process::id();
+        write_registry_entry(tmp.path(), "99.json", "{not json");
         let json =
             format!(r#"{{"sessionId":"target","pid":{pid},"pidDomain":"{domain}","updatedAt":1}}"#);
         write_registry_entry(tmp.path(), &format!("{pid}.json"), &json);
