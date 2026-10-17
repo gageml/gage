@@ -248,7 +248,7 @@ pub struct ScannerConfig {
     #[serde(default)]
     pub disable: Vec<String>,
 
-    /// Per-scanner settings, one `[scanners.<name>]` table each
+    /// Per-scanner settings, one `[scanners.<name>]` table each.
     #[serde(default, flatten)]
     pub entries: BTreeMap<String, ScannerEntry>,
 }

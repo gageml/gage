@@ -49,14 +49,14 @@ const _: () = assert!(
 );
 
 /// The most result text one page holds; a row that alone exceeds it
-/// is a page of its own and is reported rather than returned
+/// is a page of its own and is reported rather than returned.
 const PAGE_CAP_BYTES: usize = 45_000;
 
 /// How long a written result stays readable by cursor
 const CURSOR_TTL: Duration = Duration::from_secs(60 * 60);
 
 /// Schema metadata key holding the page bounds as a JSON array of
-/// row offsets, one per page, closed by the row count
+/// row offsets, one per page, closed by the row count.
 const PAGES_KEY: &str = "gage.pages";
 
 const FILE_EXT: &str = "arrow";

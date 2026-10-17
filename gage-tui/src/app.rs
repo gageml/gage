@@ -905,7 +905,7 @@ impl AppState {
         let pane_row = self.selected_pane_row();
         self.outline.set_hidden(entry_hidden(&self.doc, &self.view));
         // Reselect the same row; a filtered-out entry falls back to
-        // the nearest preceding visible entry
+        // the nearest preceding visible entry.
         let new_sel = prior
             .and_then(|kind| {
                 self.outline
@@ -1946,7 +1946,7 @@ mod tests {
         assert_eq!(outline_labels(&state), ["<Session>", "entry 0", "entry 1"]);
         assert_eq!(state.selected_entry_index(), None);
 
-        // The fixture's entries sit at lines 1 and 2
+        // The fixture's entries sit at lines 1 and 2.
         state.select_line(2);
         assert_eq!(state.selected_entry_index(), Some(1));
         state.select_line(1);
@@ -2023,7 +2023,7 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         terminal.draw(|frame| draw(frame, &mut state)).unwrap();
         // Entry 10 sits at row 11 (after the session row); scrolled so
-        // that it is the eighth row of the pane
+        // that it is the eighth row of the pane.
         state.select_entry(10);
         *state.list_state.offset_mut() = 4;
         terminal.draw(|frame| draw(frame, &mut state)).unwrap();
