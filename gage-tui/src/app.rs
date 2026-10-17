@@ -770,6 +770,7 @@ impl AppState {
         let (session_note_ids, entry_note_ids) = note_projection(&doc);
         let hidden = entry_hidden(&doc, &self.view);
         self.doc = doc;
+        let pane_row = self.selected_pane_row();
         self.outline
             .reload(session_note_ids, entry_note_ids, hidden);
         let new_sel = prior
@@ -780,8 +781,24 @@ impl AppState {
                     .position(|r| same_row(&r.kind, &kind))
             })
             .or(Some(0));
-        self.list_state.select(new_sel);
+        self.select_at_pane_row(new_sel, pane_row);
         Ok(())
+    }
+
+    /// The selected row's distance from the top of the outline pane
+    fn selected_pane_row(&self) -> usize {
+        self.list_state
+            .selected()
+            .map_or(0, |sel| sel.saturating_sub(self.list_state.offset()))
+    }
+
+    /// Select `row` and scroll so it sits `pane_row` rows from the top
+    /// of the pane, as the prior selection did before a rebuild. A row
+    /// with fewer rows above it than `pane_row` sits below the first
+    /// row instead.
+    fn select_at_pane_row(&mut self, row: Option<usize>, pane_row: usize) {
+        self.list_state.select(row);
+        *self.list_state.offset_mut() = row.map_or(0, |r| r.saturating_sub(pane_row));
     }
 
     fn toggle_assistant(&mut self) {
@@ -808,13 +825,14 @@ impl AppState {
     }
 
     /// Recompute the membership mask and reapply it, keeping the selection
-    /// when its row survives the rebuild.
+    /// and its place in the pane when its row survives the rebuild.
     fn apply_filter(&mut self) {
         let prior = self
             .list_state
             .selected()
             .and_then(|i| self.outline.row(i))
             .map(|r| r.kind.clone());
+        let pane_row = self.selected_pane_row();
         self.outline.set_hidden(entry_hidden(&self.doc, &self.view));
         // Reselect the same row; a filtered-out entry falls back to
         // the nearest preceding visible entry
@@ -830,7 +848,7 @@ impl AppState {
                     })
             })
             .or(Some(0));
-        self.list_state.select(new_sel);
+        self.select_at_pane_row(new_sel, pane_row);
     }
 
     /// Toggle raw entry detail in the content pane. Independent of the
@@ -1868,6 +1886,64 @@ mod tests {
                 .collect(),
             notes: Vec::new(),
         }
+    }
+
+    /// A document of `count` entries alternating user and assistant,
+    /// one per JSONL line
+    fn doc_with_alternating_entries(count: u32) -> Document {
+        let mut doc = doc_with_entries(count);
+        for entry in doc.entries.iter_mut().skip(1).step_by(2) {
+            entry.entry_type = "assistant".into();
+        }
+        doc
+    }
+
+    #[test]
+    fn filter_toggle_keeps_the_selected_row_in_its_pane_position() {
+        let doc = doc_with_alternating_entries(60);
+        let mut state = AppState::new(doc, &ViewOptions::default(), DocSource::Backend, false);
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        // Entry 40 is an user entry (even index); open on it centered
+        state.select_line(41);
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        assert_eq!(state.selected_entry_index(), Some(40));
+        let pane_row = state.selected_pane_row();
+        assert!(pane_row > 0);
+
+        // Hiding the assistant entries halves the rows above; the
+        // selected entry keeps its distance from the top of the pane
+        state.toggle_assistant();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        assert_eq!(state.selected_entry_index(), Some(40));
+        assert_eq!(state.selected_pane_row(), pane_row);
+
+        state.toggle_assistant();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        assert_eq!(state.selected_entry_index(), Some(40));
+        assert_eq!(state.selected_pane_row(), pane_row);
+    }
+
+    #[test]
+    fn filter_toggle_moves_a_row_up_when_too_few_rows_remain_above_it() {
+        let doc = doc_with_alternating_entries(60);
+        let mut state = AppState::new(doc, &ViewOptions::default(), DocSource::Backend, false);
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        // Entry 10 sits at row 11 (after the session row); scrolled so
+        // that it is the eighth row of the pane
+        state.select_entry(10);
+        *state.list_state.offset_mut() = 4;
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        assert_eq!(state.selected_pane_row(), 7);
+
+        // Hiding the assistant entries leaves six rows above the
+        // selection, fewer than its pane row, so the list starts at
+        // its first row with no gap above
+        state.toggle_assistant();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        assert_eq!(state.selected_entry_index(), Some(10));
+        assert_eq!(state.list_state.offset(), 0);
+        assert_eq!(state.selected_pane_row(), 6);
     }
 
     #[test]
