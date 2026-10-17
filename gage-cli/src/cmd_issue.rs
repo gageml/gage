@@ -759,7 +759,7 @@ pub fn add(args: IssueAddArgs) -> Result<(), CliError> {
                 key: None,
             })
             .map_err(|e| DialogError::Failed(e.to_string()))?;
-        Ok(format!("Added issue {}", short_uuid(&id)).into())
+        Ok(format!("Added issue {}", style::outro_id(&store, ISSUE_TYPE, &id)).into())
     })
 }
 

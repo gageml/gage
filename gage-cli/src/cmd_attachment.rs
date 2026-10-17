@@ -24,8 +24,8 @@ use gage_core::uuid::short_uuid;
 use gage_query::ContextBuilder;
 use gage_registry::scanner::ScannerRegistry;
 use gage_store::{
-    AttachmentLinkOutcome, AttachmentOutcome, AttachmentRecord, AttachmentSpec, AttachmentStore,
-    DatasetStore, Store, StoreError,
+    ATTACHMENT_TYPE, AttachmentLinkOutcome, AttachmentOutcome, AttachmentRecord, AttachmentSpec,
+    AttachmentStore, DatasetStore, Store, StoreError,
 };
 use tabled::{
     Table,
@@ -286,7 +286,10 @@ async fn add_dialog(args: &AttachmentAddArgs, store: &Store) -> Result<DialogRes
     spinner.clear();
     let added = added.map_err(|e| DialogError::Failed(e.to_string()))?;
     let files = count(added.file_count as usize, "file");
-    let shown = describe(args.name.as_deref(), &added.id);
+    let shown = scanner_attach::describe_shown(
+        args.name.as_deref(),
+        &style::outro_id(store, ATTACHMENT_TYPE, &added.id),
+    );
     let verb = match added.outcome {
         AttachmentOutcome::Added => "Added",
         AttachmentOutcome::Updated => "Updated",

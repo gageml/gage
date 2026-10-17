@@ -393,7 +393,7 @@ pub fn add(args: NoteAddArgs) -> Result<(), CliError> {
                 work_id: None,
             })
             .map_err(|e| DialogError::Failed(e.to_string()))?;
-        Ok(format!("Added note {}", short_uuid(&id)).into())
+        Ok(format!("Added note {}", style::outro_id(&store, NOTE_TYPE, &id)).into())
     })
 }
 

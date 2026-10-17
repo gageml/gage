@@ -146,6 +146,30 @@ impl IdHighlighter {
         self.styled(id, &id[..end])
     }
 
+    /// Short display with the unique prefix in bold and no color of its
+    /// own, for embedding in an already-colored line such as the dialog
+    /// outro. The span emits bold-on then bold-off rather than a reset,
+    /// so a surrounding color carries through the tail and past the id.
+    /// Plain when color is off.
+    pub fn bold_short(&self, id: &str) -> String {
+        let shown = short_uuid(id);
+        let enabled = if self.stderr {
+            console::colors_enabled_stderr()
+        } else {
+            console::colors_enabled()
+        };
+        if !enabled {
+            return shown.to_string();
+        }
+        let split_bytes = shown
+            .char_indices()
+            .nth(self.unique_prefix_len(id))
+            .map(|(i, _)| i)
+            .unwrap_or(shown.len());
+        let (prefix, tail) = shown.split_at(split_bytes);
+        format!("\x1b[1m{prefix}\x1b[22m{tail}")
+    }
+
     fn styled(&self, id: &str, display: &str) -> String {
         let split_chars = self.unique_prefix_len(id);
         let split_bytes = display
@@ -243,6 +267,16 @@ mod tests {
         let h = IdHighlighter::new(vec!["01k2h4t9aaaa".into(), "01k9m2b0bbbb".into()]);
         // Shared "01k" needs 4 chars ("01k2") to disambiguate.
         assert_eq!(h.short("01k2h4t9aaaa"), expected_styled("01k2", "h4t9"));
+    }
+
+    #[test]
+    fn bold_short_wraps_prefix_without_color_reset() {
+        console::set_colors_enabled(true);
+        let h = IdHighlighter::new(vec!["01k2h4t9aaaa".into(), "01k9m2b0bbbb".into()]);
+        // Bold-on at the prefix, bold-off after it, no color reset, so an
+        // outer color survives the span.
+        assert_eq!(h.bold_short("01k2h4t9aaaa"), "\x1b[1m01k2\x1b[22mh4t9");
+        assert_eq!(plain(&h.bold_short("01k2h4t9aaaa")), "01k2h4t9");
     }
 
     #[test]

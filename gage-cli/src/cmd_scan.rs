@@ -1737,9 +1737,9 @@ async fn run_prepared(
         ignore_missing_attachments: prep.ignore_missing_attachments,
     };
     let result = if !prep.progress_ui {
-        // Headless: task output and the scan's own lines go to the
-        // terminal as they happen, unprefixed, with a status line for
-        // the start of the scan and of each task, and each task's end
+        // Headless: scanner output streams to stdout as it happens,
+        // unprefixed. Gage's own status lines — scan start, each task's
+        // start and end — go to stderr, the stream the dialog outro used.
         let mut task_starts: HashMap<String, Instant> = HashMap::new();
         gage_scan::scan(
             store,
@@ -1755,7 +1755,7 @@ async fn run_prepared(
                 Event::Scan(ScanOutput::Out(s)) => print!("{s}"),
                 Event::Scan(ScanOutput::Err(s)) => eprint!("{s}"),
                 Event::Started { id, tasks } => {
-                    println!(
+                    eprintln!(
                         "Scan {} started: {}",
                         short_uuid(&id),
                         count(tasks.len(), "task")
@@ -1770,7 +1770,7 @@ async fn run_prepared(
                 } => eprintln!("warning: task {scanner}:{task} {message}"),
                 Event::TaskStarted { scanner, task } => {
                     task_starts.insert(format!("{scanner}:{task}"), Instant::now());
-                    println!("Task {scanner}:{task} started");
+                    eprintln!("Task {scanner}:{task} started");
                 }
                 Event::TaskFinished {
                     scanner,
@@ -1780,12 +1780,12 @@ async fn run_prepared(
                 } => {
                     let label = format!("{scanner}:{task}");
                     match task_starts.remove(&label) {
-                        Some(started) => println!(
+                        Some(started) => eprintln!(
                             "Task {label} {} in {}",
                             status.as_str(),
                             fmt_duration(started.elapsed())
                         ),
-                        None => println!("Task {label} {}", status.as_str()),
+                        None => eprintln!("Task {label} {}", status.as_str()),
                     }
                 }
             },
@@ -1816,17 +1816,17 @@ async fn run_prepared(
         e => CliError::from(anyhow::Error::new(e).context("gage scan")),
     })?;
     let shown_id = styled_scan_id(store, &outcome.id);
-    println!("{}", summary_line(&shown_id, &outcome.attrs));
+    eprintln!("{}", summary_line(&shown_id, &outcome.attrs));
     if let Some(name) = &prep.tag {
         let added = TagStore::from(store)
             .add(name, &outcome.id, prep.force_tag)
             .context("gage scan")?;
         match added.previous_id {
-            Some(previous) => println!(
+            Some(previous) => eprintln!(
                 "Moved tag {name} from {} to scan {shown_id}",
                 short_uuid(&previous)
             ),
-            None => println!("Tagged scan {shown_id} as {name}"),
+            None => eprintln!("Tagged scan {shown_id} as {name}"),
         }
     }
     if outcome.attrs.canceled || outcome.attrs.tasks.failed > 0 {
@@ -2099,11 +2099,12 @@ async fn materialize_dataset(
 }
 
 /// The scan's short id, highlighted against the same set a scan id
-/// argument resolves against. When that set cannot be read the id is
-/// shown plain and the failure goes to stderr.
+/// argument resolves against. The summary it appears in prints to
+/// stderr, so color is gated on stderr. When the set cannot be read the
+/// id is shown plain and the failure goes to stderr.
 fn styled_scan_id(store: &Store, id: &str) -> String {
     match store.short_prefix_ids(Some(SCAN_TYPE)) {
-        Ok(peers) => s::IdHighlighter::new(peers).short(id),
+        Ok(peers) => s::IdHighlighter::new(peers).for_stderr().short(id),
         Err(e) => {
             eprintln!("warning: reading scan ids: {e}");
             short_uuid(id).to_string()

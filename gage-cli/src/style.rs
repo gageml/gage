@@ -1,6 +1,23 @@
+use gage_core::uuid::short_uuid;
+use gage_store::Store;
 use tabled::settings::{Color, peaker::Peaker};
 
 pub use gage_core::style::{IdHighlighter, IdKind};
+
+/// The id's short display for a dialog outro: the unique prefix in bold,
+/// its color inherited from the green outro line. Peers come from the
+/// same short-prefix set an id argument resolves against, so a shown
+/// prefix resolves. On a peer-read error the id is shown plain and the
+/// failure goes to stderr.
+pub fn outro_id(store: &Store, object_type: &str, id: &str) -> String {
+    match store.short_prefix_ids(Some(object_type)) {
+        Ok(peers) => IdHighlighter::new(peers).bold_short(id),
+        Err(e) => {
+            eprintln!("warning: reading {object_type} ids: {e}");
+            short_uuid(id).to_string()
+        }
+    }
+}
 
 /// The determinate progress bar template after its spinner, used by
 /// the dialog theme for every bar.

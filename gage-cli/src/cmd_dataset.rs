@@ -11,8 +11,8 @@ use gage_core::uuid::short_uuid;
 use gage_query::ContextBuilder;
 use gage_session::SourceOptions;
 use gage_store::{
-    AddStep, DatasetOrigin, DatasetSessionAddOutcome, DatasetStore, SessionOutcome, Store,
-    StoreError, TagStore,
+    AddStep, DATASET_TYPE, DatasetOrigin, DatasetSessionAddOutcome, DatasetStore, SessionOutcome,
+    Store, StoreError, TagStore,
 };
 use tabled::{
     Table,
@@ -194,7 +194,7 @@ async fn add_dialog(args: &DatasetAddArgs, store: &Store) -> Result<DialogResult
             cli::log::info(format!("Moved tag {name} from {}", short_uuid(&previous)))?;
         }
     }
-    let shown = short_uuid(&dataset_id);
+    let shown = style::outro_id(store, DATASET_TYPE, &dataset_id);
     if selected.is_empty() {
         if selecting {
             cli::log::info("No sessions matched the selection")?;

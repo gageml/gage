@@ -76,8 +76,14 @@ pub(crate) async fn attach_for_scanners(
 /// The attachment as messages show it: `name (short id)` when named,
 /// the short id alone otherwise
 pub(crate) fn describe(name: Option<&str>, id: &str) -> String {
+    describe_shown(name, short_uuid(id))
+}
+
+/// Like `describe`, with the id already rendered — e.g. a bolded unique
+/// prefix for a dialog outro.
+pub(crate) fn describe_shown(name: Option<&str>, shown_id: &str) -> String {
     match name {
-        Some(name) => format!("{name} ({})", short_uuid(id)),
-        None => short_uuid(id).to_string(),
+        Some(name) => format!("{name} ({shown_id})"),
+        None => shown_id.to_string(),
     }
 }
