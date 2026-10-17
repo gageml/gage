@@ -365,8 +365,12 @@ reading a newer object is a normal condition, not an upgrade-window edge case.
   shared implementation of these semantics.
 
 - **Direct `gage-store` calls are permitted only for these five shapes.** Any
-  direct read outside this list is a gap in the SQL surface. The fix is to add
-  the column, view, or TVF the gap implies, not to normalize the direct read.
+  direct read outside this list is a gap in the SQL surface. If data is required
+  that is not already available via the datafusion schema (tables, TVFs, and
+  UDFs) the schema should be modified rather than worked-around using the Rust
+  interface to the store. With that said, see **Data schema stability** below
+  for a counteracting goal. Work with the user to resolve the tension between
+  making required data available and maintaining a stable data schema.
 
   1. Writes: create, edit, tombstone.
   2. Reads of one object at a known commit SHA.
@@ -374,6 +378,13 @@ reading a newer object is a normal condition, not an upgrade-window edge case.
   4. Commit-graph traversal (`first_parent` chain, link parents).
   5. Opaque content reads where no column represents the bytes (e.g. the raw
      attachment bytes that sit behind the `attachment_file.text` projection).
+
+- **Data schema stability.** The datafusion structure is stable and must not be
+  changed unless all other options have been discussed and rejected in favor of
+  a schema change. Look for ways to use the existing structure before
+  considering or proposing changes to the schema. If a change to a schema is
+  compelling enough, propose it with the understanding that such changes are
+  rare and require a strong argument.
 
 - **System-tier columns are tagged on the field, not by name.** A schema's
   system columns carry `gage_session::system(..)` on their `Field`. The
