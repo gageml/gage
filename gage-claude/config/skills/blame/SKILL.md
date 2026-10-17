@@ -32,26 +32,28 @@ deliberate over it.
    the rows:
 
    ```sql
-   SELECT line, text, session_id, lines, tool_use_id, tool_name, timestamp
+   SELECT line, line_end, session_id, session_lines, tool_use_id, match
    FROM native_blame('', '<FILE>', '<LINES>')
+   WHERE rank = 1
    ORDER BY line;
    ```
 
    `<FILE>` is the file's path. The third argument is optional; without it
    the whole file is blamed. `''` names the default session source.
 
-   Each row is one source line. `session_id` names the session whose tool
-   call wrote the line, `tool_use_id` and `tool_name` the call, `timestamp`
-   when it ran, and `lines` the selection of session lines to read, from the
-   human prompt before the call through the call itself. A line is attributed
-   only when a call's input carries its text; the earliest such call inside
-   the line's commit window is chosen, a call that changed the file before
-   one that recorded no change. A null `session_id` means no recorded call
-   carries the line's text; git history and comments are then the only
-   record. Short lines such as `}` are never attributed. Group the rows by
-   `session_id` and `lines`.
+   Each row is one contiguous line range attributed to one call. `line_end`
+   is null for a single line. `session_id` names the session, `tool_use_id`
+   and `tool_name` the call, `timestamp` when it ran, and `session_lines` the
+   selection of session lines to read, from the human prompt before the call
+   through the call itself. `match` is the evidence: `patch`, `input`,
+   `command`, or `neighbor`, strongest first. A line is attributed when a
+   call's recorded patch added it or its input carries its text; a line no
+   call carries yields no row, and git history and comments are then the only
+   record. Drop `WHERE rank = 1` to see every candidate call for a line, which
+   matters when several sessions touched one change. Group the rows by
+   `session_id` and `session_lines`.
 
-3. Read each selection. Where `lines` is `<start>-<end>`:
+3. Read each selection. Where `session_lines` is `<start>-<end>`:
 
    ```sql
    SELECT line, type, subtype, substr(text, 1, 1200) AS text

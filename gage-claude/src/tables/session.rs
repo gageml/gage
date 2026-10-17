@@ -1,13 +1,14 @@
 use std::any::Any;
 use std::fmt::{self, Formatter};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
 use crate::index::{ClaudeSessionAttrs, IndexStore};
 use async_trait::async_trait;
 use datafusion::arrow::array::{
-    BooleanBuilder, Float64Builder, Int64Builder, StringBuilder, TimestampMillisecondBuilder,
+    BooleanBuilder, Float64Builder, Int64Builder, ListBuilder, StringBuilder,
+    TimestampMillisecondBuilder,
 };
 use datafusion::arrow::compute::SortOptions;
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
@@ -50,6 +51,8 @@ const SUMMARY_COLS: &[&str] = &[
     "cached_tokens",
     "cost_usd",
     "is_empty",
+    "files_changed",
+    "files_referenced",
 ];
 
 fn session_schema() -> SchemaRef {
@@ -85,6 +88,13 @@ fn session_schema() -> SchemaRef {
         Field::new("cost_usd", DataType::Float64, true),
         // Derived flags
         Field::new("is_empty", DataType::Boolean, false),
+        // Files
+        // Every path a tool call wrote, as the driver judged it
+        Field::new("files_changed", path_list(), true),
+        // Every other path a tool call's input referred to: an
+        // argument named as a path, or a path-shaped token of a shell
+        // command. A write the harness did not record is found here.
+        Field::new("files_referenced", path_list(), true),
         // System
         // The driver's short display form of `id`
         system(Field::new("id_display", DataType::Utf8, false)),
@@ -93,6 +103,10 @@ fn session_schema() -> SchemaRef {
         system(Field::new("id_prefix", DataType::Utf8, false)),
         system(Field::new("path", DataType::Utf8, false)),
     ]))
+}
+
+fn path_list() -> DataType {
+    DataType::List(Arc::new(Field::new("item", DataType::Utf8, true)))
 }
 
 #[derive(Debug, Clone)]
@@ -361,6 +375,8 @@ impl SessionExec {
         let mut cached_tokens = Int64Builder::with_capacity(len);
         let mut costs = Float64Builder::with_capacity(len);
         let mut is_empty = BooleanBuilder::with_capacity(len);
+        let mut files_changed = ListBuilder::new(StringBuilder::new());
+        let mut files_referenced = ListBuilder::new(StringBuilder::new());
 
         let default_summary = ClaudeSessionAttrs {
             is_empty: true,
@@ -414,6 +430,12 @@ impl SessionExec {
             cached_tokens.append_value(summary.cached_tokens().unwrap_or(0) as i64);
             costs.append_option(summary.cost_usd());
             is_empty.append_value(summary.is_empty);
+            append_paths(&mut files_changed, &summary.files_changed, needs_summary);
+            append_paths(
+                &mut files_referenced,
+                &summary.files_referenced,
+                needs_summary,
+            );
         }
 
         let batch = RecordBatch::try_new(
@@ -432,6 +454,8 @@ impl SessionExec {
                 Arc::new(cached_tokens.finish()),
                 Arc::new(costs.finish()),
                 Arc::new(is_empty.finish()),
+                Arc::new(files_changed.finish()),
+                Arc::new(files_referenced.finish()),
                 Arc::new(id_displays.finish()),
                 Arc::new(id_prefixes.finish()),
                 Arc::new(paths.finish()),
@@ -452,6 +476,19 @@ impl SessionExec {
 
         Ok(projected)
     }
+}
+
+/// A path list row: null when the summary was not read, so a
+/// projection without the column costs no parse
+fn append_paths(builder: &mut ListBuilder<StringBuilder>, paths: &[PathBuf], known: bool) {
+    if !known {
+        builder.append_null();
+        return;
+    }
+    for p in paths {
+        builder.values().append_value(p.to_string_lossy());
+    }
+    builder.append(true);
 }
 
 #[cfg(test)]

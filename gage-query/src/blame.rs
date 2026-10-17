@@ -50,6 +50,7 @@ use gage_store::{Store, StoredSessionTable};
 
 use crate::native::string_literal;
 use crate::new_context;
+use crate::patch;
 use crate::scope::SessionSet;
 use crate::stored_rows::{RowKind, StoredRowsTable};
 
@@ -71,12 +72,14 @@ pub fn blame_schema() -> SchemaRef {
     let ts = DataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into()));
     Arc::new(Schema::new(vec![
         Field::new("line", DataType::Int64, false),
-        Field::new("text", DataType::Utf8, false),
+        Field::new("line_end", DataType::Int64, true),
         Field::new("session_id", DataType::Utf8, true),
-        Field::new("lines", DataType::Utf8, true),
+        Field::new("session_lines", DataType::Utf8, true),
         Field::new("tool_use_id", DataType::Utf8, true),
         Field::new("tool_name", DataType::Utf8, true),
         Field::new("timestamp", ts, true),
+        Field::new("rank", DataType::Int64, false),
+        Field::new("match", DataType::Utf8, true),
     ]))
 }
 
@@ -507,8 +510,37 @@ fn parse_porcelain(text: &str) -> std::result::Result<Vec<PorcelainEntry>, Strin
     Ok(entries)
 }
 
+/// The evidence tying a call to a line, strongest first. Ranking
+/// orders candidates by this, then by the earliest call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Tier {
+    /// The call's recorded patch added the line
+    Patch,
+    /// The call's input carries the line and the driver judged the
+    /// call wrote the file
+    Input,
+    /// The call's input carries the line and the driver could not
+    /// judge the write (a shell command without a recorded diff)
+    Command,
+    /// The line itself did not match, but both neighbors are patch
+    /// matches of this one call
+    Neighbor,
+}
+
+impl Tier {
+    fn as_str(self) -> &'static str {
+        match self {
+            Tier::Patch => "patch",
+            Tier::Input => "input",
+            Tier::Command => "command",
+            Tier::Neighbor => "neighbor",
+        }
+    }
+}
+
+/// One call a line could be attributed to.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Attribution {
+struct Candidate {
     session_id: String,
     tool_use_id: String,
     tool_name: String,
@@ -519,22 +551,43 @@ struct Attribution {
     prompt_line: i64,
     /// Epoch milliseconds of the call's result
     timestamp: i64,
+    tier: Tier,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct BlameRow {
-    line: BlamedLine,
-    attribution: Option<Attribution>,
+impl Candidate {
+    /// Ranking key: strongest tier, then earliest call
+    fn rank_key(&self) -> (Tier, i64, i64) {
+        (self.tier, self.timestamp, self.call_line)
+    }
+
+    /// Whether `other` is the same call
+    fn same_call(&self, other: &Candidate) -> bool {
+        self.session_id == other.session_id && self.tool_use_id == other.tool_use_id
+    }
 }
 
-/// Attribute `lines`: the sessions of `projects` that wrote the file,
-/// their calls in the lines' windows, the earliest call per line whose
-/// input carries the line, then the prompt before each winning call.
+/// One output row: a contiguous line range attributed to one call at
+/// one rank. An unattributed line yields no row.
+#[derive(Debug, Clone)]
+struct OutRow {
+    line: u64,
+    line_end: Option<u64>,
+    candidate: Candidate,
+    rank: i64,
+}
+
+/// Attribute `lines` to the calls that wrote them. The scoped pass
+/// reads the sessions of `projects` that the driver judged wrote the
+/// file. When it attributes nothing --- a file outside the projects,
+/// or one only a shell command touched --- a wide pass reads every
+/// session whose summary names the file, written or merely referenced.
+/// Each line keeps every matching call, ranked by evidence; a line
+/// between two patch matches of one call takes that call.
 async fn blame(
     ctx: &SessionContext,
     projects: &[String],
     lines: Vec<BlamedLine>,
-) -> Result<Vec<BlameRow>> {
+) -> Result<Vec<OutRow>> {
     let paths: Vec<String> = distinct_paths(&lines)
         .into_iter()
         .map(|p| {
@@ -543,32 +596,133 @@ async fn blame(
                 .ok_or_else(|| external_msg(format!("{} is not UTF-8", p.display())))
         })
         .collect::<Result<_>>()?;
-    let wrote_path = paths
-        .iter()
-        .map(|p| format!("array_has(files_changed, {})", quote(p)))
-        .collect::<Vec<_>>()
-        .join(" OR ");
-    let ids = session_ids(ctx, projects).await?;
-    let ids = writers_of(ctx, &ids, &wrote_path).await?;
-    let mut found: BTreeMap<u64, Attribution> = BTreeMap::new();
-    if !ids.is_empty() {
-        found = match_calls(ctx, &ids, &wrote_path, &lines).await?;
-        let prompts = prompt_lines(ctx, &found).await?;
-        for a in found.values_mut() {
-            if let Some(lines) = prompts.get(&a.session_id)
-                && let Some(prompt) = lines.range(..a.call_line).next_back()
+    // An empty file, or a selection off the end of one, has no lines to
+    // attribute and no paths to query
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    let has = |col: &str| {
+        paths
+            .iter()
+            .map(|p| format!("array_has({col}, {})", quote(p)))
+            .collect::<Vec<_>>()
+            .join(" OR ")
+    };
+    let wrote_path = has("files_changed");
+
+    let scoped = session_ids(ctx, projects).await?;
+    let scoped = writers_of(ctx, &scoped, &wrote_path).await?;
+    let mut found = if scoped.is_empty() {
+        BTreeMap::new()
+    } else {
+        match_calls(ctx, &scoped, &wrote_path, &lines).await?
+    };
+
+    if found.is_empty() {
+        let wide = wide_sessions(ctx, &wrote_path, &has("files_referenced")).await?;
+        if !wide.is_empty() {
+            found = match_calls(ctx, &wide, &wrote_path, &lines).await?;
+        }
+    }
+
+    add_neighbors(&mut found, &lines);
+    let prompts = prompt_lines(ctx, &found).await?;
+    for cands in found.values_mut() {
+        for c in cands.iter_mut() {
+            if let Some(session) = prompts.get(&c.session_id)
+                && let Some(prompt) = session.range(..c.call_line).next_back()
             {
-                a.prompt_line = *prompt;
+                c.prompt_line = *prompt;
             }
         }
     }
-    Ok(lines
-        .into_iter()
-        .map(|line| {
-            let attribution = found.remove(&line.number);
-            BlameRow { line, attribution }
+    Ok(build_rows(found))
+}
+
+/// Every session whose summary names the file, in any project: a
+/// judged write, or a path a call's input referred to. Empty for a
+/// scope whose summaries carry no path lists, as the stored sessions
+/// do not yet, so the wide pass is a native fallback.
+async fn wide_sessions(
+    ctx: &SessionContext,
+    wrote_path: &str,
+    referenced_path: &str,
+) -> Result<Vec<String>> {
+    let sql = format!("SELECT id FROM session WHERE ({wrote_path}) OR ({referenced_path})");
+    strings(ctx, &sql, &[]).await
+}
+
+/// Give an unattributed line the call that added both its neighbors,
+/// when one patch match added the line above and the line below: the
+/// line between them was part of the same change. Short lines such as
+/// `}` reach attribution only here.
+fn add_neighbors(found: &mut BTreeMap<u64, Vec<Candidate>>, lines: &[BlamedLine]) {
+    let strongest: HashMap<u64, Candidate> = found
+        .iter()
+        .filter_map(|(&n, cands)| {
+            cands
+                .iter()
+                .min_by(|a, b| a.rank_key().cmp(&b.rank_key()))
+                .map(|c| (n, c.clone()))
         })
-        .collect())
+        .collect();
+    let mut adds: Vec<(u64, Candidate)> = Vec::new();
+    for line in lines {
+        let n = line.number;
+        if found.contains_key(&n) || n == 0 {
+            continue;
+        }
+        let (Some(above), Some(below)) = (strongest.get(&(n - 1)), strongest.get(&(n + 1))) else {
+            continue;
+        };
+        if above.tier == Tier::Patch && below.tier == Tier::Patch && above.same_call(below) {
+            let mut c = above.clone();
+            c.tier = Tier::Neighbor;
+            adds.push((n, c));
+        }
+    }
+    for (n, c) in adds {
+        found.entry(n).or_default().push(c);
+    }
+}
+
+/// Rank each line's candidates, then fold consecutive lines with the
+/// same call and tier at the same rank into one range row, sorted by
+/// line then rank.
+fn build_rows(mut found: BTreeMap<u64, Vec<Candidate>>) -> Vec<OutRow> {
+    for cands in found.values_mut() {
+        cands.sort_by_key(Candidate::rank_key);
+    }
+    let depth = found.values().map(Vec::len).max().unwrap_or(0);
+    let mut out = Vec::new();
+    for r in 0..depth {
+        let ranked: Vec<(u64, &Candidate)> = found
+            .iter()
+            .filter_map(|(&n, cands)| cands.get(r).map(|c| (n, c)))
+            .collect();
+        let mut i = 0;
+        while let Some(&(start, cand)) = ranked.get(i) {
+            let mut end = start;
+            let mut j = i + 1;
+            while let Some(&(n, c)) = ranked.get(j) {
+                if n == end + 1 && c.same_call(cand) && c.tier == cand.tier {
+                    end = n;
+                    j += 1;
+                } else {
+                    break;
+                }
+            }
+            out.push(OutRow {
+                line: start,
+                line_end: (end > start).then_some(end),
+                candidate: cand.clone(),
+                rank: r as i64 + 1,
+            });
+            i = j;
+        }
+    }
+    out.sort_by_key(|row| (row.line, row.rank));
+    out
 }
 
 /// A SQL string literal.
@@ -632,22 +786,22 @@ async fn strings(ctx: &SessionContext, sql: &str, params: &[ScalarValue]) -> Res
 /// matched: `}` and `);` appear in nearly every edit
 const MIN_MATCH_CHARS: usize = 4;
 
-/// The earliest call per line whose input carries the line, a call
-/// the driver attributes to the file before one it could not judge.
-/// The calls read are those of `ids` in the union of the lines'
-/// windows that the driver attributes to one of the file's paths, or
-/// could not judge (`files_changed` null, as for a shell command whose
-/// result carries no diff): the text is the evidence, so an unjudged
-/// call is admitted within the sessions known to have written the
-/// file, but only for a line no judged call carries, since a command
-/// that read the text also carries it. Each call's input is scanned
-/// once for every line's text.
+/// Every call of `ids`, in the union of the lines' windows, that a
+/// line's text matches: its recorded patch added the line (`patch`),
+/// its input carries the line and the driver judged it wrote the file
+/// (`input`), or its input carries the line and the driver could not
+/// judge the write (`command`). The calls read are those the driver
+/// attributes to one of the file's paths, or could not judge
+/// (`files_changed` null, as for a shell command whose result carries
+/// no diff). Each line keeps one candidate per call, at the call's
+/// strongest tier. Each call's input and patch are scanned once for
+/// every line's text.
 async fn match_calls(
     ctx: &SessionContext,
     ids: &[String],
     wrote_path: &str,
     lines: &[BlamedLine],
-) -> Result<BTreeMap<u64, Attribution>> {
+) -> Result<BTreeMap<u64, Vec<Candidate>>> {
     // Distinct line texts, each with the lines that carry it
     let mut patterns: Vec<String> = Vec::new();
     let mut by_pattern: Vec<Vec<&BlamedLine>> = Vec::new();
@@ -669,7 +823,7 @@ async fn match_calls(
             }
         }
     }
-    let mut found = BTreeMap::new();
+    let mut found: BTreeMap<u64, Vec<Candidate>> = BTreeMap::new();
     if patterns.is_empty() {
         return Ok(found);
     }
@@ -691,11 +845,11 @@ async fn match_calls(
         span.push_str(" AND result_timestamp > $2");
     }
     let sql = format!(
-        "SELECT session_id, id, name, line, result_timestamp, input_raw, files_changed \
+        "SELECT session_id, id, name, line, result_timestamp, input_raw, files_changed, result_raw \
          FROM tool_use \
          WHERE session_id IN ({ids}) AND {span} \
            AND ({wrote_path} OR files_changed IS NULL) \
-         ORDER BY files_changed IS NULL, result_timestamp, line",
+         ORDER BY result_timestamp, line",
         ids = id_list(ids),
     );
     let batches = ctx
@@ -705,7 +859,8 @@ async fn match_calls(
         .collect()
         .await?;
 
-    let mut matched: BTreeSet<usize> = BTreeSet::new();
+    let mut in_input: BTreeSet<usize> = BTreeSet::new();
+    let mut in_patch: BTreeSet<usize> = BTreeSet::new();
     for batch in &batches {
         let session_ids = str_col(batch, 0);
         let call_ids = str_col(batch, 1);
@@ -724,19 +879,32 @@ async fn match_calls(
             .as_any()
             .downcast_ref::<ListArray>()
             .ok_or_else(|| external_msg("files_changed is not a list".into()))?;
+        let results = str_col(batch, 7);
         for i in 0..batch.num_rows() {
             if timestamps.is_null(i) {
                 continue;
             }
             let timestamp = timestamps.value(i);
             let input = normalize_json_text(inputs.value(i));
-            matched.clear();
-            matched.extend(
+            in_input.clear();
+            in_input.extend(
                 searcher
                     .find_overlapping_iter(&input)
                     .map(|m| m.pattern().as_usize()),
             );
-            if matched.is_empty() {
+            let added: String = patch::hunks(results.value(i))
+                .iter()
+                .flat_map(|h| h.lines_with('+'))
+                .map(json_normalized)
+                .collect::<Vec<_>>()
+                .join("\n");
+            in_patch.clear();
+            in_patch.extend(
+                searcher
+                    .find_overlapping_iter(&added)
+                    .map(|m| m.pattern().as_usize()),
+            );
+            if in_input.is_empty() && in_patch.is_empty() {
                 continue;
             }
             let items;
@@ -755,10 +923,9 @@ async fn match_calls(
                         .collect(),
                 )
             };
-            for &p in &matched {
+            for &p in in_patch.iter().chain(in_input.iter()) {
                 for &line in by_pattern.get(p).into_iter().flatten() {
-                    if found.contains_key(&line.number)
-                        || timestamp > line.window_end
+                    if timestamp > line.window_end
                         || line.window_start.is_some_and(|start| timestamp <= start)
                     {
                         continue;
@@ -767,18 +934,28 @@ async fn match_calls(
                         None => true,
                         Some(changed) => line.path.to_str().is_some_and(|p| changed.contains(&p)),
                     };
-                    if !wrote_line_path {
+                    let tier = if in_patch.contains(&p) && wrote_line_path {
+                        Tier::Patch
+                    } else if in_input.contains(&p) {
+                        match &changed {
+                            None => Tier::Command,
+                            Some(_) if wrote_line_path => Tier::Input,
+                            Some(_) => continue,
+                        }
+                    } else {
                         continue;
-                    }
-                    found.insert(
+                    };
+                    record(
+                        &mut found,
                         line.number,
-                        Attribution {
+                        Candidate {
                             session_id: session_ids.value(i).to_string(),
                             tool_use_id: call_ids.value(i).to_string(),
                             tool_name: names.value(i).to_string(),
                             call_line: call_lines.value(i),
                             prompt_line: call_lines.value(i),
                             timestamp,
+                            tier,
                         },
                     );
                 }
@@ -786,6 +963,25 @@ async fn match_calls(
         }
     }
     Ok(found)
+}
+
+/// Add `cand` for `line`, or lower an existing candidate for the same
+/// call to its stronger tier. A line matching one call through both
+/// its patch and its input keeps the patch.
+fn record(found: &mut BTreeMap<u64, Vec<Candidate>>, line: u64, cand: Candidate) {
+    let cands = found.entry(line).or_default();
+    match cands.iter_mut().find(|c| c.same_call(&cand)) {
+        Some(existing) => existing.tier = existing.tier.min(cand.tier),
+        None => cands.push(cand),
+    }
+}
+
+/// A plain line as it reads inside a normalized JSON input: escaped as
+/// a JSON string, then whitespace-collapsed, so the patterns built
+/// from file lines match a patch's added lines as they match an input.
+fn json_normalized(line: &str) -> String {
+    let quoted = serde_json::to_string(line).unwrap_or_default();
+    normalize_json_text(&quoted[1..quoted.len().saturating_sub(1).max(1)])
 }
 
 /// A line's text as it appears inside a JSON string with its
@@ -855,9 +1051,13 @@ fn normalize_json_text(raw: &str) -> String {
 /// session.
 async fn prompt_lines(
     ctx: &SessionContext,
-    found: &BTreeMap<u64, Attribution>,
+    found: &BTreeMap<u64, Vec<Candidate>>,
 ) -> Result<HashMap<String, BTreeSet<i64>>> {
-    let ids: BTreeSet<&str> = found.values().map(|a| a.session_id.as_str()).collect();
+    let ids: BTreeSet<&str> = found
+        .values()
+        .flatten()
+        .map(|c| c.session_id.as_str())
+        .collect();
     let mut out: HashMap<String, BTreeSet<i64>> = HashMap::new();
     if ids.is_empty() {
         return Ok(out);
@@ -897,44 +1097,40 @@ fn int_col(batch: &RecordBatch, i: usize) -> &Int64Array {
         .expect("blame query projects an integer column here")
 }
 
-fn blame_batch(rows: &[BlameRow]) -> Result<RecordBatch> {
+fn blame_batch(rows: &[OutRow]) -> Result<RecordBatch> {
     let mut line = Int64Builder::new();
-    let mut text = StringBuilder::new();
+    let mut line_end = Int64Builder::new();
     let mut session_id = StringBuilder::new();
-    let mut lines = StringBuilder::new();
+    let mut session_lines = StringBuilder::new();
     let mut tool_use_id = StringBuilder::new();
     let mut tool_name = StringBuilder::new();
     let mut timestamp = TimestampMillisecondBuilder::new();
+    let mut rank = Int64Builder::new();
+    let mut tier = StringBuilder::new();
     for row in rows {
-        line.append_value(row.line.number as i64);
-        text.append_value(&row.line.text);
-        match &row.attribution {
-            Some(a) => {
-                session_id.append_value(&a.session_id);
-                lines.append_value(selection_text(a.prompt_line, a.call_line));
-                tool_use_id.append_value(&a.tool_use_id);
-                tool_name.append_value(&a.tool_name);
-                timestamp.append_value(a.timestamp);
-            }
-            None => {
-                session_id.append_null();
-                lines.append_null();
-                tool_use_id.append_null();
-                tool_name.append_null();
-                timestamp.append_null();
-            }
-        }
+        let c = &row.candidate;
+        line.append_value(row.line as i64);
+        line_end.append_option(row.line_end.map(|n| n as i64));
+        session_id.append_value(&c.session_id);
+        session_lines.append_value(selection_text(c.prompt_line, c.call_line));
+        tool_use_id.append_value(&c.tool_use_id);
+        tool_name.append_value(&c.tool_name);
+        timestamp.append_value(c.timestamp);
+        rank.append_value(row.rank);
+        tier.append_value(c.tier.as_str());
     }
     Ok(RecordBatch::try_new(
         blame_schema(),
         vec![
             Arc::new(line.finish()),
-            Arc::new(text.finish()),
+            Arc::new(line_end.finish()),
             Arc::new(session_id.finish()),
-            Arc::new(lines.finish()),
+            Arc::new(session_lines.finish()),
             Arc::new(tool_use_id.finish()),
             Arc::new(tool_name.finish()),
             Arc::new(timestamp.finish().with_timezone("UTC")),
+            Arc::new(rank.finish()),
+            Arc::new(tier.finish()),
         ],
     )?)
 }
@@ -1112,6 +1308,19 @@ filename f.rs
     /// An Edit call and its result, as session lines, at `ts`.
     fn edit(n: u32, id: &str, path: &Path, old: &str, new: &str, ts: &str) -> [String; 2] {
         let path = path.display().to_string();
+        // A line present in `new` but not `old` is added (`+`); a line
+        // in both is context, as Claude Code records in structuredPatch
+        let old_lines: Vec<&str> = old.lines().collect();
+        let patch: Vec<String> = new
+            .lines()
+            .map(|l| {
+                if old_lines.contains(&l) {
+                    format!(" {l}")
+                } else {
+                    format!("+{l}")
+                }
+            })
+            .collect();
         [
             serde_json::json!({
                 "type": "assistant", "uuid": format!("a{n}"), "timestamp": ts,
@@ -1126,7 +1335,7 @@ filename f.rs
                 "message": {"role": "user", "content": [{
                     "type": "tool_result", "tool_use_id": id, "content": "ok"
                 }]},
-                "toolUseResult": {"filePath": path}
+                "toolUseResult": {"filePath": path, "structuredPatch": [{"lines": patch}]}
             })
             .to_string(),
         ]
@@ -1186,42 +1395,44 @@ filename f.rs
         spec
     }
 
-    /// `(line, text, session_id, lines, tool_use_id, tool_name, timestamp)`
-    type Row = (
-        i64,
-        String,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<i64>,
-    );
+    /// One blame output row, flattened for assertions.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct Out {
+        line: i64,
+        line_end: Option<i64>,
+        session: Option<String>,
+        session_lines: Option<String>,
+        tool_use_id: Option<String>,
+        rank: i64,
+        tier: Option<String>,
+    }
 
-    async fn rows(ctx: &SessionContext, from: &str) -> Vec<Row> {
+    async fn rows(ctx: &SessionContext, from: &str) -> Vec<Out> {
         let sql = format!(
-            "SELECT line, text, session_id, lines, tool_use_id, tool_name, timestamp \
-             FROM {from} ORDER BY line"
+            "SELECT line, line_end, session_id, session_lines, tool_use_id, \
+             tool_name, timestamp, rank, match \
+             FROM {from} ORDER BY line, rank"
         );
         let batches = ctx.sql(&sql).await.unwrap().collect().await.unwrap();
         let mut out = Vec::new();
         for batch in &batches {
             let opt =
                 |i: usize, col: &StringArray| (!col.is_null(i)).then(|| col.value(i).to_string());
-            let timestamps = batch
-                .column(6)
+            let ends = batch
+                .column(1)
                 .as_any()
-                .downcast_ref::<TimestampMillisecondArray>()
+                .downcast_ref::<Int64Array>()
                 .unwrap();
             for i in 0..batch.num_rows() {
-                out.push((
-                    int_col(batch, 0).value(i),
-                    str_col(batch, 1).value(i).to_string(),
-                    opt(i, str_col(batch, 2)),
-                    opt(i, str_col(batch, 3)),
-                    opt(i, str_col(batch, 4)),
-                    opt(i, str_col(batch, 5)),
-                    (!timestamps.is_null(i)).then(|| timestamps.value(i)),
-                ));
+                out.push(Out {
+                    line: int_col(batch, 0).value(i),
+                    line_end: (!ends.is_null(i)).then(|| ends.value(i)),
+                    session: opt(i, str_col(batch, 2)),
+                    session_lines: opt(i, str_col(batch, 3)),
+                    tool_use_id: opt(i, str_col(batch, 4)),
+                    rank: int_col(batch, 7).value(i),
+                    tier: opt(i, str_col(batch, 8)),
+                });
             }
         }
         out
@@ -1317,58 +1528,53 @@ filename f.rs
         let ctx = ContextBuilder::new(None).build().await;
         let from = format!("native_blame('{spec}', '{}')", path.display());
         let all = rows(&ctx, &from).await;
-        let id = some(NATIVE_ID);
-        assert_eq!(all.len(), 6);
-        assert_eq!(
-            all[0],
-            (1, "fn one() {}".into(), None, None, None, None, None),
-            "a line older than every session has no attribution"
+        assert!(
+            all.iter().all(|r| r.session.as_deref() == Some(NATIVE_ID)),
+            "every row names the one session: {all:?}"
         );
-        assert_eq!(
-            all[1],
-            (
-                2,
-                "fn two_added_later() {}".into(),
-                id.clone(),
-                some("1-4"),
-                some("t1"),
-                some("Edit"),
-                Some(1_735_725_605_000)
-            ),
-            "the earliest call that changed the file wins over an earlier read and a later edit quoting the line"
+        assert!(
+            !all.iter().any(|r| r.line == 1),
+            "a line older than every session yields no row"
         );
+        let shape: Vec<_> = all
+            .iter()
+            .map(|r| {
+                (
+                    r.line,
+                    r.line_end,
+                    r.tool_use_id.clone(),
+                    r.session_lines.clone(),
+                    r.rank,
+                    r.tier.clone(),
+                )
+            })
+            .collect();
         assert_eq!(
-            (&all[2].3, &all[2].4),
-            (&some("1-6"), &some("t2")),
-            "the later edit is credited with the line it added"
-        );
-        assert_eq!(all[3].1, "fn four(a: i32,");
-        assert_eq!(
-            all[4].1, "        b: i32) {}",
-            "text is the source line as written"
-        );
-        for row in &all[3..5] {
-            assert_eq!(
-                (&row.3, &row.4),
-                (&some("8-9"), &some("t3")),
-                "a line the formatter reflowed still matches the edit that wrote it: {row:?}"
-            );
-        }
-        assert_eq!(
-            (&all[5].2, &all[5].3, &all[5].4, &all[5].5),
-            (&id, &some("8-11"), &some("t4"), &some("Bash")),
-            "a shell write without a diff is matched by its command text"
+            shape,
+            vec![
+                // line 2: the edit that added it, the later edit quoting
+                // it, then the earlier read, by descending evidence
+                (2, None, some("t1"), some("1-4"), 1, some("patch")),
+                (2, None, some("t2"), some("1-6"), 2, some("input")),
+                (2, None, some("t0"), some("1-2"), 3, some("command")),
+                (3, None, some("t2"), some("1-6"), 1, some("patch")),
+                // the edit's one added line reflowed over two file lines,
+                // matched by its patch and folded into one range
+                (4, Some(5), some("t3"), some("8-9"), 1, some("patch")),
+                // a shell append with no diff, matched by its command
+                (6, None, some("t4"), some("8-11"), 1, some("command")),
+            ]
         );
 
         let picked = rows(&ctx, &format!("{}, '1,6')", from.trim_end_matches(')'))).await;
         assert_eq!(
-            picked.iter().map(|r| r.0).collect::<Vec<_>>(),
-            [1, 6],
-            "each range of the selection reaches git"
+            picked.iter().map(|r| r.line).collect::<Vec<_>>(),
+            [6],
+            "line 1 has no writer, so only line 6 of the selection is a row"
         );
         let one = rows(&ctx, &format!("{}, 2)", from.trim_end_matches(')'))).await;
-        assert_eq!(one.len(), 1);
-        assert_eq!(one[0].0, 2);
+        assert_eq!(one.len(), 3, "line 2 keeps all three candidates");
+        assert!(one.iter().all(|r| r.line == 2));
     }
 
     #[tokio::test]
@@ -1391,14 +1597,38 @@ filename f.rs
         let ctx = ContextBuilder::new(Some(store)).build().await;
         let stored_id = strings(&ctx, "SELECT id FROM session", &[]).await.unwrap();
         let rows = rows(&ctx, &format!("blame('{}', '2-3')", path.display())).await;
+        let r1: Vec<_> = rows
+            .iter()
+            .filter(|r| r.rank == 1)
+            .map(|r| {
+                (
+                    r.line,
+                    r.session.clone(),
+                    r.session_lines.clone(),
+                    r.tool_use_id.clone(),
+                    r.tier.clone(),
+                )
+            })
+            .collect();
         assert_eq!(
-            rows.iter()
-                .map(|r| (r.0, r.2.clone(), r.3.clone(), r.4.clone()))
-                .collect::<Vec<_>>(),
+            r1,
             [
-                (2, Some(stored_id[0].clone()), some("1-4"), some("t1")),
-                (3, Some(stored_id[0].clone()), some("1-6"), some("t2")),
-            ]
+                (
+                    2,
+                    Some(stored_id[0].clone()),
+                    some("1-4"),
+                    some("t1"),
+                    some("patch")
+                ),
+                (
+                    3,
+                    Some(stored_id[0].clone()),
+                    some("1-6"),
+                    some("t2"),
+                    some("patch")
+                ),
+            ],
+            "stored sessions carry the recorded patch, so edits read as patch matches"
         );
     }
 
@@ -1441,8 +1671,13 @@ filename f.rs
         .await;
         assert_eq!(rows.len(), 1);
         assert_eq!(
-            (&rows[0].2, &rows[0].3),
-            (&some(NATIVE_ID), &some("1-2")),
+            (
+                rows[0].line,
+                rows[0].session.clone(),
+                rows[0].session_lines.clone(),
+                rows[0].tier.clone(),
+            ),
+            (1, some(NATIVE_ID), some("1-2"), some("patch")),
             "{rows:?}"
         );
     }
@@ -1465,5 +1700,107 @@ filename f.rs
         );
         assert!(lines.iter().all(|l| l.window_start.is_none()));
         assert!(lines.iter().all(|l| l.path == path));
+    }
+
+    /// An empty file has no lines to attribute and returns no rows,
+    /// rather than building an empty SQL predicate.
+    #[tokio::test]
+    async fn an_empty_file_returns_no_rows() {
+        gage_core::config::use_test_cache_root();
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("empty.txt");
+        std::fs::write(&file, "").unwrap();
+        let claude_root = tempfile::tempdir().unwrap();
+        let spec = write_session(claude_root.path(), dir.path(), NATIVE_ID, &[]);
+        let ctx = ContextBuilder::new(None).build().await;
+        let rows = rows(
+            &ctx,
+            &format!("native_blame('{spec}', '{}')", file.display()),
+        )
+        .await;
+        assert!(rows.is_empty());
+    }
+
+    /// A short line between two patch matches of one call takes that
+    /// call, since the edit that added its neighbors added it too.
+    #[tokio::test]
+    async fn a_line_between_two_patch_matches_is_attributed_to_the_same_call() {
+        gage_core::config::use_test_cache_root();
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let file = root.join("notes.md");
+        let body = "alpha heading line\n}\ngamma heading line\n";
+        std::fs::write(&file, body).unwrap();
+
+        let mut lines = vec![prompt(1, "write the file", "2025-01-01T00:00:00Z")];
+        lines.extend(edit(2, "t1", &file, "", body, "2025-01-01T00:00:05Z"));
+        let claude_root = tempfile::tempdir().unwrap();
+        let spec = write_session(claude_root.path(), &root, NATIVE_ID, &lines);
+
+        let ctx = ContextBuilder::new(None).build().await;
+        let rows = rows(
+            &ctx,
+            &format!("native_blame('{spec}', '{}')", file.display()),
+        )
+        .await;
+        let shape: Vec<_> = rows
+            .iter()
+            .map(|r| (r.line, r.tool_use_id.clone(), r.tier.clone()))
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                (1, some("t1"), some("patch")),
+                (2, some("t1"), some("neighbor")),
+                (3, some("t1"), some("patch")),
+            ],
+            "the short `}}` line between two patch matches is a neighbor"
+        );
+    }
+
+    /// A file outside the session's project, written by a shell
+    /// heredoc the driver could not judge, is found through the wide
+    /// fallback on the summary's referenced paths.
+    #[tokio::test]
+    async fn the_wide_fallback_finds_a_file_named_only_in_a_command() {
+        gage_core::config::use_test_cache_root();
+        let home = tempfile::tempdir().unwrap();
+        let home = std::fs::canonicalize(home.path()).unwrap();
+        let project_root = home.join("projA");
+        std::fs::create_dir_all(&project_root).unwrap();
+        let file = home.join("dprint.jsonc");
+        let body = "\"lineWidth\": 80,\n\"plugin\": \"markdown\"\n";
+        std::fs::write(&file, body).unwrap();
+
+        let command = format!("cat > {} <<'EOF'\n{body}EOF\n", file.display());
+        let mut lines = vec![prompt(1, "set up dprint", "2025-01-01T00:00:00Z")];
+        lines.extend(shell(2, "t1", &command, "2025-01-01T00:00:05Z"));
+        let claude_root = tempfile::tempdir().unwrap();
+        // The session belongs to projA, not to any ancestor of the file
+        let spec = write_session(claude_root.path(), &project_root, NATIVE_ID, &lines);
+
+        let ctx = ContextBuilder::new(None).build().await;
+        let rows = rows(
+            &ctx,
+            &format!("native_blame('{spec}', '{}')", file.display()),
+        )
+        .await;
+        let shape: Vec<_> = rows
+            .iter()
+            .map(|r| {
+                (
+                    r.line,
+                    r.line_end,
+                    r.session.clone(),
+                    r.tool_use_id.clone(),
+                    r.tier.clone(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            [(1, Some(2), some(NATIVE_ID), some("t1"), some("command"))],
+            "both lines of the heredoc fold into one range, the command tier"
+        );
     }
 }

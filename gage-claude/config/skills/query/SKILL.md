@@ -33,19 +33,24 @@ reading usage out of `raw`.
 ## Sessions that wrote a file: the blame functions
 
 `native_blame(source, file [, lines])` and `blame(file [, lines])` return one
-row per line of a file with the session tool call that wrote it:
-`(line, text, session_id, lines, tool_use_id, tool_name, timestamp)`.
+row per contiguous line range and candidate call:
+`(line, line_end, session_id, session_lines, tool_use_id, tool_name,
+timestamp, rank, match)`. `line_end` is null for a single line.
 `native_blame` reads a native source and `blame` the stored sessions. `file`
 is a path; `lines` is optional and selects lines as a number (`42`) or as
-text (`'10-20,42'`). A line is attributed to the earliest call, inside the
-window git gives the line's commit, whose input carries the line's text with
-whitespace collapsed; `session_id` is null when no call does. `lines` on the
-row is the session selection to read, from the human prompt before the call
-through the call, in the form a session target carries.
+text (`'10-20,42'`). A line may have several candidate calls; `rank` 1 is the
+strongest, and `match` names the evidence: `patch` (the call's recorded patch
+added the line), `input` (its input carries the line and the driver judged it
+wrote the file), `command` (its input carries the line, write unjudged), or
+`neighbor` (both adjacent lines are patch matches of this call). An
+unattributed line yields no row. `session_lines` is the selection to read,
+from the human prompt before the call through the call. Filter `WHERE rank =
+1` for one attribution per line.
 
 ```sql
-SELECT line, session_id, lines, tool_name
-FROM native_blame('', '/path/to/file.rs', '10-20');
+SELECT line, line_end, session_id, session_lines, tool_name, match
+FROM native_blame('', '/path/to/file.rs', '10-20')
+WHERE rank = 1;
 ```
 
 ```sql

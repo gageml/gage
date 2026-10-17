@@ -18,7 +18,8 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use datafusion::arrow::array::{
-    BooleanBuilder, Float64Builder, Int64Builder, StringBuilder, TimestampMillisecondBuilder,
+    BooleanBuilder, Float64Builder, Int64Builder, ListBuilder, StringBuilder,
+    TimestampMillisecondBuilder,
 };
 use datafusion::arrow::compute::SortOptions;
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
@@ -71,6 +72,10 @@ const ATTRS_COLS: &[&str] = &[
 
 /// The commit's `modified` marker: when the store wrote the version
 const MODIFIED_COL: &str = "modified";
+
+fn path_list() -> DataType {
+    DataType::List(Arc::new(Field::new("item", DataType::Utf8, true)))
+}
 
 fn stored_session_schema() -> SchemaRef {
     // Column order is shared with the driver `native_session` table:
@@ -125,6 +130,10 @@ fn stored_session_schema() -> SchemaRef {
         Field::new("output_tokens", DataType::Int64, true),
         Field::new("cached_tokens", DataType::Int64, true),
         Field::new("cost_usd", DataType::Float64, true),
+        // Files, as the driver `native_session` table defines them.
+        // The stored summary does not carry them yet, so both are null.
+        Field::new("files_changed", path_list(), true),
+        Field::new("files_referenced", path_list(), true),
         // System
         // Short display form of the Gage id
         system(Field::new("id_display", DataType::Utf8, false)),
@@ -397,6 +406,8 @@ impl StoredSessionExec {
         let mut cached_tokens = Int64Builder::with_capacity(len);
         let mut costs = Float64Builder::with_capacity(len);
         let mut projects = StringBuilder::new();
+        let mut files_changed = ListBuilder::new(StringBuilder::new());
+        let mut files_referenced = ListBuilder::new(StringBuilder::new());
 
         for tip in &tips {
             // Read before any column is appended, so a skipped object
@@ -440,6 +451,8 @@ impl StoredSessionExec {
                 cached_tokens.append_null();
                 costs.append_null();
                 projects.append_null();
+                files_changed.append_null();
+                files_referenced.append_null();
                 continue;
             };
             let attrs = &record.attrs;
@@ -461,6 +474,8 @@ impl StoredSessionExec {
             cached_tokens.append_option(summary.cached_tokens.map(|v| v as i64));
             costs.append_option(summary.cost_usd);
             projects.append_option(attrs.project.as_deref());
+            files_changed.append_null();
+            files_referenced.append_null();
         }
 
         let batch = RecordBatch::try_new(
@@ -486,6 +501,8 @@ impl StoredSessionExec {
                 Arc::new(output_tokens.finish()),
                 Arc::new(cached_tokens.finish()),
                 Arc::new(costs.finish()),
+                Arc::new(files_changed.finish()),
+                Arc::new(files_referenced.finish()),
                 Arc::new(id_displays.finish()),
                 Arc::new(id_prefixes.finish()),
                 Arc::new(locators.finish()),

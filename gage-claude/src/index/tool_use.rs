@@ -7,22 +7,30 @@
 //! two by id over one pass of a session's entries.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use gage_session::ToolUse;
 use serde_json::Value;
 
 use super::derive::{entry_timestamp_ms, tool_result_text};
+use super::paths::referenced_paths;
 
 #[derive(Default)]
 pub struct ToolUseCollector {
     rows: Vec<ToolUse>,
     by_id: HashMap<String, usize>,
+    /// Every path a call's input refers to, each once
+    referenced: Vec<PathBuf>,
+    /// The home directory `~` resolves to, read once
+    home: Option<PathBuf>,
 }
 
 impl ToolUseCollector {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            home: std::env::var_os("HOME").map(PathBuf::from),
+            ..Self::default()
+        }
     }
 
     /// Absorb one parsed entry: a call per `tool_use` block of an
@@ -65,6 +73,12 @@ impl ToolUseCollector {
             return;
         };
         let input = block.get("input").cloned().unwrap_or(Value::Null);
+        let cwd = entry.get("cwd").and_then(Value::as_str).map(Path::new);
+        for path in referenced_paths(name, &input, cwd, self.home.as_deref()) {
+            if !self.referenced.contains(&path) {
+                self.referenced.push(path);
+            }
+        }
         self.by_id.insert(id.to_string(), self.rows.len());
         self.rows.push(ToolUse {
             id: id.to_string(),
@@ -106,6 +120,12 @@ impl ToolUseCollector {
 
     pub fn finish(self) -> Vec<ToolUse> {
         self.rows
+    }
+
+    /// The paths every call's input referred to, in order of first
+    /// appearance.
+    pub fn referenced(&self) -> &[PathBuf] {
+        &self.referenced
     }
 }
 

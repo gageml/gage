@@ -130,6 +130,12 @@ pub struct ClaudeSessionAttrs {
     /// rows record, each once, sorted
     #[serde(default)]
     pub files_changed: Vec<PathBuf>,
+    /// Every other path a tool call's input referred to, each once,
+    /// sorted: an argument the harness names as a path, or a
+    /// path-shaped token of a shell command. Disjoint from
+    /// `files_changed`.
+    #[serde(default)]
+    pub files_referenced: Vec<PathBuf>,
 }
 
 pub struct DerivedSession {
@@ -532,6 +538,7 @@ pub fn derive_session(session_id: &str, path: &Path) -> Result<DerivedSession> {
     }
 
     let mut tool_use_batch = ToolUseBatch::new();
+    attrs.files_referenced = tool_uses.referenced().to_vec();
     for t in tool_uses.finish() {
         tool_use_batch.push(session_id, &t);
         attrs
@@ -540,6 +547,9 @@ pub fn derive_session(session_id: &str, path: &Path) -> Result<DerivedSession> {
     }
     attrs.files_changed.sort();
     attrs.files_changed.dedup();
+    attrs
+        .files_referenced
+        .retain(|p| attrs.files_changed.binary_search(p).is_err());
 
     Ok(DerivedSession {
         session_id: session_id.to_string(),
@@ -644,12 +654,14 @@ mod tests {
         let lines = [
             json!({"type":"user","uuid":"u1","timestamp":"2025-01-01T00:00:05Z",
                    "message":{"role":"user","content":"go"}}),
-            json!({"type":"assistant","uuid":"a1","timestamp":"2025-01-01T00:00:01Z",
+            json!({"type":"assistant","uuid":"a1","timestamp":"2025-01-01T00:00:01Z","cwd":"/w",
                    "message":{"role":"assistant","content":[
                        {"type":"tool_use","id":"t1","name":"Write",
                         "input":{"file_path":"/w/b.rs","content":"x"}},
                        {"type":"tool_use","id":"t2","name":"Write",
-                        "input":{"file_path":"/w/a.rs","content":"x"}}]}}),
+                        "input":{"file_path":"/w/a.rs","content":"x"}},
+                       {"type":"tool_use","id":"t3","name":"Bash",
+                        "input":{"command":"cat > ~/c.json <<EOF\n{}\nEOF\ncat /w/a.rs d/e.rs"}}]}}),
             json!({"type":"user","uuid":"u2","timestamp":"2025-01-01T00:00:09Z",
                    "message":{"role":"user","content":[
                        {"type":"tool_result","tool_use_id":"t1","content":"ok"}]}}),
@@ -667,7 +679,13 @@ mod tests {
             derived.attrs.files_changed,
             [PathBuf::from("/w/a.rs"), PathBuf::from("/w/b.rs")]
         );
-        assert_eq!(derived.tool_uses.num_rows(), 2);
+        let home = std::env::var_os("HOME").map(PathBuf::from).unwrap();
+        assert_eq!(
+            derived.attrs.files_referenced,
+            [home.join("c.json"), PathBuf::from("/w/d/e.rs")],
+            "referenced paths exclude the judged writes"
+        );
+        assert_eq!(derived.tool_uses.num_rows(), 3);
     }
 
     #[test]

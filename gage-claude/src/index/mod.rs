@@ -10,6 +10,7 @@
 //! providers in [`crate::tables`] read through it.
 
 mod derive;
+mod paths;
 mod reconcile;
 mod summary_cache;
 mod tool_use;

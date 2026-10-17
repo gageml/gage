@@ -40,6 +40,7 @@ mod age;
 mod blame;
 mod json;
 mod native;
+mod patch;
 mod print_format;
 mod project;
 mod repl;
@@ -67,6 +68,7 @@ use crate::age::age_udf;
 use crate::blame::{blame_fn, blame_schema, native_blame_fn};
 use crate::json::json_extract_udf;
 use crate::native::{NativeTable, NativeTableFn};
+use crate::patch::patch_lines_udf;
 pub use crate::print_format::{PrintFormat, write_yaml, write_yaml_capped};
 use crate::project::project_for_path_udf;
 pub use crate::repl::{TvfInfo, exec_command, run_repl};
@@ -431,6 +433,7 @@ pub(crate) fn new_context(skip_system_cols: bool, show_agents: bool) -> SessionC
     }
     ctx.register_udf(project_for_path_udf());
     ctx.register_udf(age_udf());
+    ctx.register_udf(patch_lines_udf());
     ctx.register_table("content_schema", content_schema_table())
         .unwrap();
     ctx
@@ -747,6 +750,60 @@ mod tests {
         .await;
         let parsed: serde_json::Value = serde_json::from_str(&schema[0]).unwrap();
         assert_eq!(parsed["type"], "object");
+    }
+
+    /// The session row lists the judged writes and the other paths a
+    /// call named, so a file a heredoc wrote is found by the session
+    /// that named it.
+    #[tokio::test]
+    async fn native_session_lists_the_files_a_session_wrote_and_named() {
+        gage_core::config::use_test_cache_root();
+        let claude_root = tempfile::tempdir().unwrap();
+        let dir = claude_root.path().join("projects").join("-w-proj");
+        std::fs::create_dir_all(&dir).unwrap();
+        let id = "cccccccc-0000-0000-0000-000000000001";
+        std::fs::write(
+            dir.join(format!("{id}.jsonl")),
+            concat!(
+                r#"{"type":"assistant","uuid":"a1","timestamp":"2025-01-01T00:00:01Z","cwd":"/w/proj","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Edit","input":{"file_path":"/w/proj/a.rs","old_string":"x","new_string":"y"}},{"type":"tool_use","id":"t2","name":"Bash","input":{"command":"cat > /etc/x/cfg.json <<EOF\n{}\nEOF\ncat b/c.rs"}}]}}"#,
+                "\n",
+                r#"{"type":"user","uuid":"u1","timestamp":"2025-01-01T00:00:02Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]}}"#,
+                "\n",
+                r#"{"type":"user","uuid":"u2","timestamp":"2025-01-01T00:00:03Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t2","content":"ok"}]}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        let spec = format!("claude:{}", claude_root.path().display());
+        let ctx = ContextBuilder::new(None).build().await;
+        let from = format!("native_session('{spec}')");
+        assert_eq!(
+            strings(
+                &ctx,
+                &format!("SELECT array_to_string(files_changed, ',') FROM {from}")
+            )
+            .await,
+            ["/w/proj/a.rs"]
+        );
+        assert_eq!(
+            strings(
+                &ctx,
+                &format!("SELECT array_to_string(files_referenced, ',') FROM {from}")
+            )
+            .await,
+            ["/etc/x/cfg.json,/w/proj/b/c.rs"],
+            "referenced paths are resolved against cwd and exclude the judged write"
+        );
+        assert_eq!(
+            strings(
+                &ctx,
+                &format!(
+                    "SELECT id FROM {from} WHERE array_has(files_referenced, '/etc/x/cfg.json')"
+                )
+            )
+            .await,
+            [id]
+        );
     }
 
     #[tokio::test]

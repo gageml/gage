@@ -26,9 +26,10 @@ Tables:
 - session (id, project, title, model, message_count, line_count, is_empty,
   input_tokens, output_tokens, cached_tokens, cost_usd, created, modified,
   session_type, driver, content_format, native_id, native_source,
-  native_size, native_mtime) - token columns are session totals: every prompt
-  token sent, every token generated, and the cached part of input; cost_usd
-  is the harness's own figure, null when it reports none
+  native_size, native_mtime, files_changed, files_referenced) - token columns
+  are session totals: prompt tokens sent, tokens generated, cached part of
+  input; cost_usd is the harness's figure, null when none; files_changed are
+  paths a call wrote, files_referenced other paths its input named
 - entry (session_id, line, uuid, type, subtype, timestamp, raw) - one row per
   transcript line, `raw` its JSON
 - message (session_id, line, uuid, type, subtype, timestamp, text,
@@ -78,10 +79,8 @@ not in the store: native_session('<source>'), native_message('<source>'),
 native_entry('<source>'), native_tool_use('<source>'). The argument is
 required and is a source URL: '' names the default source, 'claude:' is the
 default Claude Code source, and 'claude:/path' names a projects directory.
-native_session returns (id, project, title, model, message_count, is_empty,
-input_tokens, output_tokens, cached_tokens, cost_usd, content_format, mtime,
-size); `id` is the native UUID, and there is no line_count, created, or
-modified. The other three return the stored tables' columns, with the native
+native_session returns the same columns minus line_count, created, and
+modified, plus content_format, mtime, and size; `id` is the native UUID. The other three return the stored tables' columns, with the native
 UUID as `session_id`. Use these to read a session by native id before it
 is added to the store.
 
