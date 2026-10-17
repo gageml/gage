@@ -13,9 +13,12 @@ use crate::app;
 use crate::options::ViewOptions;
 use crate::session::Backend;
 
+/// Open the viewer on `session_id`, selected at JSONL line `line`
+/// when one is given. Without a session the viewer opens its picker.
 pub async fn run(
     backend: Backend,
     session_id: Option<&str>,
+    line: Option<u32>,
     options: ViewOptions,
 ) -> Result<(), Box<dyn Error>> {
     let document = match session_id {
@@ -24,7 +27,7 @@ pub async fn run(
     };
     let mut terminal = ratatui::init();
     let enhanced_keys = push_keyboard_enhancements();
-    let result = app::run(&mut terminal, document, &options, &backend);
+    let result = app::run(&mut terminal, document, line, &options, &backend);
     if enhanced_keys {
         pop_keyboard_enhancements();
     }

@@ -14,6 +14,7 @@ use gage_core::uuid::short_uuid;
 use gage_query::ContextBuilder;
 use gage_registry::driver::DriverRegistry;
 use gage_session::{Driver, Source, SourceOptions};
+use gage_store::url::LineSelection;
 use gage_store::{DatasetStore, SessionRecord, SessionStore, Store};
 use gage_tui::session::{Backend, picker_page_size};
 use gage_tui::{ViewOptions, session_view};
@@ -149,6 +150,11 @@ pub struct SessionRemoveArgs {
 #[command(next_display_order = 3)]
 pub struct SessionViewArgs {
     /// Session to view (ID or prefix)
+    ///
+    /// A trailing ":LINES" opens the view at a session line, as
+    /// "7260:2956". LINES is a line ("42"), a range ("10-20"), or a
+    /// comma-separated list of them ("10-20,42"), the selection a
+    /// session target carries; the view opens at the first line
     pub session: Option<String>,
 
     /// View options
@@ -1151,28 +1157,57 @@ pub async fn view(
 ) -> Result<(), CliError> {
     let options = ViewOptions::parse(args.options.as_deref().unwrap_or_default())
         .map_err(|e| anyhow!("gage session view: {e}"))?;
+    let (prefix, line) = match args.session.as_deref() {
+        Some(arg) => {
+            let (prefix, line) =
+                split_view_target(arg).map_err(|e| anyhow!("gage session view: {e}"))?;
+            (Some(prefix), line)
+        }
+        None => (None, None),
+    };
     // No session arg: the view opens with its session picker dialog.
     let result = if stored {
-        view_stored(args.session.as_deref(), options).await
+        view_stored(prefix, line, options).await
     } else {
-        view_native(source.as_deref(), args.session.as_deref(), options).await
+        view_native(source.as_deref(), prefix, line, options).await
     };
     result.map_err(|e| anyhow!("gage session view: {e}").into())
 }
 
-async fn view_stored(prefix: Option<&str>, options: ViewOptions) -> Result<(), Box<dyn Error>> {
+/// Split a view target into its session prefix and the first line of
+/// its `:LINES` suffix, when it has one.
+fn split_view_target(arg: &str) -> Result<(&str, Option<u32>), Box<dyn Error>> {
+    let Some((prefix, lines)) = arg.split_once(':') else {
+        return Ok((arg, None));
+    };
+    let selection: LineSelection = lines.parse()?;
+    let (first, _) = selection
+        .ranges()
+        .first()
+        .copied()
+        .expect("a parsed line selection should hold at least one range");
+    let first = u32::try_from(first).map_err(|e| format!("line {first} is out of range: {e}"))?;
+    Ok((prefix, Some(first)))
+}
+
+async fn view_stored(
+    prefix: Option<&str>,
+    line: Option<u32>,
+    options: ViewOptions,
+) -> Result<(), Box<dyn Error>> {
     let store = Store::open(&gage_store::store_path())?;
     let id = match prefix {
         Some(prefix) => Some(SessionStore::from(&store).get(prefix)?.id),
         None => None,
     };
     let backend = Backend::stored(store).await;
-    session_view::run(backend, id.as_deref(), options).await
+    session_view::run(backend, id.as_deref(), line, options).await
 }
 
 async fn view_native(
     source: Option<&str>,
     prefix: Option<&str>,
+    line: Option<u32>,
     options: ViewOptions,
 ) -> Result<(), Box<dyn Error>> {
     let registry = source::driver_registry();
@@ -1187,7 +1222,7 @@ async fn view_native(
     };
     opened.close()?;
     let backend = Backend::native(&spec).await?;
-    session_view::run(backend, id.as_deref(), options).await
+    session_view::run(backend, id.as_deref(), line, options).await
 }
 
 /// Prepare the picker's sessions before the TUI takes the terminal,
@@ -1209,4 +1244,39 @@ fn warm_picker_sessions(source: &dyn Source) -> Result<(), Box<dyn Error>> {
         bar.clear();
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn view_target_splits_prefix_and_first_line() {
+        assert_eq!(split_view_target("7260").unwrap(), ("7260", None));
+        assert_eq!(
+            split_view_target("7260:2956").unwrap(),
+            ("7260", Some(2956))
+        );
+        assert_eq!(
+            split_view_target("7260:10-20,30").unwrap(),
+            ("7260", Some(10))
+        );
+        assert_eq!(
+            split_view_target("7260:30,10-20").unwrap(),
+            ("7260", Some(30))
+        );
+    }
+
+    #[test]
+    fn view_target_rejects_a_malformed_line_suffix() {
+        for bad in ["7260:", "7260:abc", "7260:0", "7260:20-10"] {
+            let err = split_view_target(bad).unwrap_err().to_string();
+            assert!(err.contains("line selection"), "{bad}: {err}");
+        }
+        let beyond = u64::from(u32::MAX) + 1;
+        let err = split_view_target(&format!("7260:{beyond}"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("out of range"), "{err}");
+    }
 }

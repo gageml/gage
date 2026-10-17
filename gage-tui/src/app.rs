@@ -38,6 +38,7 @@ use crate::{message, styles};
 pub fn run(
     terminal: &mut DefaultTerminal,
     doc: Option<Document>,
+    line: Option<u32>,
     options: &ViewOptions,
     backend: &Backend,
 ) -> io::Result<()> {
@@ -51,6 +52,9 @@ pub fn run(
         },
     };
     let mut state = AppState::new(doc, options, DocSource::Backend, backend.supports_notes());
+    if let Some(line) = line {
+        state.select_line(line);
+    }
     loop {
         poll_pages(&mut state)?;
         terminal.draw(|frame| draw(frame, &mut state))?;
@@ -611,6 +615,15 @@ impl AppState {
         } else {
             self.body_scroll = 0;
             self.focus = Focus::Outline;
+        }
+    }
+
+    /// Select the entry at JSONL line `line`, or the nearest entry
+    /// before it, for hosts opening the view at a session line. A line
+    /// before the first entry leaves the selection where it is.
+    pub(crate) fn select_line(&mut self, line: u32) {
+        if let Some(index) = self.doc.entry_index_for_line(line) {
+            self.select_entry(index);
         }
     }
 
@@ -1797,6 +1810,30 @@ mod tests {
 
     /// Adding, editing, and deleting a note through the keys writes
     /// the store and keeps the outline in step with it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn select_line_opens_at_the_entry_for_a_session_line() {
+        let f = fixture();
+        let backend = Backend::stored(f.store).await;
+        let doc = backend.load(&f.session_id).await.unwrap();
+        let mut state = AppState::new(doc, &ViewOptions::default(), DocSource::Backend, true);
+        assert_eq!(outline_labels(&state), ["<Session>", "entry 0", "entry 1"]);
+        assert_eq!(state.selected_entry_index(), None);
+
+        // The fixture's entries sit at lines 1 and 2
+        state.select_line(2);
+        assert_eq!(state.selected_entry_index(), Some(1));
+        state.select_line(1);
+        assert_eq!(state.selected_entry_index(), Some(0));
+
+        // A line past the last entry selects the nearest entry before it
+        state.select_line(50);
+        assert_eq!(state.selected_entry_index(), Some(1));
+
+        // A line before the first entry leaves the selection alone
+        state.select_line(0);
+        assert_eq!(state.selected_entry_index(), Some(1));
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn note_keys_write_the_store() {
         let f = fixture();

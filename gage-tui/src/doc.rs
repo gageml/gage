@@ -31,6 +31,12 @@ impl Document {
         self.notes.iter().filter(|n| n.line.is_none()).collect()
     }
 
+    /// Index of the entry at JSONL line `line`, or of the nearest entry
+    /// before it when that line is not among the document's entries.
+    pub fn entry_index_for_line(&self, line: u32) -> Option<usize> {
+        self.entries.iter().rposition(|e| e.line <= line)
+    }
+
     pub fn add_note(&mut self, note: Note) {
         self.notes.push(note);
     }

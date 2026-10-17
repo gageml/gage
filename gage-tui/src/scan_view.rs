@@ -1459,14 +1459,13 @@ impl ViewState {
         let return_to = Box::new(std::mem::replace(&mut self.dialog, Dialog::None));
         self.dialog = match loaded {
             Some((doc, source, backend)) => {
-                let entry_index = target.line.and_then(|l| entry_index_for_line(&doc, l));
                 let options = crate::ViewOptions {
                     turns: true,
                     ..Default::default()
                 };
                 let mut view = app::AppState::new(doc, &options, source, false);
-                if let Some(i) = entry_index {
-                    view.select_entry(i);
+                if let Some(line) = target.line {
+                    view.select_line(line);
                 }
                 Dialog::Session {
                     id: item.id,
@@ -2431,12 +2430,6 @@ fn issue_session_target(issue: &IssueItem) -> Option<SessionTarget> {
         .iter()
         .find_map(|e| session_target(&e.target))
         .or_else(|| issue.sessions.first().map(|s| SessionTarget::new(&s.id)))
-}
-
-/// Index of the entry at JSONL line `line`, or of the nearest entry
-/// before it when that line is not among the document's entries.
-fn entry_index_for_line(doc: &Document, line: u32) -> Option<usize> {
-    doc.entries.iter().rposition(|e| e.line <= line)
 }
 
 /// An agent's duration: last minus first session timestamp once both
