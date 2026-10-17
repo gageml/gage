@@ -1,4 +1,5 @@
 use std::error::Error;
+use std::io::{self, IsTerminal};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -1155,6 +1156,12 @@ pub async fn view(
     stored: bool,
     args: SessionViewArgs,
 ) -> Result<(), CliError> {
+    if !io::stdout().is_terminal() {
+        return Err(CliError::message(
+            "gage session view: standard output is not a terminal; read sessions with gage \
+             query (tables session, message, tool_use)",
+        ));
+    }
     let options = ViewOptions::parse(args.options.as_deref().unwrap_or_default())
         .map_err(|e| anyhow!("gage session view: {e}"))?;
     let (prefix, line) = match args.session.as_deref() {

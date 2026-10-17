@@ -446,6 +446,12 @@ async fn list(args: ScanListArgs) -> Result<(), CliError> {
 }
 
 async fn view(args: ScanViewArgs) -> Result<(), CliError> {
+    if !io::stdout().is_terminal() {
+        return Err(CliError::message(
+            "gage scan view: standard output is not a terminal; read scans with gage query \
+             (tables scan, scan_session, scan_issue, scan_note)",
+        ));
+    }
     let store = Arc::new(Mutex::new(open_store("gage scan view")?));
     let host = Arc::new(StoreHost {
         store,

@@ -25,7 +25,7 @@ pub async fn run(
         Some(id) => Some(backend.load(id).await?),
         None => None,
     };
-    let mut terminal = ratatui::init();
+    let mut terminal = ratatui::try_init()?;
     let enhanced_keys = push_keyboard_enhancements();
     let result = app::run(&mut terminal, document, line, &options, &backend);
     if enhanced_keys {

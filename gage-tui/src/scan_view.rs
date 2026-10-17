@@ -578,7 +578,7 @@ pub async fn run(
     on_cancel: impl Fn(),
     host: Arc<dyn ScanHost>,
 ) -> io::Result<()> {
-    let mut terminal = ratatui::init();
+    let mut terminal = ratatui::try_init()?;
     let enhanced_keys = push_keyboard_enhancements();
     let result = event_loop(&mut terminal, model, &mut events, &on_cancel, host, false).await;
     if enhanced_keys {
@@ -592,7 +592,7 @@ pub async fn run(
 /// scan picker first (canceling it exits); the host rebuilds the
 /// model when the user opens a different scan (`o`, or the picker).
 pub async fn view(model: Option<ScanModel>, host: Arc<dyn ScanHost>) -> io::Result<()> {
-    let mut terminal = ratatui::init();
+    let mut terminal = ratatui::try_init()?;
     let enhanced_keys = push_keyboard_enhancements();
     let result = view_inner(&mut terminal, model, host).await;
     if enhanced_keys {
@@ -776,7 +776,7 @@ async fn run_resolve_session(
         .host
         .start_resolve_session(issue_ids)
         .and_then(|mut session| session.wait());
-    *terminal = ratatui::init();
+    *terminal = ratatui::try_init()?;
     push_keyboard_enhancements();
     terminal.clear()?;
     *stop_input = Arc::new(AtomicBool::new(false));

@@ -43,7 +43,7 @@ use crate::tree::{Collapse, Expand, Tree};
 /// id prefix; the first object matching it is selected when the view
 /// opens.
 pub fn run(store: Store, select: Option<&str>) -> io::Result<()> {
-    let mut terminal = ratatui::init();
+    let mut terminal = ratatui::try_init()?;
     let enhanced_keys = push_keyboard_enhancements();
     let result = run_inner(&mut terminal, store, select);
     if enhanced_keys {

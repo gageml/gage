@@ -1,3 +1,5 @@
+use std::io::{self, IsTerminal};
+
 use anyhow::Context;
 use clap::{Args, Subcommand};
 use cliclack as cli;
@@ -126,6 +128,12 @@ pub fn run(command: StoreCommand) -> Result<(), CliError> {
     match command {
         StoreCommand::Init => return init(),
         StoreCommand::Index(args) if args.rebuild => return rebuild_index(),
+        StoreCommand::View(_) if !io::stdout().is_terminal() => {
+            return Err(CliError::message(
+                "gage store view: standard output is not a terminal; read the store with gage \
+                 query",
+            ));
+        }
         _ => {}
     }
     let store = open_store()?;
