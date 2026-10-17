@@ -19,9 +19,7 @@ pub const SCANNER = #{
                 },
             },
             issues: #{
-                writes: #{
-                    "hidden-thinking": "Thinking blocks are hidden",
-                },
+                writes: #{ "hidden-thinking": "Thinking blocks are hidden" },
             },
         },
     },
@@ -66,11 +64,9 @@ pub async fn check_sessions() {
         let empty = msg.text == "";
         let note = write_note("empty-thinking", empty)
             .target(Target::session_line(session_id, msg.line))
-            .metadata(#{
-                msg_timestamp: msg.timestamp,
-                model: msg.model(),
-                config,
-            })
+            .metadata(
+                #{ msg_timestamp: msg.timestamp, model: msg.model(), config },
+            )
             .await?;
         if empty {
             write_issue(
@@ -87,18 +83,14 @@ pub async fn check_sessions() {
 
 async fn read_config() {
     let config = #{};
-    let attachments = scan()
-        .attachments()
-        .name("claude-config")
-        .await?;
+    let attachments = scan().attachments().name("claude-config").await?;
     match attachments.next() {
         Some(att) => {
             for name in SETTINGS {
                 if let Some(f) = att.file(name).await {
-                    if let Ok(settings) = f.json() {
-                        if let Some(val) = settings.get("showThinkingSummaries") {
-                            config.insert("showThinkingSummaries", val);
-                        }
+                    let settings = f.json()?;
+                    if let Some(val) = settings.get("showThinkingSummaries") {
+                        config.insert("showThinkingSummaries", val);
                     }
                 }
             }
