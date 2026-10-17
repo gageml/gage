@@ -85,13 +85,16 @@ pub trait Driver: Send + Sync {
     /// keeps it.
     fn open_source(&self, options: &SourceOptions) -> Result<Box<dyn Source>, DriverError>;
 
-    /// Open the source holding the native session `native_source`
-    /// names: the container a stored session's `native_source` came
-    /// from. The default treats the value as a source URL; a driver
-    /// whose native session URLs differ from its container URLs
-    /// overrides it.
-    fn open_native_source(&self, native_source: &str) -> Result<Box<dyn Source>, DriverError> {
-        self.open_source(&SourceOptions::new(native_source))
+    /// Split a session URL this driver spelled, as
+    /// [`Source::session_url`] returns it, into the URL of the source
+    /// holding the session and the session's id. A URL not in the
+    /// driver's grammar is an error.
+    fn split_session_url(&self, session_url: &str) -> Result<(String, String), DriverError>;
+
+    /// Open the source holding the session `session_url` names.
+    fn open_native_source(&self, session_url: &str) -> Result<Box<dyn Source>, DriverError> {
+        let (source, _id) = self.split_session_url(session_url)?;
+        self.open_source(&SourceOptions::new(&source))
     }
 
     /// Serialize `session` into the store through `sink`. The returned
@@ -266,6 +269,11 @@ pub struct MaintenanceStatus {
 pub trait Source: Send + Sync {
     /// The source value the handle was opened with, as given
     fn source(&self) -> &str;
+
+    /// The URL of the session `session_id` in this source, the value
+    /// [`NativeSession::source`] carries for it. [`Driver::split_session_url`]
+    /// reads it back.
+    fn session_url(&self, session_id: &str) -> String;
 
     fn as_any(&self) -> &dyn Any;
 
@@ -628,6 +636,9 @@ mod tests {
     impl Source for BareSource {
         fn source(&self) -> &str {
             &self.0
+        }
+        fn session_url(&self, _session_id: &str) -> String {
+            unimplemented!()
         }
         fn as_any(&self) -> &dyn Any {
             self

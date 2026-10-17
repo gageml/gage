@@ -1,17 +1,21 @@
-//! `IssuesFree`: reopen assigned issues whose session is not live.
+//! `IssuesFree`: reopen assigned issues whose session is gone.
 //!
-//! The tool reads every assigned issue, asks the session source
-//! whether the holding session is still a live instance, and reopens
-//! the issues whose holder is gone. A holder that is still live keeps
-//! its issue; a holder whose liveness cannot be determined is left
-//! assigned and named in the result, so an inconclusive check frees
-//! nothing.
+//! The tool reads every assigned issue and asks whether the session
+//! holding it, named by the URL on its assignment event, is still a
+//! live instance. A holder found not live frees its issue once the
+//! assignment is older than a grace period, so a session is not
+//! stripped of an issue in its first hour. A holder whose liveness
+//! cannot be determined frees its issue once the assignment is older
+//! than a day. Every issue left assigned is named in the result with
+//! the reason and the assignment's age, so the user can free it by
+//! hand with `gage issue open`.
 
 use std::future::Future;
 use std::pin::Pin;
 
+use gage_core::datetime::{format_elapsed_ms, now_ms};
 use gage_core::uuid::short_uuid;
-use gage_store::{IssueFull, IssueStatus, IssueStore};
+use gage_store::{IssueChange, IssueFull, IssueStatus, IssueStore};
 use rmcp::ErrorData as McpError;
 use rmcp::handler::server::router::tool::ToolRoute;
 use rmcp::handler::server::tool::ToolCallContext;
@@ -32,6 +36,14 @@ const _: () = assert!(
     description_byte_len(MD) <= MAX_DESCRIPTION_BYTES,
     "IssuesFree description exceeds Claude Code's description cap",
 );
+
+const HOUR_MS: i64 = 60 * 60 * 1000;
+
+/// How old an assignment must be before a not-live verdict frees it
+const NOT_LIVE_GRACE_MS: i64 = HOUR_MS;
+
+/// How old an assignment must be before an undetermined verdict frees it
+const UNDETERMINED_TTL_MS: i64 = 24 * HOUR_MS;
 
 fn route() -> ToolRoute<GageServer> {
     ToolRoute::new_dyn(
@@ -54,8 +66,13 @@ fn handle(
     })
 }
 
-/// Reopen every assigned issue whose holding session is not live.
+/// Reopen every assigned issue whose holder is gone, as of now.
 pub fn execute(config: &IssuesFreeConfig) -> CallToolResult {
+    execute_at(config, now_ms())
+}
+
+/// [`execute`] with the thresholds measured from `now`.
+fn execute_at(config: &IssuesFreeConfig, now: i64) -> CallToolResult {
     let store = config.writer.store();
     let issues = IssueStore::from(&*store);
     let author = &config.writer.author;
@@ -71,21 +88,41 @@ pub fn execute(config: &IssuesFreeConfig) -> CallToolResult {
 
     for issue in &assigned {
         let short = short_uuid(&issue.id);
-        let Some(session) = holder(issue) else {
-            left.push(format!("{short}: no session recorded on the assignment"));
+        let Some(assignment) = assignment(issue) else {
+            left.push(format!("{short}: no assignment event"));
             continue;
         };
-        match (config.liveness)(session) {
-            Ok(true) => live += 1,
-            Ok(false) => {
-                let message = format!("freed: session {session} is no longer live");
-                match issues.set_status(&issue.id, IssueStatus::Open, None, author, Some(&message))
-                {
-                    Ok(_) => freed.push(format!("{short} {}", issue.title)),
-                    Err(e) => left.push(format!("{short}: reopen failed: {e}")),
-                }
+        let age = now - assignment.timestamp_ms;
+        let since = format_elapsed_ms(assignment.timestamp_ms);
+        let verdict = match assignment.message.as_deref() {
+            Some(url) => (config.session_live)(url),
+            None => Err("no session recorded on the assignment".to_string()),
+        };
+        let message = match verdict {
+            Ok(true) => {
+                live += 1;
+                continue;
             }
-            Err(reason) => left.push(format!("{short}: {reason}")),
+            Ok(false) if age < NOT_LIVE_GRACE_MS => {
+                left.push(format!(
+                    "{short}: not live, assigned {since}, within 1h grace"
+                ));
+                continue;
+            }
+            Ok(false) => format!("freed: session is not live, assigned {since}"),
+            Err(reason) if age < UNDETERMINED_TTL_MS => {
+                left.push(format!(
+                    "{short}: liveness undetermined ({reason}), assigned {since}, within 24h"
+                ));
+                continue;
+            }
+            Err(reason) => {
+                format!("freed: liveness undetermined ({reason}), assigned {since}, past 24h")
+            }
+        };
+        match issues.set_status(&issue.id, IssueStatus::Open, None, author, Some(&message)) {
+            Ok(_) => freed.push(format!("{short} {}", issue.title)),
+            Err(e) => left.push(format!("{short}: reopen failed: {e}")),
         }
     }
 
@@ -104,15 +141,14 @@ fn assigned_issues(issues: &IssueStore<'_>) -> Result<Vec<IssueFull>, String> {
     Ok(assigned)
 }
 
-/// The session id recorded on the issue's most recent assignment: the
-/// message of the latest change that set status to `assigned`.
-fn holder(issue: &IssueFull) -> Option<&str> {
+/// The issue's most recent assignment: the latest change that set
+/// status to `assigned`. Its message is the holder's session URL.
+fn assignment(issue: &IssueFull) -> Option<&IssueChange> {
     issue
         .changes
         .iter()
         .rev()
         .find(|change| change.to_status == Some(IssueStatus::Assigned))
-        .and_then(|change| change.message.as_deref())
 }
 
 fn report(freed: &[String], live: usize, left: &[String]) -> String {
@@ -128,10 +164,7 @@ fn report(freed: &[String], live: usize, left: &[String]) -> String {
         lines.push(format!("Held by a live session: {live}."));
     }
     if !left.is_empty() {
-        lines.push(format!(
-            "Left assigned, liveness undetermined: {}.",
-            left.len()
-        ));
+        lines.push(format!("Left assigned: {}.", left.len()));
         lines.extend(left.iter().map(|u| format!("- {u}")));
     }
     lines.join("\n")
@@ -144,7 +177,7 @@ mod tests {
     use gage_store::IssueStore;
 
     use super::*;
-    use crate::service::{IssuesFreeConfig, SessionLivenessFn, StoreWriterConfig};
+    use crate::service::{SessionLiveFn, StoreWriterConfig};
     use crate::tools::store_test::{config, issue, text_of};
 
     fn status(writer: &StoreWriterConfig, id: &str) -> IssueStatus {
@@ -152,68 +185,114 @@ mod tests {
         IssueStore::from(&*store).get(id).unwrap().status
     }
 
+    fn assign(writer: &StoreWriterConfig, id: &str, url: &str) {
+        let store = writer.store.lock().unwrap();
+        IssueStore::from(&*store)
+            .assign(id, "user:t", url, false)
+            .unwrap();
+    }
+
+    fn last_message(writer: &StoreWriterConfig, id: &str) -> String {
+        let store = writer.store.lock().unwrap();
+        let full = IssueStore::from(&*store).get(id).unwrap();
+        let last = full.changes.last().unwrap();
+        assert_eq!(last.to_status, Some(IssueStatus::Open));
+        last.message.clone().unwrap()
+    }
+
+    /// Live for `live-*`, not live for `dead-*`, undetermined otherwise
+    fn probe() -> SessionLiveFn {
+        Arc::new(|url: &str| match url {
+            u if u.starts_with("claude:/x/live-") => Ok(true),
+            u if u.starts_with("claude:/x/dead-") => Ok(false),
+            other => Err(format!("cannot probe {other}")),
+        })
+    }
+
+    fn cfg(writer: &StoreWriterConfig) -> IssuesFreeConfig {
+        IssuesFreeConfig {
+            writer: writer.clone(),
+            session_live: probe(),
+        }
+    }
+
     #[test]
-    fn frees_dead_holders_keeps_live_and_leaves_undetermined() {
+    fn a_fresh_assignment_is_freed_only_when_its_holder_is_dead_past_grace() {
         let (_tmp, writer) = config();
         let open = issue(&writer, "Plain open", IssueStatus::Open);
         let dead = issue(&writer, "Dead holder", IssueStatus::Open);
         let alive = issue(&writer, "Live holder", IssueStatus::Open);
         let murky = issue(&writer, "Unknown holder", IssueStatus::Open);
-        {
-            let store = writer.store.lock().unwrap();
-            let s = IssueStore::from(&*store);
-            s.assign(&dead, "user:t", "dead-session", false).unwrap();
-            s.assign(&alive, "user:t", "live-session", false).unwrap();
-            s.assign(&murky, "user:t", "murky-session", false).unwrap();
-        }
+        assign(&writer, &dead, "claude:/x/dead-1");
+        assign(&writer, &alive, "claude:/x/live-1");
+        assign(&writer, &murky, "claude:/x/murky-1");
 
-        let liveness: SessionLivenessFn = Arc::new(|id: &str| match id {
-            "live-session" => Ok(true),
-            "dead-session" => Ok(false),
-            other => Err(format!("cannot probe {other}")),
-        });
-        let cfg = IssuesFreeConfig {
-            writer: writer.clone(),
-            liveness,
-        };
-
-        let result = execute(&cfg);
+        let result = execute(&cfg(&writer));
         assert_eq!(result.is_error, Some(false), "{}", text_of(&result));
         let text = text_of(&result);
-        assert!(text.contains("Dead holder"), "{text}");
-
-        assert_eq!(status(&writer, &dead), IssueStatus::Open);
+        assert!(text.contains("Freed no issues"), "{text}");
+        assert!(text.contains("Held by a live session: 1"), "{text}");
+        assert!(text.contains("Left assigned: 2"), "{text}");
+        assert!(text.contains("not live, assigned"), "{text}");
+        assert!(text.contains("within 1h grace"), "{text}");
+        assert!(text.contains("cannot probe claude:/x/murky-1"), "{text}");
+        assert!(text.contains("within 24h"), "{text}");
+        assert_eq!(status(&writer, &dead), IssueStatus::Assigned);
         assert_eq!(status(&writer, &alive), IssueStatus::Assigned);
         assert_eq!(status(&writer, &murky), IssueStatus::Assigned);
         assert_eq!(status(&writer, &open), IssueStatus::Open);
+
+        let result = execute_at(&cfg(&writer), now_ms() + 2 * HOUR_MS);
+        let text = text_of(&result);
+        assert!(text.contains("Freed 1:"), "{text}");
+        assert!(text.contains("Dead holder"), "{text}");
+        assert!(text.contains("Held by a live session: 1"), "{text}");
+        assert!(text.contains("Left assigned: 1"), "{text}");
+        assert_eq!(status(&writer, &dead), IssueStatus::Open);
+        assert_eq!(status(&writer, &alive), IssueStatus::Assigned);
+        assert_eq!(status(&writer, &murky), IssueStatus::Assigned);
+        assert!(
+            last_message(&writer, &dead).starts_with("freed: session is not live"),
+            "{}",
+            last_message(&writer, &dead)
+        );
     }
 
     #[test]
-    fn reopened_issue_records_the_dead_session() {
+    fn an_undetermined_holder_is_freed_past_a_day() {
         let (_tmp, writer) = config();
-        let dead = issue(&writer, "Dead holder", IssueStatus::Open);
-        {
-            let store = writer.store.lock().unwrap();
-            IssueStore::from(&*store)
-                .assign(&dead, "user:t", "dead-session", false)
-                .unwrap();
-        }
-        let liveness: SessionLivenessFn = Arc::new(|_id: &str| Ok(false));
-        let cfg = IssuesFreeConfig {
-            writer: writer.clone(),
-            liveness,
-        };
+        let murky = issue(&writer, "Unknown holder", IssueStatus::Open);
+        let alive = issue(&writer, "Live holder", IssueStatus::Open);
+        assign(&writer, &murky, "claude:/x/murky-1");
+        assign(&writer, &alive, "claude:/x/live-1");
 
-        execute(&cfg);
-
-        let store = writer.store.lock().unwrap();
-        let full = IssueStore::from(&*store).get(&dead).unwrap();
-        let last = full.changes.last().unwrap();
-        assert_eq!(last.to_status, Some(IssueStatus::Open));
+        let result = execute_at(&cfg(&writer), now_ms() + 23 * HOUR_MS);
         assert!(
-            last.message.as_deref().unwrap().contains("dead-session"),
-            "{:?}",
-            last.message
+            text_of(&result).contains("Freed no issues"),
+            "{}",
+            text_of(&result)
+        );
+        assert_eq!(status(&writer, &murky), IssueStatus::Assigned);
+
+        let result = execute_at(&cfg(&writer), now_ms() + 25 * HOUR_MS);
+        let text = text_of(&result);
+        assert!(text.contains("Unknown holder"), "{text}");
+        assert_eq!(status(&writer, &murky), IssueStatus::Open);
+        assert_eq!(status(&writer, &alive), IssueStatus::Assigned);
+        let message = last_message(&writer, &murky);
+        assert!(
+            message.contains("cannot probe claude:/x/murky-1"),
+            "{message}"
+        );
+        assert!(message.ends_with("past 24h"), "{message}");
+    }
+
+    #[test]
+    fn report_names_each_left_issue_by_its_own_reason() {
+        let text = report(&[], 1, &["abc: reopen failed: locked".to_string()]);
+        assert_eq!(
+            text,
+            "Freed no issues.\nHeld by a live session: 1.\nLeft assigned: 1.\n- abc: reopen failed: locked"
         );
     }
 
@@ -221,12 +300,7 @@ mod tests {
     fn no_assigned_issues_frees_nothing() {
         let (_tmp, writer) = config();
         issue(&writer, "Plain open", IssueStatus::Open);
-        let liveness: SessionLivenessFn = Arc::new(|_id: &str| Ok(false));
-        let cfg = IssuesFreeConfig {
-            writer: writer.clone(),
-            liveness,
-        };
-        let result = execute(&cfg);
+        let result = execute(&cfg(&writer));
         assert_eq!(result.is_error, Some(false), "{}", text_of(&result));
         assert!(
             text_of(&result).contains("Freed no issues"),

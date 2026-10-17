@@ -93,16 +93,26 @@ impl Driver for ClaudeDriver {
         Ok(Box::new(ClaudeSource::open(options)?))
     }
 
-    /// A native session URL is `claude:<root>/<native id>`; its
-    /// container is `claude:<root>`. A bare id is a session in the
-    /// default location, `claude:`.
-    fn open_native_source(&self, native_source: &str) -> Result<Box<dyn Source>, DriverError> {
-        let body = match split_scheme(native_source) {
+    /// A session URL is `claude:<root>/<id>`; its source is
+    /// `claude:<root>`. A bare id is a session in the default
+    /// location, `claude:`.
+    fn split_session_url(&self, session_url: &str) -> Result<(String, String), DriverError> {
+        let body = match split_scheme(session_url) {
+            Some((scheme, _)) if scheme != NAME => {
+                return Err(DriverError::Other(format!(
+                    "{session_url}: not a {NAME} session URL"
+                )));
+            }
             Some((_, body)) => body,
-            None => native_source,
+            None => session_url,
         };
-        let root = body.rsplit_once('/').map_or("", |(root, _id)| root);
-        self.open_source(&SourceOptions::new(&format!("{NAME}:{root}")))
+        let (root, id) = body.rsplit_once('/').unwrap_or(("", body));
+        if id.is_empty() {
+            return Err(DriverError::Other(format!(
+                "{session_url}: session URL has no session id"
+            )));
+        }
+        Ok((format!("{NAME}:{root}"), id.to_string()))
     }
 
     /// Drops the `claude-` vendor prefix every Claude model name carries
@@ -509,6 +519,10 @@ impl ClaudeSource {
 impl Source for ClaudeSource {
     fn source(&self) -> &str {
         &self.source
+    }
+
+    fn session_url(&self, session_id: &str) -> String {
+        session_url(&self.root, session_id)
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -938,6 +952,11 @@ fn walk_session_files(
     Box::new(it)
 }
 
+/// `claude:<absolute root>/<id>`, the URL of one session under `root`
+fn session_url(root: &Path, session_id: &str) -> String {
+    format!("{NAME}:{}/{session_id}", root.display())
+}
+
 /// A native Claude session with its attributes read at open. The
 /// summary (title, model, message count, emptiness, token usage) comes
 /// from the source's summary cache when the cache entry is current for
@@ -973,7 +992,7 @@ impl ClaudeNativeSession {
         };
         Ok(Self {
             native_id: native_id.to_string(),
-            source: format!("{NAME}:{}/{native_id}", root.display()),
+            source: session_url(root, native_id),
             session_path: path.to_path_buf(),
             attrs,
         })
@@ -1366,6 +1385,32 @@ mod tests {
             source.project_path(&encode_project_dir(&cwd)).unwrap(),
             Some(cwd)
         );
+    }
+
+    #[test]
+    fn split_session_url_reads_back_what_session_url_spells() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+        seed_session(root, "/Users/alice/Code/gage", id, "");
+        let driver = ClaudeDriver::new();
+        let source = driver
+            .open_source(&SourceOptions::new(&source_for(root)))
+            .unwrap();
+        let url = source.session_url(id);
+        assert_eq!(url, format!("{}/{id}", source_for(root)));
+        assert_eq!(url, source.open_native(id).unwrap().source());
+        assert_eq!(
+            driver.split_session_url(&url).unwrap(),
+            (source_for(root), id.to_string())
+        );
+        assert_eq!(
+            driver.split_session_url(id).unwrap(),
+            (format!("{NAME}:"), id.to_string())
+        );
+        assert!(driver.split_session_url("other:/x/y").is_err());
+        assert!(driver.split_session_url("claude:/x/").is_err());
+        assert!(driver.split_session_url("").is_err());
     }
 
     #[test]

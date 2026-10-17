@@ -1524,6 +1524,12 @@ mod tests {
         ) -> Result<Box<dyn gage_session::Source>, gage_session::DriverError> {
             Err(gage_session::DriverError::Other("not used".into()))
         }
+        fn split_session_url(
+            &self,
+            _session_url: &str,
+        ) -> Result<(String, String), gage_session::DriverError> {
+            Err(gage_session::DriverError::Other("not used".into()))
+        }
         fn write_native(
             &self,
             _session: &mut dyn gage_session::NativeSession,

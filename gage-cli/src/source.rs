@@ -53,10 +53,11 @@ pub fn default_driver(command: &str) -> Result<Arc<dyn Driver>, CliError> {
     })
 }
 
-/// Open `source` through the registry, or `command: source: <error>`
-pub fn open_source(command: &str, source: &str) -> Result<Box<dyn Source>, CliError> {
+/// Open `source` through the registry. `label` names the caller in the
+/// error: `<label>: <source>: <error>`.
+pub fn open_source(source: &str, label: &str) -> Result<Box<dyn Source>, CliError> {
     driver_registry()
         .open_source(&SourceOptions::new(source))
-        .with_context(|| format!("{command}: {source}"))
+        .with_context(|| format!("{label}: {source}"))
         .map_err(CliError::from)
 }

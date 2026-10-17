@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::env;
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -6,11 +7,11 @@ use std::time::Duration;
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 use gage_mcp::{
-    GageTool, IssueWriteConfig, IssuesFreeConfig, NoteWriteConfig, QueryConfig, SessionLivenessFn,
-    StoreWriterConfig, ToolSpec, serve_stdio,
+    GageTool, IssueAssignConfig, IssueWriteConfig, IssuesFreeConfig, NoteWriteConfig, QueryConfig,
+    SessionLiveFn, StoreWriterConfig, ToolSpec, serve_stdio,
 };
 use gage_query::ContextBuilder;
-use gage_session::Source;
+use gage_session::SourceOptions;
 use gage_store::{IssueStatus, Store, store_path};
 use humantime::DurationError;
 use tokio_util::sync::CancellationToken;
@@ -421,26 +422,42 @@ async fn run_mcp() -> anyhow::Result<()> {
         store,
         author: author::resolve_author(None),
     };
-    // IssuesFree probes session liveness through the default session
-    // source. When the source cannot be opened the tool still routes,
-    // reporting every session's liveness as undetermined rather than
-    // failing the server's startup.
-    let liveness: SessionLivenessFn = {
-        match source::open_source("gage mcp", "") {
-            Ok(opened) => {
-                let opened: Arc<dyn Source> = Arc::from(opened);
-                Arc::new(move |id: &str| opened.is_session_live(id).map_err(|e| e.to_string()))
-            }
-            Err(e) => {
-                let reason = match e {
-                    CliError::Exit { message, .. } => {
-                        message.unwrap_or_else(|| "session source unavailable".to_string())
-                    }
-                    CliError::Other(err) => format!("session source unavailable: {err:#}"),
-                };
-                Arc::new(move |_id: &str| Err(reason.clone()))
-            }
+    // The server's own session, as IssueAssign records it on each
+    // assignment: the id Claude Code put in the environment, spelled
+    // as a session URL by the default source. Without both the tool
+    // is left out of the spec, since it could not name a holder.
+    let session_url = match (
+        env::var_os("CLAUDE_CODE_SESSION_ID"),
+        source::open_source("", "gage mcp"),
+    ) {
+        (Some(id), Ok(opened)) => Some(opened.session_url(&id.to_string_lossy())),
+        (None, _) => {
+            tracing::warn!("IssueAssign unavailable: CLAUDE_CODE_SESSION_ID is not set");
+            None
         }
+        (_, Err(e)) => {
+            let reason = match e {
+                CliError::Exit { message, .. } => {
+                    message.unwrap_or_else(|| "session source unavailable".to_string())
+                }
+                CliError::Other(err) => format!("{err:#}"),
+            };
+            tracing::warn!("IssueAssign unavailable: {reason}");
+            None
+        }
+    };
+    // IssuesFree asks whether a holder's session URL is live by
+    // routing it through the driver registry. Any failure along the
+    // way is an undetermined verdict with its reason.
+    let session_live: SessionLiveFn = {
+        let registry = source::driver_registry();
+        Arc::new(move |url: &str| {
+            let (source, id) = registry.split_session_url(url).map_err(|e| e.to_string())?;
+            let opened = registry
+                .open_source(&SourceOptions::new(&source))
+                .map_err(|e| e.to_string())?;
+            opened.is_session_live(&id).map_err(|e| e.to_string())
+        })
     };
     // The names an interactive session may write notes under; scanner
     // output names stay with the scanners that declare them
@@ -460,11 +477,21 @@ async fn run_mcp() -> anyhow::Result<()> {
             )),
             GageTool::NoteWrite(NoteWriteConfig::with_store(writer.clone(), note_names)),
             GageTool::IssueUpdate(writer.clone()),
-            GageTool::IssueAssign(writer.clone()),
             GageTool::IssueComment(writer.clone()),
             GageTool::IssuePendingResolve(writer.clone()),
-            GageTool::IssuesFree(IssuesFreeConfig { writer, liveness }),
-        ],
+            GageTool::IssuesFree(IssuesFreeConfig {
+                writer: writer.clone(),
+                session_live,
+            }),
+        ]
+        .into_iter()
+        .chain(session_url.map(|session_url| {
+            GageTool::IssueAssign(IssueAssignConfig {
+                writer,
+                session_url,
+            })
+        }))
+        .collect(),
         custom: Vec::new(),
     };
     serve_stdio(spec).await.map_err(|e| anyhow::anyhow!("{e}"))

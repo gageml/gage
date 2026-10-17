@@ -31,7 +31,7 @@ pub struct IndexArgs {
 /// cron, and bulk imports — keeps the first-build cost out of
 /// interactive queries.
 pub async fn run(args: IndexArgs) -> Result<(), CliError> {
-    let source = source::open_source("gage index", args.source.as_deref().unwrap_or(""))?;
+    let source = source::open_source(args.source.as_deref().unwrap_or(""), "gage index")?;
 
     if args.status {
         let status = tokio::task::spawn_blocking(move || source.maintenance_status())

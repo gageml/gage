@@ -1,6 +1,5 @@
 //! `IssueAssign`: assign an open issue to this session.
 
-use std::env;
 use std::future::Future;
 use std::pin::Pin;
 
@@ -13,7 +12,7 @@ use rmcp::model::{CallToolResult, JsonObject};
 
 use super::issue_update::optional_string;
 use crate::server::GageServer;
-use crate::service::StoreWriterConfig;
+use crate::service::IssueAssignConfig;
 use crate::tool::{
     MAX_DESCRIPTION_BYTES, ToolDef, build_tool_meta, description_byte_len, domain_error, success,
 };
@@ -27,10 +26,6 @@ const _: () = assert!(
     description_byte_len(MD) <= MAX_DESCRIPTION_BYTES,
     "IssueAssign description exceeds Claude Code's 2048-byte cap",
 );
-
-/// The environment variable Claude Code sets to the session's ID; the
-/// MCP server inherits it from the session that launched it
-const SESSION_VAR: &str = "CLAUDE_CODE_SESSION_ID";
 
 fn route() -> ToolRoute<GageServer> {
     ToolRoute::new_dyn(
@@ -50,12 +45,7 @@ fn handle(
                 None,
             ));
         };
-        let Some(session) = env::var_os(SESSION_VAR) else {
-            return Ok(domain_error(format!(
-                "{SESSION_VAR} is not set, so this session cannot be identified"
-            )));
-        };
-        execute(config, params, &session.to_string_lossy())
+        execute(config, params)
     })
 }
 
@@ -68,18 +58,15 @@ enum Request {
     Issue { id: String, force: bool },
 }
 
-/// Parse the call and apply it for `session`. A call that violates
-/// the declared parameters is an invalid-params error; a store refusal
-/// is a result the model reads.
-pub fn execute(
-    config: &StoreWriterConfig,
-    params: JsonObject,
-    session: &str,
-) -> Result<CallToolResult, McpError> {
+/// Parse the call and apply it for the configured session. A call that
+/// violates the declared parameters is an invalid-params error; a
+/// store refusal is a result the model reads.
+pub fn execute(config: &IssueAssignConfig, params: JsonObject) -> Result<CallToolResult, McpError> {
     let request = parse_request(&params)?;
-    let store = config.store();
+    let store = config.writer.store();
     let issues = IssueStore::from(&*store);
-    let author = &config.author;
+    let author = &config.writer.author;
+    let session = config.session_url.as_str();
     match request {
         Request::Pool(pool) => {
             for id in &pool {
@@ -187,11 +174,20 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::service::StoreWriterConfig;
     use crate::tools::store_test::{config, issue, object, text_of};
 
     fn status(config: &StoreWriterConfig, id: &str) -> IssueStatus {
         let store = config.store.lock().unwrap();
         IssueStore::from(&*store).get(id).unwrap().status
+    }
+
+    /// The tool as session `session_url` would run it
+    fn session(writer: &StoreWriterConfig, session_url: &str) -> IssueAssignConfig {
+        IssueAssignConfig {
+            writer: writer.clone(),
+            session_url: session_url.to_string(),
+        }
     }
 
     #[test]
@@ -209,7 +205,11 @@ mod tests {
         }
 
         let pool = json!([held, pending, first, second]);
-        let r = execute(&config, object(json!({"pool": pool})), "session b").unwrap();
+        let r = execute(
+            &session(&config, "session b"),
+            object(json!({"pool": pool})),
+        )
+        .unwrap();
         assert_eq!(r.is_error, Some(false), "{}", text_of(&r));
         assert!(text_of(&r).contains("First open"), "{}", text_of(&r));
         assert_eq!(status(&config, &first), IssueStatus::Assigned);
@@ -223,10 +223,18 @@ mod tests {
             );
         }
 
-        let r = execute(&config, object(json!({"pool": pool})), "session c").unwrap();
+        let r = execute(
+            &session(&config, "session c"),
+            object(json!({"pool": pool})),
+        )
+        .unwrap();
         assert!(text_of(&r).contains("Second open"), "{}", text_of(&r));
 
-        let r = execute(&config, object(json!({"pool": pool})), "session d").unwrap();
+        let r = execute(
+            &session(&config, "session d"),
+            object(json!({"pool": pool})),
+        )
+        .unwrap();
         assert_eq!(r.is_error, Some(false), "{}", text_of(&r));
         assert_eq!(text_of(&r), "No open issue in pool.");
     }
@@ -236,18 +244,17 @@ mod tests {
         let (_tmp, config) = config();
         let id = issue(&config, "Something", IssueStatus::Open);
 
-        let r = execute(&config, object(json!({"issue": id})), "session a").unwrap();
+        let r = execute(&session(&config, "session a"), object(json!({"issue": id}))).unwrap();
         assert_eq!(r.is_error, Some(false), "{}", text_of(&r));
         assert_eq!(status(&config, &id), IssueStatus::Assigned);
 
-        let r = execute(&config, object(json!({"issue": id})), "session b").unwrap();
+        let r = execute(&session(&config, "session b"), object(json!({"issue": id}))).unwrap();
         assert_eq!(r.is_error, Some(true), "{}", text_of(&r));
         assert!(text_of(&r).contains("set force"), "{}", text_of(&r));
 
         let r = execute(
-            &config,
+            &session(&config, "session b"),
             object(json!({"issue": id, "force": true})),
-            "session b",
         )
         .unwrap();
         assert_eq!(r.is_error, Some(false), "{}", text_of(&r));
@@ -268,7 +275,11 @@ mod tests {
                 .set_status(&closed, IssueStatus::Closed, None, "user:t", None)
                 .unwrap();
         }
-        let r = execute(&config, object(json!({"issue": closed})), "session a").unwrap();
+        let r = execute(
+            &session(&config, "session a"),
+            object(json!({"issue": closed})),
+        )
+        .unwrap();
         assert_eq!(r.is_error, Some(true), "{}", text_of(&r));
         assert!(text_of(&r).contains("not open"), "{}", text_of(&r));
     }
@@ -277,9 +288,21 @@ mod tests {
     fn exactly_one_of_pool_or_issue() {
         let (_tmp, config) = config();
         let id = issue(&config, "Something", IssueStatus::Open);
-        assert!(execute(&config, object(json!({})), "s").is_err());
-        assert!(execute(&config, object(json!({"pool": [id], "issue": id})), "s").is_err());
-        assert!(execute(&config, object(json!({"pool": []})), "s").is_err());
-        assert!(execute(&config, object(json!({"pool": [id], "force": true})), "s").is_err());
+        assert!(execute(&session(&config, "s"), object(json!({}))).is_err());
+        assert!(
+            execute(
+                &session(&config, "s"),
+                object(json!({"pool": [id], "issue": id}))
+            )
+            .is_err()
+        );
+        assert!(execute(&session(&config, "s"), object(json!({"pool": []}))).is_err());
+        assert!(
+            execute(
+                &session(&config, "s"),
+                object(json!({"pool": [id], "force": true}))
+            )
+            .is_err()
+        );
     }
 }

@@ -1210,6 +1210,9 @@ mod tests {
         fn open_source(&self, _options: &SourceOptions) -> Result<Box<dyn Source>, DriverError> {
             Err(DriverError::Other("not used".into()))
         }
+        fn split_session_url(&self, _session_url: &str) -> Result<(String, String), DriverError> {
+            Err(DriverError::Other("not used".into()))
+        }
         fn write_native(
             &self,
             _session: &mut dyn NativeSession,

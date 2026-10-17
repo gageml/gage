@@ -44,7 +44,7 @@ pub enum GageTool {
     IssueWrite(IssueWriteConfig),
     NoteWrite(NoteWriteConfig),
     IssueUpdate(StoreWriterConfig),
-    IssueAssign(StoreWriterConfig),
+    IssueAssign(IssueAssignConfig),
     IssueComment(StoreWriterConfig),
     IssuePendingResolve(StoreWriterConfig),
     IssuesFree(IssuesFreeConfig),
@@ -87,19 +87,29 @@ impl StoreWriterConfig {
     }
 }
 
-/// Reports whether a session is a live instance now. `Ok(true)` is a
-/// positive live signal, `Ok(false)` a positive not-live signal, and
-/// `Err(reason)` is returned when liveness cannot be determined; the
-/// reason is surfaced in the tool result. The runtime wires this to
-/// the session source's own liveness probe.
-pub type SessionLivenessFn = Arc<dyn Fn(&str) -> Result<bool, String> + Send + Sync>;
+/// The `IssueAssign` tool's data: the store writer and the URL of the
+/// session the server serves, recorded on each assignment as the
+/// holder. The URL is fixed for the server's lifetime.
+#[derive(Clone)]
+pub struct IssueAssignConfig {
+    pub writer: StoreWriterConfig,
+    pub session_url: String,
+}
+
+/// Reports whether the session a session URL names is a live instance
+/// now. `Ok(true)` is a positive live signal, `Ok(false)` a positive
+/// not-live signal, and `Err(reason)` means liveness cannot be
+/// determined: the URL is malformed, its source cannot be opened, or
+/// the source cannot probe it. The runtime builds it over the driver
+/// registry.
+pub type SessionLiveFn = Arc<dyn Fn(&str) -> Result<bool, String> + Send + Sync>;
 
 /// The `IssuesFree` tool's data: the store it reopens issues through
 /// and the probe it asks whether a holding session is still live.
 #[derive(Clone)]
 pub struct IssuesFreeConfig {
     pub writer: StoreWriterConfig,
-    pub liveness: SessionLivenessFn,
+    pub session_live: SessionLiveFn,
 }
 
 /// The `Query` tool's data: the DataFusion context its SQL runs on
@@ -172,7 +182,7 @@ pub struct ToolsConfig {
     pub issue_write: Option<IssueWriteConfig>,
     pub note_write: Option<NoteWriteConfig>,
     pub issue_update: Option<StoreWriterConfig>,
-    pub issue_assign: Option<StoreWriterConfig>,
+    pub issue_assign: Option<IssueAssignConfig>,
     pub issue_comment: Option<StoreWriterConfig>,
     pub issue_pending_resolve: Option<StoreWriterConfig>,
     pub issues_free: Option<IssuesFreeConfig>,

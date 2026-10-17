@@ -91,6 +91,16 @@ impl DriverRegistry {
             .ok_or_else(|| DriverError::Other("no default session driver registered".into()))?;
         driver.open_source(options)
     }
+
+    /// Route `session_url` to its driver by scheme and split it into
+    /// its source URL and session id. A scheme-less URL goes to the
+    /// default driver.
+    pub fn split_session_url(&self, session_url: &str) -> Result<(String, String), DriverError> {
+        let driver = self
+            .driver_for(session_url)
+            .ok_or_else(|| DriverError::Other("no default session driver registered".into()))?;
+        driver.split_session_url(session_url)
+    }
 }
 
 impl Default for DriverRegistry {
@@ -120,6 +130,9 @@ mod tests {
             self.1
         }
         fn open_source(&self, _options: &SourceOptions) -> Result<Box<dyn Source>, DriverError> {
+            Err(DriverError::Other("not used".into()))
+        }
+        fn split_session_url(&self, _session_url: &str) -> Result<(String, String), DriverError> {
             Err(DriverError::Other("not used".into()))
         }
         fn write_native(

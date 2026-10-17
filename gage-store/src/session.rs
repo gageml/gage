@@ -815,6 +815,9 @@ pub(crate) mod tests {
         fn open_source(&self, _options: &SourceOptions) -> Result<Box<dyn Source>, DriverError> {
             Err(DriverError::Other("open_source not used".into()))
         }
+        fn split_session_url(&self, _session_url: &str) -> Result<(String, String), DriverError> {
+            Err(DriverError::Other("split_session_url not used".into()))
+        }
         fn write_native(
             &self,
             session: &mut dyn NativeSession,
@@ -978,6 +981,9 @@ pub(crate) mod tests {
         }
         fn open_source(&self, _options: &SourceOptions) -> Result<Box<dyn Source>, DriverError> {
             Err(DriverError::Other("open_source not used".into()))
+        }
+        fn split_session_url(&self, _session_url: &str) -> Result<(String, String), DriverError> {
+            Err(DriverError::Other("split_session_url not used".into()))
         }
         fn write_native(
             &self,
