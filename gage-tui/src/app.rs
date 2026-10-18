@@ -2103,7 +2103,11 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn note_key_explains_itself_without_note_support() {
         let f = fixture();
-        let backend = Backend::native(&f.spec).await.unwrap();
+        let backend = Backend::native(&f.spec)
+            .cache_root(&f.cache_root)
+            .open()
+            .await
+            .unwrap();
         let doc = backend.load(&f.native_id).await.unwrap();
         let mut state = AppState::new(
             doc,
@@ -2325,7 +2329,11 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn notes_unavailable_notice_wraps_to_the_terminal() {
         let f = fixture();
-        let backend = Backend::native(&f.spec).await.unwrap();
+        let backend = Backend::native(&f.spec)
+            .cache_root(&f.cache_root)
+            .open()
+            .await
+            .unwrap();
         let doc = backend.load(&f.native_id).await.unwrap();
         let mut state = AppState::new(doc, &ViewOptions::default(), DocSource::Backend, false);
         press(&mut state, &backend, KeyCode::Char('n'));

@@ -32,7 +32,7 @@ pub(crate) async fn attach_for_scanners(
     // The first terminal write failure, surfaced after the tasks end;
     // later events are not rendered
     let mut write: io::Result<()> = Ok(());
-    attach(store, dataset_id, scanners, driver, |event| {
+    attach(store, dataset_id, scanners, driver, None, |event| {
         if write.is_err() {
             return;
         }

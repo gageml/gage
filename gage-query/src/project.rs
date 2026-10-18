@@ -8,7 +8,7 @@
 //! project name and filter with `project = project_for_path(<value>)`.
 
 use std::any::Any;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use datafusion::arrow::array::{Array, StringArray, StringBuilder};
@@ -21,19 +21,23 @@ use datafusion::scalar::ScalarValue;
 use gage_registry::driver::DriverRegistry;
 use gage_session::{Source, SourceOptions};
 
-pub fn project_for_path_udf() -> ScalarUDF {
-    ScalarUDF::from(ProjectForPath::new())
+/// The UDF, resolving through the default source, whose derived state
+/// is kept under `cache_root`, or the default root when it is `None`.
+pub fn project_for_path_udf(cache_root: Option<PathBuf>) -> ScalarUDF {
+    ScalarUDF::from(ProjectForPath::new(cache_root))
 }
 
 #[derive(Debug, PartialEq, Eq, Hash)]
 struct ProjectForPath {
     signature: Signature,
+    cache_root: Option<PathBuf>,
 }
 
 impl ProjectForPath {
-    fn new() -> Self {
+    fn new(cache_root: Option<PathBuf>) -> Self {
         Self {
             signature: Signature::exact(vec![DataType::Utf8], Volatility::Stable),
+            cache_root,
         }
     }
 }
@@ -67,7 +71,7 @@ impl ScalarUDFImpl for ProjectForPath {
                     .ok_or_else(|| {
                         DataFusionError::Internal("project_for_path expects Utf8".into())
                     })?;
-                let mut resolver = Resolver::new();
+                let mut resolver = Resolver::new(self.cache_root.clone());
                 let mut out = StringBuilder::with_capacity(strs.len(), strs.value_data().len());
                 for i in 0..strs.len() {
                     if strs.is_null(i) {
@@ -79,7 +83,7 @@ impl ScalarUDFImpl for ProjectForPath {
                 Ok(ColumnarValue::Array(Arc::new(out.finish())))
             }
             ColumnarValue::Scalar(ScalarValue::Utf8(Some(s))) => {
-                let mut resolver = Resolver::new();
+                let mut resolver = Resolver::new(self.cache_root.clone());
                 Ok(ColumnarValue::Scalar(ScalarValue::Utf8(Some(
                     resolver.resolve(&s)?,
                 ))))
@@ -98,11 +102,15 @@ impl ScalarUDFImpl for ProjectForPath {
 /// reuses it. Inputs that are not directories never open a source.
 struct Resolver {
     source: Option<Box<dyn Source>>,
+    cache_root: Option<PathBuf>,
 }
 
 impl Resolver {
-    fn new() -> Self {
-        Self { source: None }
+    fn new(cache_root: Option<PathBuf>) -> Self {
+        Self {
+            source: None,
+            cache_root,
+        }
     }
 
     fn resolve(&mut self, input: &str) -> Result<String> {
@@ -112,11 +120,11 @@ impl Resolver {
         }
         if self.source.is_none() {
             let registry = DriverRegistry::builtin();
-            self.source = Some(
-                registry
-                    .open_source(&SourceOptions::new(""))
-                    .map_err(external)?,
-            );
+            let mut options = SourceOptions::new("");
+            if let Some(root) = &self.cache_root {
+                options.cache_root(root);
+            }
+            self.source = Some(registry.open_source(&options).map_err(external)?);
         }
         let source = self.source.as_ref().expect("source opened above");
         source.project_name(path).map_err(external)

@@ -62,6 +62,9 @@ pub struct AttachContext {
     /// The driver that reopens a session's native source for
     /// `session.native()`
     pub driver: Arc<dyn Driver>,
+    /// Where the sources opened during the phase keep their derived
+    /// state; `None` is the default cache root
+    pub cache_root: Option<PathBuf>,
     query_store: Arc<Mutex<Store>>,
     dataset_query: Arc<OnceCell<SessionContext>>,
 }
@@ -84,6 +87,7 @@ impl AttachContext {
             store: Arc::new(tokio::sync::Mutex::new(Store::open(store_path)?)),
             attached,
             driver,
+            cache_root: None,
             query_store: Arc::new(Mutex::new(Store::open(store_path)?)),
             dataset_query: Arc::new(OnceCell::new()),
         })
@@ -94,7 +98,12 @@ impl AttachContext {
     pub(crate) async fn dataset_context(&self) -> Result<&SessionContext, VmError> {
         self.dataset_query
             .get_or_try_init(|| async {
-                let ctx = ContextBuilder::new(Some(Arc::clone(&self.query_store)))
+                let builder = ContextBuilder::new(Some(Arc::clone(&self.query_store)));
+                let builder = match &self.cache_root {
+                    Some(root) => builder.cache_root(root),
+                    None => builder,
+                };
+                let ctx = builder
                     .scope(ScanScope::dataset(&self.dataset.commit_sha))
                     .build()
                     .await;

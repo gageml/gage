@@ -54,17 +54,29 @@ use crate::patch;
 use crate::scope::SessionSet;
 use crate::stored_rows::{RowKind, StoredRowsTable};
 
-/// `blame(file [, lines])` over the stored sessions.
-pub fn blame_fn(store: Arc<Mutex<Store>>) -> Arc<dyn TableFunctionImpl> {
+/// `blame(file [, lines])` over the stored sessions. The source the
+/// project names are resolved through keeps its derived state under
+/// `cache_root`, or the default root when it is `None`.
+pub fn blame_fn(
+    store: Arc<Mutex<Store>>,
+    cache_root: Option<PathBuf>,
+) -> Arc<dyn TableFunctionImpl> {
     Arc::new(BlameFn {
         scope: Scope::Stored(store),
+        cache_root,
     })
 }
 
-/// `native_blame(source, file [, lines])` over a native source.
-pub fn native_blame_fn(show_agents: bool) -> Arc<dyn TableFunctionImpl> {
+/// `native_blame(source, file [, lines])` over a native source, whose
+/// derived state is kept under `cache_root`, or the default root when
+/// it is `None`.
+pub fn native_blame_fn(
+    show_agents: bool,
+    cache_root: Option<PathBuf>,
+) -> Arc<dyn TableFunctionImpl> {
     Arc::new(BlameFn {
         scope: Scope::Native { show_agents },
+        cache_root,
     })
 }
 
@@ -95,6 +107,7 @@ enum Scope {
 #[derive(Debug)]
 struct BlameFn {
     scope: Scope,
+    cache_root: Option<PathBuf>,
 }
 
 impl TableFunctionImpl for BlameFn {
@@ -124,6 +137,7 @@ impl TableFunctionImpl for BlameFn {
         Ok(Arc::new(BlameTable {
             scope: self.scope.clone(),
             source,
+            cache_root: self.cache_root.clone(),
             path,
             selection,
         }))
@@ -147,6 +161,7 @@ struct BlameTable {
     scope: Scope,
     /// The native source spec; `None` in the stored scope
     source: Option<String>,
+    cache_root: Option<PathBuf>,
     path: PathBuf,
     selection: Option<LineSelection>,
 }
@@ -194,9 +209,12 @@ impl BlameTable {
             Scope::Stored(_) => false,
         };
         options.show_agents(show_agents);
+        if let Some(root) = &self.cache_root {
+            options.cache_root(root);
+        }
         let source = registry.open_source(&options).map_err(external)?;
         let projects = project_names(source.as_ref(), lines)?;
-        let ctx = new_context(false, show_agents);
+        let ctx = new_context(false, show_agents, self.cache_root.clone());
         let tables: [(&str, Arc<dyn TableProvider>); 3] = match &self.scope {
             Scope::Native { .. } => {
                 let tables = source.tables().map_err(external)?;
@@ -1245,7 +1263,7 @@ filename f.rs
         let file = dir.path().join("f.txt");
         std::fs::write(&file, "x\n").unwrap();
         let file = file.to_str().unwrap();
-        let native = native_blame_fn(false);
+        let native = native_blame_fn(false, None);
         let err = native.call(&[lit(file)]).err().unwrap();
         assert!(
             err.to_string()
@@ -1381,7 +1399,7 @@ filename f.rs
     ) -> String {
         let spec = format!("claude:{}", claude_root.display());
         let source = DriverRegistry::builtin()
-            .open_source(&SourceOptions::new(&spec))
+            .open_source(SourceOptions::new(&spec).cache_root(claude_root.join("cache")))
             .unwrap();
         let project_dir = claude_root
             .join("projects")
@@ -1447,7 +1465,6 @@ filename f.rs
     /// commit writing a line the committed file carries reflowed over
     /// two lines, and a shell append whose result has no diff.
     fn fixture() -> (tempfile::TempDir, tempfile::TempDir, PathBuf, String) {
-        gage_core::config::use_temp_cache_root();
         let repo = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(repo.path()).unwrap();
         git(&root, &["init", "-q"]);
@@ -1524,8 +1541,11 @@ filename f.rs
 
     #[tokio::test]
     async fn native_blame_attributes_lines_to_the_earliest_call_carrying_them() {
-        let (_repo, _claude_root, path, spec) = fixture();
-        let ctx = ContextBuilder::new(None).build().await;
+        let (_repo, claude_root, path, spec) = fixture();
+        let ctx = ContextBuilder::new(None)
+            .cache_root(claude_root.path().join("cache"))
+            .build()
+            .await;
         let from = format!("native_blame('{spec}', '{}')", path.display());
         let all = rows(&ctx, &from).await;
         assert!(
@@ -1579,14 +1599,16 @@ filename f.rs
 
     #[tokio::test]
     async fn blame_reads_stored_sessions() {
-        let (_repo, _claude_root, path, spec) = fixture();
+        let (_repo, claude_root, path, spec) = fixture();
         let tmp = tempfile::tempdir().unwrap();
         let store_path = tmp.path().join("store.git");
         gage_store::init(&store_path).unwrap();
         let store = Arc::new(Mutex::new(Store::open(&store_path).unwrap()));
         let registry = DriverRegistry::builtin();
         let driver = registry.driver_for(&spec).unwrap();
-        let source = driver.open_source(&SourceOptions::new(&spec)).unwrap();
+        let source = driver
+            .open_source(SourceOptions::new(&spec).cache_root(claude_root.path().join("cache")))
+            .unwrap();
         let mut native = source.open_native(NATIVE_ID).unwrap();
         {
             let store = store.lock().unwrap();
@@ -1594,7 +1616,10 @@ filename f.rs
                 .add(driver.as_ref(), native.as_mut())
                 .unwrap();
         }
-        let ctx = ContextBuilder::new(Some(store)).build().await;
+        let ctx = ContextBuilder::new(Some(store))
+            .cache_root(claude_root.path().join("cache"))
+            .build()
+            .await;
         let stored_id = strings(&ctx, "SELECT id FROM session", &[]).await.unwrap();
         let rows = rows(&ctx, &format!("blame('{}', '2-3')", path.display())).await;
         let r1: Vec<_> = rows
@@ -1636,7 +1661,6 @@ filename f.rs
     /// the calls that wrote the old path.
     #[tokio::test]
     async fn native_blame_follows_a_rename() {
-        gage_core::config::use_temp_cache_root();
         let repo = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(repo.path()).unwrap();
         git(&root, &["init", "-q"]);
@@ -1663,7 +1687,10 @@ filename f.rs
         let claude_root = tempfile::tempdir().unwrap();
         let spec = write_session(claude_root.path(), &root, NATIVE_ID, &lines);
 
-        let ctx = ContextBuilder::new(None).build().await;
+        let ctx = ContextBuilder::new(None)
+            .cache_root(claude_root.path().join("cache"))
+            .build()
+            .await;
         let rows = rows(
             &ctx,
             &format!("native_blame('{spec}', '{}')", new.display()),
@@ -1706,13 +1733,15 @@ filename f.rs
     /// rather than building an empty SQL predicate.
     #[tokio::test]
     async fn an_empty_file_returns_no_rows() {
-        gage_core::config::use_temp_cache_root();
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("empty.txt");
         std::fs::write(&file, "").unwrap();
         let claude_root = tempfile::tempdir().unwrap();
         let spec = write_session(claude_root.path(), dir.path(), NATIVE_ID, &[]);
-        let ctx = ContextBuilder::new(None).build().await;
+        let ctx = ContextBuilder::new(None)
+            .cache_root(claude_root.path().join("cache"))
+            .build()
+            .await;
         let rows = rows(
             &ctx,
             &format!("native_blame('{spec}', '{}')", file.display()),
@@ -1725,7 +1754,6 @@ filename f.rs
     /// call, since the edit that added its neighbors added it too.
     #[tokio::test]
     async fn a_line_between_two_patch_matches_is_attributed_to_the_same_call() {
-        gage_core::config::use_temp_cache_root();
         let dir = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(dir.path()).unwrap();
         let file = root.join("notes.md");
@@ -1737,7 +1765,10 @@ filename f.rs
         let claude_root = tempfile::tempdir().unwrap();
         let spec = write_session(claude_root.path(), &root, NATIVE_ID, &lines);
 
-        let ctx = ContextBuilder::new(None).build().await;
+        let ctx = ContextBuilder::new(None)
+            .cache_root(claude_root.path().join("cache"))
+            .build()
+            .await;
         let rows = rows(
             &ctx,
             &format!("native_blame('{spec}', '{}')", file.display()),
@@ -1763,7 +1794,6 @@ filename f.rs
     /// fallback on the summary's referenced paths.
     #[tokio::test]
     async fn the_wide_fallback_finds_a_file_named_only_in_a_command() {
-        gage_core::config::use_temp_cache_root();
         let home = tempfile::tempdir().unwrap();
         let home = std::fs::canonicalize(home.path()).unwrap();
         let project_root = home.join("projA");
@@ -1779,7 +1809,10 @@ filename f.rs
         // The session belongs to projA, not to any ancestor of the file
         let spec = write_session(claude_root.path(), &project_root, NATIVE_ID, &lines);
 
-        let ctx = ContextBuilder::new(None).build().await;
+        let ctx = ContextBuilder::new(None)
+            .cache_root(claude_root.path().join("cache"))
+            .build()
+            .await;
         let rows = rows(
             &ctx,
             &format!("native_blame('{spec}', '{}')", file.display()),

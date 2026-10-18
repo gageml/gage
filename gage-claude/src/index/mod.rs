@@ -18,8 +18,6 @@ mod tool_use;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use gage_core::config::cache_root;
-
 use crate::session::encode_project_dir;
 
 pub use derive::{
@@ -36,15 +34,14 @@ pub use tool_use::ToolUseCollector;
 /// `<cache_root>/<slug>`, where the slug is the canonical projects
 /// path with every non-alphanumeric character replaced by `-`. Every
 /// source is keyed the same way; the default Claude location is not
-/// special. The base is `<gage_home>/cache` unless the process uses a
-/// temp cache root.
-pub fn cache_dir_for(projects_dir: &Path) -> PathBuf {
+/// special.
+pub fn cache_dir_for(cache_root: &Path, projects_dir: &Path) -> PathBuf {
     // A projects dir that cannot be canonicalized (typically: it does
     // not exist yet) is keyed as given. The only effect of a
     // non-canonical key is a second cache dir for the same corpus.
     let canonical =
         std::fs::canonicalize(projects_dir).unwrap_or_else(|_| projects_dir.to_path_buf());
-    cache_root().join(encode_project_dir(&canonical))
+    cache_root.join(encode_project_dir(&canonical))
 }
 
 #[derive(Debug)]

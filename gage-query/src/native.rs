@@ -9,6 +9,7 @@
 //! is required: `''` names the default source and `'claude:/path'`
 //! names one.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use datafusion::catalog::TableFunctionImpl;
@@ -57,6 +58,9 @@ pub struct NativeTableFn {
     pub skip_system_cols: bool,
     /// Read the runtime's own in-flight agent sessions too
     pub show_agents: bool,
+    /// Where the opened source keeps its derived state; `None` is the
+    /// driver's default root
+    pub cache_root: Option<PathBuf>,
 }
 
 impl TableFunctionImpl for NativeTableFn {
@@ -73,6 +77,9 @@ impl TableFunctionImpl for NativeTableFn {
         let registry = DriverRegistry::builtin();
         let mut options = SourceOptions::new(&source);
         options.show_agents(self.show_agents);
+        if let Some(root) = &self.cache_root {
+            options.cache_root(root);
+        }
         let opened = registry.open_source(&options).map_err(external)?;
         // The provider holds its own handle to the driver's index; the
         // opened source may drop once the tables are taken.
@@ -109,6 +116,7 @@ mod tests {
             table: NativeTable::Session,
             skip_system_cols: false,
             show_agents: false,
+            cache_root: None,
         }
     }
 

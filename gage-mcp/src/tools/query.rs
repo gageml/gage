@@ -24,7 +24,7 @@ use datafusion::arrow::ipc::reader::FileReader;
 use datafusion::arrow::ipc::writer::FileWriter;
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::prelude::SessionContext;
-use gage_core::config::cache_root;
+use gage_core::config::default_cache_root;
 use gage_core::uuid::new_uuid;
 use gage_query::write_yaml_capped;
 use rmcp::ErrorData as McpError;
@@ -298,7 +298,7 @@ impl Default for QueryCache {
 impl QueryCache {
     /// The cache under the Gage cache root.
     pub fn new() -> Self {
-        Self::with_dir(cache_root().join("query"))
+        Self::with_dir(default_cache_root().join("query"))
     }
 
     pub fn with_dir(dir: PathBuf) -> Self {

@@ -40,11 +40,14 @@ pub use tool_use::{ToolUse, ToolUseBatch, tool_use_batch, tool_use_schema};
 /// under one of the driver's schemes, or a scheme-less value the
 /// driver interprets as it sees fit. The runtime's own in-flight agent
 /// sessions are left out unless `show_agents` is set; the live scan
-/// view is the one reader that wants them.
+/// view is the one reader that wants them. A driver that keeps derived
+/// state on disk keeps it under `cache_root`, and under its default
+/// root when none is given.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceOptions {
     url: String,
     show_agents: bool,
+    cache_root: Option<PathBuf>,
 }
 
 impl SourceOptions {
@@ -52,11 +55,19 @@ impl SourceOptions {
         Self {
             url: url.to_string(),
             show_agents: false,
+            cache_root: None,
         }
     }
 
     pub fn show_agents(&mut self, show: bool) -> &mut Self {
         self.show_agents = show;
+        self
+    }
+
+    /// Keep the source's derived state under `root` rather than the
+    /// driver's default cache root.
+    pub fn cache_root(&mut self, root: impl Into<PathBuf>) -> &mut Self {
+        self.cache_root = Some(root.into());
         self
     }
 
@@ -67,6 +78,11 @@ impl SourceOptions {
 
     pub fn shows_agents(&self) -> bool {
         self.show_agents
+    }
+
+    /// The cache root the caller named, if any
+    pub fn cache_root_path(&self) -> Option<&Path> {
+        self.cache_root.as_deref()
     }
 }
 
@@ -90,12 +106,6 @@ pub trait Driver: Send + Sync {
     /// holding the session and the session's id. A URL not in the
     /// driver's grammar is an error.
     fn split_session_url(&self, session_url: &str) -> Result<(String, String), DriverError>;
-
-    /// Open the source holding the session `session_url` names.
-    fn open_native_source(&self, session_url: &str) -> Result<Box<dyn Source>, DriverError> {
-        let (source, _id) = self.split_session_url(session_url)?;
-        self.open_source(&SourceOptions::new(&source))
-    }
 
     /// Serialize `session` into the store through `sink`. The returned
     /// string is the `content_format` value the store persists on the
@@ -607,6 +617,14 @@ mod tests {
         assert!(!options.shows_agents());
         options.show_agents(true);
         assert!(options.shows_agents());
+    }
+
+    #[test]
+    fn source_options_carry_a_cache_root_only_when_given() {
+        let mut options = SourceOptions::new("claude:/tmp/foo");
+        assert_eq!(options.cache_root_path(), None);
+        options.cache_root("/tmp/cache");
+        assert_eq!(options.cache_root_path(), Some(Path::new("/tmp/cache")));
     }
 
     #[test]

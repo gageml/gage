@@ -5,7 +5,6 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize, de};
 use serde_json as json;
@@ -116,32 +115,12 @@ pub fn gage_home() -> PathBuf {
     }
 }
 
-/// A process-global cache-root override. `None` until a caller points
-/// the cache at a temp directory through [`use_temp_cache_root`], in
-/// which case every derived cache of the process is written there
-/// instead of under the user's `<gage_home>/cache`.
-static CACHE_ROOT_OVERRIDE: OnceLock<PathBuf> = OnceLock::new();
-
-/// The base directory for per-source derived caches. `<gage_home>/cache`
-/// unless the process uses a temp root through [`use_temp_cache_root`].
-pub fn cache_root() -> PathBuf {
-    CACHE_ROOT_OVERRIDE
-        .get()
-        .cloned()
-        .unwrap_or_else(|| gage_home().join("cache"))
-}
-
-/// Point [`cache_root`] at a process-unique temp directory, once.
-/// Idempotent: every caller computes the same pid-keyed path and the
-/// first call creates it. Call it before opening a session source
-/// whose caches must not reach `<gage_home>/cache`. The directory is
-/// left for the OS to reclaim; one per process.
-pub fn use_temp_cache_root() {
-    CACHE_ROOT_OVERRIDE.get_or_init(|| {
-        let dir = env::temp_dir().join(format!("gage-cache-{}", std::process::id()));
-        fs::create_dir_all(&dir).expect("temp cache root should be creatable under the temp dir");
-        dir
-    });
+/// The base directory for derived caches when a caller names none:
+/// `<gage_home>/cache`. A writer of derived data takes its cache root
+/// from the caller, through the options or builder that opens it,
+/// and falls back to this value.
+pub fn default_cache_root() -> PathBuf {
+    gage_home().join("cache")
 }
 
 /// Returns the agent session corpus root: `<gage_home>/claude`. Agent

@@ -1739,6 +1739,7 @@ async fn run_prepared(
         jobs: prep.jobs,
         agent_jobs: prep.agent_jobs,
         driver,
+        cache_root: None,
         invalidate: prep.invalidate,
         ignore_missing_attachments: prep.ignore_missing_attachments,
     };

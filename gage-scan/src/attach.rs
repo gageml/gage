@@ -13,7 +13,7 @@
 
 use std::collections::BTreeSet;
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use gage_registry::scanner::{TaskDef, TaskKind};
@@ -80,12 +80,14 @@ impl From<StoreError> for AttachError {
 
 /// Run every attach task of `scanners` against the dataset
 /// `dataset_id`, which is read at its current commit. `driver` reopens
-/// native sources for `session.native()`.
+/// native sources for `session.native()`, keeping their derived state
+/// under `cache_root`, or the default cache root when it is `None`.
 pub async fn attach(
     store: &Store,
     dataset_id: &str,
     scanners: &[CompiledScanner],
     driver: Arc<dyn Driver>,
+    cache_root: Option<PathBuf>,
     mut on_event: impl FnMut(AttachEvent),
 ) -> Result<(), AttachError> {
     let record = DatasetStore::from(store).get(dataset_id)?;
@@ -105,6 +107,7 @@ pub async fn attach(
                 scanner,
                 task,
                 Arc::clone(&driver),
+                cache_root.clone(),
                 &mut on_event,
             )
             .await?;
@@ -129,11 +132,12 @@ async fn run_one(
     scanner: &CompiledScanner,
     task: &TaskDef,
     driver: Arc<dyn Driver>,
+    cache_root: Option<PathBuf>,
     on_event: &mut impl FnMut(AttachEvent),
 ) -> Result<(), AttachError> {
     let (attached_tx, mut attached_rx) = mpsc::unbounded_channel();
     let (output_tx, mut output_rx) = mpsc::unbounded_channel();
-    let ctx = AttachContext::new(
+    let mut ctx = AttachContext::new(
         dataset.clone(),
         scanner.name.clone(),
         scanner.dir().to_path_buf(),
@@ -141,6 +145,7 @@ async fn run_one(
         attached_tx,
         driver,
     )?;
+    ctx.cache_root = cache_root;
     let sink = OutputSink {
         scanner: scanner.name.clone(),
         task: task.name.clone(),

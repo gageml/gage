@@ -8,6 +8,7 @@
 //! backend reads or writes them.
 
 use std::error::Error;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use datafusion::arrow::array::{
@@ -73,35 +74,14 @@ fn page_size_for_rows(rows: u16) -> usize {
 
 impl Backend {
     /// Over the driver source `spec` names. Empty names the default
-    /// driver's default location.
-    pub async fn native(spec: &str) -> Result<Backend, Box<dyn Error>> {
-        Self::native_showing(spec, false).await
-    }
-
-    /// Over the driver source `spec` names, reading the runtime's own
-    /// in-flight agent sessions too. The live scan view opens a
-    /// running agent through this backend.
-    pub async fn native_with_agents(spec: &str) -> Result<Backend, Box<dyn Error>> {
-        Self::native_showing(spec, true).await
-    }
-
-    async fn native_showing(spec: &str, show_agents: bool) -> Result<Backend, Box<dyn Error>> {
-        let registry = DriverRegistry::builtin();
-        let driver = registry
-            .driver_for(spec)
-            .ok_or_else(|| format!("no session driver for source {spec:?}"))?;
-        let mut ctx = ContextBuilder::new(None);
-        if show_agents {
-            ctx = ctx.show_agents();
+    /// driver's default location. The returned builder opens the
+    /// backend with [`NativeBackend::open`].
+    pub fn native(spec: &str) -> NativeBackend {
+        NativeBackend {
+            spec: spec.to_string(),
+            show_agents: false,
+            cache_root: None,
         }
-        Ok(Backend {
-            ctx: ctx.build().await,
-            kind: Kind::Native {
-                spec: spec.to_string(),
-                driver,
-            },
-            registry: Arc::new(registry),
-        })
     }
 
     /// Over the store.
@@ -406,6 +386,53 @@ impl Backend {
     }
 }
 
+/// A native backend before it is opened: the source, whether the
+/// runtime's own in-flight agent sessions are read, and where the
+/// source keeps its derived state.
+pub struct NativeBackend {
+    spec: String,
+    show_agents: bool,
+    cache_root: Option<PathBuf>,
+}
+
+impl NativeBackend {
+    /// Read the runtime's own in-flight agent sessions too. The live
+    /// scan view opens a running agent through such a backend.
+    pub fn show_agents(mut self) -> Self {
+        self.show_agents = true;
+        self
+    }
+
+    /// Keep the source's derived state under `root` rather than the
+    /// default cache root.
+    pub fn cache_root(mut self, root: impl Into<PathBuf>) -> Self {
+        self.cache_root = Some(root.into());
+        self
+    }
+
+    pub async fn open(self) -> Result<Backend, Box<dyn Error>> {
+        let registry = DriverRegistry::builtin();
+        let driver = registry
+            .driver_for(&self.spec)
+            .ok_or_else(|| format!("no session driver for source {:?}", self.spec))?;
+        let mut ctx = ContextBuilder::new(None);
+        if self.show_agents {
+            ctx = ctx.show_agents();
+        }
+        if let Some(root) = self.cache_root {
+            ctx = ctx.cache_root(root);
+        }
+        Ok(Backend {
+            ctx: ctx.build().await,
+            kind: Kind::Native {
+                spec: self.spec,
+                driver,
+            },
+            registry: Arc::new(registry),
+        })
+    }
+}
+
 /// A row in the session-open picker.
 pub struct SessionListItem {
     pub id: String,
@@ -514,6 +541,8 @@ pub(crate) mod tests {
         pub native_id: String,
         pub store: Store,
         pub session_id: String,
+        /// Where the source keeps its derived state, beside the store
+        pub cache_root: PathBuf,
         _dirs: (TempDir, TempDir),
     }
 
@@ -536,10 +565,13 @@ pub(crate) mod tests {
         let path = store_root.path().join("store.git");
         gage_store::init(&path).unwrap();
         let store = Store::open(&path).unwrap();
+        let cache_root = store_root.path().join("cache");
         let spec = format!("claude:{}", claude_root.path().display());
         let registry = DriverRegistry::builtin();
         let driver = registry.driver_for(&spec).unwrap();
-        let source = driver.open_source(&SourceOptions::new(&spec)).unwrap();
+        let source = driver
+            .open_source(SourceOptions::new(&spec).cache_root(&cache_root))
+            .unwrap();
         let mut native = source.open_native(native_id).unwrap();
         let session_id = SessionStore::from(&store)
             .add(driver.as_ref(), native.as_mut())
@@ -550,6 +582,7 @@ pub(crate) mod tests {
             native_id: native_id.to_string(),
             store,
             session_id,
+            cache_root,
             _dirs: (claude_root, store_root),
         }
     }
@@ -640,11 +673,19 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn native_backend_loads_without_notes() {
         let f = fixture();
-        let backend = Backend::native(&f.spec).await.unwrap();
+        let backend = Backend::native(&f.spec)
+            .cache_root(&f.cache_root)
+            .open()
+            .await
+            .unwrap();
         assert!(backend.is_native());
         assert!(!backend.supports_notes());
 
         let doc = backend.load(&f.native_id).await.unwrap();
+        assert!(
+            f.cache_root.is_dir(),
+            "the source's cache is under the given root"
+        );
         assert_eq!(doc.entries.len(), 2);
         assert_eq!(doc.session.value["id"], f.native_id);
         assert!(doc.session.value.get("path").is_none());

@@ -49,6 +49,7 @@ pub mod scope;
 pub mod stored_rows;
 pub mod system_cols;
 
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use datafusion::datasource::{MemTable, TableProvider, ViewTable};
@@ -88,6 +89,7 @@ pub struct ContextBuilder {
     scope: Option<ScanScope>,
     skip_system_cols: bool,
     show_agents: bool,
+    cache_root: Option<PathBuf>,
 }
 
 impl ContextBuilder {
@@ -97,7 +99,17 @@ impl ContextBuilder {
             scope: None,
             skip_system_cols: false,
             show_agents: false,
+            cache_root: None,
         }
+    }
+
+    /// Keep the derived state of every source the context opens under
+    /// `root` rather than the default cache root. The native table
+    /// functions, `native_blame`, `blame`, and `project_for_path` open
+    /// sources.
+    pub fn cache_root(mut self, root: impl Into<PathBuf>) -> Self {
+        self.cache_root = Some(root.into());
+        self
     }
 
     /// Scope the context to one scan: every table serves that scan's
@@ -133,9 +145,13 @@ impl ContextBuilder {
     /// context registers the scan's tables, with the relations as
     /// tables rather than views.
     pub async fn build(self) -> SessionContext {
-        let ctx = new_context(self.skip_system_cols, self.show_agents);
+        let ctx = new_context(
+            self.skip_system_cols,
+            self.show_agents,
+            self.cache_root.clone(),
+        );
         let Some(store) = self.store else {
-            register_blame_functions(&ctx, None, self.show_agents);
+            register_blame_functions(&ctx, None, self.show_agents, self.cache_root);
             return ctx;
         };
         if let Some(scope) = self.scope {
@@ -188,7 +204,7 @@ impl ContextBuilder {
         ctx.register_table("note_doc", registry_note_doc_table())
             .expect("register the note doc table on a fresh context");
         register_issue_functions(&ctx, &store);
-        register_blame_functions(&ctx, Some(&store), self.show_agents);
+        register_blame_functions(&ctx, Some(&store), self.show_agents, self.cache_root);
         // Views are planned over the raw providers, so they survive the
         // user-facing context hiding what they read
         for (name, sql) in VIEWS {
@@ -293,10 +309,14 @@ fn register_blame_functions(
     ctx: &SessionContext,
     store: Option<&Arc<Mutex<Store>>>,
     show_agents: bool,
+    cache_root: Option<PathBuf>,
 ) {
-    ctx.register_udtf("native_blame", native_blame_fn(show_agents));
+    ctx.register_udtf(
+        "native_blame",
+        native_blame_fn(show_agents, cache_root.clone()),
+    );
     if let Some(store) = store {
-        ctx.register_udtf("blame", blame_fn(Arc::clone(store)));
+        ctx.register_udtf("blame", blame_fn(Arc::clone(store), cache_root));
     }
 }
 
@@ -410,8 +430,13 @@ const NATIVE_TABLES: [NativeTable; 4] = [
 /// extension, the PostgreSQL SQL dialect, `information_schema`, the
 /// native table functions, the JSON functions, the `project_for_path`
 /// UDF, and the `content_schema` table --- with no store tables
-/// registered.
-pub(crate) fn new_context(skip_system_cols: bool, show_agents: bool) -> SessionContext {
+/// registered. Sources the functions open keep their derived state
+/// under `cache_root`, or the default root when it is `None`.
+pub(crate) fn new_context(
+    skip_system_cols: bool,
+    show_agents: bool,
+    cache_root: Option<PathBuf>,
+) -> SessionContext {
     let config = SessionConfig::new()
         .with_information_schema(true)
         .with_extension(Arc::new(RowCache::new()))
@@ -430,10 +455,11 @@ pub(crate) fn new_context(skip_system_cols: bool, show_agents: bool) -> SessionC
                 table,
                 skip_system_cols,
                 show_agents,
+                cache_root: cache_root.clone(),
             }),
         );
     }
-    ctx.register_udf(project_for_path_udf());
+    ctx.register_udf(project_for_path_udf(cache_root));
     ctx.register_udf(age_udf());
     ctx.register_udf(patch_lines_udf());
     ctx.register_table("content_schema", content_schema_table())
@@ -759,7 +785,6 @@ mod tests {
     /// that named it.
     #[tokio::test]
     async fn native_session_lists_the_files_a_session_wrote_and_named() {
-        gage_core::config::use_temp_cache_root();
         let claude_root = tempfile::tempdir().unwrap();
         let dir = claude_root.path().join("projects").join("-w-proj");
         std::fs::create_dir_all(&dir).unwrap();
@@ -777,8 +802,16 @@ mod tests {
         )
         .unwrap();
         let spec = format!("claude:{}", claude_root.path().display());
-        let ctx = ContextBuilder::new(None).build().await;
+        let ctx = ContextBuilder::new(None)
+            .cache_root(claude_root.path().join("cache"))
+            .build()
+            .await;
         let from = format!("native_session('{spec}')");
+        assert_eq!(strings(&ctx, &format!("SELECT id FROM {from}")).await, [id]);
+        assert!(
+            claude_root.path().join("cache").is_dir(),
+            "the source's cache is under the context's root"
+        );
         assert_eq!(
             strings(
                 &ctx,
@@ -810,7 +843,6 @@ mod tests {
 
     #[tokio::test]
     async fn native_session_pushes_project_and_mtime_filters_into_the_walk() {
-        gage_core::config::use_temp_cache_root();
         use std::time::{Duration, UNIX_EPOCH};
 
         let claude_root = tempfile::tempdir().unwrap();
@@ -843,7 +875,10 @@ mod tests {
                 .unwrap();
         }
         let spec = format!("claude:{}", claude_root.path().display());
-        let ctx = ContextBuilder::new(None).build().await;
+        let ctx = ContextBuilder::new(None)
+            .cache_root(claude_root.path().join("cache"))
+            .build()
+            .await;
         let from = format!("native_session('{spec}')");
 
         let newest_in_a =
@@ -874,7 +909,6 @@ mod tests {
     /// join to `session`.
     #[tokio::test]
     async fn entry_and_message_read_stored_sessions_through_the_driver() {
-        gage_core::config::use_temp_cache_root();
         let (_tmp, store) = open_store();
         let claude_root = tempfile::tempdir().unwrap();
         let native_id = "11111111-2222-3333-4444-555555555555";
@@ -895,7 +929,9 @@ mod tests {
         let spec = format!("claude:{}", claude_root.path().display());
         let registry = DriverRegistry::builtin();
         let driver = registry.driver_for(&spec).unwrap();
-        let source = driver.open_source(&SourceOptions::new(&spec)).unwrap();
+        let source = driver
+            .open_source(SourceOptions::new(&spec).cache_root(claude_root.path().join("cache")))
+            .unwrap();
         let mut native = source.open_native(native_id).unwrap();
         {
             let store = store.lock().unwrap();
@@ -925,7 +961,6 @@ mod tests {
     /// session filter and the `line` filter on the calling entry.
     #[tokio::test]
     async fn tool_use_reads_stored_sessions_through_the_driver() {
-        gage_core::config::use_temp_cache_root();
         let (_tmp, store) = open_store();
         let claude_root = tempfile::tempdir().unwrap();
         let native_id = "11111111-2222-3333-4444-666666666666";
@@ -948,7 +983,9 @@ mod tests {
         let spec = format!("claude:{}", claude_root.path().display());
         let registry = DriverRegistry::builtin();
         let driver = registry.driver_for(&spec).unwrap();
-        let source = driver.open_source(&SourceOptions::new(&spec)).unwrap();
+        let source = driver
+            .open_source(SourceOptions::new(&spec).cache_root(claude_root.path().join("cache")))
+            .unwrap();
         let mut native = source.open_native(native_id).unwrap();
         {
             let store = store.lock().unwrap();
@@ -957,7 +994,10 @@ mod tests {
                 .unwrap();
         }
 
-        let ctx = ContextBuilder::new(Some(store)).build().await;
+        let ctx = ContextBuilder::new(Some(store))
+            .cache_root(claude_root.path().join("cache"))
+            .build()
+            .await;
         let names = strings(&ctx, "SELECT name FROM tool_use ORDER BY line").await;
         assert_eq!(names, ["Edit", "Read"]);
 
@@ -1027,7 +1067,6 @@ mod tests {
     /// the commit columns.
     #[tokio::test]
     async fn link_tables_and_views_resolve_relations() {
-        gage_core::config::use_temp_cache_root();
         let (_tmp, store) = open_store();
         let claude_root = tempfile::tempdir().unwrap();
         let native_id = "11111111-2222-3333-4444-555555555555";
@@ -1044,7 +1083,9 @@ mod tests {
         let spec = format!("claude:{}", claude_root.path().display());
         let registry = DriverRegistry::builtin();
         let driver = registry.driver_for(&spec).unwrap();
-        let source = driver.open_source(&SourceOptions::new(&spec)).unwrap();
+        let source = driver
+            .open_source(SourceOptions::new(&spec).cache_root(claude_root.path().join("cache")))
+            .unwrap();
         let mut native = source.open_native(native_id).unwrap();
         let (dataset_id, dataset_commit, session_id, note_id, issue_id) = {
             let store = store.lock().unwrap();

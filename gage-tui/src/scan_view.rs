@@ -2753,7 +2753,7 @@ fn issue_session_lines(sessions: &[IssueSessionItem], width: usize) -> Vec<Line<
 /// cannot serve until the agent has ended.
 fn live_agent_backend() -> io::Result<Backend> {
     tokio::task::block_in_place(|| {
-        tokio::runtime::Handle::current().block_on(Backend::native_with_agents(""))
+        tokio::runtime::Handle::current().block_on(Backend::native("").show_agents().open())
     })
     .map_err(|e| io::Error::other(e.to_string()))
 }
@@ -3766,7 +3766,7 @@ mod tests {
         let backend = tokio::runtime::Builder::new_current_thread()
             .build()
             .unwrap()
-            .block_on(Backend::native(""))
+            .block_on(Backend::native("").open())
             .unwrap();
         state.dialog = Dialog::Session {
             id: "s1".into(),

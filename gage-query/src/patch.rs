@@ -208,7 +208,7 @@ mod tests {
 
     #[tokio::test]
     async fn patch_lines_selects_lines_by_op() {
-        let ctx = crate::new_context(false, false);
+        let ctx = crate::new_context(false, false, None);
         let sql = format!(
             "SELECT array_to_string(patch_lines('{}', 'add'), '|') AS a, \
              array_to_string(patch_lines('{}', 'remove'), '|') AS r, \

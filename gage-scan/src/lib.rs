@@ -390,6 +390,9 @@ pub struct ScanConfig<'a> {
     pub agent_jobs: usize,
     /// The driver that runs the scan's agents
     pub driver: Arc<dyn Driver>,
+    /// Where the sources opened during the scan keep their derived
+    /// state; `None` is the default cache root
+    pub cache_root: Option<PathBuf>,
     /// Ignore prior work: every object's high-water mark is 0 and no
     /// notes are carried forward. Watermarks are still written.
     pub invalidate: bool,
@@ -487,6 +490,7 @@ pub async fn scan(
         Arc::clone(&config.driver),
     )?;
     scan_ctx.invalidate = config.invalidate;
+    scan_ctx.cache_root = config.cache_root.clone();
     scan_ctx.agent_pool = Arc::new(Semaphore::new(config.agent_jobs.max(1)));
     trace::install_panic_hook();
     let scope = LogScope {
@@ -1324,6 +1328,7 @@ mod tests {
             jobs: 1,
             agent_jobs: 8,
             driver: claude_driver(),
+            cache_root: Some(root.with_file_name("cache")),
             invalidate: false,
             ignore_missing_attachments: false,
         };
@@ -1915,6 +1920,7 @@ mod tests {
             jobs: 1,
             agent_jobs: 1,
             driver: driver.clone(),
+            cache_root: Some(tmp.path().join("cache")),
             invalidate: false,
             ignore_missing_attachments: false,
         };
@@ -1989,6 +1995,7 @@ mod tests {
             jobs: 1,
             agent_jobs: 8,
             driver: driver.clone(),
+            cache_root: Some(tmp.path().join("cache")),
             invalidate: false,
             ignore_missing_attachments: false,
         };
@@ -2042,6 +2049,7 @@ mod tests {
             jobs: 1,
             agent_jobs: 8,
             driver: driver.clone(),
+            cache_root: Some(tmp.path().join("cache")),
             invalidate: false,
             ignore_missing_attachments: false,
         };
@@ -2114,6 +2122,7 @@ mod tests {
             jobs: 1,
             agent_jobs: 8,
             driver: Arc::new(ScriptedDriver::new()),
+            cache_root: Some(tmp.path().join("cache")),
             invalidate: false,
             ignore_missing_attachments: false,
         };
@@ -2184,6 +2193,7 @@ mod tests {
             jobs: 1,
             agent_jobs: 8,
             driver,
+            cache_root: Some(tmp.path().join("cache")),
             invalidate: false,
             ignore_missing_attachments: false,
         };
@@ -2322,6 +2332,7 @@ mod tests {
             jobs: 1,
             agent_jobs: 8,
             driver,
+            cache_root: Some(tmp.path().join("cache")),
             invalidate: false,
             ignore_missing_attachments: false,
         };
@@ -3077,6 +3088,7 @@ mod tests {
             jobs: 1,
             agent_jobs: 8,
             driver: claude_driver(),
+            cache_root: Some(tmp.path().join("cache")),
             invalidate: false,
             ignore_missing_attachments: false,
         };
@@ -3174,6 +3186,7 @@ mod tests {
             jobs: 1,
             agent_jobs: 8,
             driver: claude_driver(),
+            cache_root: Some(tmp.path().join("cache")),
             invalidate: false,
             ignore_missing_attachments: false,
         };
@@ -3234,6 +3247,7 @@ mod tests {
             jobs: 1,
             agent_jobs: 8,
             driver: claude_driver(),
+            cache_root: Some(tmp.path().join("cache")),
             invalidate: false,
             ignore_missing_attachments: false,
         };
@@ -3368,10 +3382,15 @@ mod tests {
             &dataset_id,
             std::slice::from_ref(&compiled),
             claude_driver(),
+            Some(tmp.path().join("cache")),
             |e| events.push(e),
         )
         .await
         .unwrap();
+        assert!(
+            tmp.path().join("cache").is_dir(),
+            "the reopened native source keeps its cache under the given root"
+        );
         let attached: Vec<&Attached> = events
             .iter()
             .filter_map(|e| match e {
@@ -3463,6 +3482,7 @@ mod tests {
             &dataset_id,
             std::slice::from_ref(&compiled),
             claude_driver(),
+            Some(tmp.path().join("cache")),
             |e| again.push(e),
         )
         .await
@@ -3489,6 +3509,7 @@ mod tests {
             jobs: 1,
             agent_jobs: 8,
             driver: claude_driver(),
+            cache_root: Some(tmp.path().join("cache")),
             invalidate: false,
             ignore_missing_attachments: false,
         };
@@ -3545,6 +3566,7 @@ mod tests {
             &dataset_id,
             &[broken.unwrap()],
             claude_driver(),
+            Some(tmp.path().join("cache")),
             |_| {},
         )
         .await
@@ -3632,7 +3654,10 @@ mod tests {
         std::fs::write(dir.join(format!("{native_id}.jsonl")), jsonl).unwrap();
         let driver = gage_claude::driver::ClaudeDriver::new();
         let source = driver
-            .open_source(&SourceOptions::new(&format!("claude:{}", claude.display())))
+            .open_source(
+                SourceOptions::new(&format!("claude:{}", claude.display()))
+                    .cache_root(root.join("cache")),
+            )
             .unwrap();
         let mut native = source.open_native(native_id).unwrap();
 
@@ -3717,6 +3742,7 @@ mod tests {
             jobs: 1,
             agent_jobs: 8,
             driver: claude_driver(),
+            cache_root: Some(tmp.path().join("cache")),
             invalidate: false,
             ignore_missing_attachments: false,
         };
@@ -3820,6 +3846,7 @@ mod tests {
             jobs: 1,
             agent_jobs: 8,
             driver: claude_driver(),
+            cache_root: Some(tmp.path().join("cache")),
             invalidate: false,
             ignore_missing_attachments: false,
         };
@@ -4007,6 +4034,7 @@ mod tests {
             jobs: 1,
             agent_jobs: 8,
             driver: claude_driver(),
+            cache_root: Some(tmp.path().join("cache")),
             invalidate: false,
             ignore_missing_attachments: false,
         };
@@ -4258,6 +4286,7 @@ mod tests {
                     jobs: 1,
                     agent_jobs: 8,
                     driver: claude_driver(),
+                    cache_root: Some(root.with_file_name("cache")),
                     invalidate: false,
                     ignore_missing_attachments: false,
                 };
@@ -4406,6 +4435,7 @@ mod tests {
             &dataset_id,
             &[compiled.unwrap()],
             claude_driver(),
+            Some(tmp.path().join("cache")),
             |e| events.push(e),
         )
         .await
@@ -4509,6 +4539,7 @@ mod tests {
             jobs: 1,
             agent_jobs: 8,
             driver: claude_driver(),
+            cache_root: Some(tmp.path().join("cache")),
             invalidate: false,
             ignore_missing_attachments: false,
         };
@@ -4570,6 +4601,7 @@ mod tests {
             jobs: 1,
             agent_jobs: 1,
             driver: claude_driver(),
+            cache_root: Some(scans_dir.with_file_name("cache")),
             invalidate: false,
             ignore_missing_attachments: false,
         };
@@ -4654,6 +4686,7 @@ mod tests {
             jobs: 1,
             agent_jobs: 1,
             driver: claude_driver(),
+            cache_root: Some(tmp.path().join("cache")),
             invalidate: false,
             ignore_missing_attachments: false,
         };
@@ -4732,6 +4765,7 @@ mod tests {
             jobs: 1,
             agent_jobs: 1,
             driver: Arc::new(NotReadyDriver),
+            cache_root: Some(scans_dir.with_file_name("cache")),
             invalidate: false,
             ignore_missing_attachments: false,
         };
@@ -4802,6 +4836,7 @@ mod tests {
                     jobs: 1,
                     agent_jobs: 8,
                     driver: claude_driver(),
+                    cache_root: Some(root.with_file_name("cache")),
                     invalidate: false,
                     ignore_missing_attachments: false,
                 };
@@ -4869,7 +4904,10 @@ mod tests {
         std::fs::write(dir.join(format!("{native_id}.jsonl")), jsonl).unwrap();
         let driver = gage_claude::driver::ClaudeDriver::new();
         let source = driver
-            .open_source(&SourceOptions::new(&format!("claude:{}", claude.display())))
+            .open_source(
+                SourceOptions::new(&format!("claude:{}", claude.display()))
+                    .cache_root(root.join("cache")),
+            )
             .unwrap();
         let mut native = source.open_native(native_id).unwrap();
         let datasets = DatasetStore::from(store);
@@ -4942,6 +4980,7 @@ mod tests {
             jobs: 1,
             agent_jobs: 8,
             driver: claude_driver(),
+            cache_root: Some(tmp.path().join("cache")),
             invalidate: false,
             ignore_missing_attachments: false,
         };
@@ -4986,7 +5025,10 @@ mod tests {
         std::fs::write(dir.join(format!("{native_id}.jsonl")), jsonl).unwrap();
         let driver = gage_claude::driver::ClaudeDriver::new();
         let source = driver
-            .open_source(&SourceOptions::new(&format!("claude:{}", claude.display())))
+            .open_source(
+                SourceOptions::new(&format!("claude:{}", claude.display()))
+                    .cache_root(root.join("cache")),
+            )
             .unwrap();
         let mut native = source.open_native(native_id).unwrap();
         let datasets = DatasetStore::from(store);
@@ -5053,6 +5095,10 @@ mod tests {
         )
         .unwrap();
         let (_, printed) = run_watermark_scan(&tmp, &store, &compiled, &dataset_sha).await;
+        assert!(
+            tmp.path().join("cache").is_dir(),
+            "the reopened native source keeps its cache under the scan's root"
+        );
         let dir = work.display().to_string();
         assert_eq!(
             printed,
@@ -5163,6 +5209,7 @@ mod tests {
             jobs: 1,
             agent_jobs: 8,
             driver: claude_driver(),
+            cache_root: Some(tmp.path().join("cache")),
             invalidate,
             ignore_missing_attachments: false,
         };
@@ -5888,6 +5935,7 @@ mod tests {
             jobs: 2,
             agent_jobs: 8,
             driver: claude_driver(),
+            cache_root: Some(tmp.path().join("cache")),
             invalidate: false,
             ignore_missing_attachments: false,
         };
@@ -5971,6 +6019,7 @@ mod tests {
             jobs: 2,
             agent_jobs: 8,
             driver: claude_driver(),
+            cache_root: Some(tmp.path().join("cache")),
             invalidate: false,
             ignore_missing_attachments: false,
         };

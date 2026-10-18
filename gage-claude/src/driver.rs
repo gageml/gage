@@ -19,7 +19,7 @@ use std::process::Child;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime};
 
-use gage_core::config::plugin_marketplace_dir;
+use gage_core::config::{default_cache_root, plugin_marketplace_dir};
 use gage_session::{
     AgentSession, AgentSpec, AuthInfo, ContentSchema, ContentSink, ContentSource, Driver,
     DriverError, DriverStatus, DriverTables, Entry, Field, HarnessInfo, InstallInfo, InstallReport,
@@ -476,7 +476,11 @@ impl ClaudeSource {
         let source = options.url();
         let projects_dir = resolve_projects_dir(source)?;
         let root = root_of(&projects_dir);
-        let cache_dir = cache_dir_for(&projects_dir);
+        let cache_root = options
+            .cache_root_path()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(default_cache_root);
+        let cache_dir = cache_dir_for(&cache_root, &projects_dir);
         let store = Arc::new(
             IndexStore::new(projects_dir.clone(), cache_dir).show_agents(options.shows_agents()),
         );
@@ -1158,6 +1162,7 @@ impl StoredSession for ClaudeStoredSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::index::SOURCE_MARKER;
     use tempfile::TempDir;
 
     #[test]
@@ -1169,9 +1174,7 @@ mod tests {
         let sidecar = path.with_extension("");
         fs::create_dir_all(sidecar.join("subagents")).unwrap();
 
-        let source = ClaudeDriver::new()
-            .open_source(&SourceOptions::new(&source_for(root)))
-            .unwrap();
+        let source = ClaudeDriver::new().open_source(&options_for(root)).unwrap();
         source.delete_native(id).unwrap();
         assert!(!path.exists());
         assert!(!sidecar.exists());
@@ -1182,7 +1185,7 @@ mod tests {
     fn delete_native_unknown_id_errors() {
         let tmp = TempDir::new().unwrap();
         let source = ClaudeDriver::new()
-            .open_source(&SourceOptions::new(&source_for(tmp.path())))
+            .open_source(&options_for(tmp.path()))
             .unwrap();
         let err = source.delete_native("nope").unwrap_err();
         assert!(err.to_string().contains("native session not found"));
@@ -1258,9 +1261,7 @@ mod tests {
             "bbbbbbbb-2222-2222-2222-222222222222",
             line,
         );
-        let source = ClaudeDriver::new()
-            .open_source(&SourceOptions::new(&source_for(root)))
-            .unwrap();
+        let source = ClaudeDriver::new().open_source(&options_for(root)).unwrap();
 
         let mut reported = Vec::new();
         source
@@ -1275,8 +1276,31 @@ mod tests {
         assert_eq!(reported, [(0, 0)]);
     }
 
+    #[test]
+    fn open_source_keeps_the_cache_under_the_given_root() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        seed_session(
+            root,
+            "/Users/alice/x",
+            "aaaaaaaa-1111-1111-1111-111111111111",
+            "",
+        );
+        let cache_root = root.join("elsewhere");
+        let mut options = SourceOptions::new(&source_for(root));
+        options.cache_root(&cache_root);
+        let source = ClaudeDriver::new().open_source(&options).unwrap();
+        let status = source.maintenance_status().unwrap();
+        let state_dir = status.state_dir.unwrap();
+        assert!(
+            state_dir.starts_with(&cache_root),
+            "{}",
+            state_dir.display()
+        );
+        assert!(state_dir.join(SOURCE_MARKER).is_file());
+    }
+
     fn seed_session(root: &Path, cwd: &str, id: &str, contents: &str) -> PathBuf {
-        gage_core::config::use_temp_cache_root();
         let slug = encode_project_dir(Path::new(cwd));
         let dir = root.join("projects").join(&slug);
         fs::create_dir_all(&dir).unwrap();
@@ -1286,8 +1310,15 @@ mod tests {
     }
 
     fn source_for(root: &Path) -> String {
-        gage_core::config::use_temp_cache_root();
         format!("{NAME}:{}", root.to_string_lossy())
+    }
+
+    /// Options opening the source at `root` with its cache kept inside
+    /// the same temp directory.
+    fn options_for(root: &Path) -> SourceOptions {
+        let mut options = SourceOptions::new(&source_for(root));
+        options.cache_root(root.join("cache"));
+        options
     }
 
     #[test]
@@ -1299,13 +1330,11 @@ mod tests {
         seed_session(root, "/Users/alice/x", a, "");
         seed_session(root, "/Users/alice/y", b, "");
 
-        let source = ClaudeDriver::new()
-            .open_source(&SourceOptions::new(&source_for(root)))
-            .unwrap();
+        let source = ClaudeDriver::new().open_source(&options_for(root)).unwrap();
         assert_eq!(source.find_native("aaaa").unwrap(), a);
-        let bare = ClaudeDriver::new()
-            .open_source(&SourceOptions::new(&root.to_string_lossy()))
-            .unwrap();
+        let mut bare_options = SourceOptions::new(&root.to_string_lossy());
+        bare_options.cache_root(root.join("cache"));
+        let bare = ClaudeDriver::new().open_source(&bare_options).unwrap();
         assert_eq!(bare.find_native("bbbb").unwrap(), b);
         match ClaudeDriver::new().open_source(&SourceOptions::new("zzz:/x")) {
             Err(DriverError::Other(msg)) => assert!(msg.contains("zzz"), "{msg}"),
@@ -1323,13 +1352,11 @@ mod tests {
         let id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
         seed_session(root, "/Users/alice/.gage/tmp/run-1/cwd", id, "");
 
-        let hidden = ClaudeDriver::new()
-            .open_source(&SourceOptions::new(&source_for(root)))
-            .unwrap();
+        let hidden = ClaudeDriver::new().open_source(&options_for(root)).unwrap();
         let err = hidden.find_native("aaaa").unwrap_err();
         assert!(matches!(err, NativeLookupError::NoMatch(_)));
 
-        let mut options = SourceOptions::new(&source_for(root));
+        let mut options = options_for(root);
         options.show_agents(true);
         let shown = ClaudeDriver::new().open_source(&options).unwrap();
         assert_eq!(shown.find_native("aaaa").unwrap(), id);
@@ -1342,7 +1369,7 @@ mod tests {
         let id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
         seed_session(&root, "/Users/alice/x", id, "");
         let source = ClaudeDriver::new()
-            .open_source(&SourceOptions::new(&source_for(&root)))
+            .open_source(&options_for(&root))
             .unwrap();
         let session = source.open_native(id).unwrap();
         assert_eq!(session.source(), format!("claude:{}/{id}", root.display()));
@@ -1355,15 +1382,13 @@ mod tests {
         let cwd = "/Users/alice/Code/gage";
         seed_session(root, cwd, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "");
 
-        let source = ClaudeDriver::new()
-            .open_source(&SourceOptions::new(&source_for(root)))
-            .unwrap();
+        let source = ClaudeDriver::new().open_source(&options_for(root)).unwrap();
         let name = source.project_name(Path::new(cwd)).unwrap();
         assert_eq!(name, "-Users-alice-Code-gage");
     }
 
     #[test]
-    fn open_native_source_opens_the_container_of_a_session_url() {
+    fn a_session_url_splits_to_the_source_that_holds_it() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
         fs::create_dir_all(root.join("work")).unwrap();
@@ -1377,11 +1402,15 @@ mod tests {
         .unwrap();
         let driver = ClaudeDriver::new();
         let native = driver
-            .open_source(&SourceOptions::new(&source_for(root)))
+            .open_source(&options_for(root))
             .unwrap()
             .open_native(id)
             .unwrap();
-        let source = driver.open_native_source(native.source()).unwrap();
+        let (source_url, _) = driver.split_session_url(native.source()).unwrap();
+        assert_eq!(source_url, source_for(root));
+        let mut options = SourceOptions::new(&source_url);
+        options.cache_root(root.join("cache"));
+        let source = driver.open_source(&options).unwrap();
         assert_eq!(source.source(), source_for(root));
         assert_eq!(
             source.project_path(&encode_project_dir(&cwd)).unwrap(),
@@ -1396,9 +1425,7 @@ mod tests {
         let id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
         seed_session(root, "/Users/alice/Code/gage", id, "");
         let driver = ClaudeDriver::new();
-        let source = driver
-            .open_source(&SourceOptions::new(&source_for(root)))
-            .unwrap();
+        let source = driver.open_source(&options_for(root)).unwrap();
         let url = source.session_url(id);
         assert_eq!(url, format!("{}/{id}", source_for(root)));
         assert_eq!(url, source.open_native(id).unwrap().source());
@@ -1434,9 +1461,7 @@ mod tests {
         )
         .unwrap();
 
-        let source = ClaudeDriver::new()
-            .open_source(&SourceOptions::new(&source_for(root)))
-            .unwrap();
+        let source = ClaudeDriver::new().open_source(&options_for(root)).unwrap();
         let slug = encode_project_dir(&cwd);
         assert_eq!(source.project_path(&slug).unwrap(), Some(cwd));
         assert_eq!(source.project_path("-no-such").unwrap(), None);

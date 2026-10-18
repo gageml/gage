@@ -1228,7 +1228,7 @@ async fn view_native(
         }
     };
     opened.close()?;
-    let backend = Backend::native(&spec).await?;
+    let backend = Backend::native(&spec).open().await?;
     session_view::run(backend, id.as_deref(), line, options).await
 }
 
