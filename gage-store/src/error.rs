@@ -96,6 +96,11 @@ pub enum StoreError {
     RemoteExists(String),
     /// No remote has the given name
     RemoteNotFound(String),
+    /// A listing pattern the glob syntax rejects
+    ListPattern(String),
+    /// No namespace, reference, tree, or file at the path, and no
+    /// match for the pattern
+    PathNotFound(String),
 }
 
 impl fmt::Display for StoreError {
@@ -224,6 +229,8 @@ impl fmt::Display for StoreError {
             ),
             StoreError::RemoteExists(name) => write!(f, "remote {name} exists"),
             StoreError::RemoteNotFound(name) => write!(f, "remote not found: {name}"),
+            StoreError::ListPattern(what) => write!(f, "invalid pattern: {what}"),
+            StoreError::PathNotFound(path) => write!(f, "no such path: {path}"),
         }
     }
 }
@@ -266,7 +273,9 @@ impl std::error::Error for StoreError {
             | StoreError::TagNotFound(_)
             | StoreError::RemoteName(_)
             | StoreError::RemoteExists(_)
-            | StoreError::RemoteNotFound(_) => None,
+            | StoreError::RemoteNotFound(_)
+            | StoreError::ListPattern(_)
+            | StoreError::PathNotFound(_) => None,
         }
     }
 }

@@ -5,7 +5,7 @@ use clap::{Args, Subcommand};
 use cliclack as cli;
 use gage_core::path::shorten_home;
 use gage_core::uuid::short_uuid;
-use gage_store::{EntryKind, InitOutcome, Store, StoreError, StoreStatus, TreeEntry};
+use gage_store::{InitOutcome, PathEntry, PathKind, Store, StoreError, StoreStatus};
 use tabled::{
     Table,
     settings::{
@@ -45,7 +45,11 @@ pub enum StoreCommand {
     /// immediately) and `2.weeks.ago` (the git default).
     Gc(GcArgs),
 
-    /// List files stored for an object
+    /// List store paths
+    ///
+    /// The store is one hierarchy: namespaces, the references in
+    /// them, and the files of the commit each reference points at.
+    /// Without a path, lists the Gage namespaces as a starting point.
     Ls(LsArgs),
 
     /// Print a file stored for an object
@@ -90,8 +94,15 @@ pub struct DeleteArgs {
 
 #[derive(Args)]
 pub struct LsArgs {
-    /// Object to list (tag, ID, or prefix)
-    object: String,
+    /// Paths to list (glob; repeatable)
+    ///
+    /// A path starts at the store root, runs through a reference, and
+    /// continues into the files of the commit the reference points
+    /// at. A path with no wildcard lists the children of the container
+    /// it names, or the file it names. A path with a wildcard lists
+    /// what it matches: `*` matches one name and `**` matches any
+    /// number of names, on either side of a reference.
+    paths: Vec<String>,
 }
 
 #[derive(Args)]
@@ -369,8 +380,8 @@ fn gc_summary_rows(outcome: &gage_store::GcOutcome) -> Vec<Vec<String>> {
 }
 
 fn ls(store: &Store, args: LsArgs) -> Result<(), CliError> {
-    let tip = resolve_tip(store, "gage store ls", &args.object)?;
-    let entries = store.ls(&tip).context("gage store ls")?;
+    let patterns: Vec<&str> = args.paths.iter().map(String::as_str).collect();
+    let entries = store.ls_paths(&patterns).context("gage store ls")?;
     if entries.is_empty() {
         return Ok(());
     }
@@ -389,15 +400,15 @@ fn ls(store: &Store, args: LsArgs) -> Result<(), CliError> {
     Ok(())
 }
 
-fn ls_row(entry: &TreeEntry) -> Vec<String> {
+fn ls_row(entry: &PathEntry) -> Vec<String> {
     let size = match entry.size {
         Some(bytes) => format_size(bytes as i64),
         None => "-".to_string(),
     };
     let kind = entry.kind.as_str().to_string();
     let name = match entry.kind {
-        EntryKind::Tree => format!("{}/", entry.name),
-        _ => entry.name.clone(),
+        PathKind::Namespace | PathKind::Tree => format!("{}/", entry.path),
+        _ => entry.path.clone(),
     };
     vec![name, kind, size]
 }

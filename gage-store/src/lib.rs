@@ -49,6 +49,7 @@ pub mod git;
 pub mod index;
 mod issue;
 pub mod key;
+mod ls;
 mod note;
 pub mod object;
 pub mod query;
@@ -89,6 +90,7 @@ pub use issue::{
     IssueStore, OBJECT_TYPE as ISSUE_TYPE, StatusReason,
 };
 pub use key::{KeyRef, KeyStore, object_key_ref};
+pub use ls::{PathEntry, PathKind};
 pub use note::{
     NoteEdit, NoteFull, NoteInput, NoteQuery, NoteRecord, NoteStore, NoteValue,
     OBJECT_TYPE as NOTE_TYPE,
