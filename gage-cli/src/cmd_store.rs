@@ -52,10 +52,11 @@ pub enum StoreCommand {
     /// Without a path, lists the Gage namespaces as a starting point.
     Ls(LsArgs),
 
-    /// Print a file stored for an object
+    /// Print a stored file
     ///
-    /// Prints the file's bytes as stored. Without FILE, prints the
-    /// object's attributes.
+    /// Prints the file's bytes as stored. The path runs from the store
+    /// root through a reference into the files of its commit, as
+    /// `gage store ls` lists them.
     Cat(CatArgs),
 
     /// Delete objects of any type
@@ -107,11 +108,10 @@ pub struct LsArgs {
 
 #[derive(Args)]
 pub struct CatArgs {
-    /// Object to read (tag, ID, or prefix)
-    object: String,
-
-    /// File to print (default attrs.json)
-    file: Option<String>,
+    /// File to print (glob)
+    ///
+    /// A wildcard is accepted when it matches exactly one file.
+    path: String,
 }
 
 #[derive(Args)]
@@ -416,28 +416,20 @@ fn ls_row(entry: &PathEntry) -> Vec<String> {
 fn cat(store: &Store, args: CatArgs) -> Result<(), CliError> {
     use std::io::Write;
 
-    let tip = resolve_tip(store, "gage store cat", &args.object)?;
-    let file = args.file.as_deref().unwrap_or("attrs.json");
-    let bytes = match store.read_blob_bytes(&format!("{tip}:{file}")) {
-        Ok(bytes) => bytes,
-        Err(StoreError::MissingObject(_)) => {
+    let entry = store.resolve_path(&args.path).context("gage store cat")?;
+    let sha = match (entry.kind, entry.sha) {
+        (PathKind::Blob, Some(sha)) => sha,
+        (kind, _) => {
             return Err(CliError::message(format!(
-                "gage store cat: {}: no such file: {file}",
-                args.object
+                "gage store cat: {} is a {}, not a file",
+                entry.path,
+                kind.as_str()
             )));
         }
-        Err(e) => Err(e).context("gage store cat")?,
     };
+    let bytes = store.read_blob_bytes(&sha).context("gage store cat")?;
     std::io::stdout()
         .write_all(&bytes)
         .context("gage store cat")?;
     Ok(())
-}
-
-/// The stored version an object name resolves to, or `command: <error>`
-fn resolve_tip(store: &Store, command: &str, object: &str) -> Result<String, CliError> {
-    let found = store
-        .resolve_in(object, None)
-        .with_context(|| command.to_string())?;
-    Ok(found.tip_sha)
 }

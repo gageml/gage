@@ -77,6 +77,23 @@ impl Store {
         }
         Ok(out.into_values().collect())
     }
+
+    /// The one path `pattern` names: a literal path, or a pattern with
+    /// exactly one match. A container is returned as is, for the
+    /// caller to report. More than one match is
+    /// [`StoreError::PathAmbiguous`].
+    pub fn resolve_path(&self, pattern: &str) -> Result<PathEntry, StoreError> {
+        let hierarchy = Hierarchy::load(self)?;
+        let (_, mut matched) = hierarchy.matches(pattern)?;
+        if matched.len() > 1 {
+            return Err(StoreError::PathAmbiguous {
+                pattern: pattern.to_string(),
+                count: matched.len(),
+            });
+        }
+        let node = matched.pop().unwrap();
+        hierarchy.entry(node)
+    }
 }
 
 struct Hierarchy<'a> {
@@ -146,6 +163,24 @@ impl<'a> Hierarchy<'a> {
     }
 
     fn list(&self, pattern: &str) -> Result<Vec<PathEntry>, StoreError> {
+        let (invariant, mut matched) = self.matches(pattern)?;
+        let nodes: Vec<Node> = if invariant {
+            let node = matched.pop().unwrap();
+            if node.kind.is_container() {
+                self.children(&node)?
+            } else {
+                vec![node]
+            }
+        } else {
+            matched
+        };
+        nodes.into_iter().map(|node| self.entry(node)).collect()
+    }
+
+    /// The path-sorted nodes `pattern` matches, with whether the
+    /// pattern is a literal path. A literal path matches at most one
+    /// node. No match is [`StoreError::PathNotFound`].
+    fn matches(&self, pattern: &str) -> Result<(bool, Vec<Node>), StoreError> {
         let trimmed = pattern.strip_suffix('/').unwrap_or(pattern);
         if trimmed.is_empty() {
             return Err(StoreError::ListPattern(format!(
@@ -169,17 +204,7 @@ impl<'a> Hierarchy<'a> {
         if matched.is_empty() {
             return Err(StoreError::PathNotFound(pattern.to_string()));
         }
-        let nodes: Vec<Node> = if invariant {
-            let node = matched.into_values().next().unwrap();
-            if node.kind.is_container() {
-                self.children(&node)?
-            } else {
-                vec![node]
-            }
-        } else {
-            matched.into_values().collect()
-        };
-        nodes.into_iter().map(|node| self.entry(node)).collect()
+        Ok((invariant, matched.into_values().collect()))
     }
 
     /// Adds to `out` every node `steps` reaches from `node`.
@@ -511,5 +536,42 @@ mod tests {
                 "{pattern:?}: {err}"
             );
         }
+    }
+
+    #[test]
+    fn resolve_path_names_one_path_and_reports_a_container_or_an_ambiguity() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let id = note(&store, "v1");
+        let (_, tip) = store.resolve_id(&id).unwrap();
+        TagStore::from(&store).add("db/test", &id, false).unwrap();
+
+        let literal = format!("refs/gage/1/object/{id}/attrs.json");
+        let entry = store.resolve_path(&literal).unwrap();
+        assert_eq!(entry.path, literal);
+        assert_eq!(entry.kind, PathKind::Blob);
+        assert!(entry.size.unwrap() > 0);
+        assert_eq!(
+            store
+                .read_blob_bytes(entry.sha.as_deref().unwrap())
+                .unwrap(),
+            store.read_blob_bytes(&format!("{tip}:attrs.json")).unwrap()
+        );
+
+        let glob = format!("refs/gage/1/object/{}*/attrs.json", &id[..4]);
+        assert_eq!(store.resolve_path(&glob).unwrap(), entry);
+
+        let container = store.resolve_path("refs/gage/1/tag/db/test").unwrap();
+        assert_eq!(container.kind, PathKind::Ref);
+        assert_eq!(container.sha.as_deref(), Some(tip.as_str()));
+
+        let err = store.resolve_path("refs/**/attrs.json").unwrap_err();
+        assert!(
+            matches!(&err, StoreError::PathAmbiguous { pattern, count: 2 } if pattern == "refs/**/attrs.json"),
+            "{err}"
+        );
+
+        let err = store.resolve_path("refs/gage/1/tag/nope").unwrap_err();
+        assert!(matches!(err, StoreError::PathNotFound(_)));
     }
 }

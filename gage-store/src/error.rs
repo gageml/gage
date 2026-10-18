@@ -101,6 +101,8 @@ pub enum StoreError {
     /// No namespace, reference, tree, or file at the path, and no
     /// match for the pattern
     PathNotFound(String),
+    /// A pattern matched more than one path where one is required
+    PathAmbiguous { pattern: String, count: usize },
 }
 
 impl fmt::Display for StoreError {
@@ -231,6 +233,9 @@ impl fmt::Display for StoreError {
             StoreError::RemoteNotFound(name) => write!(f, "remote not found: {name}"),
             StoreError::ListPattern(what) => write!(f, "invalid pattern: {what}"),
             StoreError::PathNotFound(path) => write!(f, "no such path: {path}"),
+            StoreError::PathAmbiguous { pattern, count } => {
+                write!(f, "{pattern} matches {count} paths; name one")
+            }
         }
     }
 }
@@ -275,7 +280,8 @@ impl std::error::Error for StoreError {
             | StoreError::RemoteExists(_)
             | StoreError::RemoteNotFound(_)
             | StoreError::ListPattern(_)
-            | StoreError::PathNotFound(_) => None,
+            | StoreError::PathNotFound(_)
+            | StoreError::PathAmbiguous { .. } => None,
         }
     }
 }
