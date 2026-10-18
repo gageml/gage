@@ -36,7 +36,8 @@ pub use tool_use::ToolUseCollector;
 /// `<cache_root>/<slug>`, where the slug is the canonical projects
 /// path with every non-alphanumeric character replaced by `-`. Every
 /// source is keyed the same way; the default Claude location is not
-/// special. The base is `<gage_home>/cache` outside tests.
+/// special. The base is `<gage_home>/cache` unless the process uses a
+/// temp cache root.
 pub fn cache_dir_for(projects_dir: &Path) -> PathBuf {
     // A projects dir that cannot be canonicalized (typically: it does
     // not exist yet) is keyed as given. The only effect of a

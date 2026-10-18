@@ -1447,7 +1447,7 @@ filename f.rs
     /// commit writing a line the committed file carries reflowed over
     /// two lines, and a shell append whose result has no diff.
     fn fixture() -> (tempfile::TempDir, tempfile::TempDir, PathBuf, String) {
-        gage_core::config::use_test_cache_root();
+        gage_core::config::use_temp_cache_root();
         let repo = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(repo.path()).unwrap();
         git(&root, &["init", "-q"]);
@@ -1636,7 +1636,7 @@ filename f.rs
     /// the calls that wrote the old path.
     #[tokio::test]
     async fn native_blame_follows_a_rename() {
-        gage_core::config::use_test_cache_root();
+        gage_core::config::use_temp_cache_root();
         let repo = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(repo.path()).unwrap();
         git(&root, &["init", "-q"]);
@@ -1706,7 +1706,7 @@ filename f.rs
     /// rather than building an empty SQL predicate.
     #[tokio::test]
     async fn an_empty_file_returns_no_rows() {
-        gage_core::config::use_test_cache_root();
+        gage_core::config::use_temp_cache_root();
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("empty.txt");
         std::fs::write(&file, "").unwrap();
@@ -1725,7 +1725,7 @@ filename f.rs
     /// call, since the edit that added its neighbors added it too.
     #[tokio::test]
     async fn a_line_between_two_patch_matches_is_attributed_to_the_same_call() {
-        gage_core::config::use_test_cache_root();
+        gage_core::config::use_temp_cache_root();
         let dir = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(dir.path()).unwrap();
         let file = root.join("notes.md");
@@ -1763,7 +1763,7 @@ filename f.rs
     /// fallback on the summary's referenced paths.
     #[tokio::test]
     async fn the_wide_fallback_finds_a_file_named_only_in_a_command() {
-        gage_core::config::use_test_cache_root();
+        gage_core::config::use_temp_cache_root();
         let home = tempfile::tempdir().unwrap();
         let home = std::fs::canonicalize(home.path()).unwrap();
         let project_root = home.join("projA");

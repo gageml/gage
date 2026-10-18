@@ -759,7 +759,7 @@ mod tests {
     /// that named it.
     #[tokio::test]
     async fn native_session_lists_the_files_a_session_wrote_and_named() {
-        gage_core::config::use_test_cache_root();
+        gage_core::config::use_temp_cache_root();
         let claude_root = tempfile::tempdir().unwrap();
         let dir = claude_root.path().join("projects").join("-w-proj");
         std::fs::create_dir_all(&dir).unwrap();
@@ -810,7 +810,7 @@ mod tests {
 
     #[tokio::test]
     async fn native_session_pushes_project_and_mtime_filters_into_the_walk() {
-        gage_core::config::use_test_cache_root();
+        gage_core::config::use_temp_cache_root();
         use std::time::{Duration, UNIX_EPOCH};
 
         let claude_root = tempfile::tempdir().unwrap();
@@ -874,7 +874,7 @@ mod tests {
     /// join to `session`.
     #[tokio::test]
     async fn entry_and_message_read_stored_sessions_through_the_driver() {
-        gage_core::config::use_test_cache_root();
+        gage_core::config::use_temp_cache_root();
         let (_tmp, store) = open_store();
         let claude_root = tempfile::tempdir().unwrap();
         let native_id = "11111111-2222-3333-4444-555555555555";
@@ -925,7 +925,7 @@ mod tests {
     /// session filter and the `line` filter on the calling entry.
     #[tokio::test]
     async fn tool_use_reads_stored_sessions_through_the_driver() {
-        gage_core::config::use_test_cache_root();
+        gage_core::config::use_temp_cache_root();
         let (_tmp, store) = open_store();
         let claude_root = tempfile::tempdir().unwrap();
         let native_id = "11111111-2222-3333-4444-666666666666";
@@ -1027,7 +1027,7 @@ mod tests {
     /// the commit columns.
     #[tokio::test]
     async fn link_tables_and_views_resolve_relations() {
-        gage_core::config::use_test_cache_root();
+        gage_core::config::use_temp_cache_root();
         let (_tmp, store) = open_store();
         let claude_root = tempfile::tempdir().unwrap();
         let native_id = "11111111-2222-3333-4444-555555555555";

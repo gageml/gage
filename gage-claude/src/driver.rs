@@ -1276,7 +1276,7 @@ mod tests {
     }
 
     fn seed_session(root: &Path, cwd: &str, id: &str, contents: &str) -> PathBuf {
-        gage_core::config::use_test_cache_root();
+        gage_core::config::use_temp_cache_root();
         let slug = encode_project_dir(Path::new(cwd));
         let dir = root.join("projects").join(&slug);
         fs::create_dir_all(&dir).unwrap();
@@ -1286,7 +1286,7 @@ mod tests {
     }
 
     fn source_for(root: &Path) -> String {
-        gage_core::config::use_test_cache_root();
+        gage_core::config::use_temp_cache_root();
         format!("{NAME}:{}", root.to_string_lossy())
     }
 
