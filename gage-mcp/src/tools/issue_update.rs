@@ -74,6 +74,17 @@ pub fn execute(config: &StoreWriterConfig, params: JsonObject) -> Result<CallToo
         Err(e) => return Ok(domain_error(e.to_string())),
     };
     let author = &config.author;
+    // A completed or wontfix close with no message leaves the history
+    // with a status change and no record of why; the duplicate close
+    // carries its reason as the survivor link
+    if message.is_none()
+        && let Update::Close(reason) = &update
+    {
+        return Ok(domain_error(format!(
+            "closing as {reason} requires `message`: state what was done or why the issue \
+             will not be addressed"
+        )));
+    }
     let message = message.as_deref();
     let (result, outcome) = match &update {
         Update::Open => (
@@ -213,6 +224,36 @@ mod tests {
     }
 
     #[test]
+    fn a_completed_or_wontfix_close_requires_a_message() {
+        let (_tmp, config) = config();
+        let id = issue(&config, "Open", IssueStatus::Open);
+        for params in [
+            json!({"issue_id": id, "status": "closed"}),
+            json!({"issue_id": id, "status": "closed", "status_reason": "wontfix", "message": "  "}),
+        ] {
+            let r = execute(&config, object(params)).unwrap();
+            assert_eq!(r.is_error, Some(true), "{}", text_of(&r));
+            assert!(
+                text_of(&r).contains("requires `message`"),
+                "{}",
+                text_of(&r)
+            );
+        }
+        {
+            let store = config.store.lock().unwrap();
+            let full = IssueStore::from(&*store).get(&id).unwrap();
+            assert_eq!(full.status, IssueStatus::Open);
+            assert_eq!(full.changes.len(), 1);
+        }
+        let r = execute(
+            &config,
+            object(json!({"issue_id": id, "status": "closed", "message": "fixed in abc123"})),
+        )
+        .unwrap();
+        assert_eq!(r.is_error, Some(false), "{}", text_of(&r));
+    }
+
+    #[test]
     fn opens_closes_and_records_a_duplicate_survivor() {
         let (_tmp, config) = config();
         let pending = issue(&config, "Retry loop spins", IssueStatus::Pending);
@@ -241,7 +282,10 @@ mod tests {
 
         let r = execute(
             &config,
-            object(json!({"issue_id": survivor, "status": "closed", "status_reason": "wontfix"})),
+            object(
+                json!({"issue_id": survivor, "status": "closed", "status_reason": "wontfix",
+                          "message": "out of scope"}),
+            ),
         )
         .unwrap();
         assert_eq!(

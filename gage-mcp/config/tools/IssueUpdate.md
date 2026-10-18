@@ -24,7 +24,7 @@ description = "The surviving issue's ID when status_reason is duplicate. Require
 [parameters.message]
 type = "string"
 required = false
-description = "A message recorded with the status change"
+description = "A message recorded with the status change. Required to close as completed or wontfix: what was done, or why the issue will not be addressed"
 
 [annotations]
 read_only_hint = false
@@ -38,7 +38,9 @@ event in the issue's history, with your message when given.
 releases an assigned one. `status=closed` closes a pending, open, or
 assigned issue, and `status_reason` says why: `completed` when the condition was fixed or acted on,
 `wontfix` when it will not be addressed, `duplicate` when another
-issue already describes the condition. A duplicate close names the
+issue already describes the condition. A `completed` or `wontfix`
+close requires `message`, stating what was done or why the issue
+will not be addressed; a close without one is refused. A duplicate close names the
 surviving issue in `duplicate_of`, so the link between the two is data rather
 than prose; record any insight the survivor lacks on the survivor
 with `IssueComment`.

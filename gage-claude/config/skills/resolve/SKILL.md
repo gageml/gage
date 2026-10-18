@@ -317,9 +317,11 @@ Exceptions to asking for confirmation:
 
 Use `mcp__plugin_gage_gage__IssueUpdate` with `status=closed` and
 `status_reason=completed` to close an issue that's been verified as fixed.
+`message` states what was done; the tool refuses a close without one.
 
 If the user decides to not fix the issue, close it with `status=closed` and
-`status_reason=wontfix`.
+`status_reason=wontfix`. `message` states why the issue will not be
+addressed.
 
 **Release the issue**
 
