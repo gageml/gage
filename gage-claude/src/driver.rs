@@ -23,9 +23,9 @@ use gage_core::config::{default_cache_root, plugin_marketplace_dir};
 use gage_session::{
     AgentSession, AgentSpec, AuthInfo, ContentSchema, ContentSink, ContentSource, Driver,
     DriverError, DriverStatus, DriverTables, Entry, Field, HarnessInfo, InstallInfo, InstallReport,
-    InstallUi, MaintenanceOutcome, MaintenanceStatus, NativeLookupError, NativeSession,
-    ResolveSession, SessionAttrs, SessionLiveError, Source, SourceOptions, StoredSession, ToolUse,
-    split_scheme,
+    InstallUi, MaintenanceOutcome, MaintenanceStatus, MessageTextHit, NativeLookupError,
+    NativeSession, ResolveSession, SessionAttrs, SessionLiveError, Source, SourceOptions,
+    StoredSession, ToolUse, split_scheme,
 };
 use serde::Deserialize;
 
@@ -610,8 +610,27 @@ impl Source for ClaudeSource {
             stale: status.dirty,
             state_dir: Some(status.summary_dir),
             state_bytes: status.cache_bytes,
+            text_dir: Some(status.text_dir),
+            text_bytes: status.text_bytes,
             last_reconcile_ms: status.last_reconcile_ms,
         })
+    }
+
+    /// Search the text index, after a reconcile that yields to a pass
+    /// already running: on contention the committed index is searched
+    /// as it stands, at most one pass behind the corpus.
+    fn message_text(
+        &self,
+        query: &str,
+        snippet_chars: usize,
+        limit: usize,
+    ) -> Result<Vec<MessageTextHit>, DriverError> {
+        self.store
+            .reconcile(LockMode::Try)
+            .map_err(|e| DriverError::Other(e.to_string()))?;
+        self.store
+            .search(query, limit, snippet_chars)
+            .map_err(|e| DriverError::Other(e.to_string()))
     }
 
     fn find_native(&self, prefix: &str) -> Result<String, NativeLookupError> {
@@ -1296,6 +1315,33 @@ mod tests {
             state_dir.display()
         );
         assert!(state_dir.join("manifest.json").is_file());
+    }
+
+    #[test]
+    fn message_text_searches_the_source_and_names_sessions_by_url() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let id = "aaaaaaaa-1111-1111-1111-111111111111";
+        seed_session(
+            root,
+            "/Users/alice/x",
+            id,
+            r#"{"type":"user","uuid":"u1","message":{"role":"user","content":"the quokka smiled"}}"#,
+        );
+        let source = ClaudeDriver::new().open_source(&options_for(root)).unwrap();
+        let hits = source.message_text("quokka", 200, 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].session_id, id);
+        assert_eq!(hits[0].url, source.session_url(id));
+        assert_eq!(hits[0].line, 1);
+        assert_eq!(hits[0].type_.as_deref(), Some("user"));
+        assert!(hits[0].snippet.contains("«quokka»"));
+        assert!(source.message_text("wombat", 200, 10).unwrap().is_empty());
+        let err = source.message_text("\"open", 200, 10).unwrap_err();
+        assert!(
+            err.to_string().contains("invalid text search query"),
+            "{err}"
+        );
     }
 
     fn seed_session(root: &Path, cwd: &str, id: &str, contents: &str) -> PathBuf {

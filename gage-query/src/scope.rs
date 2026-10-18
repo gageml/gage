@@ -159,7 +159,7 @@ pub struct SessionSet {
 
 impl SessionSet {
     /// Every live session at its tip.
-    pub(crate) fn all(store: Arc<Mutex<Store>>) -> Self {
+    pub fn all(store: Arc<Mutex<Store>>) -> Self {
         Self {
             store,
             drivers: DriverRegistry::builtin(),

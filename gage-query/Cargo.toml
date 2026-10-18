@@ -15,12 +15,14 @@ datafusion = { workspace = true }
 datafusion-functions-json = "0.52"
 futures = { workspace = true }
 gage-core = { path = "../gage-core" }
+gage-index = { path = "../gage-index" }
 gage-registry = { path = "../gage-registry" }
 gage-session = { path = "../gage-session" }
 gage-store = { path = "../gage-store" }
 rustyline = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
+tokio = { workspace = true, features = ["rt"] }
 tracing = { workspace = true }
 
 [dev-dependencies]

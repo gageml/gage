@@ -1,12 +1,13 @@
 //! Derived data layer for Claude session files.
 //!
-//! One artifact shadows the session corpus, maintained by one
-//! reconcile pass: a per-session summary cache. The cache of a corpus
-//! is the directory `<cache root>/summary/<slug>`, where the slug is
-//! the canonical projects path with every non-alphanumeric character
-//! replaced by `-`. Every source is keyed the same way; the default
-//! Claude location is not special. The cache is ephemeral: deleting
-//! it is a complete reset.
+//! Two artifacts shadow the session corpus, maintained by one
+//! reconcile pass: a per-session summary cache at
+//! `<cache root>/summary/<slug>` and a full-text index over message
+//! text at `<cache root>/text/<slug>`, where the slug is the canonical
+//! projects path with every non-alphanumeric character replaced by
+//! `-`. Every source is keyed the same way; the default Claude
+//! location is not special. Both are ephemeral: deleting either is a
+//! complete reset of it.
 //!
 //! Layering: [`crate::session`] and [`crate::entry`] (source reading)
 //! feed this module (derived artifacts); the DataFusion table
@@ -25,7 +26,8 @@ pub use derive::{
     COL_SUBTYPE, COL_TEXT, COL_TIMESTAMP, COL_TYPE, COL_UUID, ClaudeSessionAttrs, DerivedSession,
     Fingerprint, derive_entry, derive_session, derived_schema, entry_text, is_message_row,
 };
-pub use reconcile::{IndexStore, LockMode, ReconcileEvent, ReconcileOutcome, Status};
+pub use gage_index::LockMode;
+pub use reconcile::{IndexStore, ReconcileEvent, ReconcileOutcome, Status};
 pub use tool_use::ToolUseCollector;
 
 #[derive(Debug)]
@@ -33,6 +35,7 @@ pub enum IndexError {
     Io(std::io::Error),
     Arrow(arrow::error::ArrowError),
     Json(serde_json::Error),
+    Text(gage_index::Error),
 }
 
 impl fmt::Display for IndexError {
@@ -41,6 +44,7 @@ impl fmt::Display for IndexError {
             IndexError::Io(e) => write!(f, "io error: {e}"),
             IndexError::Arrow(e) => write!(f, "arrow error: {e}"),
             IndexError::Json(e) => write!(f, "json error: {e}"),
+            IndexError::Text(e) => write!(f, "{e}"),
         }
     }
 }
@@ -62,6 +66,12 @@ impl From<arrow::error::ArrowError> for IndexError {
 impl From<serde_json::Error> for IndexError {
     fn from(e: serde_json::Error) -> Self {
         IndexError::Json(e)
+    }
+}
+
+impl From<gage_index::Error> for IndexError {
+    fn from(e: gage_index::Error) -> Self {
+        IndexError::Text(e)
     }
 }
 

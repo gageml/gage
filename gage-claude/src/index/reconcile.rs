@@ -22,22 +22,20 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use arrow::array::{Array, Int64Array, StringArray};
+use arrow::record_batch::RecordBatch;
 use fs4::FileExt;
+use gage_index::{LockMode, MessageRow, TextIndex, corpus_slug};
+use gage_session::MessageTextHit;
 use serde::{Deserialize, Serialize};
 
 use super::Result;
-use super::derive::{ClaudeSessionAttrs, Fingerprint, derive_session};
+use super::derive::{
+    COL_LINE, COL_MESSAGE_SUBTYPE, COL_TEXT, COL_TYPE, ClaudeSessionAttrs, Fingerprint,
+    derive_session,
+};
 use super::summary_cache;
-use crate::session::{SessionListBuilder, encode_project_dir};
-
-/// How to take the reconcile lock. Queries use `Try` —
-/// skip-with-stale on contention. Explicit maintenance (`gage index`)
-/// uses `Wait`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LockMode {
-    Try,
-    Wait,
-}
+use crate::session::SessionListBuilder;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ReconcileOutcome {
@@ -72,6 +70,8 @@ pub struct Status {
     pub last_reconcile_ms: Option<i64>,
     pub summary_dir: PathBuf,
     pub cache_bytes: u64,
+    pub text_dir: PathBuf,
+    pub text_bytes: u64,
 }
 
 /// The directory's record: the format its files are in, the projects
@@ -117,15 +117,22 @@ fn process_lock(summary_dir: &Path) -> Arc<Mutex<()>> {
         .clone()
 }
 
-/// Handle to the summary cache for one session corpus.
+/// Handle to the derived artifacts of one session corpus: the summary
+/// cache and the full-text index.
 ///
 /// `root` is the Claude projects directory the corpus is read from;
-/// the cache is the directory `summary/<slug>` under `cache_root`
-/// (`~/.gage/cache` in production). Everything under it is
-/// rebuildable; deleting it is a complete reset.
+/// the summary cache is the directory `summary/<slug>` and the text
+/// index `text/<slug>` under `cache_root` (`~/.gage/cache` in
+/// production). Everything under either is rebuildable; deleting it
+/// is a complete reset.
 #[derive(Debug, Clone)]
 pub struct IndexStore {
     root: PathBuf,
+    cache_root: PathBuf,
+    slug: String,
+    /// The source URL the text index records and prefixes session
+    /// URLs with: `claude:<Claude root>`
+    source_url: String,
     summary_dir: PathBuf,
     show_agents: bool,
 }
@@ -134,19 +141,22 @@ pub struct IndexStore {
 /// cache of every corpus
 const SUMMARY_DIR: &str = "summary";
 
+/// The scheme of a Claude session URL
+const URL_SCHEME: &str = "claude";
+
 impl IndexStore {
     pub fn new(root: impl Into<PathBuf>, cache_root: impl Into<PathBuf>) -> Self {
         let root = root.into();
-        // A projects dir that cannot be canonicalized (typically: it does
-        // not exist yet) is keyed as given. The only effect of a
-        // non-canonical key is a second cache dir for the same corpus.
-        let canonical = std::fs::canonicalize(&root).unwrap_or_else(|_| root.clone());
-        let summary_dir = cache_root
-            .into()
-            .join(SUMMARY_DIR)
-            .join(encode_project_dir(&canonical));
+        let cache_root = cache_root.into();
+        let slug = corpus_slug(&root);
+        let claude_root = root.parent().unwrap_or(&root);
+        let source_url = format!("{URL_SCHEME}:{}", claude_root.display());
+        let summary_dir = cache_root.join(SUMMARY_DIR).join(&slug);
         Self {
             root,
+            cache_root,
+            slug,
+            source_url,
             summary_dir,
             show_agents: false,
         }
@@ -179,6 +189,37 @@ impl IndexStore {
     /// summary files.
     pub fn summary_dir(&self) -> &Path {
         &self.summary_dir
+    }
+
+    /// The directory holding this corpus's full-text index.
+    pub fn text_dir(&self) -> PathBuf {
+        TextIndex::dir_for(&self.cache_root, &self.slug)
+    }
+
+    fn text_index(&self) -> Result<TextIndex> {
+        Ok(TextIndex::open(
+            &self.cache_root,
+            &self.slug,
+            &self.source_url,
+        )?)
+    }
+
+    /// The URL of the session `id` in this corpus, as the text index
+    /// carries it.
+    fn session_url(&self, id: &str) -> String {
+        format!("{}/{id}", self.source_url)
+    }
+
+    /// The top `limit` text-index hits for `query`, best match first,
+    /// with snippets of at most `snippet_chars` characters. An index
+    /// not yet built matches nothing.
+    pub fn search(
+        &self,
+        query: &str,
+        limit: usize,
+        snippet_chars: usize,
+    ) -> Result<Vec<MessageTextHit>> {
+        Ok(self.text_index()?.search(query, limit, snippet_chars)?)
     }
 
     fn lock_path(&self) -> PathBuf {
@@ -246,7 +287,8 @@ impl IndexStore {
         self.locked(mode, |store| store.reconcile_locked(&mut on_event))
     }
 
-    /// Delete the cache and rebuild from scratch.
+    /// Delete the summary cache and the text index and rebuild both
+    /// from scratch.
     pub fn rebuild(&self) -> Result<ReconcileOutcome> {
         self.rebuild_with_progress(|_| {})
     }
@@ -259,6 +301,7 @@ impl IndexStore {
         self.locked(LockMode::Wait, |store| {
             write_manifest(&store.manifest_path(), &Manifest::empty(&store.root))?;
             summary_cache::remove_all(&store.summary_dir)?;
+            TextIndex::remove(&store.cache_root, &store.slug)?;
             store.reconcile_locked(&mut on_event)
         })
     }
@@ -344,15 +387,20 @@ impl IndexStore {
             summary_cache::remove_all(&self.summary_dir)?;
             manifest = Manifest::empty(&self.root);
         }
+        let mut text = self.text_index()?;
 
-        // 2. Diff. A session is dirty if either the manifest doesn't
-        // have it at the current fingerprint, or its summary cache
+        // 2. Diff. A session is dirty if the manifest or the text index
+        // lacks it at the current fingerprint, or its summary cache
         // file is missing (covers first-run backfill and any
-        // out-of-band deletion under `session/`).
+        // out-of-band deletion of a summary file).
         let cached = summary_cache::existing_ids(&self.summary_dir);
         let dirty: Vec<&(String, PathBuf, Fingerprint)> = walked
             .iter()
-            .filter(|(id, _, fp)| manifest.sessions.get(id) != Some(fp) || !cached.contains(id))
+            .filter(|(id, _, fp)| {
+                manifest.sessions.get(id) != Some(fp)
+                    || !cached.contains(id)
+                    || text.sessions().get(id) != Some(&text_fingerprint(fp))
+            })
             .collect();
         // A cache file with no manifest entry was derived by a table
         // read, as for an agent session read while it ran; once its
@@ -361,9 +409,11 @@ impl IndexStore {
             .sessions
             .keys()
             .chain(cached.iter())
+            .chain(text.sessions().keys())
             .filter(|id| !walked_ids.contains(id.as_str()))
             .cloned()
             .collect();
+        let mut writer = text.writer()?;
 
         let mut outcome = ReconcileOutcome {
             discovered: walked.len(),
@@ -374,9 +424,10 @@ impl IndexStore {
             total: (dirty.len() + removed.len()) as u64,
         });
 
-        // 3. Re-derive changed sessions: parse the JSONL and persist
-        // the summary cache for the `session` table fast path. A
-        // session whose summary fails to write stays out of the
+        // 3. Re-derive changed sessions: parse the JSONL once, persist
+        // the summary cache for the `session` table fast path, and
+        // replace the session's documents in the text index. A session
+        // whose summary or documents fail to write stays out of its
         // manifest, so the next pass retries it.
         for (id, path, fp) in &dirty {
             let derived = match derive_session(id, path) {
@@ -393,23 +444,35 @@ impl IndexStore {
                 continue;
             }
             manifest.sessions.insert(id.clone(), *fp);
+            if let Err(e) = writer.replace_session(
+                id,
+                &self.session_url(id),
+                &text_fingerprint(fp),
+                message_rows_of(&derived.batch),
+            ) {
+                tracing::warn!(session_id = %id, "failed to index message text: {e}");
+                on_event(ReconcileEvent::Advance);
+                continue;
+            }
             outcome.indexed += 1;
             tracing::info!(session_id = %id, "indexed session");
             on_event(ReconcileEvent::Advance);
         }
 
-        // 4. Garbage collection: summary cache files for sessions gone
-        // from disk
+        // 4. Garbage collection: summary cache files and text documents
+        // for sessions gone from disk
         for id in &removed {
             manifest.sessions.remove(id);
             if let Err(e) = summary_cache::remove(&self.summary_dir, id) {
                 tracing::warn!(session_id = %id, "failed to remove summary cache: {e}");
             }
+            writer.remove_session(id);
             outcome.removed += 1;
             on_event(ReconcileEvent::Advance);
         }
 
-        // 5. Write the manifest.
+        // 5. Commit the text index, then write the manifest.
+        writer.commit()?;
         manifest.last_reconcile_ms = now_ms();
         write_manifest(&self.manifest_path(), &manifest)?;
 
@@ -463,8 +526,38 @@ impl IndexStore {
                 .then_some(manifest.last_reconcile_ms),
             summary_dir: self.summary_dir.clone(),
             cache_bytes: dir_size(&self.summary_dir),
+            text_dir: self.text_dir(),
+            text_bytes: dir_size(&self.text_dir()),
         }
     }
+}
+
+/// The fingerprint as the text index records it.
+fn text_fingerprint(fp: &Fingerprint) -> String {
+    format!("{}:{}", fp.mtime_ms, fp.size)
+}
+
+/// The message rows of a derived batch: the rows with text, each with
+/// its line, entry type, and message subtype.
+fn message_rows_of(batch: &RecordBatch) -> Vec<MessageRow> {
+    let column = |i: usize| batch.columns().get(i);
+    let (Some(lines), Some(types), Some(subtypes), Some(texts)) = (
+        column(COL_LINE).and_then(|c| c.as_any().downcast_ref::<Int64Array>()),
+        column(COL_TYPE).and_then(|c| c.as_any().downcast_ref::<StringArray>()),
+        column(COL_MESSAGE_SUBTYPE).and_then(|c| c.as_any().downcast_ref::<StringArray>()),
+        column(COL_TEXT).and_then(|c| c.as_any().downcast_ref::<StringArray>()),
+    ) else {
+        return Vec::new();
+    };
+    (0..batch.num_rows())
+        .filter(|&i| texts.is_valid(i))
+        .map(|i| MessageRow {
+            line: lines.value(i),
+            type_: types.is_valid(i).then(|| types.value(i).to_string()),
+            subtype: subtypes.is_valid(i).then(|| subtypes.value(i).to_string()),
+            text: texts.value(i).to_string(),
+        })
+        .collect()
 }
 
 fn now_ms() -> i64 {

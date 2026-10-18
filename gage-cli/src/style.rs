@@ -49,8 +49,9 @@ pub fn dim_italic() -> Color {
 }
 
 /// Truncates the biggest column first (like `PriorityMax::left`), but never
-/// picks the Id column (index 0) when `protect_id` is set, so a full ID is
-/// preserved while the other columns absorb the shrink.
+/// picks the Id column (index 0 unless `id_column` names another) when
+/// `protect_id` is set, so a full ID is preserved while the other
+/// columns absorb the shrink.
 ///
 /// A column's weight scales its width for the comparison: a column of
 /// weight 2 is picked only when it is more than twice as wide as a
@@ -58,6 +59,7 @@ pub fn dim_italic() -> Color {
 /// Columns without an explicit weight have weight 1.
 pub struct IdAwarePriority {
     protect_id: bool,
+    id_col: usize,
     weights: Vec<usize>,
 }
 
@@ -65,8 +67,15 @@ impl IdAwarePriority {
     pub fn new(protect_id: bool) -> Self {
         Self {
             protect_id,
+            id_col: 0,
             weights: Vec::new(),
         }
+    }
+
+    /// Name the column `protect_id` preserves, when it is not the first.
+    pub fn id_column(mut self, col: usize) -> Self {
+        self.id_col = col;
+        self
     }
 
     /// Set the weight of column `col`. A weight of zero is treated as 1.
@@ -87,13 +96,12 @@ impl IdAwarePriority {
 
 impl Peaker for IdAwarePriority {
     fn peak(&mut self, mins: &[usize], widths: &[usize]) -> Option<usize> {
-        let start = if self.protect_id { 1 } else { 0 };
         widths
             .iter()
             .copied()
             .enumerate()
-            .skip(start)
             .rev()
+            .filter(|&(i, _)| !(self.protect_id && i == self.id_col))
             .filter(|&(i, w)| w != 0 && (mins.is_empty() || mins.get(i).is_none_or(|&m| w > m)))
             // Compare w_a / weight_a against w_b / weight_b without division
             .max_by(|&(a, wa), &(b, wb)| (wa * self.weight_of(b)).cmp(&(wb * self.weight_of(a))))
@@ -104,11 +112,17 @@ impl Peaker for IdAwarePriority {
 /// Styled id: the kind's bright shade over the unique prefix, its dark
 /// shade for the rest of the shown form.
 pub fn styled_id(shown: &str, prefix: &str, kind: IdKind) -> String {
+    styled_target(shown, prefix, kind, "")
+}
+
+/// A styled id followed by `suffix` in the id's dark shade: the form
+/// of a `<session>:<line>` target, as `gage blame` prints one.
+pub fn styled_target(shown: &str, prefix: &str, kind: IdKind, suffix: &str) -> String {
     let split = shown
         .char_indices()
         .nth(prefix.chars().count())
         .map(|(i, _)| i)
         .unwrap_or(shown.len());
     let (head, tail) = shown.split_at(split);
-    kind.style(head, tail)
+    kind.style(head, &format!("{tail}{suffix}"))
 }

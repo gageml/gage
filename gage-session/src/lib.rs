@@ -269,6 +269,9 @@ pub struct MaintenanceStatus {
     /// Where the state lives, when it is on disk
     pub state_dir: Option<PathBuf>,
     pub state_bytes: u64,
+    /// Where the full-text index lives, when the source keeps one
+    pub text_dir: Option<PathBuf>,
+    pub text_bytes: u64,
     /// When [`Source::reconcile`] last ran, in epoch milliseconds
     pub last_reconcile_ms: Option<i64>,
 }
@@ -357,8 +360,43 @@ pub trait Source: Send + Sync {
         )))
     }
 
+    /// Search the text of the source's messages. `query` is a
+    /// full-text query; `limit` caps the hits, and `snippet_chars`
+    /// caps each hit's snippet. Hits come back best match first. The
+    /// default reports that the source has no text index.
+    fn message_text(
+        &self,
+        _query: &str,
+        _snippet_chars: usize,
+        _limit: usize,
+    ) -> Result<Vec<MessageTextHit>, DriverError> {
+        Err(DriverError::Other(format!(
+            "source {} has no text index",
+            self.source()
+        )))
+    }
+
     /// Release the handle.
     fn close(self: Box<Self>) -> Result<(), DriverError>;
+}
+
+/// One hit of a message text search: the message, its session, and
+/// how it matched.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MessageTextHit {
+    /// The session's URL, unique across every source and store
+    pub url: String,
+    /// The session's id within its source
+    pub session_id: String,
+    pub line: i64,
+    /// The message's `type` and `subtype`, as the `message` table has
+    /// them
+    pub type_: Option<String>,
+    pub subtype: Option<String>,
+    /// The relevance score; comparable within one search only
+    pub score: f32,
+    /// The matching fragment, each match wrapped in guillemets
+    pub snippet: String,
 }
 
 /// The session-derived tables a driver exposes to gage-query. Every

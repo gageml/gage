@@ -30,6 +30,49 @@ included; `cached_tokens` the part of input served from cache. `cost_usd` is
 the harness's reported figure, null when it reports none. Use these before
 reading usage out of `raw`.
 
+## Full-text search: `message_text` and `native_message_text`
+
+`message_text(query [, snippet_len])` searches the text of every stored
+session's messages; `native_message_text(source, query [, snippet_len])`
+searches a source's sessions, with `source` as the native functions take it.
+Each returns `(url, session_id, line, type, subtype, score, snippet)`, one row
+per matching message, best match first. `url` names the session across every
+source and store (`claude:<root>/<native id>`, `gage:<store>/<id>`);
+`session_id` is the id the corpus uses, so a row joins to `message` or to
+`native_message(source)` on `(session_id, line)`. Matched terms in `snippet`
+are wrapped in `«guillemets»`; `snippet_len` caps its length, default 200.
+`LIMIT n` reaches the search; without one the cap is 100 rows. The search
+reconciles its index first, so a message written since the last query is
+found. `message_text` is absent from a scan-scoped context.
+
+### Query syntax
+
+- Plain terms: `refactor cache` matches either term
+- Require all: `refactor AND cache`, or `+refactor +cache`
+- Exclude: `refactor -cache`
+- Phrase: `"prepared plan"`
+- Field terms: `type:assistant`, `subtype:tool_use`, `session_id:abc123`
+- Combine: `+telemetry +type:assistant`
+
+### Recipe: hit with its full message
+
+```sql
+SELECT m.session_id, m.line, m.type, t.snippet, m.text
+FROM message_text('prepared plan') t
+JOIN message m ON m.session_id = t.session_id AND m.line = t.line
+ORDER BY t.score DESC
+LIMIT 20;
+```
+
+### Recipe: sessions ranked by hits
+
+```sql
+SELECT session_id, count(*) AS hits
+FROM message_text('telemetry')
+GROUP BY session_id
+ORDER BY hits DESC;
+```
+
 ## Sessions that wrote a file: the blame functions
 
 `native_blame(source, file [, lines])` and `blame(file [, lines])` return one

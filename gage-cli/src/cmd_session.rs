@@ -7,7 +7,7 @@ use anyhow::{Context, anyhow};
 use clap::{ArgGroup, Args, Subcommand};
 use cliclack as cli;
 use datafusion::arrow::array::{
-    Array, BooleanArray, Int64Array, StringArray, TimestampMillisecondArray,
+    Array, BooleanArray, Float32Array, Int64Array, StringArray, TimestampMillisecondArray,
 };
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::prelude::SessionContext;
@@ -27,6 +27,7 @@ use tabled::{
         object::{Columns, Object, Rows},
     },
 };
+use tokio::task::JoinSet;
 
 use crate::cmd_dataset::{AddEvent, AddView, add_native_to_dataset};
 use crate::dialog::{self, DialogError, DialogResult};
@@ -35,7 +36,7 @@ use crate::human::count;
 use crate::session_filter::{FILTER_ARG_NAMES, SessionFilterArgs, select_sessions};
 use crate::size_limit::SizeLimitArgs;
 use crate::source;
-use crate::style::{self, IdKind, styled_id};
+use crate::style::{self, IdKind, styled_id, styled_target};
 
 #[derive(Subcommand)]
 pub enum SessionCommand {
@@ -66,6 +67,16 @@ pub enum SessionCommand {
 
     /// View a session
     View(SessionViewArgs),
+
+    /// Find sessions by message text
+    ///
+    /// Searches message text in the default source, in each --source,
+    /// and in the store with --stored, and lists the matching messages
+    /// best match first. Bare terms match any of them; "a AND b",
+    /// "+a", "-a", a quoted phrase, and a field term such as
+    /// "type:assistant" narrow a search. --all shows up to 1000
+    /// matches per source
+    Find(SessionFindArgs),
 }
 
 #[derive(Args)]
@@ -175,6 +186,36 @@ pub struct SessionViewArgs {
     /// A leading "!" turns an option off, as in "!user"
     #[arg(short = 'v', long, verbatim_doc_comment)]
     pub options: Option<String>,
+}
+
+#[derive(Args)]
+#[command(next_display_order = 3)]
+pub struct SessionFindArgs {
+    /// Text to find
+    pub query: String,
+
+    /// Session sources to search (repeatable)
+    #[arg(
+        id = "source",
+        short = 's',
+        long = "source",
+        value_name = "SOURCE",
+        action = clap::ArgAction::Append,
+        long_help = format!("Session sources to search (repeatable)\n\n{}", source::SOURCE_HELP),
+        display_order = 1
+    )]
+    pub sources: Vec<String>,
+
+    /// Search stored sessions
+    #[arg(id = "stored", short = 'S', long = "stored", display_order = 2)]
+    pub stored: bool,
+
+    #[command(flatten)]
+    pub limit: crate::limit::LimitArgs,
+
+    /// Show full session ID
+    #[arg(long)]
+    pub full_id: bool,
 }
 
 #[derive(Args)]
@@ -897,6 +938,256 @@ fn add_native(
         ));
     }
     Ok(())
+}
+
+/// Matches per corpus when every match is wanted. A search ranks its
+/// hits, so a cap this size leaves nothing a reader would scroll to.
+const FIND_ALL_LIMIT: usize = 1000;
+
+pub async fn find(args: SessionFindArgs) -> Result<(), CliError> {
+    let mut corpora: Vec<Corpus> = args.sources.iter().cloned().map(Corpus::Native).collect();
+    if args.stored {
+        corpora.push(Corpus::Stored);
+    }
+    if corpora.is_empty() {
+        corpora.push(Corpus::Native(String::new()));
+    }
+    let store = match args.stored {
+        true => Some(Arc::new(Mutex::new(
+            Store::open(&gage_store::store_path()).context("gage session find")?,
+        ))),
+        false => None,
+    };
+    let ctx = ContextBuilder::new(store).build().await;
+    let fetch = args.limit.fetch_limit().unwrap_or(FIND_ALL_LIMIT);
+    let registry = source::driver_registry();
+
+    // One query per corpus, run at once; each is ranked and capped on
+    // its own, then the union is ranked and cut.
+    let mut tasks = JoinSet::new();
+    for (order, corpus) in corpora.iter().enumerate() {
+        let ctx = ctx.clone();
+        let sql = corpus.sql(&args.query, fetch);
+        let corpus = corpus.clone();
+        tasks.spawn(async move {
+            let batches = run_query(&ctx, &sql).await;
+            (order, corpus, batches)
+        });
+    }
+    let mut hits: Vec<Hit> = Vec::new();
+    while let Some(joined) = tasks.join_next().await {
+        let (order, corpus, batches) = joined.context("gage session find")?;
+        let batches =
+            batches.with_context(|| format!("gage session find: {}", corpus.describe()))?;
+        hits.extend(hits_from_batches(&batches, order, &corpus, &registry)?);
+    }
+    hits.sort_by(|a, b| {
+        b.score
+            .total_cmp(&a.score)
+            .then(a.corpus_order.cmp(&b.corpus_order))
+    });
+    let total = hits.len();
+    let show = args.limit.show_count(total);
+    hits.truncate(show);
+    if total == 0 {
+        println!("No matches found");
+        return Ok(());
+    }
+    render_hits(&hits, corpora.len() > 1, args.full_id);
+    args.limit.print_summary(show, total, "hit");
+    Ok(())
+}
+
+/// One body of sessions a search covers
+#[derive(Clone)]
+enum Corpus {
+    /// A session source, by its `--source` value; empty is the
+    /// default source
+    Native(String),
+    Stored,
+}
+
+impl Corpus {
+    /// The hits of this corpus for `query`, each joined to its
+    /// session row for the id's display forms, best match first. The
+    /// search itself is capped at `fetch` inside the function call,
+    /// where the limit reaches the index.
+    fn sql(&self, query: &str, fetch: usize) -> String {
+        let query = query.replace('\'', "''");
+        match self {
+            Corpus::Native(spec) => {
+                let spec = spec.replace('\'', "''");
+                format!(
+                    "SELECT t.session_id, s.id_display, s.id_prefix, t.line, t.type, t.snippet, \
+                     t.score, '' AS driver \
+                     FROM (SELECT * FROM native_message_text('{spec}', '{query}') LIMIT {fetch}) t \
+                     JOIN native_session('{spec}') s ON s.id = t.session_id \
+                     ORDER BY t.score DESC"
+                )
+            }
+            Corpus::Stored => format!(
+                "SELECT t.session_id, s.id_display, s.id_prefix, t.line, t.type, t.snippet, \
+                 t.score, s.driver \
+                 FROM (SELECT * FROM message_text('{query}') LIMIT {fetch}) t \
+                 JOIN session s ON s.id = t.session_id \
+                 ORDER BY t.score DESC"
+            ),
+        }
+    }
+
+    /// The corpus as the Source column names it
+    fn label(&self) -> String {
+        match self {
+            Corpus::Native(spec) if spec.is_empty() => "default".to_string(),
+            Corpus::Native(spec) => spec.clone(),
+            Corpus::Stored => "stored".to_string(),
+        }
+    }
+
+    /// The corpus as an error names it
+    fn describe(&self) -> String {
+        match self {
+            Corpus::Native(spec) if spec.is_empty() => "searching default source".to_string(),
+            Corpus::Native(spec) => format!("searching source {spec}"),
+            Corpus::Stored => "searching stored sessions".to_string(),
+        }
+    }
+
+    fn id_kind(&self) -> IdKind {
+        match self {
+            Corpus::Native(_) => IdKind::Native,
+            Corpus::Stored => IdKind::Gage,
+        }
+    }
+}
+
+struct Hit {
+    /// Position of the hit's corpus in the search order, the tiebreak
+    /// between equal scores
+    corpus_order: usize,
+    corpus_label: String,
+    id_kind: IdKind,
+    id: String,
+    id_display: String,
+    id_prefix: String,
+    line: i64,
+    type_: String,
+    snippet: String,
+    score: f32,
+}
+
+fn hits_from_batches(
+    batches: &[RecordBatch],
+    corpus_order: usize,
+    corpus: &Corpus,
+    registry: &DriverRegistry,
+) -> anyhow::Result<Vec<Hit>> {
+    let mut out = Vec::new();
+    for batch in batches {
+        let ids = column::<StringArray>(batch, 0);
+        let displays = column::<StringArray>(batch, 1);
+        let prefixes = column::<StringArray>(batch, 2);
+        let lines = column::<Int64Array>(batch, 3);
+        let types = column::<StringArray>(batch, 4);
+        let snippets = column::<StringArray>(batch, 5);
+        let scores = column::<Float32Array>(batch, 6);
+        let drivers = column::<StringArray>(batch, 7);
+        for i in 0..batch.num_rows() {
+            // A stored row names its driver; the id's display form is
+            // the driver's, so an unknown driver is an error here as
+            // it is in a listing.
+            if let Corpus::Stored = corpus {
+                let name = driver_name_of(drivers.value(i));
+                registry
+                    .for_name(name)
+                    .ok_or_else(|| anyhow!("{}: unknown session driver '{name}'", ids.value(i)))?;
+            }
+            out.push(Hit {
+                corpus_order,
+                corpus_label: corpus.label(),
+                id_kind: corpus.id_kind(),
+                id: ids.value(i).to_string(),
+                id_display: string_or_empty(displays, i),
+                id_prefix: string_or_empty(prefixes, i),
+                line: lines.value(i),
+                type_: string_or_empty(types, i),
+                snippet: snippets.value(i).to_string(),
+                score: scores.value(i),
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// The hits as a table: the source when more than one was searched,
+/// the message as `<session>:<line>`, the target `gage session view`
+/// opens, the message type, and the snippet with its matches
+/// emphasized.
+fn render_hits(hits: &[Hit], show_source: bool, full_id: bool) {
+    let mut header = Vec::new();
+    if show_source {
+        header.push("Source");
+    }
+    header.extend(["Message", "Type", "Snippet"]);
+    let message_col = usize::from(show_source);
+    let type_col = message_col + 1;
+    let snippet_col = header.len() - 1;
+    let rows = hits.iter().map(|h| {
+        let shown = if full_id { &h.id } else { &h.id_display };
+        let mut cells = Vec::new();
+        if show_source {
+            cells.push(h.corpus_label.clone());
+        }
+        cells.extend([
+            styled_target(shown, &h.id_prefix, h.id_kind, &format!(":{}", h.line)),
+            h.type_.clone(),
+            emphasize_matches(&h.snippet),
+        ]);
+        cells
+    });
+    let header: Vec<String> = header.into_iter().map(String::from).collect();
+    let mut table = Table::from_iter(std::iter::once(header).chain(rows));
+    table
+        .with(Style::rounded())
+        .modify(Rows::first(), style::tty(Color::FG_BRIGHT_YELLOW))
+        .modify(
+            Columns::new(type_col..type_col + 1).not(Rows::first()),
+            style::dim(),
+        );
+    let term_width = console::Term::stdout().size().1 as usize;
+    // The message cell is the target a reader acts on; it is never cut
+    table.with(
+        Width::truncate(term_width).suffix("…").priority(
+            style::IdAwarePriority::new(true)
+                .id_column(message_col)
+                .weight(snippet_col, 3),
+        ),
+    );
+    println!("{table}");
+}
+
+/// The snippet on one line, each guillemet-marked match shown in the
+/// match color when the output is a terminal.
+fn emphasize_matches(snippet: &str) -> String {
+    let flat = snippet.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut out = String::with_capacity(flat.len());
+    let mut rest = flat.as_str();
+    while let Some(start) = rest.find('«') {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + '«'.len_utf8()..];
+        match after.find('»') {
+            Some(end) => {
+                out.push_str(&console::style(&after[..end]).yellow().bold().to_string());
+                rest = &after[end + '»'.len_utf8()..];
+            }
+            None => {
+                out.push_str(&rest[start..]);
+                rest = "";
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 pub fn remove(

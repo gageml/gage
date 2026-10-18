@@ -71,6 +71,17 @@ fn reconcile_lifecycle() {
     assert_eq!(status.dirty, 0);
     assert!(status.last_reconcile_ms.is_some());
 
+    // The text index holds the corpus's messages, keyed by session URL
+    let hits = store.search("zanzibar", 10, 200).unwrap();
+    assert!(hits.is_empty());
+    let hits = store.search("hello OR help OR read", 50, 200).unwrap();
+    assert!(!hits.is_empty(), "the fixture messages are indexed");
+    assert!(
+        hits.iter()
+            .all(|h| h.url.ends_with(&format!("/{}", h.session_id)))
+    );
+    assert!(hits.iter().all(|h| h.url.starts_with("claude:")));
+
     // Append a message: the session re-derives
     let session_path = rich_session_path(root.path());
     let mut contents = std::fs::read_to_string(&session_path).unwrap();
@@ -85,6 +96,14 @@ fn reconcile_lifecycle() {
     assert_eq!(outcome.indexed, 1);
     let summary = rich_summary(&store, root.path()).expect("summary refreshed after append");
     assert_eq!(summary.message_count, message_count + 1);
+    let hits = store.search("zanzibar", 10, 200).unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].session_id, RICH_SESSION);
+    assert!(
+        hits[0].snippet.contains("«zanzibar»"),
+        "{}",
+        hits[0].snippet
+    );
 
     // Remove a session: its cache file is garbage-collected
     std::fs::remove_file(&session_path).unwrap();
@@ -92,15 +111,33 @@ fn reconcile_lifecycle() {
     assert_eq!(outcome.removed, 1);
     assert!(rich_summary(&store, root.path()).is_none());
     assert_eq!(store.status().indexed, 3);
+    assert!(store.search("zanzibar", 10, 200).unwrap().is_empty());
 }
 
 #[test]
 fn rebuild_resets_artifacts() {
-    let (store, root, _cache) = store_with_tempdirs();
+    let (store, root, cache) = store_with_tempdirs();
     store.reconcile(LockMode::Wait).unwrap();
+    let before = store
+        .search("hello OR help OR read", 50, 200)
+        .unwrap()
+        .len();
     let outcome = store.rebuild().unwrap();
     assert_eq!(outcome.indexed, 4);
     assert!(rich_summary(&store, root.path()).is_some());
+    assert_eq!(
+        store.text_dir().parent().unwrap(),
+        cache.path().join("text")
+    );
+    assert_eq!(
+        store
+            .search("hello OR help OR read", 50, 200)
+            .unwrap()
+            .len(),
+        before
+    );
+    let status = store.status();
+    assert!(status.text_bytes > 0);
 }
 
 #[test]

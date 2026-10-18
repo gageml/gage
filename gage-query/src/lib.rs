@@ -48,6 +48,7 @@ pub mod rows;
 pub mod scope;
 pub mod stored_rows;
 pub mod system_cols;
+pub mod text;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -79,6 +80,10 @@ pub use crate::scope::ScanScope;
 use crate::scope::SessionSet;
 use crate::stored_rows::{RowKind, StoredRowsTable};
 use crate::system_cols::SkipSystemCols;
+use crate::text::{
+    MESSAGE_TEXT_ARGS, MessageTextFn, NATIVE_MESSAGE_TEXT_ARGS, NativeMessageTextFn,
+    StoreTextIndex, message_text_schema,
+};
 
 /// Composes a query context. `store` backs the store tables when
 /// present; without it, they are absent and only the native discovery
@@ -158,6 +163,13 @@ impl ContextBuilder {
             return build_scan_scope(ctx, store, scope, self.skip_system_cols);
         }
         let sessions = Arc::new(SessionSet::all(Arc::clone(&store)));
+        ctx.register_udtf(
+            "message_text",
+            Arc::new(MessageTextFn::new(Arc::new(StoreTextIndex::new(
+                Arc::clone(&store),
+                self.cache_root.clone(),
+            )))),
+        );
         let base: Vec<(&str, Arc<dyn TableProvider>)> = vec![
             (
                 "session",
@@ -415,6 +427,16 @@ pub fn repl_functions() -> Vec<TvfInfo> {
                 args: "source text, file text [, lines text]",
                 schema: Some(blame_schema()),
             },
+            TvfInfo {
+                name: "message_text",
+                args: MESSAGE_TEXT_ARGS,
+                schema: Some(message_text_schema()),
+            },
+            TvfInfo {
+                name: "native_message_text",
+                args: NATIVE_MESSAGE_TEXT_ARGS,
+                schema: Some(message_text_schema()),
+            },
         ])
         .collect()
 }
@@ -459,6 +481,13 @@ pub(crate) fn new_context(
             }),
         );
     }
+    ctx.register_udtf(
+        "native_message_text",
+        Arc::new(NativeMessageTextFn {
+            show_agents,
+            cache_root: cache_root.clone(),
+        }),
+    );
     ctx.register_udf(project_for_path_udf(cache_root));
     ctx.register_udf(age_udf());
     ctx.register_udf(patch_lines_udf());
@@ -487,6 +516,8 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use datafusion::arrow::array::StringArray;
+    use datafusion::arrow::compute::cast;
+    use datafusion::arrow::datatypes::DataType;
     use datafusion::prelude::SessionContext;
     use gage_registry::driver::DriverRegistry;
     use gage_session::SourceOptions;
@@ -533,12 +564,16 @@ mod tests {
         Explained { physical }
     }
 
+    /// The first column of every row as strings. A string column of
+    /// any width is read; a cast result is `Utf8View` under the
+    /// PostgreSQL dialect's string mapping.
     async fn strings(ctx: &SessionContext, sql: &str) -> Vec<String> {
         let batches = ctx.sql(sql).await.unwrap().collect().await.unwrap();
         batches
             .iter()
             .flat_map(|b| {
-                let col = b.column(0).as_any().downcast_ref::<StringArray>().unwrap();
+                let col = cast(b.column(0), &DataType::Utf8).unwrap();
+                let col = col.as_any().downcast_ref::<StringArray>().unwrap();
                 (0..b.num_rows())
                     .map(|i| col.value(i).to_string())
                     .collect::<Vec<_>>()
@@ -1557,6 +1592,163 @@ mod tests {
         assert_eq!(
             strings(&scoped, "SELECT event FROM issue_event ORDER BY timestamp").await,
             ["create", "status"]
+        );
+    }
+
+    fn seed_text_session(claude_root: &std::path::Path, id: &str, texts: &[&str]) {
+        let dir = claude_root.join("projects").join("-w-proj");
+        std::fs::create_dir_all(&dir).unwrap();
+        let lines: Vec<String> = texts
+            .iter()
+            .enumerate()
+            .map(|(i, text)| {
+                format!(
+                    r#"{{"type":"user","uuid":"u{i}","timestamp":"2025-01-01T00:00:0{i}Z","cwd":"/w/proj","message":{{"role":"user","content":"{text}"}}}}"#
+                )
+            })
+            .collect();
+        std::fs::write(dir.join(format!("{id}.jsonl")), lines.join("\n") + "\n").unwrap();
+    }
+
+    /// `native_message_text` searches a source's index: one row per
+    /// matching message, best match first, named by session URL, with
+    /// `LIMIT` pushed into the search.
+    #[tokio::test]
+    async fn native_message_text_searches_a_source() {
+        let claude_root = tempfile::tempdir().unwrap();
+        let a = "aaaaaaaa-0000-0000-0000-000000000001";
+        let b = "bbbbbbbb-0000-0000-0000-000000000002";
+        seed_text_session(
+            claude_root.path(),
+            a,
+            &["the quokka smiled", "nothing here"],
+        );
+        seed_text_session(claude_root.path(), b, &["a quokka and a wombat"]);
+        let spec = format!("claude:{}", claude_root.path().display());
+        let ctx = ContextBuilder::new(None)
+            .cache_root(claude_root.path().join("cache"))
+            .build()
+            .await;
+        let from = format!("native_message_text('{spec}', 'quokka')");
+
+        let urls = strings(&ctx, &format!("SELECT url FROM {from} ORDER BY session_id")).await;
+        assert_eq!(
+            urls,
+            [format!("{spec}/{a}"), format!("{spec}/{b}")],
+            "a session URL is the source URL and the native id"
+        );
+        let snippets = strings(&ctx, &format!("SELECT snippet FROM {from}")).await;
+        assert!(
+            snippets.iter().all(|s| s.contains("«quokka»")),
+            "{snippets:?}"
+        );
+        assert_eq!(
+            strings(&ctx, &format!("SELECT session_id FROM {from} LIMIT 1"))
+                .await
+                .len(),
+            1
+        );
+        assert_eq!(
+            strings(
+                &ctx,
+                &format!("SELECT CAST(line AS VARCHAR) FROM {from} WHERE session_id = '{a}'")
+            )
+            .await,
+            ["1"]
+        );
+        assert!(
+            strings(
+                &ctx,
+                &format!(
+                    "SELECT CAST(line AS VARCHAR) FROM native_message_text('{spec}', 'wallaby')"
+                )
+            )
+            .await
+            .is_empty()
+        );
+        let err = ctx
+            .sql(&format!(
+                "SELECT line FROM native_message_text('{spec}', '\"open')"
+            ))
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("invalid text search query"),
+            "{err}"
+        );
+        assert!(
+            claude_root.path().join("cache").join("text").is_dir(),
+            "the index is kept under the context's cache root"
+        );
+    }
+
+    /// `message_text` searches the store's index over the live tips,
+    /// names sessions by `gage:` URL and Gage id, and joins to
+    /// `message` on `(session_id, line)`.
+    #[tokio::test]
+    async fn message_text_searches_the_store() {
+        let (tmp, store) = open_store();
+        let claude_root = tempfile::tempdir().unwrap();
+        let native_id = "11111111-2222-3333-4444-555555555555";
+        seed_text_session(
+            claude_root.path(),
+            native_id,
+            &["hello there", "the quokka smiled"],
+        );
+        let spec = format!("claude:{}", claude_root.path().display());
+        let registry = DriverRegistry::builtin();
+        let driver = registry.driver_for(&spec).unwrap();
+        let source = driver
+            .open_source(SourceOptions::new(&spec).cache_root(claude_root.path().join("cache")))
+            .unwrap();
+        let mut native = source.open_native(native_id).unwrap();
+        let (session_id, store_path) = {
+            let store = store.lock().unwrap();
+            let id = SessionStore::from(&*store)
+                .add(driver.as_ref(), native.as_mut())
+                .unwrap()
+                .id;
+            (id, store.path().to_path_buf())
+        };
+        let ctx = ContextBuilder::new(Some(Arc::clone(&store)))
+            .cache_root(tmp.path().join("cache"))
+            .build()
+            .await;
+
+        let rows = strings(
+            &ctx,
+            "SELECT url || ' ' || session_id || ' ' || CAST(line AS VARCHAR) \
+             FROM message_text('quokka')",
+        )
+        .await;
+        assert_eq!(
+            rows,
+            [format!(
+                "gage:{}/{session_id} {session_id} 2",
+                store_path.display()
+            )]
+        );
+        let joined = strings(
+            &ctx,
+            "SELECT m.text FROM message_text('quokka') t \
+             JOIN message m ON m.session_id = t.session_id AND m.line = t.line",
+        )
+        .await;
+        assert_eq!(joined, ["the quokka smiled"]);
+        assert!(
+            strings(
+                &ctx,
+                "SELECT CAST(line AS VARCHAR) FROM message_text('wallaby')"
+            )
+            .await
+            .is_empty()
+        );
+        assert!(
+            tmp.path().join("cache").join("text").is_dir(),
+            "the store's index is kept under the context's cache root"
         );
     }
 }
