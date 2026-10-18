@@ -1,15 +1,15 @@
 Analyze finding notes and report issues
 
-The following notes need to be analyzed:
+Notes:
 
 | Id | Name | Target |
 | -- | ---- | ------ |
 {% for f in findings -%}
 | {{ f.id }} | {{ f.name }} | {{ f.target or "" }} |
-{% endfor %}
+{% endfor -%}
 
-A note is a finding of some type, which is indicated by the note name. Finding
-notes are named `<type>[finding]`.
+Each of the above notes is a finding of some type, which is indicated by the
+note name. Finding notes are named `<type>[finding]`.
 
 Use `mcp__gage__Query` to read docs for finding note types by running:
 
@@ -27,39 +27,41 @@ WHERE id IN ({{ findings | map(attribute='id') | sql_in_list }})
 
 Look for issues to report from the notes.
 
+## Issue criteria
+
 An issue is a problem the user should be aware of and be able to act on.
 
 Criteria for reporting an issue:
 
 1. Sufficient evidence in the notes
 2. Problem will persist or recur until fixed
-3. Issue contains a single conceptual problem
+3. Represents a single conceptual problem
 
 The phrase "sufficient evidence" is intentionally open ended. Use your best
 judgement. You are asked to cite evidence below when you report an issue.
 
-Some issues persist unless they're fixed. This includes any malformed artifact
-(e.g. buggy source code, inconsistent or poorly worded project rules, invalid
-configuration, etc.)
+Certain issues:
 
-A malformed artifact may result from the omission of content (e.g. model failed
-to act on something agreed upon or that was requested by the user).
+- Software defects
+- Security or safety concerns
+- Other errors or rule violations reflected in project files
 
-Malformed artifacts and other persistent problems should be reported as an
-issue.
+Possible issues:
 
-Some issues are ephemeral. They did not result in a malformed artifact but
-nonetheless appear in the session (e.g. communication friction, model ignored
-project rules, etc.) Such issues should be reported if they are likely to recur.
-If you see the same problem repeated in the notes, odds are higher the issue
-will recur.
+- Recurring points of friction in session with a common theme or likely underlying cause
 
-A problem that was resolved during a session must not be reported as an issue.
-However, recurring errors or problems, even when fixed, may pose a problem to
-efficiency. This may be an ephemeral problem that is likely to occur again.
+Non issues:
 
-You may find multiple problems. Use one issue per problem. Do not report an
-issue that consists of multiple, unrelated problems.
+- Problems during a session that were resolved
+- Anything that cannot be acted on (see notes below)
+
+{% if instructions -%}
+## Additional instructions
+
+{{ instructions }}
+{% endif -%}
+
+## Reporting issues
 
 When you identify an issue, report it using `mcp__gage__IssueWrite`.
 
@@ -91,5 +93,7 @@ Guidelines for issue `description`:
   active. Do not offer advice to session models.
 
 - Refer to models acting in original sessions in the third person.
+
+## Finishing
 
 Reply with whether you wrote issues. Do not restate them.

@@ -3,6 +3,7 @@ use gage::{
     Template,
     call_agent,
     carry_forward_notes_named,
+    params,
     scan,
     tools::{IssueWrite, Query},
     watermark,
@@ -12,6 +13,7 @@ pub const SCANNER = #{
     name: "findings",
     description: "Issues across findings",
     groups: ["default"],
+    params: #{ instructions: "Additional instructions for reporting issues." },
     tasks: #{
         review_findings: #{
             notes: #{ wants: ["*[finding]"] },
@@ -36,11 +38,12 @@ pub async fn review_findings() {
         return;
     }
 
-    // Construct agent prompt with findings
+    // Construct agent prompt
     let t = Template::new(include_str!(
         "review-findings-prompt.md.j2"
     ))?;
-    let prompt = t.render(#{ findings });
+    let instructions = params().instructions;
+    let prompt = t.render(#{ findings, instructions });
 
     // Run agent with tools to query sessions and report issues
     let agent = call_agent(prompt)
