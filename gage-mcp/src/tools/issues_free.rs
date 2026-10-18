@@ -2,13 +2,13 @@
 //!
 //! The tool reads every assigned issue and asks whether the session
 //! holding it, named by the URL on its assignment event, is still a
-//! live instance. A holder found not live frees its issue once the
-//! assignment is older than a grace period, so a session is not
-//! stripped of an issue in its first hour. A holder whose liveness
-//! cannot be determined frees its issue once the assignment is older
-//! than a day. Every issue left assigned is named in the result with
-//! the reason and the assignment's age, so the user can free it by
-//! hand with `gage issue open`.
+//! live instance. A holder found not live frees its issue at once: a
+//! session registers itself before it can assign an issue, so a
+//! not-live verdict means the holder has exited. A holder whose
+//! liveness cannot be determined frees its issue once the assignment
+//! is older than a day. Every issue left assigned is named in the
+//! result with the reason and the assignment's age, so the user can
+//! free it by hand with `gage issue open`.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -38,9 +38,6 @@ const _: () = assert!(
 );
 
 const HOUR_MS: i64 = 60 * 60 * 1000;
-
-/// How old an assignment must be before a not-live verdict frees it
-const NOT_LIVE_GRACE_MS: i64 = HOUR_MS;
 
 /// How old an assignment must be before an undetermined verdict frees it
 const UNDETERMINED_TTL_MS: i64 = 24 * HOUR_MS;
@@ -101,12 +98,6 @@ fn execute_at(config: &IssuesFreeConfig, now: i64) -> CallToolResult {
         let message = match verdict {
             Ok(true) => {
                 live += 1;
-                continue;
-            }
-            Ok(false) if age < NOT_LIVE_GRACE_MS => {
-                left.push(format!(
-                    "{short}: not live, assigned {since}, within 1h grace"
-                ));
                 continue;
             }
             Ok(false) => format!("freed: session is not live, assigned {since}"),
@@ -217,7 +208,7 @@ mod tests {
     }
 
     #[test]
-    fn a_fresh_assignment_is_freed_only_when_its_holder_is_dead_past_grace() {
+    fn a_fresh_assignment_is_freed_at_once_when_its_holder_is_dead() {
         let (_tmp, writer) = config();
         let open = issue(&writer, "Plain open", IssueStatus::Open);
         let dead = issue(&writer, "Dead holder", IssueStatus::Open);
@@ -230,27 +221,16 @@ mod tests {
         let result = execute(&cfg(&writer));
         assert_eq!(result.is_error, Some(false), "{}", text_of(&result));
         let text = text_of(&result);
-        assert!(text.contains("Freed no issues"), "{text}");
-        assert!(text.contains("Held by a live session: 1"), "{text}");
-        assert!(text.contains("Left assigned: 2"), "{text}");
-        assert!(text.contains("not live, assigned"), "{text}");
-        assert!(text.contains("within 1h grace"), "{text}");
-        assert!(text.contains("cannot probe claude:/x/murky-1"), "{text}");
-        assert!(text.contains("within 24h"), "{text}");
-        assert_eq!(status(&writer, &dead), IssueStatus::Assigned);
-        assert_eq!(status(&writer, &alive), IssueStatus::Assigned);
-        assert_eq!(status(&writer, &murky), IssueStatus::Assigned);
-        assert_eq!(status(&writer, &open), IssueStatus::Open);
-
-        let result = execute_at(&cfg(&writer), now_ms() + 2 * HOUR_MS);
-        let text = text_of(&result);
         assert!(text.contains("Freed 1:"), "{text}");
         assert!(text.contains("Dead holder"), "{text}");
         assert!(text.contains("Held by a live session: 1"), "{text}");
         assert!(text.contains("Left assigned: 1"), "{text}");
+        assert!(text.contains("cannot probe claude:/x/murky-1"), "{text}");
+        assert!(text.contains("within 24h"), "{text}");
         assert_eq!(status(&writer, &dead), IssueStatus::Open);
         assert_eq!(status(&writer, &alive), IssueStatus::Assigned);
         assert_eq!(status(&writer, &murky), IssueStatus::Assigned);
+        assert_eq!(status(&writer, &open), IssueStatus::Open);
         assert!(
             last_message(&writer, &dead).starts_with("freed: session is not live"),
             "{}",
