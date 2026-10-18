@@ -32,8 +32,8 @@ use serde::Deserialize;
 use crate::content_schema;
 use crate::home::ClaudeHome;
 use crate::index::{
-    ClaudeSessionAttrs, IndexStore, LockMode, ReconcileEvent, ToolUseCollector, cache_dir_for,
-    derive_entry, derive_session,
+    ClaudeSessionAttrs, IndexStore, LockMode, ReconcileEvent, ToolUseCollector, derive_entry,
+    derive_session,
 };
 use crate::model::{configured_model, resolve_model, resolved_model};
 use crate::plugin;
@@ -480,11 +480,10 @@ impl ClaudeSource {
             .cache_root_path()
             .map(Path::to_path_buf)
             .unwrap_or_else(default_cache_root);
-        let cache_dir = cache_dir_for(&cache_root, &projects_dir);
         let store = Arc::new(
-            IndexStore::new(projects_dir.clone(), cache_dir).show_agents(options.shows_agents()),
+            IndexStore::new(projects_dir.clone(), cache_root).show_agents(options.shows_agents()),
         );
-        store.ensure_cache_dir()?;
+        store.ensure_summary_dir()?;
         Ok(Self {
             source: source.to_string(),
             projects_dir,
@@ -609,7 +608,7 @@ impl Source for ClaudeSource {
             discovered: status.discovered,
             prepared: status.indexed,
             stale: status.dirty,
-            state_dir: Some(status.cache_dir),
+            state_dir: Some(status.summary_dir),
             state_bytes: status.cache_bytes,
             last_reconcile_ms: status.last_reconcile_ms,
         })
@@ -1162,7 +1161,6 @@ impl StoredSession for ClaudeStoredSession {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::index::SOURCE_MARKER;
     use tempfile::TempDir;
 
     #[test]
@@ -1293,11 +1291,11 @@ mod tests {
         let status = source.maintenance_status().unwrap();
         let state_dir = status.state_dir.unwrap();
         assert!(
-            state_dir.starts_with(&cache_root),
+            state_dir.starts_with(cache_root.join("summary")),
             "{}",
             state_dir.display()
         );
-        assert!(state_dir.join(SOURCE_MARKER).is_file());
+        assert!(state_dir.join("manifest.json").is_file());
     }
 
     fn seed_session(root: &Path, cwd: &str, id: &str, contents: &str) -> PathBuf {

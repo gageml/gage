@@ -113,14 +113,51 @@ fn status_on_empty_cache_has_no_reconcile() {
     assert!(status.last_reconcile_ms.is_none());
 }
 
+/// The cache of a corpus is `summary/<slug>` under the cache root, a
+/// flat directory of one file per session beside the manifest, which
+/// names the projects directory it caches.
 #[test]
-fn reconcile_removes_legacy_text_index() {
-    let (store, _root, cache) = store_with_tempdirs();
-    let legacy = cache.path().join("text").join("v3");
-    std::fs::create_dir_all(&legacy).unwrap();
-    std::fs::write(legacy.join("meta.json"), "{}").unwrap();
+fn summary_dir_is_the_slug_under_the_summary_category() {
+    let (store, root, cache) = store_with_tempdirs();
     store.reconcile(LockMode::Wait).unwrap();
-    assert!(!cache.path().join("text").exists());
+    let dir = store.summary_dir();
+    assert_eq!(dir.parent().unwrap(), cache.path().join("summary"));
+    assert!(dir.join(RICH_SESSION).is_file());
+    let manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("manifest.json")).unwrap()).unwrap();
+    assert_eq!(
+        manifest["source"],
+        std::fs::canonicalize(root.path())
+            .unwrap()
+            .to_string_lossy()
+            .as_ref()
+    );
+    assert_eq!(manifest["sessions"].as_object().unwrap().len(), 4);
+}
+
+/// A directory whose manifest records another format version holds
+/// files of unknown shape. Ensuring the directory discards it, and the
+/// next reconcile rebuilds it in the current format.
+#[test]
+fn a_manifest_of_another_format_discards_the_directory() {
+    let (store, root, _cache) = store_with_tempdirs();
+    let dir = store.summary_dir();
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::write(
+        dir.join("manifest.json"),
+        r#"{"format_version":1,"source":"/elsewhere","last_reconcile_ms":5,"sessions":{}}"#,
+    )
+    .unwrap();
+    std::fs::write(dir.join("stale-file"), b"old format").unwrap();
+
+    let outcome = store.reconcile(LockMode::Wait).unwrap();
+    assert_eq!(outcome.indexed, 4);
+    assert!(!dir.join("stale-file").exists());
+    assert!(rich_summary(&store, root.path()).is_some());
+    let manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("manifest.json")).unwrap()).unwrap();
+    assert_ne!(manifest["format_version"], 1);
+    assert_ne!(manifest["source"], "/elsewhere");
 }
 
 /// A summary a table read cached for a session the walk does not

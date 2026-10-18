@@ -1,6 +1,14 @@
 //! The reconcile pass and the `IndexStore` handle that owns the
 //! per-session summary cache.
 //!
+//! The cache of one corpus is the directory `<cache root>/summary/<slug>`,
+//! where the slug encodes the corpus's projects directory. It holds
+//! `manifest.json`, naming the format version, the source, and the
+//! fingerprint of every session indexed; the reconcile lock; and one
+//! summary file per session. The directory is validated when the
+//! handle's directory is ensured: a manifest of another format version,
+//! or none, discards the directory and starts it empty.
+//!
 //! Any query of the session-row tables reconciles first. The pass
 //! serializes on an advisory file lock. Queries try-lock and on
 //! contention skip reconciliation, reading the current cache — the
@@ -20,7 +28,7 @@ use serde::{Deserialize, Serialize};
 use super::Result;
 use super::derive::{ClaudeSessionAttrs, Fingerprint, derive_session};
 use super::summary_cache;
-use crate::session::SessionListBuilder;
+use crate::session::{SessionListBuilder, encode_project_dir};
 
 /// How to take the reconcile lock. Queries use `Try` —
 /// skip-with-stale on contention. Explicit maintenance (`gage index`)
@@ -62,25 +70,29 @@ pub struct Status {
     pub indexed: usize,
     pub dirty: usize,
     pub last_reconcile_ms: Option<i64>,
-    pub cache_dir: PathBuf,
+    pub summary_dir: PathBuf,
     pub cache_bytes: u64,
 }
 
-/// Per-session cache state, written only under the reconcile lock,
-/// after the summaries are written. A crash before the manifest write
-/// understates the cache; the next reconcile re-derives those
-/// sessions, and the summary write is idempotent.
+/// The directory's record: the format its files are in, the projects
+/// directory it caches, and the per-session state. The session map is
+/// written only under the reconcile lock, after the summaries are
+/// written. A crash before the manifest write understates the cache;
+/// the next reconcile re-derives those sessions, and the summary write
+/// is idempotent.
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct Manifest {
     format_version: u32,
+    source: PathBuf,
     last_reconcile_ms: i64,
     sessions: BTreeMap<String, Fingerprint>,
 }
 
 impl Manifest {
-    fn empty() -> Self {
+    fn empty(source: &Path) -> Self {
         Self {
             format_version: summary_cache::VERSION,
+            source: source.to_path_buf(),
             last_reconcile_ms: 0,
             sessions: BTreeMap::new(),
         }
@@ -91,16 +103,16 @@ impl Manifest {
     }
 }
 
-/// In-process serialization of reconcile passes, keyed by cache dir.
+/// In-process serialization of reconcile passes, keyed by summary dir.
 /// The file lock serializes across processes; this mutex keeps
 /// concurrent scans within one process from duplicating work (and
 /// from try-lock-failing against their own siblings).
 static PROCESS_LOCKS: LazyLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-fn process_lock(cache_dir: &Path) -> Arc<Mutex<()>> {
+fn process_lock(summary_dir: &Path) -> Arc<Mutex<()>> {
     let mut map = PROCESS_LOCKS.lock().expect("process lock registry");
-    map.entry(cache_dir.to_path_buf())
+    map.entry(summary_dir.to_path_buf())
         .or_insert_with(|| Arc::new(Mutex::new(())))
         .clone()
 }
@@ -108,28 +120,34 @@ fn process_lock(cache_dir: &Path) -> Arc<Mutex<()>> {
 /// Handle to the summary cache for one session corpus.
 ///
 /// `root` is the Claude projects directory the corpus is read from;
-/// `cache_dir` holds the cache (`~/.gage/cache` in production).
-/// Everything under `cache_dir` is rebuildable; deleting it is a
-/// complete reset.
+/// the cache is the directory `summary/<slug>` under `cache_root`
+/// (`~/.gage/cache` in production). Everything under it is
+/// rebuildable; deleting it is a complete reset.
 #[derive(Debug, Clone)]
 pub struct IndexStore {
     root: PathBuf,
-    cache_dir: PathBuf,
+    summary_dir: PathBuf,
     show_agents: bool,
 }
 
-/// File in a cache dir holding the projects dir the cache is for
-pub const SOURCE_MARKER: &str = "source";
-
-/// Directory an earlier format kept its full-text index under; removed
-/// on sight
-const LEGACY_TEXT_INDEX_DIR: &str = "text";
+/// The category directory under the cache root holding the summary
+/// cache of every corpus
+const SUMMARY_DIR: &str = "summary";
 
 impl IndexStore {
-    pub fn new(root: impl Into<PathBuf>, cache_dir: impl Into<PathBuf>) -> Self {
+    pub fn new(root: impl Into<PathBuf>, cache_root: impl Into<PathBuf>) -> Self {
+        let root = root.into();
+        // A projects dir that cannot be canonicalized (typically: it does
+        // not exist yet) is keyed as given. The only effect of a
+        // non-canonical key is a second cache dir for the same corpus.
+        let canonical = std::fs::canonicalize(&root).unwrap_or_else(|_| root.clone());
+        let summary_dir = cache_root
+            .into()
+            .join(SUMMARY_DIR)
+            .join(encode_project_dir(&canonical));
         Self {
-            root: root.into(),
-            cache_dir: cache_dir.into(),
+            root,
+            summary_dir,
             show_agents: false,
         }
     }
@@ -157,16 +175,18 @@ impl IndexStore {
         &self.root
     }
 
-    pub fn cache_dir(&self) -> &Path {
-        &self.cache_dir
+    /// The directory holding this corpus's manifest, lock, and
+    /// summary files.
+    pub fn summary_dir(&self) -> &Path {
+        &self.summary_dir
     }
 
     fn lock_path(&self) -> PathBuf {
-        self.cache_dir.join("reconcile.lock")
+        self.summary_dir.join(summary_cache::LOCK_FILE)
     }
 
     fn manifest_path(&self) -> PathBuf {
-        self.cache_dir.join("manifest.json")
+        self.summary_dir.join(summary_cache::MANIFEST_FILE)
     }
 
     /// Read the cached `ClaudeSessionAttrs` for `id` if its file exists and
@@ -176,27 +196,39 @@ impl IndexStore {
     /// tmp+rename pattern means the reader either sees the old file or
     /// the new one, never a partial.
     pub fn session_attrs(&self, id: &str, jsonl_mtime: SystemTime) -> Option<ClaudeSessionAttrs> {
-        summary_cache::read(&self.cache_dir, id, jsonl_mtime)
+        summary_cache::read(&self.summary_dir, id, jsonl_mtime)
     }
 
     /// Persist a `ClaudeSessionAttrs` to the on-disk cache. Used by the
     /// session-table lazy path to populate the cache as it derives
     /// sessions on demand, so subsequent queries hit `session_attrs`.
     pub fn put_session_attrs(&self, id: &str, attrs: &ClaudeSessionAttrs) -> std::io::Result<()> {
-        self.ensure_cache_dir()?;
-        summary_cache::write(&self.cache_dir, id, attrs)
+        self.ensure_summary_dir()?;
+        summary_cache::write(&self.summary_dir, id, attrs)
     }
 
-    /// Create the cache dir and record the projects dir it caches in
-    /// its [`SOURCE_MARKER`] file. A sweep reads the marker to find
-    /// cache dirs whose source no longer exists.
-    pub fn ensure_cache_dir(&self) -> std::io::Result<()> {
-        std::fs::create_dir_all(&self.cache_dir)?;
-        let marker = self.cache_dir.join(SOURCE_MARKER);
-        if !marker.exists() {
-            std::fs::write(marker, format!("{}\n", self.root.to_string_lossy()))?;
+    /// Bring the summary directory to a usable state: created, with a
+    /// manifest of the current format naming this corpus. A directory
+    /// whose manifest is of another format, unreadable, or missing is
+    /// discarded first; its files are of unknown shape.
+    pub fn ensure_summary_dir(&self) -> std::io::Result<()> {
+        let manifest_path = self.manifest_path();
+        if self.summary_dir.is_dir() {
+            match read_manifest(&manifest_path) {
+                Ok(manifest) if manifest.is_current() => return Ok(()),
+                Ok(_) => tracing::info!(
+                    dir = %self.summary_dir.display(),
+                    "summary cache format changed, discarding"
+                ),
+                Err(e) => tracing::info!(
+                    dir = %self.summary_dir.display(),
+                    "summary cache manifest unreadable, discarding: {e}"
+                ),
+            }
+            std::fs::remove_dir_all(&self.summary_dir)?;
         }
-        Ok(())
+        std::fs::create_dir_all(&self.summary_dir)?;
+        write_manifest(&manifest_path, &Manifest::empty(&self.root))
     }
 
     /// Run the reconcile pass: diff the corpus against the cache,
@@ -225,8 +257,8 @@ impl IndexStore {
         mut on_event: impl FnMut(ReconcileEvent),
     ) -> Result<ReconcileOutcome> {
         self.locked(LockMode::Wait, |store| {
-            remove_file_if_present(&store.manifest_path())?;
-            summary_cache::remove_all(&store.cache_dir)?;
+            write_manifest(&store.manifest_path(), &Manifest::empty(&store.root))?;
+            summary_cache::remove_all(&store.summary_dir)?;
             store.reconcile_locked(&mut on_event)
         })
     }
@@ -236,10 +268,9 @@ impl IndexStore {
         mode: LockMode,
         body: impl FnOnce(&Self) -> Result<ReconcileOutcome>,
     ) -> Result<ReconcileOutcome> {
-        self.ensure_cache_dir()?;
-        self.remove_stale_artifacts();
+        self.ensure_summary_dir()?;
 
-        let process = process_lock(&self.cache_dir);
+        let process = process_lock(&self.summary_dir);
         let _process_guard = match mode {
             LockMode::Wait => process.lock().expect("reconcile process lock"),
             LockMode::Try => match process.try_lock() {
@@ -278,20 +309,6 @@ impl IndexStore {
         result
     }
 
-    /// Remove summary-cache version directories that do not match the
-    /// current code's version, and the full-text index an earlier
-    /// format left behind.
-    fn remove_stale_artifacts(&self) {
-        let legacy = self.cache_dir.join(LEGACY_TEXT_INDEX_DIR);
-        if legacy.is_dir() {
-            tracing::info!(path = %legacy.display(), "removing legacy text index");
-            if let Err(e) = std::fs::remove_dir_all(&legacy) {
-                tracing::warn!(path = %legacy.display(), "failed to remove: {e}");
-            }
-        }
-        summary_cache::remove_stale_versions(&self.cache_dir);
-    }
-
     fn reconcile_locked(
         &self,
         on_event: &mut dyn FnMut(ReconcileEvent),
@@ -321,18 +338,18 @@ impl IndexStore {
             .collect();
         let walked_ids: BTreeSet<&str> = walked.iter().map(|(id, _, _)| id.as_str()).collect();
 
-        let mut manifest = load_manifest(&self.manifest_path());
+        let mut manifest = load_manifest(&self.manifest_path(), &self.root);
         if !manifest.is_current() {
             tracing::info!("summary cache format changed, rebuilding");
-            summary_cache::remove_all(&self.cache_dir)?;
-            manifest = Manifest::empty();
+            summary_cache::remove_all(&self.summary_dir)?;
+            manifest = Manifest::empty(&self.root);
         }
 
         // 2. Diff. A session is dirty if either the manifest doesn't
         // have it at the current fingerprint, or its summary cache
         // file is missing (covers first-run backfill and any
         // out-of-band deletion under `session/`).
-        let cached = summary_cache::existing_ids(&self.cache_dir);
+        let cached = summary_cache::existing_ids(&self.summary_dir);
         let dirty: Vec<&(String, PathBuf, Fingerprint)> = walked
             .iter()
             .filter(|(id, _, fp)| manifest.sessions.get(id) != Some(fp) || !cached.contains(id))
@@ -370,7 +387,7 @@ impl IndexStore {
                     continue;
                 }
             };
-            if let Err(e) = summary_cache::write(&self.cache_dir, id, &derived.attrs) {
+            if let Err(e) = summary_cache::write(&self.summary_dir, id, &derived.attrs) {
                 tracing::warn!(session_id = %id, "failed to write summary cache: {e}");
                 on_event(ReconcileEvent::Advance);
                 continue;
@@ -385,7 +402,7 @@ impl IndexStore {
         // from disk
         for id in &removed {
             manifest.sessions.remove(id);
-            if let Err(e) = summary_cache::remove(&self.cache_dir, id) {
+            if let Err(e) = summary_cache::remove(&self.summary_dir, id) {
                 tracing::warn!(session_id = %id, "failed to remove summary cache: {e}");
             }
             outcome.removed += 1;
@@ -430,7 +447,7 @@ impl IndexStore {
             })
             .collect();
 
-        let manifest = load_manifest(&self.manifest_path());
+        let manifest = load_manifest(&self.manifest_path(), &self.root);
 
         let dirty = walked
             .iter()
@@ -444,8 +461,8 @@ impl IndexStore {
             dirty,
             last_reconcile_ms: (manifest.last_reconcile_ms > 0)
                 .then_some(manifest.last_reconcile_ms),
-            cache_dir: self.cache_dir.clone(),
-            cache_bytes: dir_size(&self.cache_dir),
+            summary_dir: self.summary_dir.clone(),
+            cache_bytes: dir_size(&self.summary_dir),
         }
     }
 }
@@ -457,32 +474,32 @@ fn now_ms() -> i64 {
         .as_millis() as i64
 }
 
-fn load_manifest(path: &Path) -> Manifest {
-    match std::fs::read_to_string(path) {
-        Ok(s) => serde_json::from_str(&s).unwrap_or_else(|e| {
+/// The manifest as written, or an empty one for `source` when the
+/// file is absent. An unreadable file is reported as version 0, so
+/// the caller rebuilds.
+fn load_manifest(path: &Path, source: &Path) -> Manifest {
+    match read_manifest(path) {
+        Ok(manifest) => manifest,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Manifest::empty(source),
+        Err(e) => {
             tracing::warn!("unreadable cache manifest, rebuilding: {e}");
             Manifest {
                 format_version: 0,
-                ..Manifest::empty()
+                ..Manifest::empty(source)
             }
-        }),
-        Err(_) => Manifest::empty(),
+        }
     }
 }
 
-fn write_manifest(path: &Path, manifest: &Manifest) -> Result<()> {
+fn read_manifest(path: &Path) -> std::io::Result<Manifest> {
+    let text = std::fs::read_to_string(path)?;
+    serde_json::from_str(&text).map_err(std::io::Error::other)
+}
+
+fn write_manifest(path: &Path, manifest: &Manifest) -> std::io::Result<()> {
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, serde_json::to_string_pretty(manifest)?)?;
-    std::fs::rename(&tmp, path)?;
-    Ok(())
-}
-
-fn remove_file_if_present(path: &Path) -> std::io::Result<()> {
-    match std::fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(e),
-    }
+    std::fs::rename(&tmp, path)
 }
 
 fn dir_size(dir: &Path) -> u64 {
