@@ -26,7 +26,9 @@ pub struct ResolveArgs {
     #[arg(short, long)]
     model: Option<String>,
 
-    /// Skip confirmation prompt
+    /// Skip prompts
+    ///
+    /// Without --model, model takes its default
     #[arg(short, long)]
     yes: bool,
 
@@ -110,6 +112,10 @@ fn run_dialog(
         Some(m) => {
             cli::log::step(format!("Model\n{}", style(m).dim()))?;
             Some(m.clone())
+        }
+        None if args.yes => {
+            cli::log::step(format!("Model\n{}", style("Default").dim()))?;
+            None
         }
         None => model_prompt::prompt_model_ranked()?,
     };
