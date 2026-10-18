@@ -321,7 +321,7 @@ pub(crate) fn handle_key(
                 KeyCode::Char('e') => state.toggle_all_entries(),
                 KeyCode::Char('d') => state.toggle_details(),
                 KeyCode::Char('n') => state.toggle_turns(),
-                KeyCode::Enter | KeyCode::Esc => {
+                KeyCode::Enter | KeyCode::Char('q') | KeyCode::Esc => {
                     state.dialog = Dialog::None;
                 }
                 _ => {}
@@ -1785,10 +1785,7 @@ fn draw_options(frame: &mut Frame, view: &ViewOptions) {
         option_line('d', view.details, false, "Entry details"),
         option_line('n', view.turns, false, "Turns"),
     ];
-    let hint = Line::from(vec![
-        Span::styled("Enter", styles::Dialog::key()),
-        Span::raw(" close"),
-    ]);
+    let hint = hint::dialog_line(&[("Enter", "close")]);
     crate::dialog::draw_menu(frame, "View options", lines, hint);
 }
 
@@ -2219,6 +2216,7 @@ mod tests {
         assert!(text.contains("t [ ] Tool calls"), "{text}");
         assert!(text.contains("d [ ] Entry details"), "{text}");
         assert!(text.contains("Enter close"), "{text}");
+        assert!(!text.contains("q/Enter"), "{text}");
         // Two spaces inside the border, and option rows are not indented
         // under their headers: both sit two columns in from the border.
         assert!(text.contains("│  Entry types:"), "{text}");
@@ -2240,9 +2238,15 @@ mod tests {
         assert!(text.contains("a [x] Assistant messages"), "{text}");
         assert!(!text.contains('~'), "{text}");
 
-        // Enter closes the menu.
+        // Enter closes the menu, and so does `q`, which the hint does
+        // not list.
         press(&mut state, &backend, KeyCode::Enter);
         assert!(matches!(state.dialog, Dialog::None));
+        press(&mut state, &backend, KeyCode::Char('v'));
+        assert!(matches!(state.dialog, Dialog::Options));
+        press(&mut state, &backend, KeyCode::Char('q'));
+        assert!(matches!(state.dialog, Dialog::None));
+        assert!(state.view.all_entries, "q keeps the toggled options");
     }
 
     /// The menu keys use the key color, the hint's "Enter" is a key and
