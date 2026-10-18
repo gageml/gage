@@ -625,7 +625,7 @@ impl AppState {
         }
     }
 
-    /// The view options in effect
+    /// The view options in effect.
     #[cfg(test)]
     pub(crate) fn view(&self) -> &ViewOptions {
         &self.view

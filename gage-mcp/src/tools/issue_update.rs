@@ -76,7 +76,7 @@ pub fn execute(config: &StoreWriterConfig, params: JsonObject) -> Result<CallToo
     let author = &config.author;
     // A completed or wontfix close with no message leaves the history
     // with a status change and no record of why; the duplicate close
-    // carries its reason as the survivor link
+    // carries its reason as the survivor link.
     if message.is_none()
         && let Update::Close(reason) = &update
     {

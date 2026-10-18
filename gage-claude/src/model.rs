@@ -1,15 +1,21 @@
 //! Model alias resolution for values passed to `claude --model`.
-//! Maps size aliases (`small`/`medium`/`large`) to the version-free
-//! family aliases claude itself documents (`haiku`/`sonnet`/`opus`),
-//! which track the latest release of each family. Family aliases and
-//! concrete model ids pass through unchanged.
+//! Maps size aliases (`small`/`medium`/`large`) to pinned model ids.
+//! The family aliases claude documents (`haiku`/`sonnet`/`opus`)
+//! track the latest release of each family, and the 5.x releases
+//! refuse routine Gage prompts through the reasoning_extraction
+//! safety classifier, so each size pins the latest 4.x release of its
+//! family. Family aliases and concrete model ids pass through
+//! unchanged.
 
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const MODEL_ALIASES: &[(&str, &str)] =
-    &[("large", "opus"), ("medium", "sonnet"), ("small", "haiku")];
+const MODEL_ALIASES: &[(&str, &str)] = &[
+    ("large", "claude-opus-4-8"),
+    ("medium", "claude-sonnet-4-6"),
+    ("small", "claude-haiku-4-5"),
+];
 
 /// Model used when a spec does not set one. Every child claude gets
 /// `--model`; an unset model never falls through to the user's
@@ -114,9 +120,9 @@ mod tests {
 
     #[test]
     fn resolves_aliases() {
-        assert_eq!(resolve_model("large"), "opus");
-        assert_eq!(resolve_model("medium"), "sonnet");
-        assert_eq!(resolve_model("small"), "haiku");
+        assert_eq!(resolve_model("large"), "claude-opus-4-8");
+        assert_eq!(resolve_model("medium"), "claude-sonnet-4-6");
+        assert_eq!(resolve_model("small"), "claude-haiku-4-5");
     }
 
     #[test]
@@ -130,8 +136,8 @@ mod tests {
 
     #[test]
     fn default_model_when_unset() {
-        assert_eq!(resolved_model(None), "sonnet");
-        assert_eq!(resolved_model(Some("large")), "opus");
+        assert_eq!(resolved_model(None), "claude-sonnet-4-6");
+        assert_eq!(resolved_model(Some("large")), "claude-opus-4-8");
         assert_eq!(resolved_model(Some("claude-haiku-4-5")), "claude-haiku-4-5");
     }
 
@@ -143,8 +149,8 @@ mod tests {
     #[test]
     fn empty_map_matches_resolved_model() {
         let m = map(&[]);
-        assert_eq!(m.resolve(None), "sonnet");
-        assert_eq!(m.resolve(Some("large")), "opus");
+        assert_eq!(m.resolve(None), "claude-sonnet-4-6");
+        assert_eq!(m.resolve(Some("large")), "claude-opus-4-8");
         assert_eq!(m.resolve(Some("claude-haiku-4-5")), "claude-haiku-4-5");
     }
 

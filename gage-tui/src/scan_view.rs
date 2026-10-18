@@ -3689,7 +3689,7 @@ mod tests {
         }
     }
 
-    /// A host whose session backend reads the fixture store
+    /// A host whose session backend reads the fixture store.
     struct StoreHost(Arc<Mutex<Store>>);
 
     impl ScanHost for StoreHost {

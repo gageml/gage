@@ -23,7 +23,7 @@ pub(crate) fn scan_log_schema() -> SchemaRef {
         Field::new("scan_id", DataType::Utf8, false),
         // One of `out`, `err`, `records`
         Field::new("name", DataType::Utf8, false),
-        // The log's content; bytes that are not UTF-8 are replaced
+        // The log's content; bytes that are not UTF-8 are replaced.
         Field::new("text", DataType::Utf8, false),
     ]))
 }

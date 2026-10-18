@@ -184,20 +184,18 @@ These rules apply to ALL Rust code in this workspace. They are non-negotiable.
   The remedy for unclear code is clearer code, not a description of the unclear
   code.
 
-- Comment punctuation rules:
-  - Sentences that provide background or details not obvious in the code should
-    end with periods
-  - Short fragments that demark sections or provide quick clarity to code
-    without filling in detail should not use periods
+- **Comment punctuation.** A doc comment (`///`, `//!`) ends with a period. A
+  line comment (`//`) ends with a period when it contains a verb or spans more
+  than one line. A line comment that is a bare label with no verb takes no
+  period.
+  - RIGHT: `/// The view options in effect.`
+  - RIGHT: `// The log's content; bytes that are not UTF-8 are replaced.`
+  - RIGHT: `// One of "out", "err", "records"`
+  - WRONG: `/// A host whose session backend reads the fixture store`
 
-  Rule of thumb: If it reads like a description, use periods. If it reads like a
-  label or title, omit the period.
-
-  This deviates from the [Rust Style Guide comments] chapter, which requires
-  complete sentences ending with a period for all comments except inline block
-  comments. The deviation is intentional.
-
-  Doc comments (`///`) are prose and follow normal conventions.
+  This deviates from the [Rust Style Guide comments] chapter, which requires a
+  period on every comment except an inline block comment. The deviation is
+  intentional.
 
 - **Use `Path` / `PathBuf` for filesystem paths, not `&str` / `String`.**
   Function parameters, struct fields, and return values that represent a
