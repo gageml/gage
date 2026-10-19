@@ -189,7 +189,7 @@ impl TableProvider for BlameTable {
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let lines = blamed_lines(&self.path, self.selection.as_ref())?;
         let (ctx, projects) = self.open(&lines).await?;
-        let rows = blame(&ctx, &projects, lines).await?;
+        let rows = blame(&ctx, &projects, lines, &self.scope).await?;
         MemTable::try_new(blame_schema(), vec![vec![blame_batch(&rows)?]])?
             .scan(state, projection, filters, limit)
             .await
@@ -605,6 +605,7 @@ async fn blame(
     ctx: &SessionContext,
     projects: &[String],
     lines: Vec<BlamedLine>,
+    scope: &Scope,
 ) -> Result<Vec<OutRow>> {
     let paths: Vec<String> = distinct_paths(&lines)
         .into_iter()
@@ -628,8 +629,13 @@ async fn blame(
     };
     let wrote_path = has("files_changed");
 
-    let scoped = session_ids(ctx, projects).await?;
-    let scoped = writers_of(ctx, &scoped, &wrote_path).await?;
+    let scoped = match scope {
+        Scope::Native { .. } => writer_sessions(ctx, projects, &wrote_path).await?,
+        Scope::Stored(_) => {
+            let scoped = session_ids(ctx, projects).await?;
+            writers_of(ctx, &scoped, &wrote_path).await?
+        }
+    };
     let mut found = if scoped.is_empty() {
         BTreeMap::new()
     } else {
@@ -755,6 +761,26 @@ fn id_list(ids: &[String]) -> String {
         .map(|id| quote(id))
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// The sessions of `projects` with a write the driver attributes to
+/// the file, read from the session table. A native session's summary
+/// lists the paths it wrote, so the writers are found without opening
+/// a session. A stored session's summary lists no paths yet, so the
+/// stored scope finds its writers through `writers_of`.
+async fn writer_sessions(
+    ctx: &SessionContext,
+    projects: &[String],
+    wrote_path: &str,
+) -> Result<Vec<String>> {
+    if projects.is_empty() {
+        return Ok(Vec::new());
+    }
+    let sql = format!(
+        "SELECT id FROM session WHERE project IN ({}) AND ({wrote_path})",
+        id_list(projects)
+    );
+    strings(ctx, &sql, &[]).await
 }
 
 /// The ids of the sessions in `projects`, read through the session
@@ -1834,6 +1860,60 @@ filename f.rs
             shape,
             [(1, Some(2), some(NATIVE_ID), some("t1"), some("command"))],
             "both lines of the heredoc fold into one range, the command tier"
+        );
+    }
+
+    /// The native writer lookup reads the session summaries: it names
+    /// the project's session that wrote the file and leaves out the
+    /// project's session that wrote another file and the other
+    /// project's session that wrote this one. The `tool_use` lookup
+    /// the stored scope uses names the same session.
+    #[tokio::test]
+    async fn native_writers_are_read_from_the_session_summaries() {
+        let home = tempfile::tempdir().unwrap();
+        let home = std::fs::canonicalize(home.path()).unwrap();
+        let (proj_a, proj_b) = (home.join("projA"), home.join("projB"));
+        std::fs::create_dir_all(&proj_a).unwrap();
+        std::fs::create_dir_all(&proj_b).unwrap();
+        let file = proj_a.join("a.rs");
+        std::fs::write(&file, "fn one() {}\n").unwrap();
+        let other = proj_a.join("b.rs");
+        let ts = "2025-01-01T00:00:05Z";
+        let writer = "aaaaaaaa-0000-0000-0000-000000000001";
+        let bystander = "aaaaaaaa-0000-0000-0000-000000000002";
+        let elsewhere = "aaaaaaaa-0000-0000-0000-000000000003";
+        let claude_root = tempfile::tempdir().unwrap();
+        let session = |id: &str, project: &Path, path: &Path| {
+            let mut lines = vec![prompt(1, "write it", "2025-01-01T00:00:00Z")];
+            lines.extend(edit(2, "t1", path, "", "fn one() {}\n", ts));
+            write_session(claude_root.path(), project, id, &lines)
+        };
+        session(bystander, &proj_a, &other);
+        session(elsewhere, &proj_b, &file);
+        let spec = session(writer, &proj_a, &file);
+
+        let table = BlameTable {
+            scope: Scope::Native { show_agents: false },
+            source: Some(spec),
+            cache_root: Some(claude_root.path().join("cache")),
+            path: file.clone(),
+            selection: None,
+        };
+        let lines = blamed_lines(&file, None).unwrap();
+        let (ctx, projects) = table.open(&lines).await.unwrap();
+        let wrote_path = format!(
+            "array_has(files_changed, {})",
+            quote(file.to_str().unwrap())
+        );
+
+        let from_summaries = writer_sessions(&ctx, &projects, &wrote_path).await.unwrap();
+        assert_eq!(from_summaries, [writer.to_string()]);
+
+        let scoped = session_ids(&ctx, &projects).await.unwrap();
+        let from_calls = writers_of(&ctx, &scoped, &wrote_path).await.unwrap();
+        assert_eq!(
+            from_calls, from_summaries,
+            "both lookups name the same writer"
         );
     }
 }

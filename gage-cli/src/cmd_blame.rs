@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::Context;
 use chrono::{DateTime, Utc};
 use clap::Args;
+use cliclack as cli;
 use datafusion::arrow::array::{Array, Int64Array, StringArray, TimestampMillisecondArray};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::prelude::SessionContext;
@@ -48,9 +49,37 @@ pub struct BlameArgs {
 }
 
 pub async fn run(args: BlameArgs) -> Result<(), CliError> {
+    let spinner = cli::spinner();
+    spinner.start("Working");
+    let blamed = blame(&args).await;
+    spinner.clear();
+    let blamed = blamed?;
+    if args.json {
+        PrintFormat::Json
+            .print_batches(&blamed.batches)
+            .context("gage blame")?;
+    } else {
+        let text = std::fs::read_to_string(&blamed.path)
+            .with_context(|| format!("gage blame: {}", blamed.path.display()))?;
+        print_rows(&blamed.batches, &text, args.lines.as_ref(), blamed.peers);
+    }
+    Ok(())
+}
+
+/// The attribution rows and what the text form needs beside them:
+/// the file as the rows address it, and the peer session ids.
+struct Blamed {
+    path: PathBuf,
+    batches: Vec<RecordBatch>,
+    /// Every session id in the source; empty for JSON output, which
+    /// shows ids in full
+    peers: Vec<String>,
+}
+
+async fn blame(args: &BlameArgs) -> Result<Blamed, CliError> {
     let path = std::fs::canonicalize(&args.path)
         .with_context(|| format!("gage blame: {}", args.path.display()))?;
-    let path = path
+    let path_str = path
         .to_str()
         .with_context(|| format!("gage blame: {} is not UTF-8", path.display()))?;
     let lines = args
@@ -67,7 +96,7 @@ pub async fn run(args: BlameArgs) -> Result<(), CliError> {
             .await;
         (
             ctx,
-            format!("blame({}{lines})", quote(path)),
+            format!("blame({}{lines})", quote(path_str)),
             "session".to_string(),
         )
     } else {
@@ -78,7 +107,7 @@ pub async fn run(args: BlameArgs) -> Result<(), CliError> {
         let ctx = ContextBuilder::new(None).build().await;
         (
             ctx,
-            format!("native_blame({}, {}{lines})", quote(&spec), quote(path)),
+            format!("native_blame({}, {}{lines})", quote(&spec), quote(path_str)),
             format!("native_session({})", quote(&spec)),
         )
     };
@@ -98,16 +127,16 @@ pub async fn run(args: BlameArgs) -> Result<(), CliError> {
         .collect()
         .await
         .context("gage blame")?;
-    if args.json {
-        PrintFormat::Json
-            .print_batches(&batches)
-            .context("gage blame")?;
+    let peers = if args.json {
+        Vec::new()
     } else {
-        let text = std::fs::read_to_string(path).with_context(|| format!("gage blame: {path}"))?;
-        let peers = session_ids(&ctx, &sessions).await?;
-        print_rows(&batches, &text, args.lines.as_ref(), peers);
-    }
-    Ok(())
+        session_ids(&ctx, &sessions).await?
+    };
+    Ok(Blamed {
+        path,
+        batches,
+        peers,
+    })
 }
 
 /// Every session id in the source, the peer set for prefix
