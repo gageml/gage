@@ -61,3 +61,27 @@ fn flush_token(spans: &mut Vec<Span<'static>>, token: &mut String, key_style: St
         spans.push(Span::styled(std::mem::take(token), key_style));
     }
 }
+
+/// The newline shortcut shown in a text-entry dialog's key hint.
+/// Shift+Enter is reported as a distinct key only under the Kitty
+/// keyboard protocol; a legacy terminal sends the same bytes for Enter
+/// and Shift+Enter, so the hint names the shortcuts legacy input
+/// reports instead.
+pub(crate) fn newline_keys(enhanced_keys: bool) -> &'static str {
+    if enhanced_keys {
+        "Shift+Enter"
+    } else {
+        "Alt+Enter or Ctrl+J"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn newline_keys_names_shift_enter_only_under_the_kitty_protocol() {
+        assert_eq!(newline_keys(true), "Shift+Enter");
+        assert_eq!(newline_keys(false), "Alt+Enter or Ctrl+J");
+    }
+}

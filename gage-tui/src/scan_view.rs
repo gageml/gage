@@ -580,7 +580,16 @@ pub async fn run(
 ) -> io::Result<()> {
     let mut terminal = ratatui::try_init()?;
     let enhanced_keys = push_keyboard_enhancements();
-    let result = event_loop(&mut terminal, model, &mut events, &on_cancel, host, false).await;
+    let result = event_loop(
+        &mut terminal,
+        model,
+        &mut events,
+        &on_cancel,
+        host,
+        false,
+        enhanced_keys,
+    )
+    .await;
     if enhanced_keys {
         pop_keyboard_enhancements();
     }
@@ -594,7 +603,7 @@ pub async fn run(
 pub async fn view(model: Option<ScanModel>, host: Arc<dyn ScanHost>) -> io::Result<()> {
     let mut terminal = ratatui::try_init()?;
     let enhanced_keys = push_keyboard_enhancements();
-    let result = view_inner(&mut terminal, model, host).await;
+    let result = view_inner(&mut terminal, model, host, enhanced_keys).await;
     if enhanced_keys {
         pop_keyboard_enhancements();
     }
@@ -606,6 +615,7 @@ async fn view_inner(
     terminal: &mut DefaultTerminal,
     model: Option<ScanModel>,
     host: Arc<dyn ScanHost>,
+    enhanced_keys: bool,
 ) -> io::Result<()> {
     let mut model = match model {
         Some(m) => m,
@@ -618,7 +628,16 @@ async fn view_inner(
     let (tx, mut events) = unbounded_channel();
     drop(tx);
     // A finished model never opens the cancel path
-    event_loop(terminal, model, &mut events, &|| {}, host, true).await
+    event_loop(
+        terminal,
+        model,
+        &mut events,
+        &|| {},
+        host,
+        true,
+        enhanced_keys,
+    )
+    .await
 }
 
 /// Run the open dialog on a blank background until the user picks a
@@ -689,9 +708,11 @@ async fn event_loop(
     on_cancel: &impl Fn(),
     host: Arc<dyn ScanHost>,
     allow_open: bool,
+    enhanced_keys: bool,
 ) -> io::Result<()> {
     let mut state = ViewState::new(model, host);
     state.allow_open = allow_open;
+    state.enhanced_keys = enhanced_keys;
     let mut stop_input = Arc::new(AtomicBool::new(false));
     let mut input = spawn_input_thread(Arc::clone(&stop_input));
     let mut tick = tokio::time::interval(Duration::from_millis(100));
@@ -757,7 +778,9 @@ async fn run_resolve_session(
     // The channel closes when the input thread exits; draining until
     // then keeps buffered keys out of the child's session.
     while input.recv().await.is_some() {}
-    pop_keyboard_enhancements();
+    if state.enhanced_keys {
+        pop_keyboard_enhancements();
+    }
     ratatui::restore();
     // Leaving the alternate screen reveals the base terminal; clear it
     // and show a startup line so shell scrollback isn't visible while
@@ -777,7 +800,7 @@ async fn run_resolve_session(
         .start_resolve_session(issue_ids)
         .and_then(|mut session| session.wait());
     *terminal = ratatui::try_init()?;
-    push_keyboard_enhancements();
+    state.enhanced_keys = push_keyboard_enhancements();
     terminal.clear()?;
     *stop_input = Arc::new(AtomicBool::new(false));
     *input = spawn_input_thread(Arc::clone(stop_input));
@@ -1095,6 +1118,9 @@ struct ViewState {
     /// Whether `o` and the picker may open another scan; off for a
     /// live scan
     allow_open: bool,
+    /// Whether the terminal runs the Kitty keyboard protocol; selects
+    /// the newline shortcut the comment prompts name
+    enhanced_keys: bool,
 }
 
 enum Dialog {
@@ -1232,6 +1258,7 @@ impl ViewState {
             max_ratio: 0.0,
             host,
             allow_open: false,
+            enhanced_keys: false,
             model,
         };
         state.sync_tables();
@@ -1243,8 +1270,10 @@ impl ViewState {
     fn replace_model(&mut self, mut model: ScanModel) {
         model.finished = true;
         let allow_open = self.allow_open;
+        let enhanced_keys = self.enhanced_keys;
         *self = ViewState::new(model, Arc::clone(&self.host));
         self.allow_open = allow_open;
+        self.enhanced_keys = enhanced_keys;
     }
 
     /// Overall progress ratio for the gauge. Each task owns an equal
@@ -2474,6 +2503,7 @@ fn draw_dialogs(frame: &mut Frame, state: &mut ViewState) {
         scroll_view,
         model,
         cancel_requested,
+        enhanced_keys,
         ..
     } = state;
     match dialog {
@@ -2505,13 +2535,14 @@ fn draw_dialogs(frame: &mut Frame, state: &mut ViewState) {
         Dialog::None => {}
     }
     if let Some(prompt) = prompt {
-        draw_prompt(frame, prompt);
+        draw_prompt(frame, prompt, *enhanced_keys);
     }
 }
 
 /// Draw the open prompt over the frame. The prompt dialogs clear only
 /// their own centered area, so whatever is beneath stays visible.
-fn draw_prompt(frame: &mut Frame, prompt: &mut Prompt) {
+fn draw_prompt(frame: &mut Frame, prompt: &mut Prompt, enhanced_keys: bool) {
+    let newline = hint::newline_keys(enhanced_keys);
     match prompt {
         Prompt::Actions { issue } => draw_actions(frame, issue),
         Prompt::Close { reason, editor, .. } => {
@@ -2524,7 +2555,7 @@ fn draw_prompt(frame: &mut Frame, prompt: &mut Prompt) {
                 &format!("Close issue ({})", reason.as_str()),
                 Some(comment_prompt),
                 editor,
-                "Enter close · Shift-Enter newline · Esc cancel",
+                &format!("Enter close · {newline} newline · Esc cancel"),
             );
         }
         Prompt::Resolve { issue } => {
@@ -2565,14 +2596,14 @@ fn draw_prompt(frame: &mut Frame, prompt: &mut Prompt) {
             &format!("Open issue ({})", status.as_str()),
             Some("Comment (optional)"),
             editor,
-            "Enter open · Shift-Enter newline · Esc cancel",
+            &format!("Enter open · {newline} newline · Esc cancel"),
         ),
         Prompt::Comment { editor, .. } => dialog::draw_text_area(
             frame,
             "Comment issue",
             Some("Comment"),
             editor,
-            "Enter comment · Shift-Enter newline · Esc cancel",
+            &format!("Enter comment · {newline} newline · Esc cancel"),
         ),
     }
 }
@@ -3999,5 +4030,53 @@ mod tests {
         let line = name_line("general", false);
         assert_eq!(line.spans.len(), 1);
         assert_eq!(line.spans[0].style, Style::new());
+    }
+
+    #[test]
+    fn comment_prompt_hint_names_the_newline_shortcut_the_terminal_reports() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut state = ViewState::new(ScanModel::default(), Arc::new(NullHost));
+        state.prompt = Some(Prompt::Comment {
+            issue: Box::new(IssueItem {
+                id: "i1".into(),
+                name: "issue".into(),
+                title: "An issue".into(),
+                status: "open".into(),
+                status_cell: "open".into(),
+                closed: false,
+                author: "me".into(),
+                created: String::new(),
+                description: None,
+                sessions: Vec::new(),
+                evidence: Vec::new(),
+                events: Vec::new(),
+            }),
+            editor: TextArea::new(""),
+        });
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        let screen = |terminal: &Terminal<TestBackend>| {
+            let buffer = terminal.backend().buffer();
+            let mut out = String::new();
+            for y in 0..buffer.area.height {
+                for x in 0..buffer.area.width {
+                    out.push_str(buffer[(x, y)].symbol());
+                }
+                out.push('\n');
+            }
+            out
+        };
+
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let legacy = screen(&terminal);
+        assert!(legacy.contains("Alt+Enter or Ctrl+J newline"), "{legacy}");
+        assert!(!legacy.contains("Shift+Enter"), "{legacy}");
+
+        state.enhanced_keys = true;
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let enhanced = screen(&terminal);
+        assert!(enhanced.contains("Shift+Enter newline"), "{enhanced}");
+        assert!(!enhanced.contains("Alt+Enter"), "{enhanced}");
     }
 }

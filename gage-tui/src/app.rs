@@ -41,6 +41,7 @@ pub fn run(
     line: Option<u32>,
     options: &ViewOptions,
     backend: &Backend,
+    enhanced_keys: bool,
 ) -> io::Result<()> {
     let doc = match doc {
         Some(doc) => doc,
@@ -52,6 +53,7 @@ pub fn run(
         },
     };
     let mut state = AppState::new(doc, options, DocSource::Backend, backend.supports_notes());
+    state.enhanced_keys = enhanced_keys;
     if let Some(line) = line {
         state.select_line(line);
     }
@@ -587,6 +589,9 @@ pub(crate) struct AppState {
     source: DocSource,
     /// Whether the backend writes notes; gates the note keys
     notes_writable: bool,
+    /// Whether the terminal runs the Kitty keyboard protocol; selects
+    /// the newline shortcut the editor hint names
+    enhanced_keys: bool,
 }
 
 impl AppState {
@@ -622,6 +627,7 @@ impl AppState {
             turns,
             source,
             notes_writable,
+            enhanced_keys: false,
         }
     }
 
@@ -1334,7 +1340,7 @@ pub(crate) fn draw_in(frame: &mut Frame, area: Rect, state: &mut AppState) {
         Layout::horizontal([Constraint::Length(32), Constraint::Min(0)]).areas(area);
     draw_outline(frame, state, outline_area);
     draw_body(frame, state, body_area);
-    draw_dialog(frame, &mut state.dialog, &state.view);
+    draw_dialog(frame, &mut state.dialog, &state.view, state.enhanced_keys);
 }
 
 pub(crate) fn footer_hint(state: &AppState) -> Line<'static> {
@@ -1737,7 +1743,7 @@ fn draw_body_scrollbar(frame: &mut Frame, state: &AppState, active: bool, area: 
     );
 }
 
-fn draw_dialog(frame: &mut Frame, dialog: &mut Dialog, view: &ViewOptions) {
+fn draw_dialog(frame: &mut Frame, dialog: &mut Dialog, view: &ViewOptions, enhanced_keys: bool) {
     match dialog {
         Dialog::None => {}
         Dialog::Options => draw_options(frame, view),
@@ -1745,12 +1751,16 @@ fn draw_dialog(frame: &mut Frame, dialog: &mut Dialog, view: &ViewOptions) {
             crate::dialog::draw_wrapped_message(frame, NOTES_UNAVAILABLE, "Enter dismiss")
         }
         Dialog::NoteType { .. } => draw_note_type(frame),
-        Dialog::AddNote { editor, title, .. } => draw_editor(frame, title, editor),
-        Dialog::EditNote { editor, title, .. } => draw_editor(frame, title, editor),
+        Dialog::AddNote { editor, title, .. } => draw_editor(frame, title, editor, enhanced_keys),
+        Dialog::EditNote { editor, title, .. } => draw_editor(frame, title, editor, enhanced_keys),
         Dialog::ConfirmCancel { pending } => {
             match pending.as_mut() {
-                Dialog::AddNote { editor, title, .. } => draw_editor(frame, title, editor),
-                Dialog::EditNote { editor, title, .. } => draw_editor(frame, title, editor),
+                Dialog::AddNote { editor, title, .. } => {
+                    draw_editor(frame, title, editor, enhanced_keys)
+                }
+                Dialog::EditNote { editor, title, .. } => {
+                    draw_editor(frame, title, editor, enhanced_keys)
+                }
                 _ => {}
             }
             draw_confirm(frame, "Cancel your changes?");
@@ -1816,10 +1826,12 @@ fn draw_note_type(frame: &mut Frame) {
     crate::dialog::draw_lines_titled(frame, Some("Note type"), lines, "q cancel");
 }
 
-const EDITOR_HINT: &str = "Enter save · Shift/Alt+Enter or Ctrl+J newline · Esc cancel";
-
-fn draw_editor(frame: &mut Frame, title: &str, editor: &mut TextArea) {
-    crate::dialog::draw_text_area(frame, title, None, editor, EDITOR_HINT);
+fn draw_editor(frame: &mut Frame, title: &str, editor: &mut TextArea, enhanced_keys: bool) {
+    let hint = format!(
+        "Enter save · {} newline · Esc cancel",
+        hint::newline_keys(enhanced_keys)
+    );
+    crate::dialog::draw_text_area(frame, title, None, editor, &hint);
 }
 
 fn draw_confirm(frame: &mut Frame, message: &str) {
@@ -2538,5 +2550,24 @@ mod tests {
         assert_ne!(cell_bg(&terminal, "g go", 'o'), Color::Cyan);
         assert_eq!(cell_bg(&terminal, "g go", 'E'), Color::Cyan);
         assert_ne!(cell_bg(&terminal, "g go", 'n'), Color::Cyan);
+    }
+
+    #[test]
+    fn editor_hint_names_the_newline_shortcut_the_terminal_reports() {
+        let doc = doc_with_alternating_entries(4);
+        let mut state = AppState::new(doc, &ViewOptions::default(), DocSource::Backend, true);
+        state.open_add_editor(None, "comment", "Add comment");
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let legacy = screen(&terminal);
+        assert!(legacy.contains("Alt+Enter or Ctrl+J newline"), "{legacy}");
+        assert!(!legacy.contains("Shift+Enter"), "{legacy}");
+
+        state.enhanced_keys = true;
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let enhanced = screen(&terminal);
+        assert!(enhanced.contains("Shift+Enter newline"), "{enhanced}");
+        assert!(!enhanced.contains("Alt+Enter"), "{enhanced}");
     }
 }
