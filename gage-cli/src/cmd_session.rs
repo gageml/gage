@@ -1,3 +1,5 @@
+use std::cmp::Ordering;
+use std::collections::{BTreeSet, HashMap};
 use std::error::Error;
 use std::io::{self, IsTerminal};
 use std::sync::{Arc, Mutex};
@@ -32,7 +34,7 @@ use tokio::task::JoinSet;
 use crate::cmd_dataset::{AddEvent, AddView, add_native_to_dataset};
 use crate::dialog::{self, DialogError, DialogResult};
 use crate::error::CliError;
-use crate::human::count;
+use crate::human::{count, format_elapsed_ms};
 use crate::session_filter::{FILTER_ARG_NAMES, SessionFilterArgs, select_sessions};
 use crate::size_limit::SizeLimitArgs;
 use crate::source;
@@ -209,6 +211,13 @@ pub struct SessionFindArgs {
     /// Search stored sessions
     #[arg(id = "stored", short = 'S', long = "stored", display_order = 2)]
     pub stored: bool,
+
+    /// Sort hits by date, most recent first
+    ///
+    /// Sort hits by date, most recent first. The hits shown are
+    /// still the best matches; this option changes their order only.
+    #[arg(short = 'D', long)]
+    pub by_date: bool,
 
     #[command(flatten)]
     pub limit: crate::limit::LimitArgs,
@@ -993,6 +1002,10 @@ pub async fn find(args: SessionFindArgs) -> Result<(), CliError> {
         println!("No matches found");
         return Ok(());
     }
+    attach_timestamps(&ctx, &corpora, &mut hits).await?;
+    if args.by_date {
+        sort_hits_by_date(&mut hits);
+    }
     render_hits(&hits, corpora.len() > 1, args.full_id);
     args.limit.print_summary(show, total, "hit");
     Ok(())
@@ -1035,6 +1048,27 @@ impl Corpus {
         }
     }
 
+    /// The timestamps of the messages behind `hits`, which all belong
+    /// to this corpus. Each key is a literal list, so the scan opens
+    /// only the hit sessions and masks to the hit lines; the cross
+    /// product of the two lists is matched back to hits by
+    /// `(session_id, line)`.
+    fn timestamp_sql(&self, hits: &[&Hit]) -> String {
+        let table = match self {
+            Corpus::Native(spec) => format!("native_message('{}')", spec.replace('\'', "''")),
+            Corpus::Stored => "message".to_string(),
+        };
+        let ids = unique_literals(
+            hits.iter()
+                .map(|h| format!("'{}'", h.id.replace('\'', "''"))),
+        );
+        let lines = unique_literals(hits.iter().map(|h| h.line.to_string()));
+        format!(
+            "SELECT session_id, line, timestamp FROM {table} \
+             WHERE session_id IN ({ids}) AND line IN ({lines})"
+        )
+    }
+
     /// The corpus as the Source column names it
     fn label(&self) -> String {
         match self {
@@ -1061,6 +1095,12 @@ impl Corpus {
     }
 }
 
+/// The distinct items of `literals`, comma-separated for an `IN` list
+fn unique_literals(literals: impl Iterator<Item = String>) -> String {
+    let unique: BTreeSet<String> = literals.collect();
+    unique.into_iter().collect::<Vec<_>>().join(", ")
+}
+
 struct Hit {
     /// Position of the hit's corpus in the search order, the tiebreak
     /// between equal scores
@@ -1074,6 +1114,9 @@ struct Hit {
     type_: String,
     snippet: String,
     score: f32,
+    /// The message's timestamp, epoch milliseconds; `None` until
+    /// looked up, or when the message has none
+    timestamp_ms: Option<i64>,
 }
 
 fn hits_from_batches(
@@ -1113,24 +1156,72 @@ fn hits_from_batches(
                 type_: string_or_empty(types, i),
                 snippet: snippets.value(i).to_string(),
                 score: scores.value(i),
+                timestamp_ms: None,
             });
         }
     }
     Ok(out)
 }
 
+/// Fill each hit's timestamp from its corpus's message table. The
+/// search index carries no timestamp, so the shown hits are looked up
+/// after the cut, one query per corpus with hits.
+async fn attach_timestamps(
+    ctx: &SessionContext,
+    corpora: &[Corpus],
+    hits: &mut [Hit],
+) -> anyhow::Result<()> {
+    for (order, corpus) in corpora.iter().enumerate() {
+        let in_corpus: Vec<&Hit> = hits.iter().filter(|h| h.corpus_order == order).collect();
+        if in_corpus.is_empty() {
+            continue;
+        }
+        let sql = corpus.timestamp_sql(&in_corpus);
+        let batches = run_query(ctx, &sql)
+            .await
+            .with_context(|| format!("gage session find: {}", corpus.describe()))?;
+        let mut times: HashMap<(String, i64), i64> = HashMap::new();
+        for batch in &batches {
+            let ids = column::<StringArray>(batch, 0);
+            let lines = column::<Int64Array>(batch, 1);
+            let stamps = column::<TimestampMillisecondArray>(batch, 2);
+            for i in 0..batch.num_rows() {
+                if stamps.is_valid(i) {
+                    times.insert((ids.value(i).to_string(), lines.value(i)), stamps.value(i));
+                }
+            }
+        }
+        for hit in hits.iter_mut().filter(|h| h.corpus_order == order) {
+            hit.timestamp_ms = times.get(&(hit.id.clone(), hit.line)).copied();
+        }
+    }
+    Ok(())
+}
+
+/// Newest first; a hit with no timestamp sorts last. Hits of one
+/// time keep their score order.
+fn sort_hits_by_date(hits: &mut [Hit]) {
+    hits.sort_by(|a, b| match (a.timestamp_ms, b.timestamp_ms) {
+        (Some(x), Some(y)) => y.cmp(&x),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
+    });
+}
+
 /// The hits as a table: the source when more than one was searched,
 /// the message as `<session>:<line>`, the target `gage session view`
-/// opens, the message type, and the snippet with its matches
-/// emphasized.
+/// opens, the message type, the message's age, and the snippet with
+/// its matches emphasized.
 fn render_hits(hits: &[Hit], show_source: bool, full_id: bool) {
     let mut header = Vec::new();
     if show_source {
         header.push("Source");
     }
-    header.extend(["Message", "Type", "Snippet"]);
+    header.extend(["Message", "Type", "Date", "Snippet"]);
     let message_col = usize::from(show_source);
     let type_col = message_col + 1;
+    let date_col = type_col + 1;
     let snippet_col = header.len() - 1;
     let rows = hits.iter().map(|h| {
         let shown = if full_id { &h.id } else { &h.id_display };
@@ -1141,6 +1232,7 @@ fn render_hits(hits: &[Hit], show_source: bool, full_id: bool) {
         cells.extend([
             styled_target(shown, &h.id_prefix, h.id_kind, &format!(":{}", h.line)),
             h.type_.clone(),
+            h.timestamp_ms.map(format_elapsed_ms).unwrap_or_default(),
             emphasize_matches(&h.snippet),
         ]);
         cells
@@ -1151,7 +1243,7 @@ fn render_hits(hits: &[Hit], show_source: bool, full_id: bool) {
         .with(Style::rounded())
         .modify(Rows::first(), style::tty(Color::FG_BRIGHT_YELLOW))
         .modify(
-            Columns::new(type_col..type_col + 1).not(Rows::first()),
+            Columns::new(type_col..date_col + 1).not(Rows::first()),
             style::dim(),
         );
     let term_width = console::Term::stdout().size().1 as usize;
@@ -1547,6 +1639,39 @@ fn warm_picker_sessions(source: &dyn Source) -> Result<(), Box<dyn Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn hit(line: i64, score: f32, timestamp_ms: Option<i64>) -> Hit {
+        Hit {
+            corpus_order: 0,
+            corpus_label: String::new(),
+            id_kind: IdKind::Native,
+            id: String::new(),
+            id_display: String::new(),
+            id_prefix: String::new(),
+            line,
+            type_: String::new(),
+            snippet: String::new(),
+            score,
+            timestamp_ms,
+        }
+    }
+
+    /// `--by-date` orders the hits newest first, keeps the score
+    /// order among hits of one time, and puts hits without a
+    /// timestamp last.
+    #[test]
+    fn by_date_sorts_newest_first_and_undated_last() {
+        let mut hits = vec![
+            hit(1, 0.9, None),
+            hit(2, 0.8, Some(100)),
+            hit(3, 0.7, Some(300)),
+            hit(4, 0.6, Some(300)),
+            hit(5, 0.5, Some(200)),
+        ];
+        sort_hits_by_date(&mut hits);
+        let lines: Vec<i64> = hits.iter().map(|h| h.line).collect();
+        assert_eq!(lines, [3, 4, 5, 2, 1]);
+    }
 
     #[test]
     fn view_target_splits_prefix_and_first_line() {

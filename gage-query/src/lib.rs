@@ -1751,4 +1751,62 @@ mod tests {
             "the store's index is kept under the context's cache root"
         );
     }
+
+    /// `gage session find` looks up the timestamps of its shown hits
+    /// with literal `session_id` and `line` lists against `message`
+    /// and `native_message`. Both tables apply the lists in the scan,
+    /// so the plan has no filter step over the parsed rows.
+    #[tokio::test]
+    async fn message_timestamps_resolve_by_literal_keys() {
+        let (tmp, store) = open_store();
+        let claude_root = tempfile::tempdir().unwrap();
+        let a = "aaaaaaaa-0000-0000-0000-000000000001";
+        let b = "bbbbbbbb-0000-0000-0000-000000000002";
+        seed_text_session(claude_root.path(), a, &["hello there", "the quokka smiled"]);
+        seed_text_session(claude_root.path(), b, &["a quokka and a wombat"]);
+        let spec = format!("claude:{}", claude_root.path().display());
+        let registry = DriverRegistry::builtin();
+        let driver = registry.driver_for(&spec).unwrap();
+        let source = driver
+            .open_source(SourceOptions::new(&spec).cache_root(claude_root.path().join("cache")))
+            .unwrap();
+        let mut native = source.open_native(a).unwrap();
+        let stored_id = {
+            let store = store.lock().unwrap();
+            SessionStore::from(&*store)
+                .add(driver.as_ref(), native.as_mut())
+                .unwrap()
+                .id
+        };
+        let ctx = ContextBuilder::new(Some(Arc::clone(&store)))
+            .cache_root(tmp.path().join("cache"))
+            .build()
+            .await;
+
+        let native_sql = format!(
+            "SELECT session_id || ' ' || CAST(line AS VARCHAR) || ' ' || CAST(timestamp AS VARCHAR) \
+             FROM native_message('{spec}') \
+             WHERE session_id IN ('{a}') AND line IN (2)"
+        );
+        assert_eq!(
+            strings(&ctx, &native_sql).await,
+            [format!("{a} 2 2025-01-01T00:00:01Z")]
+        );
+        let stored_sql = format!(
+            "SELECT session_id || ' ' || CAST(line AS VARCHAR) || ' ' || CAST(timestamp AS VARCHAR) \
+             FROM message \
+             WHERE session_id IN ('{stored_id}') AND line IN (2)"
+        );
+        assert_eq!(
+            strings(&ctx, &stored_sql).await,
+            [format!("{stored_id} 2 2025-01-01T00:00:01Z")]
+        );
+        for sql in [&native_sql, &stored_sql] {
+            let plan = explain(&ctx, sql).await.physical;
+            assert!(
+                !plan.contains("FilterExec"),
+                "the key lists are applied by the scan: {plan}"
+            );
+        }
+    }
 }
