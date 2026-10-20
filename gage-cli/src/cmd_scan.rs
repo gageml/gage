@@ -1717,8 +1717,8 @@ async fn run_prepared(
     store: &Store,
     driver: Arc<dyn Driver>,
 ) -> Result<(), CliError> {
-    // Ctrl-C cancels the run; the scan applies what ran. Once tokio
-    // has taken the signal, a second Ctrl-C during apply has no
+    // Ctrl+C cancels the run; the scan applies what ran. Once tokio
+    // has taken the signal, a second Ctrl+C during apply has no
     // effect.
     let cancel = crate::panic_token().child_token();
     let signal_task = {
