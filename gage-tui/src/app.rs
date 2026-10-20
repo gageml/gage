@@ -284,6 +284,10 @@ pub(crate) fn handle_key(
             handle_confirm_delete(state, key.code, backend)?;
             return Ok(KeyOutcome::Consumed);
         }
+        Dialog::ConfirmShowAll { .. } => {
+            handle_confirm_show_all(state, key.code);
+            return Ok(KeyOutcome::Consumed);
+        }
         Dialog::OpenSession { picker, loader } => {
             match picker.handle_key(key.code) {
                 PickerAction::None => {}
@@ -545,6 +549,13 @@ enum Dialog {
     ConfirmDelete {
         note_id: String,
     },
+    /// Offer to show every entry when the view opened at a session
+    /// line whose entry the membership options hide. `y` turns "All
+    /// entries" on and selects the entry; anything else keeps the view.
+    ConfirmShowAll {
+        line: u32,
+        entry_index: usize,
+    },
     /// Session-open picker (`o`) and the loader for its later pages
     OpenSession {
         picker: Picker,
@@ -684,27 +695,34 @@ impl AppState {
 
     /// Select the entry at JSONL line `line`, or the nearest entry
     /// before it, for hosts opening the view at a session line. A line
-    /// before the first entry leaves the selection where it is.
+    /// before the first entry leaves the selection where it is. A line
+    /// whose entry the membership options hide opens the dialog that
+    /// offers to show all entries.
     pub(crate) fn select_line(&mut self, line: u32) {
-        if let Some(index) = self.doc.entry_index_for_line(line) {
-            self.select_entry(index);
+        let Some(entry_index) = self.doc.entry_index_for_line(line) else {
+            return;
+        };
+        if !self.select_entry(entry_index) {
+            self.dialog = Dialog::ConfirmShowAll { line, entry_index };
         }
     }
 
     /// Select entry `index`'s outline row and scroll it into view, for
-    /// hosts opening the view at a specific entry.
-    pub(crate) fn select_entry(&mut self, index: usize) {
+    /// hosts opening the view at a specific entry. Returns whether the
+    /// entry has a row; a hidden entry leaves the selection unchanged.
+    pub(crate) fn select_entry(&mut self, index: usize) -> bool {
         let Some(row) = self
             .outline
             .rows()
             .iter()
             .position(|r| matches!(r.kind, RowKind::Entry { index: i } if i == index))
         else {
-            return;
+            return false;
         };
         self.list_state.select(Some(row));
         self.body_scroll = 0;
         self.center_selected();
+        true
     }
 
     /// Select entry `index`'s outline row, or the nearest visible entry
@@ -897,6 +915,11 @@ impl AppState {
 
     fn toggle_all_entries(&mut self) {
         self.view.all_entries = !self.view.all_entries;
+        self.apply_filter();
+    }
+
+    fn show_all_entries(&mut self) {
+        self.view.all_entries = true;
         self.apply_filter();
     }
 
@@ -1266,6 +1289,18 @@ fn handle_confirm_cancel(state: &mut AppState, code: KeyCode) {
             // Discard the editor; dialog stays None.
         }
         _ => state.dialog = *pending,
+    }
+}
+
+fn handle_confirm_show_all(state: &mut AppState, code: KeyCode) {
+    let Dialog::ConfirmShowAll { entry_index, .. } =
+        std::mem::replace(&mut state.dialog, Dialog::None)
+    else {
+        return;
+    };
+    if matches!(code, KeyCode::Char('y') | KeyCode::Char('Y')) {
+        state.show_all_entries();
+        state.select_entry(entry_index);
     }
 }
 
@@ -1768,6 +1803,10 @@ fn draw_dialog(frame: &mut Frame, dialog: &mut Dialog, view: &ViewOptions, enhan
         Dialog::ConfirmDelete { .. } => {
             draw_confirm(frame, "Delete this note? This cannot be undone.")
         }
+        Dialog::ConfirmShowAll { line, .. } => draw_confirm(
+            frame,
+            &format!("Line {line} is not visible. Show all entries?"),
+        ),
         Dialog::OpenSession { picker, .. } => picker.draw(frame),
         Dialog::GotoEntry { input, cursor } => {
             let hint = hint::dialog_line(&[("g", "go"), ("Esc", "cancel")]);
@@ -2064,6 +2103,77 @@ mod tests {
         assert!(half > 0);
         assert_eq!(state.list_state.offset(), selected - half);
         assert!(!state.center_pending);
+    }
+
+    /// A document of `count` user entries with the entry at `hidden`
+    /// (zero-based) typed as a system entry, which the default options
+    /// hide.
+    fn doc_with_hidden_entry(count: u32, hidden: usize) -> Document {
+        let mut doc = doc_with_entries(count);
+        doc.entries[hidden].entry_type = "system".into();
+        doc.entries[hidden].value = serde_json::json!({"type": "system"});
+        doc
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn select_line_on_a_hidden_entry_offers_to_show_all_entries() {
+        let backend = Backend::stored(fixture().store).await;
+        let doc = doc_with_hidden_entry(3, 1);
+        let mut state = AppState::new(doc, &ViewOptions::default(), DocSource::Backend, false);
+        assert_eq!(outline_labels(&state), ["<Session>", "entry 0", "entry 2"]);
+
+        // Entry 1 sits at line 2 and is hidden; the dialog opens in
+        // place of a selection.
+        state.select_line(2);
+        assert!(matches!(
+            state.dialog,
+            Dialog::ConfirmShowAll {
+                line: 2,
+                entry_index: 1
+            }
+        ));
+        assert_eq!(state.selected_entry_index(), None);
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let text = screen(&terminal);
+        assert!(text.contains("Line 2 is not visible. Show all entries?"));
+        assert!(text.contains("y / n"));
+
+        press(&mut state, &backend, KeyCode::Char('y'));
+        assert!(matches!(state.dialog, Dialog::None));
+        assert!(state.view.all_entries);
+        assert_eq!(
+            outline_labels(&state),
+            ["<Session>", "entry 0", "entry 1", "entry 2"]
+        );
+        assert_eq!(state.selected_entry_index(), Some(1));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn declining_to_show_all_entries_keeps_the_view() {
+        let backend = Backend::stored(fixture().store).await;
+        for code in [KeyCode::Char('n'), KeyCode::Char('q'), KeyCode::Esc] {
+            let doc = doc_with_hidden_entry(3, 1);
+            let mut state = AppState::new(doc, &ViewOptions::default(), DocSource::Backend, false);
+            state.select_line(2);
+            assert!(matches!(state.dialog, Dialog::ConfirmShowAll { .. }));
+
+            press(&mut state, &backend, code);
+            assert!(matches!(state.dialog, Dialog::None));
+            assert!(!state.view.all_entries);
+            assert_eq!(outline_labels(&state), ["<Session>", "entry 0", "entry 2"]);
+            assert_eq!(state.selected_entry_index(), None);
+        }
+    }
+
+    #[test]
+    fn select_line_before_the_first_entry_opens_no_dialog() {
+        let doc = doc_with_hidden_entry(3, 0);
+        let mut state = AppState::new(doc, &ViewOptions::default(), DocSource::Backend, false);
+        state.select_line(0);
+        assert!(matches!(state.dialog, Dialog::None));
+        assert_eq!(state.selected_entry_index(), None);
     }
 
     #[tokio::test(flavor = "multi_thread")]
