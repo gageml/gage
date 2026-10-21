@@ -49,6 +49,7 @@ mod cmd_index;
 mod cmd_init;
 mod cmd_issue;
 mod cmd_note;
+mod cmd_publish;
 mod cmd_push;
 mod cmd_query;
 mod cmd_remote;
@@ -351,6 +352,9 @@ async fn main() -> ExitCode {
                     cmd_session::view(source, stored, args).await
                 }
                 cmd_session::SessionCommand::Find(args) => cmd_session::find(args).await,
+                cmd_session::SessionCommand::Publish { command } => {
+                    cmd_publish::run(source, stored, command).await
+                }
             },
             Command::Dataset { command } => match command {
                 cmd_dataset::DatasetCommand::Add(args) => cmd_dataset::add(args).await,

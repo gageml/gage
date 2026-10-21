@@ -33,7 +33,7 @@ pub(crate) const INDEXED_ATTRS: &[&str] = &["summary.model"];
 /// Top-level subtree name for the session's opaque file content. The
 /// `.d` suffix marks the subtree as producer-owned; Gage schema
 /// walkers do not descend into it.
-const FILES_TREE: &str = "files.d";
+pub(crate) const FILES_TREE: &str = "files.d";
 
 /// Session operations over an opened store.
 pub struct SessionStore<'a> {

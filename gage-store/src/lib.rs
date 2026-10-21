@@ -52,6 +52,7 @@ pub mod key;
 mod ls;
 mod note;
 pub mod object;
+mod publish;
 pub mod query;
 pub mod refs;
 mod remote;
@@ -96,6 +97,7 @@ pub use note::{
     OBJECT_TYPE as NOTE_TYPE,
 };
 pub use object::SHORT_PREFIX_SET_SIZE;
+pub use publish::{PublishDirLayout, PublishInit, PublishStore, publishes_root};
 pub use query::{
     LinkKind, NoteDocRow, ScanSource, ScopedIssue, ScopedNote, StoredNoteTable, StoredSessionTable,
     attachment_file_table, attachment_table, dataset_table, issue_event_table, issue_report_fn,
