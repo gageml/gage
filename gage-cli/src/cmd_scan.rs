@@ -368,18 +368,10 @@ async fn list(args: ScanListArgs) -> Result<(), CliError> {
         return Ok(());
     }
     let show = args.limit.show_count(total);
-    // Sessions and Notes are counts over the relation views
-    let sql = format!(
-        "SELECT s.id, s.id_prefix, s.tasks, s.failed, s.canceled, s.started, s.stopped, \
-                ss.n, sn.n \
-         FROM scan s \
-         LEFT JOIN (SELECT scan_id, COUNT(*) AS n FROM scan_session GROUP BY scan_id) ss \
-              ON ss.scan_id = s.id \
-         LEFT JOIN (SELECT scan_id, COUNT(*) AS n FROM scan_note GROUP BY scan_id) sn \
-              ON sn.scan_id = s.id \
-         ORDER BY s.modified DESC LIMIT {show}"
-    );
-    let batches = run_query(&ctx, &sql).await.context("gage scan list")?;
+    let rows = list_rows(&ctx, show, args.full_id)
+        .await
+        .context("gage scan list")?;
+    let shown = rows.len();
 
     let header: Vec<String> = [
         "Id", "Tasks", "Sessions", "Issues", "Notes", "Errors", "Cost", "Status", "Duration",
@@ -388,43 +380,6 @@ async fn list(args: ScanListArgs) -> Result<(), CliError> {
     .iter()
     .map(|s| s.to_string())
     .collect();
-    let mut rows: Vec<Vec<String>> = Vec::new();
-    for batch in &batches {
-        let ids = column::<StringArray>(batch, 0);
-        let prefixes = column::<StringArray>(batch, 1);
-        let tasks = column::<Int64Array>(batch, 2);
-        let failed = column::<Int64Array>(batch, 3);
-        let canceled = column::<BooleanArray>(batch, 4);
-        let started = column::<TimestampMillisecondArray>(batch, 5);
-        let stopped = column::<TimestampMillisecondArray>(batch, 6);
-        let sessions = column::<Int64Array>(batch, 7);
-        let notes = column::<Int64Array>(batch, 8);
-        for i in 0..batch.num_rows() {
-            let id = ids.value(i);
-            let shown = if args.full_id { id } else { short_uuid(id) };
-            let count = |arr: &Int64Array| if arr.is_valid(i) { arr.value(i) } else { 0 };
-            let elapsed = stopped.value(i).saturating_sub(started.value(i)).max(0) as u64;
-            rows.push(vec![
-                s::styled_id(shown, prefixes.value(i), s::IdKind::Gage),
-                tasks.value(i).to_string(),
-                count(sessions).to_string(),
-                String::new(),
-                count(notes).to_string(),
-                failed.value(i).to_string(),
-                String::new(),
-                if canceled.value(i) {
-                    "canceled"
-                } else {
-                    "completed"
-                }
-                .to_string(),
-                format_duration(Duration::from_millis(elapsed)),
-                String::new(),
-                format_elapsed_ms(started.value(i)),
-            ]);
-        }
-    }
-    let shown = rows.len();
 
     let term_width = console::Term::stdout().size().1 as usize;
     let table = Table::from_iter(std::iter::once(header).chain(rows))
@@ -443,6 +398,81 @@ async fn list(args: ScanListArgs) -> Result<(), CliError> {
 
     args.limit.print_summary(shown, total, "scan run");
     Ok(())
+}
+
+/// The listing's cells for the `show` most recently modified scans.
+/// Sessions and Notes are counts over the relation views. Cost sums
+/// each scan's agent spend; an agent row without a recorded cost
+/// marks the total incomplete.
+async fn list_rows(
+    ctx: &SessionContext,
+    show: usize,
+    full_id: bool,
+) -> datafusion::error::Result<Vec<Vec<String>>> {
+    let sql = format!(
+        "SELECT s.id, s.id_prefix, s.tasks, s.failed, s.canceled, s.started, s.stopped, \
+                ss.n, sn.n, sc.usd, sc.incomplete \
+         FROM scan s \
+         LEFT JOIN (SELECT scan_id, COUNT(*) AS n FROM scan_session GROUP BY scan_id) ss \
+              ON ss.scan_id = s.id \
+         LEFT JOIN (SELECT scan_id, COUNT(*) AS n FROM scan_note GROUP BY scan_id) sn \
+              ON sn.scan_id = s.id \
+         LEFT JOIN (SELECT scan_id, SUM(cost_usd) AS usd, \
+                           BOOL_OR(cost_usd IS NULL) AS incomplete \
+                    FROM scan_task_agent GROUP BY scan_id) sc \
+              ON sc.scan_id = s.id \
+         ORDER BY s.modified DESC LIMIT {show}"
+    );
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    for batch in &run_query(ctx, &sql).await? {
+        let ids = column::<StringArray>(batch, 0);
+        let prefixes = column::<StringArray>(batch, 1);
+        let tasks = column::<Int64Array>(batch, 2);
+        let failed = column::<Int64Array>(batch, 3);
+        let canceled = column::<BooleanArray>(batch, 4);
+        let started = column::<TimestampMillisecondArray>(batch, 5);
+        let stopped = column::<TimestampMillisecondArray>(batch, 6);
+        let sessions = column::<Int64Array>(batch, 7);
+        let notes = column::<Int64Array>(batch, 8);
+        let usd = column::<Float64Array>(batch, 9);
+        let incomplete = column::<BooleanArray>(batch, 10);
+        for i in 0..batch.num_rows() {
+            let id = ids.value(i);
+            let shown = if full_id { id } else { short_uuid(id) };
+            let count = |arr: &Int64Array| if arr.is_valid(i) { arr.value(i) } else { 0 };
+            let elapsed = stopped.value(i).saturating_sub(started.value(i)).max(0) as u64;
+            rows.push(vec![
+                s::styled_id(shown, prefixes.value(i), s::IdKind::Gage),
+                tasks.value(i).to_string(),
+                count(sessions).to_string(),
+                String::new(),
+                count(notes).to_string(),
+                failed.value(i).to_string(),
+                cost_cell(
+                    usd.is_valid(i).then(|| usd.value(i)),
+                    incomplete.is_valid(i) && incomplete.value(i),
+                ),
+                if canceled.value(i) {
+                    "canceled"
+                } else {
+                    "completed"
+                }
+                .to_string(),
+                format_duration(Duration::from_millis(elapsed)),
+                String::new(),
+                format_elapsed_ms(started.value(i)),
+            ]);
+        }
+    }
+    Ok(rows)
+}
+
+/// A scan's spend as `gage scan view` shows it: `$0.50`, with a `+`
+/// suffix when an agent's cost went unrecorded. A scan with no agent
+/// rows is `$0.00`.
+fn cost_cell(usd: Option<f64>, incomplete: bool) -> String {
+    let suffix = if incomplete { "+" } else { "" };
+    format!("${:.2}{suffix}", usd.unwrap_or(0.0))
 }
 
 async fn view(args: ScanViewArgs) -> Result<(), CliError> {
@@ -2215,4 +2245,98 @@ pub(crate) fn list_scanners(registry: &ScannerRegistry) -> Result<(), CliError> 
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::Path;
+
+    use gage_store::{ScanStore, Store};
+
+    use super::*;
+
+    /// Write a stored scan whose one task ran one agent per entry of
+    /// `agents`: the agent's id and its recorded cost, `None` for an
+    /// agent record without one.
+    fn store_scan(store: &Store, home: &Path, id: &str, agents: &[(&str, Option<f64>)]) {
+        let scan = home.join(id).join("scan");
+        let write = |path: &str, content: &str| {
+            let path = scan.join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, content).unwrap();
+        };
+        write(
+            "attrs.json",
+            r#"{"runtime":"gage 1","started":1000,"stopped":1500,"canceled":false,"tasks":{"total":1,"completed":1,"failed":0}}"#,
+        );
+        write(
+            "plan.json",
+            r#"{"tasks":[{"task":"hello:greet","selected":"explicit","after":[],"unmatched_note_wants":[]}]}"#,
+        );
+        write(
+            "tasks/hello/greet/attrs.json",
+            r#"{"status":"completed","started":1000,"stopped":1200}"#,
+        );
+        for (agent, cost) in agents {
+            let cost = match cost {
+                Some(usd) => format!(r#","cost_usd":{usd}"#),
+                None => String::new(),
+            };
+            write(
+                &format!("tasks/hello/greet/agents/{agent}/attrs.json"),
+                &format!(
+                    r#"{{"exit_code":0,"is_error":false,"stop_reason":"end_turn","turns":1,"duration_ms":10{cost}}}"#
+                ),
+            );
+        }
+        ScanStore::from(store).create(id, &scan).unwrap();
+    }
+
+    /// The Cost column sums a scan's agent spend, marks a total with
+    /// an unrecorded agent cost with `+`, and shows `$0.00` for a scan
+    /// that ran no agent.
+    #[tokio::test]
+    async fn list_rows_show_each_scans_agent_cost() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("store.git");
+        gage_store::init(&path).unwrap();
+        let store = Store::open(&path).unwrap();
+        store_scan(
+            &store,
+            tmp.path(),
+            "SCAN1",
+            &[("AGENT1", Some(0.5)), ("AGENT2", Some(0.25))],
+        );
+        store_scan(
+            &store,
+            tmp.path(),
+            "SCAN2",
+            &[("AGENT3", Some(1.0)), ("AGENT4", None)],
+        );
+        store_scan(&store, tmp.path(), "SCAN3", &[]);
+        let ctx = ContextBuilder::new(Some(Arc::new(Mutex::new(store))))
+            .build()
+            .await;
+
+        let rows = list_rows(&ctx, 10, true).await.unwrap();
+        let mut costs: Vec<(String, String)> = rows
+            .iter()
+            .map(|row| {
+                (
+                    console::strip_ansi_codes(&row[0]).into_owned(),
+                    row[6].clone(),
+                )
+            })
+            .collect();
+        costs.sort();
+        assert_eq!(
+            costs,
+            [
+                ("SCAN1".to_string(), "$0.75".to_string()),
+                ("SCAN2".to_string(), "$1.00+".to_string()),
+                ("SCAN3".to_string(), "$0.00".to_string()),
+            ]
+        );
+    }
 }
