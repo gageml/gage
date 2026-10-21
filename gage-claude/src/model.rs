@@ -8,8 +8,6 @@
 //! unchanged.
 
 use std::collections::HashMap;
-use std::fs;
-use std::path::{Path, PathBuf};
 
 const MODEL_ALIASES: &[(&str, &str)] = &[
     ("large", "claude-opus-4-8"),
@@ -75,34 +73,6 @@ impl ModelMap {
         let mapped = self.0.get(input).map(String::as_str).unwrap_or(input);
         resolve_model(mapped).to_string()
     }
-}
-
-/// The `model` configured in Claude Code settings, nearest match wins.
-/// Walks from `start` up through `$HOME` (or the filesystem root),
-/// checking `.claude/settings.local.json` then `.claude/settings.json`
-/// at each directory; the `$HOME` step covers the user scope. `None`
-/// when no settings file sets a model — a missing or unparsable file
-/// reads as unset.
-pub fn configured_model(start: &Path) -> Option<String> {
-    let home = std::env::var_os("HOME").map(PathBuf::from);
-    for dir in start.ancestors() {
-        let claude = dir.join(".claude");
-        for name in ["settings.local.json", "settings.json"] {
-            if let Some(m) = settings_model(&claude.join(name)) {
-                return Some(m);
-            }
-        }
-        if home.as_deref() == Some(dir) {
-            break;
-        }
-    }
-    None
-}
-
-fn settings_model(path: &Path) -> Option<String> {
-    let text = fs::read_to_string(path).ok()?;
-    let json: serde_json::Value = serde_json::from_str(&text).ok()?;
-    Some(json.get("model")?.as_str()?.to_string())
 }
 
 pub fn resolve_model(input: &str) -> &str {

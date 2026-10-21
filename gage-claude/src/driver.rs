@@ -35,7 +35,7 @@ use crate::index::{
     ClaudeSessionAttrs, IndexStore, LockMode, ReconcileEvent, ToolUseCollector, derive_entry,
     derive_session,
 };
-use crate::model::{configured_model, resolve_model, resolved_model};
+use crate::model::resolve_model;
 use crate::plugin;
 use crate::preflight;
 use crate::proc::find_claude;
@@ -182,9 +182,8 @@ impl Driver for ClaudeDriver {
 
     /// Start the interactive `/gage:resolve` session. The plugin must
     /// be installed at this build's version and the user logged in.
-    /// `None` for the model is the model Claude Code is configured
-    /// with from the current directory, else the driver's default;
-    /// a given model has its size alias resolved.
+    /// `None` for the model passes no `--model`, so claude applies its
+    /// own model resolution; a given model has its size alias resolved.
     fn start_resolve_session(
         &self,
         issue_ids: &[String],
@@ -192,14 +191,8 @@ impl Driver for ClaudeDriver {
         extra_args: &[String],
     ) -> Result<Box<dyn ResolveSession>, DriverError> {
         preflight::check().map_err(|e| DriverError::Other(e.to_string()))?;
-        let model = match model {
-            Some(m) => resolve_model(m).to_string(),
-            None => std::env::current_dir()
-                .ok()
-                .and_then(|cwd| configured_model(&cwd))
-                .unwrap_or_else(|| resolved_model(None)),
-        };
-        let child = resolve_command(issue_ids, &model, extra_args)?
+        let model = model.map(resolve_model);
+        let child = resolve_command(issue_ids, model, extra_args)?
             .spawn()
             .map_err(DriverError::Io)?;
         Ok(Box::new(ClaudeResolveSession(child)))
