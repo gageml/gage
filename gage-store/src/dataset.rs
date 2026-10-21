@@ -382,7 +382,7 @@ impl DatasetStore<'_> {
             .enumerate()
             .map(|(idx, record)| DatasetSessionSummary {
                 session_num: (idx + 1) as u32,
-                native_id: record.attrs.native_id,
+                native_id: record.attrs.native_id().to_string(),
                 session_type: record.attrs.session_type,
                 native_size: record.attrs.native_size,
             })
@@ -807,7 +807,7 @@ impl DatasetStore<'_> {
             outcomes.push(DatasetSessionUnlinkOutcome {
                 session_num: (idx + 1) as u32,
                 id,
-                native_id: record.attrs.native_id,
+                native_id: record.attrs.native_id().to_string(),
             });
         }
 
@@ -1764,7 +1764,7 @@ mod tests {
         assert_eq!(ids, vec![added[0].id.as_str(), added[1].id.as_str()]);
         assert_eq!(records[0].attrs.native_size, 2);
         assert!(records[0].created_ms.is_some());
-        assert_eq!(records[1].attrs.native_id, "s2");
+        assert_eq!(records[1].attrs.native_id(), "s2");
         assert!(
             datasets
                 .sessions(&datasets.create().unwrap())

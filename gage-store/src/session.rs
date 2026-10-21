@@ -39,7 +39,7 @@ const FILES_TREE: &str = "files.d";
 pub struct SessionStore<'a> {
     store: &'a Store,
     max_session_bytes: Option<u64>,
-    native_source: Option<String>,
+    origin: Option<String>,
 }
 
 impl<'a> From<&'a Store> for SessionStore<'a> {
@@ -47,7 +47,7 @@ impl<'a> From<&'a Store> for SessionStore<'a> {
         SessionStore {
             store,
             max_session_bytes: None,
-            native_source: None,
+            origin: None,
         }
     }
 }
@@ -57,28 +57,47 @@ impl<'a> From<&'a Store> for SessionStore<'a> {
 pub struct SessionAttrsRecord {
     /// `"<driver name> <driver version>"`.
     pub driver: String,
-    /// The Gage URL the session was read from, as the driver spelled
-    /// it.
-    pub native_source: String,
-    /// The id the harness gave the session, as the driver reported it.
-    pub native_id: String,
+    /// The session this one was made from, as a URL. A native origin
+    /// is the session source URL the driver spelled,
+    /// `<scheme>:<body>`, with the native id as its last segment; a
+    /// derived origin is `session:<id>@<commit>`.
+    pub origin: String,
     /// UNIX time millis: when the native artifact was last touched at
-    /// its source, as the driver reported it.
+    /// its source, as the driver reported it. With `native_size`, the
+    /// change-detection fingerprint `add` reads.
     pub native_mtime: i64,
     /// The size in bytes of the native artifact, as the driver
-    /// reported it.
+    /// reported it. The other half of the `add` fingerprint. Not the
+    /// stored content size; see `size`.
     pub native_size: u64,
     /// Harness family, e.g. `"claude"`. A category with no version.
     pub session_type: String,
     /// The driver's byte-layout string, as returned by
     /// [`Driver::write_native`].
     pub content_format: String,
+    /// The total byte size of the content stored under `files.d`.
+    pub size: u64,
     /// The project the session belongs to, as the driver names it.
     /// Absent when the harness has no such notion.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<String>,
     /// The driver's projection of the session, written at add time.
     pub summary: SummaryAttrs,
+}
+
+impl SessionAttrsRecord {
+    /// The native id, the identifying part of `origin`: its last path
+    /// segment, or the scheme body when there is no path. For display
+    /// and diagnostics, not an authoritative driver split.
+    pub fn native_id(&self) -> &str {
+        if let Some(i) = self.origin.rfind('/') {
+            &self.origin[i + 1..]
+        } else if let Some(i) = self.origin.find(':') {
+            &self.origin[i + 1..]
+        } else {
+            &self.origin
+        }
+    }
 }
 
 /// `attrs.summary`: the driver's session-level attributes at write
@@ -209,13 +228,13 @@ impl<'a> SessionStore<'a> {
         self
     }
 
-    /// Record `source` as the session's `native_source` in place of
-    /// what the native session reports. For a session whose only home
-    /// was a scan task's agent run, the runtime names the task here,
-    /// since the place the driver read it from does not outlive the
-    /// scan.
-    pub fn with_native_source(mut self, source: String) -> Self {
-        self.native_source = Some(source);
+    /// Record `origin` as the session's `origin` in place of what the
+    /// native session reports as its source. For a session whose only
+    /// home was a scan task's agent run, the runtime names the task
+    /// here, since the place the driver read it from does not outlive
+    /// the scan.
+    pub fn with_origin(mut self, origin: String) -> Self {
+        self.origin = Some(origin);
         self
     }
 
@@ -231,8 +250,8 @@ impl<'a> SessionStore<'a> {
     ) -> Result<SessionAddOutcome, StoreError> {
         let path = self.store.path();
         let native_id = session.id().to_string();
-        let native_source = self
-            .native_source
+        let origin = self
+            .origin
             .clone()
             .unwrap_or_else(|| session.source().to_string());
         let native_mtime = system_time_ms(session.attrs().native_mtime());
@@ -241,14 +260,14 @@ impl<'a> SessionStore<'a> {
         let id = session_object_id(driver.name(), &native_id);
         let session_type = session.session_type().to_string();
         let summary = collect_summary(session.attrs());
-        let attrs = |content_format: String| SessionAttrsRecord {
+        let attrs = |content_format: String, size: u64| SessionAttrsRecord {
             driver: format!("{} {}", driver.name(), driver.version()),
-            native_source: native_source.clone(),
-            native_id: native_id.clone(),
+            origin: origin.clone(),
             native_mtime,
             native_size,
             session_type: session_type.clone(),
             content_format,
+            size,
             project: project.clone(),
             summary: summary.clone(),
         };
@@ -271,7 +290,11 @@ impl<'a> SessionStore<'a> {
             && !current.header.is_tombstone()
         {
             let stored = decode_attrs(current)?;
-            if stored == attrs(stored.content_format.clone()) {
+            // `size` is a deterministic function of the content, which
+            // the fingerprint already detects a change in, and it is
+            // not known until the content is written. Borrow the
+            // stored value so it never forces a false difference.
+            if stored == attrs(stored.content_format.clone(), stored.size) {
                 return Ok(SessionAddOutcome {
                     id,
                     commit_sha: current.commit_sha.clone(),
@@ -291,9 +314,10 @@ impl<'a> SessionStore<'a> {
                     .unwrap_or_else(|| StoreError::Parse(format!("driver: {e}"))));
             }
         };
+        let size = sink.total_bytes;
         let file_entries = sink.into_entries()?;
         let files_tree_sha = build_files_tree(path, file_entries)?;
-        let attrs = attrs(content_format);
+        let attrs = attrs(content_format, size);
 
         let mut tree = ObjectTree {
             attrs: Some(
@@ -304,7 +328,7 @@ impl<'a> SessionStore<'a> {
         };
         tree.subtrees.insert(FILES_TREE.to_string(), files_tree_sha);
 
-        let subject = format!("{}:{}", driver.name(), attrs.native_id);
+        let subject = format!("{}:{}", driver.name(), native_id);
         match current {
             None => {
                 let message = format!("session: {subject}");
@@ -385,7 +409,8 @@ impl<'a> SessionStore<'a> {
         let object = self.store.read_object(&record.commit_sha)?;
         let message = format!(
             "session remove: {}:{}",
-            record.driver_name, record.attrs.native_id
+            record.driver_name,
+            record.attrs.native_id()
         );
         self.store.delete(&object, &message)?;
         Ok(())
@@ -714,6 +739,36 @@ pub(crate) mod tests {
     use crate::DatasetStore;
     use crate::git::{git_in, run};
     use crate::test_support::open_store;
+
+    fn attrs_with_origin(origin: &str) -> SessionAttrsRecord {
+        SessionAttrsRecord {
+            driver: "fake 0.1".into(),
+            origin: origin.into(),
+            native_mtime: 0,
+            native_size: 0,
+            session_type: "fake".into(),
+            content_format: "fake-lines 1".into(),
+            size: 0,
+            project: None,
+            summary: SummaryAttrs::default(),
+        }
+    }
+
+    #[test]
+    fn native_id_is_the_identifying_part_of_origin() {
+        // A path-shaped source URL: the id is the last segment.
+        assert_eq!(
+            attrs_with_origin("claude:/home/u/.claude/projects/-w-proj/abc-123").native_id(),
+            "abc-123"
+        );
+        // A scan task source: the id is still the last segment.
+        assert_eq!(
+            attrs_with_origin("session+task:SCANA/hello:greet/native-1").native_id(),
+            "native-1"
+        );
+        // A scheme-and-id source with no path: the id is the body.
+        assert_eq!(attrs_with_origin("fake:s1").native_id(), "s1");
+    }
     use gage_session::{
         ContentSource, Driver as DriverTrait, DriverError, Source, SourceOptions, StoredSession,
     };
@@ -918,7 +973,7 @@ pub(crate) mod tests {
         );
         assert_eq!(
             cat(&store, &format!("{ref_path}:attrs.json")),
-            "{\"content_format\":\"fake-lines 1\",\"driver\":\"fake 0.1\",\"native_id\":\"s1\",\"native_mtime\":0,\"native_size\":4,\"native_source\":\"fake:s1\",\"project\":\"proj\",\"session_type\":\"fake\",\"summary\":{\"is_empty\":false}}\n"
+            "{\"content_format\":\"fake-lines 1\",\"driver\":\"fake 0.1\",\"native_mtime\":0,\"native_size\":4,\"origin\":\"fake:s1\",\"project\":\"proj\",\"session_type\":\"fake\",\"size\":4,\"summary\":{\"is_empty\":false}}\n"
         );
         assert_eq!(cat(&store, &format!("{ref_path}:files.d/sub/a.txt")), "a");
 
@@ -928,8 +983,8 @@ pub(crate) mod tests {
         assert_eq!(record.driver_version, "0.1");
         assert_eq!(record.attrs.session_type, "fake");
         assert_eq!(record.attrs.content_format, "fake-lines 1");
-        assert_eq!(record.attrs.native_id, "s1");
-        assert_eq!(record.attrs.native_source, "fake:s1");
+        assert_eq!(record.attrs.native_id(), "s1");
+        assert_eq!(record.attrs.origin, "fake:s1");
         assert_eq!(record.attrs.project.as_deref(), Some("proj"));
         assert_eq!(record.attrs.native_size, 4);
         assert_eq!(record.attrs.native_mtime, 0);
@@ -1045,7 +1100,7 @@ pub(crate) mod tests {
         let removed = &outcome.sessions[0];
         assert_eq!(removed.id, added.id);
         assert_eq!(removed.commit_sha, added.commit_sha);
-        assert_eq!(removed.attrs.native_id, "s1");
+        assert_eq!(removed.attrs.native_id(), "s1");
 
         let tip = store.rev_parse(&ref_path).unwrap().unwrap();
         let commit = cat(&store, &tip);
@@ -1138,7 +1193,7 @@ pub(crate) mod tests {
 
         let ids: Vec<String> = sessions.iter().unwrap().map(|r| r.unwrap().id).collect();
         assert_eq!(ids, vec![first.id.clone()]);
-        assert_eq!(sessions.get(&first.id).unwrap().attrs.native_id, "s1");
+        assert_eq!(sessions.get(&first.id).unwrap().attrs.native_id(), "s1");
 
         // A later changed add edits the revived session, chaining from
         // the resurrection commit
@@ -1233,7 +1288,7 @@ pub(crate) mod tests {
             .unwrap();
         let record = sessions.get(&added.id[..8]).unwrap();
         assert_eq!(record.id, added.id);
-        assert_eq!(record.attrs.native_id, "s1");
+        assert_eq!(record.attrs.native_id(), "s1");
     }
 
     #[test]

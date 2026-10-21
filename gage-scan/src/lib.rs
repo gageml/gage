@@ -2222,7 +2222,7 @@ mod tests {
         let session_id = session_object_id("scripted", "native-1");
         let session = SessionStore::from(&store).get(&session_id).unwrap();
         assert_eq!(
-            session.attrs.native_source,
+            session.attrs.origin,
             format!("session+task:{}/agentic:main/native-1", outcome.id)
         );
         assert_eq!(session.attrs.project.as_deref(), Some("greeter"));
@@ -2369,7 +2369,7 @@ mod tests {
                 .get(&session_object_id("scripted", &format!("native-{p}")))
                 .unwrap();
             assert_eq!(
-                session.attrs.native_source,
+                session.attrs.origin,
                 format!("session+task:{}/runner:main/native-{p}", outcome.id)
             );
             assert_eq!(

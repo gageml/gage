@@ -409,10 +409,12 @@ impl Listing {
 /// count under the same filter. The count is needed for the summary
 /// line; DataFusion's `LIMIT` truncates the shown rows and does not
 /// report a total. Both bindings select the same column list; the
-/// native binding has no type and fills it with an empty literal; its
-/// time column is `mtime` where the store's is `created`, its size is
-/// `size` where the store's is `native_size`, and rows order and
-/// `--since` filter on `mtime` where the store's do on `modified`.
+/// native binding has no type and fills it with an empty literal, and
+/// reads `title`, `model`, and `message_count` as its own columns
+/// where the store reads them from its `summary` JSON; its time
+/// column is `mtime` where the store's is `created`; and rows order
+/// and `--since` filter on `mtime` where the store's do on
+/// `modified`.
 async fn query_sessions(
     ctx: &SessionContext,
     args: &SessionListArgs,
@@ -425,24 +427,28 @@ async fn query_sessions(
         Some(n) => format!(" LIMIT {n}"),
         None => String::new(),
     };
-    let (type_col, size_col, time_col, driver_col) = match listing {
+    let (type_col, title_col, model_col, count_col, time_col, driver_col) = match listing {
         Listing::Native => (
             "'' AS session_type",
-            "size",
+            "title",
+            "model",
+            "message_count",
             "mtime AS time",
             "'' AS driver",
         ),
         Listing::Stored | Listing::Dataset => (
             "session_type",
-            "native_size AS size",
+            "json_extract(summary, '$.title') AS title",
+            "json_extract(summary, '$.model') AS model",
+            "CAST(json_extract(summary, '$.message_count') AS BIGINT) AS message_count",
             "created AS time",
             "driver",
         ),
     };
     let order_clause = listing.order_clause();
     let sql = format!(
-        "SELECT id, id_display, id_prefix, project, title, {type_col}, model, {size_col}, \
-         message_count, {time_col}, {driver_col} \
+        "SELECT id, id_display, id_prefix, project, {title_col}, {type_col}, {model_col}, size, \
+         {count_col}, {time_col}, {driver_col} \
          FROM {from}{where_clause} \
          ORDER BY {order_clause}{limit_clause}",
     );
@@ -742,7 +748,7 @@ async fn add_dialog(
                     format!(
                         "{} (native {})",
                         short_uuid(&r.id),
-                        short_uuid(&r.attrs.native_id)
+                        short_uuid(r.attrs.native_id())
                     )
                 }),
             )?;
@@ -845,7 +851,7 @@ fn link_stored(
         on_event(AddEvent::Added {
             outcome: outcome.outcome,
             id: &outcome.id,
-            native_id: &record.attrs.native_id,
+            native_id: record.attrs.native_id(),
             dataset: Some(dataset_id),
         });
     }
@@ -1334,7 +1340,7 @@ pub fn remove(
                 format!(
                     "{} (native {})",
                     short_uuid(&r.id),
-                    short_uuid(&r.attrs.native_id)
+                    short_uuid(r.attrs.native_id())
                 )
             }),
         )?;

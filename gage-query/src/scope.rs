@@ -131,7 +131,7 @@ impl StoredSessionRef {
             id: record.id,
             commit: record.commit_sha,
             type_version: record.type_version,
-            native_id: record.attrs.native_id,
+            native_id: record.attrs.native_id().to_string(),
             content_format: record.attrs.content_format,
             driver_name: record.driver_name,
         })

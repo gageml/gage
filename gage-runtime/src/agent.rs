@@ -539,7 +539,7 @@ async fn store_transcript(
         tracing::warn!("agent wrote no transcript; nothing stored");
         return Ok(());
     };
-    let source = format!(
+    let origin = format!(
         "session+task:{}/{}:{}/{}",
         ctx.scan_id,
         ctx.scanner,
@@ -547,7 +547,7 @@ async fn store_transcript(
         native.id()
     );
     let added = SessionStore::from(&*store)
-        .with_native_source(source)
+        .with_origin(origin)
         .add(&*ctx.driver, &mut *native)
         .map_err(|e| Error::agent(format!("storing agent session: {e}")))?;
     drop(store);

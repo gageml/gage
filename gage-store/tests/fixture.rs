@@ -322,7 +322,7 @@ fn reads_the_generation_1_fixture() {
         .collect();
     assert_eq!(session_ids.len(), 1);
     let session = &session_ids[0];
-    assert_eq!(session.attrs.native_id, "fixture-1");
+    assert_eq!(session.attrs.native_id(), "fixture-1");
     assert_eq!(session.attrs.content_format, "fake-lines 1");
     assert_eq!(session.attrs.driver, "fake 0.1");
     assert_eq!(

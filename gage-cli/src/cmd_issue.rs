@@ -424,7 +424,7 @@ pub async fn show(args: IssueShowArgs) -> Result<(), CliError> {
         .await
         .context("gage issue show")?;
     let sessions_sql = format!(
-        "SELECT s.id, s.project, s.driver, s.title \
+        "SELECT s.id, s.project, s.driver, json_extract(s.summary, '$.title') AS title \
          FROM session_issue si JOIN session s ON s.id = si.session_id \
          WHERE si.issue_id = '{id}' ORDER BY s.id"
     );

@@ -1441,12 +1441,12 @@ mod tests {
             attrs: FakeAttrs,
         };
         let added = SessionStore::from(&store)
-            .with_native_source("session+task:SCANA/hello:greet/agent-native-1".into())
+            .with_origin("session+task:SCANA/hello:greet/agent-native-1".into())
             .add(&FakeDriver, &mut native)
             .unwrap();
         let record = SessionStore::from(&store).get(&added.id).unwrap();
         assert_eq!(
-            record.attrs.native_source,
+            record.attrs.origin,
             "session+task:SCANA/hello:greet/agent-native-1"
         );
 

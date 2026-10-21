@@ -20,9 +20,7 @@ use std::sync::{Arc, Mutex};
 use crate::datetime::{self, DateTime};
 use crate::error::Error;
 use crate::value::json_to_value;
-use datafusion::arrow::array::{
-    Array, BooleanArray, Int64Array, StringArray, TimestampMillisecondArray,
-};
+use datafusion::arrow::array::{Array, Int64Array, StringArray, TimestampMillisecondArray};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::error::DataFusionError;
 use datafusion::prelude::SessionContext;
@@ -553,7 +551,8 @@ pub(crate) async fn members(
     newest_first: bool,
 ) -> Result<Vec<Session>, VmError> {
     let sql = format!(
-        "SELECT id, locator, line_count FROM session{}",
+        "SELECT id, locator, CAST(json_extract(summary, '$.line_count') AS BIGINT) AS line_count \
+         FROM session{}",
         session_order(newest_first)
     );
     let batches = run(df_ctx, &sql).await?;
@@ -717,7 +716,7 @@ impl Native {
 /// reads it. The inner error is the driver's.
 async fn fetch_native(q: NativeQuery) -> Result<Result<Option<Native>, Error>, VmError> {
     let sql = format!(
-        "SELECT driver, native_source, project FROM session WHERE id = '{}'",
+        "SELECT driver, origin, project FROM session WHERE id = '{}'",
         sql_str(&q.id)
     );
     let batches = run(&dataset_query().await?, &sql).await?;
@@ -740,8 +739,8 @@ struct NativeRow {
 }
 
 impl NativeRow {
-    /// Row `i` of `batch`, whose `driver`, `native_source`, and
-    /// `project` columns start at `first`.
+    /// Row `i` of `batch`, whose `driver`, `origin`, and `project`
+    /// columns start at `first`.
     fn from_columns(batch: &RecordBatch, first: usize, i: usize) -> NativeRow {
         let projects = string_column(batch, first + 2);
         NativeRow {
@@ -808,7 +807,8 @@ fn sessions_native(sessions: Ref<SessionsQuery>) -> SessionsNative {
 /// members this machine's driver owns, read in one statement.
 async fn fetch_sessions_native(q: SessionsNative) -> Result<Vec<Value>, VmError> {
     let sql = format!(
-        "SELECT id, locator, line_count, driver, native_source, project FROM session{}",
+        "SELECT id, locator, CAST(json_extract(summary, '$.line_count') AS BIGINT) AS line_count, \
+                driver, origin, project FROM session{}",
         session_order(q.newest_first)
     );
     let batches = run(&dataset_query().await?, &sql).await?;
@@ -862,17 +862,12 @@ pub struct SessionAttrs {
     /// When the store first added the session
     #[rune(get)]
     pub created: DateTime,
-    /// When the native artifact was last touched at its source
+    /// The session this one was made from, as a URL
     #[rune(get)]
-    pub native_mtime: DateTime,
+    pub origin: String,
+    /// The total byte size of the stored content under `files.d`
     #[rune(get)]
-    pub native_size: i64,
-    /// The id the harness gave the session
-    #[rune(get)]
-    pub native_id: String,
-    /// The Gage URL the session was read from
-    #[rune(get)]
-    pub native_source: String,
+    pub size: i64,
     #[rune(get)]
     pub session_type: String,
     #[rune(get)]
@@ -897,17 +892,14 @@ impl SessionAttrs {
         write!(
             f,
             "SessionAttrs {{ id: {:?}, project: {:?}, modified: {}, created: {}, \
-             native_mtime: {}, native_size: {}, native_id: {:?}, native_source: {:?}, \
-             session_type: {:?}, driver: {:?}, title: {:?}, model: {:?}, \
-             message_count: {:?}, is_empty: {}, line_count: {:?} }}",
+             origin: {:?}, size: {}, session_type: {:?}, driver: {:?}, title: {:?}, \
+             model: {:?}, message_count: {:?}, is_empty: {}, line_count: {:?} }}",
             self.id,
             self.project,
             self.modified.to_rfc3339(),
             self.created.to_rfc3339(),
-            self.native_mtime.to_rfc3339(),
-            self.native_size,
-            self.native_id,
-            self.native_source,
+            self.origin,
+            self.size,
             self.session_type,
             self.driver,
             self.title,
@@ -925,9 +917,7 @@ impl SessionAttrs {
 /// runtime fault.
 async fn fetch_attrs(q: SessionAttrsQuery) -> Result<SessionAttrs, VmError> {
     let sql = format!(
-        "SELECT id, project, modified, created, native_mtime, native_size, native_id, \
-                native_source, session_type, driver, title, model, message_count, is_empty, \
-                line_count \
+        "SELECT id, project, modified, created, origin, size, session_type, driver, summary \
          FROM session WHERE id = '{}'",
         sql_str(&q.id)
     );
@@ -960,29 +950,34 @@ async fn fetch_attrs(q: SessionAttrsQuery) -> Result<SessionAttrs, VmError> {
             .downcast_ref::<Int64Array>()
             .expect("session table integer columns are fixed")
     };
-    let counts = int(12);
-    let lines = int(14);
+    // The driver's projection rides the `summary` JSON column; its
+    // fields are absent when the driver reported none.
+    let summary_col = string_column(batch, 8);
+    let summary: serde_json::Value = if summary_col.is_valid(0) {
+        serde_json::from_str(summary_col.value(0))
+            .map_err(|e| VmError::panic(format!("session {} summary: {e}", q.id)))?
+    } else {
+        serde_json::Value::Null
+    };
+    let s_str = |k: &str| summary.get(k).and_then(|v| v.as_str()).map(String::from);
+    let s_int = |k: &str| summary.get(k).and_then(serde_json::Value::as_i64);
     Ok(SessionAttrs {
         id: string(0).value(0).to_string(),
         project: optional(1),
         modified: timestamp(2),
         created: timestamp(3),
-        native_mtime: timestamp(4),
-        native_size: int(5).value(0),
-        native_id: string(6).value(0).to_string(),
-        native_source: string(7).value(0).to_string(),
-        session_type: string(8).value(0).to_string(),
-        driver: string(9).value(0).to_string(),
-        title: optional(10),
-        model: optional(11),
-        message_count: counts.is_valid(0).then(|| counts.value(0)),
-        is_empty: batch
-            .column(13)
-            .as_any()
-            .downcast_ref::<BooleanArray>()
-            .expect("is_empty is a boolean column")
-            .value(0),
-        line_count: lines.is_valid(0).then(|| lines.value(0)),
+        origin: string(4).value(0).to_string(),
+        size: int(5).value(0),
+        session_type: string(6).value(0).to_string(),
+        driver: string(7).value(0).to_string(),
+        title: s_str("title"),
+        model: s_str("model"),
+        message_count: s_int("message_count"),
+        is_empty: summary
+            .get("is_empty")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        line_count: s_int("line_count"),
     })
 }
 

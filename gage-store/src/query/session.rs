@@ -17,10 +17,7 @@ use std::fmt::{self, Formatter};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use datafusion::arrow::array::{
-    BooleanBuilder, Float64Builder, Int64Builder, ListBuilder, StringBuilder,
-    TimestampMillisecondBuilder,
-};
+use datafusion::arrow::array::{Int64Builder, StringBuilder, TimestampMillisecondBuilder};
 use datafusion::arrow::compute::SortOptions;
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use datafusion::arrow::record_batch::RecordBatch;
@@ -52,42 +49,28 @@ use crate::{Order, SESSION_TYPE, SelectedTip, SessionStore, Store, StoreError};
 /// A projection touching none of these never opens an object.
 const ATTRS_COLS: &[&str] = &[
     "project",
-    "native_mtime",
-    "native_size",
-    "native_id",
-    "native_source",
     "session_type",
     "driver",
     "content_format",
-    "title",
-    "model",
-    "message_count",
-    "is_empty",
-    "line_count",
-    "input_tokens",
-    "output_tokens",
-    "cached_tokens",
-    "cost_usd",
+    "size",
+    "origin",
+    "summary",
 ];
 
 /// The commit's `modified` marker: when the store wrote the version
 const MODIFIED_COL: &str = "modified";
 
-fn path_list() -> DataType {
-    DataType::List(Arc::new(Field::new("item", DataType::Utf8, true)))
-}
-
 fn stored_session_schema() -> SchemaRef {
     // Column order is shared with the driver `native_session` table:
-    // identity, location, timestamps and size, provenance, content
-    // summary, system. A new column joins the category it belongs to.
+    // identity, location, timestamps, provenance, content, summary,
+    // system. A new column joins the category it belongs to.
     Arc::new(Schema::new(vec![
         // Identity
         Field::new("id", DataType::Utf8, false),
         // Location
         // The project the session belongs to, as the driver names it
         Field::new("project", DataType::Utf8, true),
-        // Timestamps and size
+        // Timestamps
         Field::new(
             MODIFIED_COL,
             DataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into())),
@@ -99,41 +82,20 @@ fn stored_session_schema() -> SchemaRef {
             DataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into())),
             false,
         ),
-        // When the native artifact was last touched at its source
-        Field::new(
-            "native_mtime",
-            DataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into())),
-            false,
-        ),
-        // The size in bytes of the native artifact
-        Field::new("native_size", DataType::Int64, false),
         // Provenance
-        Field::new("native_id", DataType::Utf8, false),
-        Field::new("native_source", DataType::Utf8, false),
         Field::new("session_type", DataType::Utf8, false),
         Field::new("driver", DataType::Utf8, false),
         // The driver's name and version for the byte layout of the
         // stored content; a reader of `raw` checks it
         Field::new("content_format", DataType::Utf8, false),
-        // Content summary
-        Field::new("title", DataType::Utf8, true),
-        Field::new("model", DataType::Utf8, true),
-        Field::new("message_count", DataType::Int64, true),
-        Field::new("is_empty", DataType::Boolean, false),
-        // The number of lines in the native content, when the driver
-        // reports it
-        Field::new("line_count", DataType::Int64, true),
-        // Token totals and cost as `SessionAttrs` defines them: every
-        // prompt token sent, every token generated, the cached part of
-        // the input, and the harness's own dollar figure
-        Field::new("input_tokens", DataType::Int64, true),
-        Field::new("output_tokens", DataType::Int64, true),
-        Field::new("cached_tokens", DataType::Int64, true),
-        Field::new("cost_usd", DataType::Float64, true),
-        // Files, as the driver `native_session` table defines them.
-        // The stored summary does not carry them yet, so both are null.
-        Field::new("files_changed", path_list(), true),
-        Field::new("files_referenced", path_list(), true),
+        // The total byte size of the stored content under `files.d`
+        Field::new("size", DataType::Int64, false),
+        // The session this one was made from, as a URL
+        Field::new("origin", DataType::Utf8, false),
+        // The driver's projection of the session, as a JSON object:
+        // title, model, message_count, is_empty, line_count, the token
+        // totals, and cost_usd when the driver reports them
+        Field::new("summary", DataType::Utf8, true),
         // System
         // Short display form of the Gage id
         system(Field::new("id_display", DataType::Utf8, false)),
@@ -389,25 +351,13 @@ impl StoredSessionExec {
         let mut locators = StringBuilder::with_capacity(len, len * 44);
         let mut modifieds = TimestampMillisecondBuilder::with_capacity(len);
         let mut createds = TimestampMillisecondBuilder::with_capacity(len);
-        let mut native_mtimes = TimestampMillisecondBuilder::with_capacity(len);
-        let mut native_sizes = Int64Builder::with_capacity(len);
-        let mut native_ids = StringBuilder::new();
-        let mut native_sources = StringBuilder::new();
         let mut session_types = StringBuilder::new();
         let mut drivers = StringBuilder::new();
         let mut content_formats = StringBuilder::new();
-        let mut titles = StringBuilder::new();
-        let mut models = StringBuilder::new();
-        let mut message_counts = Int64Builder::with_capacity(len);
-        let mut is_empties = BooleanBuilder::with_capacity(len);
-        let mut line_counts = Int64Builder::with_capacity(len);
-        let mut input_tokens = Int64Builder::with_capacity(len);
-        let mut output_tokens = Int64Builder::with_capacity(len);
-        let mut cached_tokens = Int64Builder::with_capacity(len);
-        let mut costs = Float64Builder::with_capacity(len);
+        let mut sizes = Int64Builder::with_capacity(len);
+        let mut origins = StringBuilder::new();
+        let mut summaries = StringBuilder::new();
         let mut projects = StringBuilder::new();
-        let mut files_changed = ListBuilder::new(StringBuilder::new());
-        let mut files_referenced = ListBuilder::new(StringBuilder::new());
 
         for tip in &tips {
             // Read before any column is appended, so a skipped object
@@ -434,48 +384,23 @@ impl StoredSessionExec {
             createds.append_value(marker(tip, "created", tip.created_ms)?);
 
             let Some(record) = record else {
-                native_ids.append_value("");
-                native_sources.append_value("");
                 session_types.append_value("");
                 drivers.append_value("");
                 content_formats.append_value("");
-                native_mtimes.append_value(0);
-                native_sizes.append_value(0);
-                titles.append_null();
-                models.append_null();
-                message_counts.append_null();
-                is_empties.append_value(false);
-                line_counts.append_null();
-                input_tokens.append_null();
-                output_tokens.append_null();
-                cached_tokens.append_null();
-                costs.append_null();
+                sizes.append_value(0);
+                origins.append_value("");
+                summaries.append_null();
                 projects.append_null();
-                files_changed.append_null();
-                files_referenced.append_null();
                 continue;
             };
             let attrs = &record.attrs;
-            native_ids.append_value(&attrs.native_id);
-            native_sources.append_value(&attrs.native_source);
             session_types.append_value(&attrs.session_type);
             drivers.append_value(&attrs.driver);
             content_formats.append_value(&attrs.content_format);
-            native_mtimes.append_value(attrs.native_mtime);
-            native_sizes.append_value(attrs.native_size as i64);
-            let summary = &attrs.summary;
-            titles.append_option(summary.title.as_deref());
-            models.append_option(summary.model.as_deref());
-            message_counts.append_option(summary.message_count.map(|v| v as i64));
-            is_empties.append_value(summary.is_empty);
-            line_counts.append_option(summary.line_count.map(|v| v as i64));
-            input_tokens.append_option(summary.input_tokens.map(|v| v as i64));
-            output_tokens.append_option(summary.output_tokens.map(|v| v as i64));
-            cached_tokens.append_option(summary.cached_tokens.map(|v| v as i64));
-            costs.append_option(summary.cost_usd);
+            sizes.append_value(attrs.size as i64);
+            origins.append_value(&attrs.origin);
+            summaries.append_value(summary_json(&attrs.summary)?);
             projects.append_option(attrs.project.as_deref());
-            files_changed.append_null();
-            files_referenced.append_null();
         }
 
         let batch = RecordBatch::try_new(
@@ -485,24 +410,12 @@ impl StoredSessionExec {
                 Arc::new(projects.finish()),
                 Arc::new(modifieds.finish().with_timezone("UTC")),
                 Arc::new(createds.finish().with_timezone("UTC")),
-                Arc::new(native_mtimes.finish().with_timezone("UTC")),
-                Arc::new(native_sizes.finish()),
-                Arc::new(native_ids.finish()),
-                Arc::new(native_sources.finish()),
                 Arc::new(session_types.finish()),
                 Arc::new(drivers.finish()),
                 Arc::new(content_formats.finish()),
-                Arc::new(titles.finish()),
-                Arc::new(models.finish()),
-                Arc::new(message_counts.finish()),
-                Arc::new(is_empties.finish()),
-                Arc::new(line_counts.finish()),
-                Arc::new(input_tokens.finish()),
-                Arc::new(output_tokens.finish()),
-                Arc::new(cached_tokens.finish()),
-                Arc::new(costs.finish()),
-                Arc::new(files_changed.finish()),
-                Arc::new(files_referenced.finish()),
+                Arc::new(sizes.finish()),
+                Arc::new(origins.finish()),
+                Arc::new(summaries.finish()),
                 Arc::new(id_displays.finish()),
                 Arc::new(id_prefixes.finish()),
                 Arc::new(locators.finish()),
@@ -528,6 +441,13 @@ fn unique_prefix_lens(ids: Vec<String>) -> HashMap<String, usize> {
 
 fn external(e: StoreError) -> DataFusionError {
     DataFusionError::External(Box::new(e))
+}
+
+/// The driver's session summary as a JSON object string, the value the
+/// `summary` column carries.
+fn summary_json(summary: &crate::SummaryAttrs) -> Result<String> {
+    serde_json::to_string(summary)
+        .map_err(|e| external(StoreError::Parse(format!("session summary encode: {e}"))))
 }
 
 /// The value of a required marker of `tip`, or an error naming the
@@ -622,7 +542,7 @@ impl ExecutionPlan for StoredSessionExec {
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use datafusion::arrow::array::{Array, Float64Array, Int64Array, StringArray};
+    use datafusion::arrow::array::{Array, StringArray};
     use datafusion::prelude::SessionContext;
 
     use super::StoredSessionTable;
@@ -654,7 +574,7 @@ mod tests {
         )
         .unwrap();
         let batches = ctx
-            .sql("SELECT native_id, project FROM session ORDER BY native_id")
+            .sql("SELECT origin, project FROM session ORDER BY origin")
             .await
             .unwrap()
             .collect()
@@ -663,7 +583,7 @@ mod tests {
 
         let batch = batches.first().unwrap();
         assert_eq!(batch.num_rows(), 2);
-        let native = batch
+        let origin = batch
             .column(0)
             .as_any()
             .downcast_ref::<StringArray>()
@@ -673,16 +593,17 @@ mod tests {
             .as_any()
             .downcast_ref::<StringArray>()
             .unwrap();
-        assert_eq!(native.value(0), "s1");
-        assert_eq!(native.value(1), "s2");
+        assert_eq!(origin.value(0), "fake:s1");
+        assert_eq!(origin.value(1), "fake:s2");
         assert_eq!(project.value(0), "proj");
         assert_eq!(project.value(1), "proj");
     }
 
-    /// The token and cost columns come from `attrs.summary`, null
-    /// where the driver reported none.
+    /// The `summary` column carries the driver's projection as a JSON
+    /// object, with the token totals and cost present only where the
+    /// driver reported them.
     #[tokio::test]
-    async fn session_table_projects_token_totals_and_cost() {
+    async fn session_table_projects_summary_json() {
         let tmp = tempfile::tempdir().unwrap();
         let (store, _fsck) = open_store(tmp.path());
         {
@@ -703,33 +624,25 @@ mod tests {
         )
         .unwrap();
         let batches = ctx
-            .sql(
-                "SELECT native_id, input_tokens, output_tokens, cached_tokens, cost_usd \
-                 FROM session ORDER BY native_id",
-            )
+            .sql("SELECT origin, summary FROM session ORDER BY origin")
             .await
             .unwrap()
             .collect()
             .await
             .unwrap();
         let batch = batches.first().unwrap();
-        let ints = |i: usize| {
-            batch
-                .column(i)
-                .as_any()
-                .downcast_ref::<Int64Array>()
-                .unwrap()
-        };
-        assert_eq!(ints(1).value(0), 1200);
-        assert_eq!(ints(2).value(0), 300);
-        assert_eq!(ints(3).value(0), 1000);
-        assert!(ints(1).is_null(1) && ints(2).is_null(1) && ints(3).is_null(1));
-        let costs = batch
-            .column(4)
+        let summary = batch
+            .column(1)
             .as_any()
-            .downcast_ref::<Float64Array>()
+            .downcast_ref::<StringArray>()
             .unwrap();
-        assert_eq!(costs.value(0), 0.5);
-        assert!(costs.is_null(1));
+        let with: serde_json::Value = serde_json::from_str(summary.value(0)).unwrap();
+        assert_eq!(with["input_tokens"], 1200);
+        assert_eq!(with["output_tokens"], 300);
+        assert_eq!(with["cached_tokens"], 1000);
+        assert_eq!(with["cost_usd"], 0.5);
+        let without: serde_json::Value = serde_json::from_str(summary.value(1)).unwrap();
+        assert!(without.get("input_tokens").is_none());
+        assert!(without.get("cost_usd").is_none());
     }
 }

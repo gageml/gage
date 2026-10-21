@@ -254,12 +254,16 @@ impl Backend {
         limit: usize,
         offset: usize,
     ) -> Result<Vec<SessionListItem>, Box<dyn Error>> {
-        let (time_col, driver_col) = match self.kind {
-            Kind::Native { .. } => ("mtime", "'' AS driver"),
-            Kind::Stored { .. } => ("modified", "driver"),
+        let (time_col, driver_col, title_col) = match self.kind {
+            Kind::Native { .. } => ("mtime", "'' AS driver", "title"),
+            Kind::Stored { .. } => (
+                "modified",
+                "driver",
+                "json_extract(summary, '$.title') AS title",
+            ),
         };
         let sql = format!(
-            "SELECT id, id_display, project, title, {time_col}, {driver_col} \
+            "SELECT id, id_display, project, {title_col}, {time_col}, {driver_col} \
              FROM {} ORDER BY {time_col} DESC LIMIT {limit} OFFSET {offset}",
             self.session_rel()
         );
@@ -626,7 +630,8 @@ pub(crate) mod tests {
         let doc = backend.load(&f.session_id).await.unwrap();
         assert_eq!(doc.entries.len(), 2);
         assert_eq!(doc.entries[0].entry_type(), "user");
-        assert_eq!(doc.session.value["native_id"], f.native_id);
+        let origin = doc.session.value["origin"].as_str().unwrap();
+        assert!(origin.ends_with(&f.native_id), "{origin}");
         assert!(doc.session.value.get("locator").is_none());
         assert!(doc.notes.is_empty());
 

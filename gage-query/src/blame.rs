@@ -642,7 +642,11 @@ async fn blame(
         match_calls(ctx, &scoped, &wrote_path, &lines).await?
     };
 
-    if found.is_empty() {
+    // The wide pass filters the `session` table on its path lists,
+    // which only the native scope carries; the stored session table
+    // does not expose them, and its writers are already found through
+    // `writers_of` over `tool_use`.
+    if found.is_empty() && matches!(scope, Scope::Native { .. }) {
         let wide = wide_sessions(ctx, &wrote_path, &has("files_referenced")).await?;
         if !wide.is_empty() {
             found = match_calls(ctx, &wide, &wrote_path, &lines).await?;
