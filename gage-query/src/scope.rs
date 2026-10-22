@@ -14,7 +14,7 @@
 //! from [`Driver::read_stored`] on that driver, normalized into
 //! [`gage_session::Entry`] values the core turns into a batch.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use datafusion::arrow::record_batch::RecordBatch;
@@ -22,9 +22,10 @@ use datafusion::error::{DataFusionError, Result};
 use datafusion::prelude::Expr;
 use gage_registry::driver::DriverRegistry;
 use gage_session::filter::IdFilter;
-use gage_session::{Driver, StoredSession, tool_use_batch};
+use gage_session::{ContentSource, Driver, StoredSession, tool_use_batch};
 use gage_store::{
-    Order, ScanDirLayout, ScanSource, SelectedTip, SessionRecord, SessionStore, Store, StoreError,
+    DirContentSource, Order, PendingPublish, PublishDirLayout, PublishStore, ScanDirLayout,
+    ScanSource, SelectedTip, SessionRecord, SessionStore, Store, StoreError, show_publishing,
 };
 
 /// One scan's objects, as a context is scoped to them.
@@ -111,6 +112,10 @@ pub struct StoredSessionRef {
     pub native_id: String,
     pub content_format: String,
     pub driver_name: String,
+    /// The `files.d` of a pending publish working tree when this
+    /// session is staged on disk rather than committed; `None` for a
+    /// stored session, which reads from its commit.
+    pub root: Option<PathBuf>,
 }
 
 impl StoredSessionRef {
@@ -134,7 +139,34 @@ impl StoredSessionRef {
             native_id: record.attrs.native_id().to_string(),
             content_format: record.attrs.content_format,
             driver_name: record.driver_name,
+            root: None,
         })
+    }
+
+    /// The reference to a pending publish working tree. Its content
+    /// comes from the working tree's `files.d`, and its cache key
+    /// carries the working tree's mtime so a rebuild is not served a
+    /// stale batch.
+    fn from_pending(pending: PendingPublish) -> Self {
+        let driver_name = pending
+            .attrs
+            .driver
+            .split_once(' ')
+            .map(|(name, _)| name)
+            .unwrap_or(&pending.attrs.driver)
+            .to_string();
+        let files_dir = PublishDirLayout::new(&pending.root).files_dir();
+        StoredSessionRef {
+            commit: format!("publishing:{}@{}", pending.id, pending.modified_ms),
+            type_version: String::new(),
+            created_ms: pending.modified_ms,
+            modified_ms: pending.modified_ms,
+            native_id: pending.attrs.native_id().to_string(),
+            content_format: pending.attrs.content_format,
+            driver_name,
+            id: pending.id,
+            root: Some(files_dir),
+        }
     }
 
     /// The version as the `session` table takes it.
@@ -204,12 +236,30 @@ impl SessionSet {
         if let Some(id_filter) = IdFilter::new(filters, "session_id")? {
             tips = id_filter.retain(tips, |t| t.id.as_str())?;
         }
-        tips.into_iter()
+        let mut refs: Vec<StoredSessionRef> = tips
+            .into_iter()
             .map(|tip| {
                 let record = sessions.at_commit(&tip.sha).map_err(external)?;
                 StoredSessionRef::from_record(record)
             })
-            .collect()
+            .collect::<Result<Vec<_>>>()?;
+        // Pending publish working trees join the store-wide set only
+        // under `GAGE_SHOW_PUBLISHING=1`, respecting the same
+        // `session_id` filter. A fixed set, a scan or dataset scope,
+        // never includes them.
+        if show_publishing() {
+            let mut pending: Vec<StoredSessionRef> = PublishStore::from(&*store)
+                .list()
+                .map_err(external)?
+                .into_iter()
+                .map(StoredSessionRef::from_pending)
+                .collect();
+            if let Some(id_filter) = IdFilter::new(filters, "session_id")? {
+                pending = id_filter.retain(pending, |s| s.id.as_str())?;
+            }
+            refs.extend(pending);
+        }
+        Ok(refs)
     }
 
     /// The derived batch of `session`, read through its driver on
@@ -248,9 +298,12 @@ impl SessionSet {
 
     fn read_stored(&self, session: &StoredSessionRef) -> Result<Box<dyn StoredSession>> {
         let driver = self.driver(&session.driver_name)?;
-        let content = {
-            let store = self.lock();
-            SessionStore::from(&*store).content(&session.commit)
+        let content: Box<dyn ContentSource> = match &session.root {
+            Some(files_dir) => Box::new(DirContentSource::new(files_dir.clone())),
+            None => {
+                let store = self.lock();
+                SessionStore::from(&*store).content(&session.commit)
+            }
         };
         driver
             .read_stored(session.native_id.clone(), &session.content_format, content)

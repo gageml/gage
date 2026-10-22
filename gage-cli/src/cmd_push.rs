@@ -18,7 +18,9 @@ use clap::Args;
 use cliclack as cli;
 use datafusion::arrow::array::StringArray;
 use gage_query::ContextBuilder;
-use gage_store::{IdMatch, OBJECT_REFS, RemoteStore, Store, StoreError, TAG_REFS, TagStore};
+use gage_store::{
+    IdMatch, OBJECT_REFS, PushSet, RemoteStore, Store, StoreError, TAG_REFS, TagStore,
+};
 
 use crate::cmd_session::run_query;
 use crate::dialog::{self, DialogError};
@@ -128,16 +130,20 @@ pub async fn main(args: PushArgs) -> Result<(), CliError> {
 
     let store = store.lock().unwrap();
     let remotes = RemoteStore::from(&*store);
-    let approval = remotes.approval_digest(&send_names).context("gage push")?;
+    let set = PushSet {
+        send: send_names,
+        ..PushSet::default()
+    };
+    let approval = remotes.approval_digest(&set.names()).context("gage push")?;
     let status = remotes
-        .push(&repository, &send_names, &approval)
+        .push(&repository, &set, &approval)
         .context("gage push")?;
     if !status.success() {
         return Err(CliError::message(format!(
             "gage push: push to {remote} was rejected; fetch and retry: gage fetch {remote}"
         )));
     }
-    println!("Pushed {} refs to {remote}", send_names.len());
+    println!("Pushed {} refs to {remote}", set.len());
     Ok(())
 }
 

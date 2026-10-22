@@ -45,6 +45,56 @@ pub struct Remote {
     pub backup: bool,
 }
 
+/// The refs one push changes on the remote, by what happens to each:
+/// sent as a new ref or a fast-forward, sent with force so the
+/// remote's commit is replaced, or deleted.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PushSet {
+    pub send: Vec<String>,
+    pub force: Vec<String>,
+    pub delete: Vec<String>,
+}
+
+impl PushSet {
+    /// Every remote ref name the push touches: the set the `pre-push`
+    /// hook digests.
+    pub fn names(&self) -> Vec<String> {
+        self.send
+            .iter()
+            .chain(&self.force)
+            .chain(&self.delete)
+            .cloned()
+            .collect()
+    }
+
+    pub fn len(&self) -> usize {
+        self.send.len() + self.force.len() + self.delete.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+/// The store's object and tag refs against a remote's, from
+/// [`RemoteStore::diff_remote`]. Names are full ref names in ref
+/// order.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RemoteDiff {
+    /// In the store and not on the remote.
+    pub new: Vec<String>,
+    /// On the remote at a commit in the local commit's history.
+    pub update: Vec<String>,
+    /// On the remote at a commit that is not in the local commit's
+    /// history.
+    pub diverged: Vec<String>,
+    /// On the remote under the object or tag prefix and not in the
+    /// store.
+    pub remote_only: Vec<String>,
+    /// On the remote at the local commit.
+    pub same: usize,
+}
+
 /// The remote-tracking prefix of `name`: `refs/remotes/<name>/gage/1/`.
 pub fn tracking_prefix(name: &str) -> String {
     format!("refs/remotes/{name}/gage/1/")
@@ -274,26 +324,78 @@ impl RemoteStore<'_> {
         Ok(sha.trim().to_string())
     }
 
-    /// Push `ref_names` to `repository`, one refspec per ref and no
-    /// force, with `approval` set for the store's `pre-push` hook.
-    /// Git's output goes to the terminal as it runs. Returns git's
-    /// exit status; a rejection by either hook is a failing status
-    /// whose reason git has already printed.
+    /// Push `set` to `repository` with `approval` set for the store's
+    /// `pre-push` hook. A sent ref is one refspec with no force, a
+    /// forced ref is one with `+`, and a deleted ref is one with an
+    /// empty source. Git's output goes to the terminal as it runs.
+    /// Returns git's exit status; a rejection by either hook is a
+    /// failing status whose reason git has already printed.
     pub fn push(
         &self,
         repository: &Repository,
-        ref_names: &[String],
+        set: &PushSet,
         approval: &str,
     ) -> Result<ExitStatus, StoreError> {
         let mut cmd = git_transport_in(self.store.path(), ["push", repository.spec()]);
-        for ref_name in ref_names {
+        for ref_name in &set.send {
             cmd.arg(format!("{ref_name}:{ref_name}"));
+        }
+        for ref_name in &set.force {
+            cmd.arg(format!("+{ref_name}:{ref_name}"));
+        }
+        for ref_name in &set.delete {
+            cmd.arg(format!(":{ref_name}"));
         }
         cmd.env("GAGE_PUSH_APPROVAL", approval)
             .stdin(Stdio::null())
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit());
         cmd.status().map_err(StoreError::Spawn)
+    }
+
+    /// The store's object and tag refs against what `repository`
+    /// advertises, each ref classified by what a push of it would do.
+    /// A remote commit the store holds in the local commit's
+    /// first-parent chain is an update; any other remote commit,
+    /// including one the store does not have, is a divergence, which
+    /// covers a remote that is ahead of the store.
+    pub fn diff_remote(&self, repository: &Repository) -> Result<RemoteDiff, StoreError> {
+        let local = self.gage_refs()?;
+        let advertised = self.ls_remote(repository)?;
+        let mut diff = RemoteDiff::default();
+        for (name, sha) in &local {
+            match advertised.get(name) {
+                None => diff.new.push(name.clone()),
+                Some(remote_sha) if remote_sha == sha => diff.same += 1,
+                Some(remote_sha) => {
+                    if self.descends(sha, remote_sha)? {
+                        diff.update.push(name.clone());
+                    } else {
+                        diff.diverged.push(name.clone());
+                    }
+                }
+            }
+        }
+        for name in advertised.keys() {
+            let backed_up = name.starts_with(OBJECT_REFS) || name.starts_with(TAG_REFS);
+            if backed_up && !local.contains_key(name) {
+                diff.remote_only.push(name.clone());
+            }
+        }
+        Ok(diff)
+    }
+
+    /// True when `ancestor` is in the store and in the first-parent
+    /// chain of `commit`.
+    fn descends(&self, commit: &str, ancestor: &str) -> Result<bool, StoreError> {
+        if self.store.object_info(ancestor)?.is_none() {
+            return Ok(false);
+        }
+        Ok(self
+            .store
+            .walk_parent_chain(commit)?
+            .iter()
+            .any(|c| c == ancestor))
     }
 
     /// Every object and tag ref of this store as ref name to commit
@@ -446,6 +548,8 @@ fn parse_remote_config(output: &str) -> Vec<Remote> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
     use crate::test_support::open_store;
 
@@ -566,11 +670,15 @@ mod tests {
         let wrong = remotes
             .approval_digest(&[ref_name.clone(), "refs/gage/1/tag/x".into()])
             .unwrap();
-        let status = remotes.push(&share, &[ref_name.clone()], &wrong).unwrap();
+        let set = PushSet {
+            send: vec![ref_name.clone()],
+            ..PushSet::default()
+        };
+        let status = remotes.push(&share, &set, &wrong).unwrap();
         assert!(!status.success());
 
-        let digest = remotes.approval_digest(&[ref_name.clone()]).unwrap();
-        let status = remotes.push(&share, &[ref_name.clone()], &digest).unwrap();
+        let digest = remotes.approval_digest(&set.names()).unwrap();
+        let status = remotes.push(&share, &set, &digest).unwrap();
         assert!(status.success());
         assert_eq!(
             remotes.ls_remote(&share).unwrap(),
@@ -591,14 +699,177 @@ mod tests {
                 work_id: None,
             })
             .unwrap();
-        let second_ref = format!("{OBJECT_REFS}{second}");
-        let status = remotes.push(&url, &[second_ref.clone()], &wrong).unwrap();
+        let set = PushSet {
+            send: vec![format!("{OBJECT_REFS}{second}")],
+            ..PushSet::default()
+        };
+        let status = remotes.push(&url, &set, &wrong).unwrap();
         assert!(!status.success(), "a URL push still needs the digest");
-        let digest = remotes.approval_digest(&[second_ref.clone()]).unwrap();
-        let status = remotes.push(&url, &[second_ref.clone()], &digest).unwrap();
+        let digest = remotes.approval_digest(&set.names()).unwrap();
+        let status = remotes.push(&url, &set, &digest).unwrap();
         assert!(status.success());
         assert_eq!(remotes.ls_remote(&url).unwrap().len(), 2);
         assert_eq!(remotes.list().unwrap().len(), 1, "no remote is added");
+    }
+
+    /// A note in `store`, returning its object ref name and tip.
+    fn note_ref(store: &Store, text: &str) -> (String, String) {
+        use crate::note::{NoteInput, NoteStore, NoteValue};
+        let id = NoteStore::from(store)
+            .create(NoteInput {
+                name: "comment",
+                value: NoteValue::Text(text.into()),
+                author: "user:test",
+                target: None,
+                metadata: None,
+                work_id: None,
+            })
+            .unwrap();
+        let ref_name = format!("{OBJECT_REFS}{id}");
+        let tip = store.rev_parse(&ref_name).unwrap().unwrap();
+        (ref_name, tip)
+    }
+
+    /// A parentless commit of an empty tree in the repository at
+    /// `path`: a commit unrelated to any object.
+    fn unrelated_commit(path: &Path) -> String {
+        let tree = run(git_in(path, ["mktree"])).unwrap();
+        run(git_in(path, ["commit-tree", tree.trim(), "-m", "x"]))
+            .unwrap()
+            .trim()
+            .to_string()
+    }
+
+    #[test]
+    fn diff_remote_classifies_every_ref() {
+        use crate::note::{NoteEdit, NoteStore, NoteValue};
+        let dir = tempfile::tempdir().unwrap();
+        let (source, _fsck) = open_store(&dir.path().join("source"));
+        let target = dir.path().join("target.git");
+        run(git_in(dir.path(), ["init", "--bare", "-q", "target.git"])).unwrap();
+        let remotes = RemoteStore::from(&source);
+        let repository = remotes.resolve(target.to_str().unwrap()).unwrap();
+
+        let (same, _) = note_ref(&source, "same");
+        let (update, _) = note_ref(&source, "update");
+        let (diverged, _) = note_ref(&source, "diverged");
+        let set = PushSet {
+            send: vec![same.clone(), update.clone(), diverged.clone()],
+            ..PushSet::default()
+        };
+        let digest = remotes.approval_digest(&set.names()).unwrap();
+        assert!(remotes.push(&repository, &set, &digest).unwrap().success());
+
+        let (new, _) = note_ref(&source, "new");
+        NoteStore::from(&source)
+            .edit(
+                update.strip_prefix(OBJECT_REFS).unwrap(),
+                NoteEdit {
+                    name: None,
+                    value: Some(NoteValue::Text("edited".into())),
+                    target: None,
+                },
+            )
+            .unwrap();
+        let unrelated = unrelated_commit(&target);
+        run(git_in(&target, ["update-ref", &diverged, &unrelated])).unwrap();
+        let remote_only = format!("{OBJECT_REFS}remoteonly");
+        run(git_in(&target, ["update-ref", &remote_only, &unrelated])).unwrap();
+        let key_only = format!("{}note/k", crate::refs::KEY_REFS);
+        run(git_in(&target, ["update-ref", &key_only, &unrelated])).unwrap();
+
+        let diff = remotes.diff_remote(&repository).unwrap();
+        assert_eq!(
+            diff,
+            RemoteDiff {
+                new: vec![new],
+                update: vec![update],
+                diverged: vec![diverged],
+                remote_only: vec![remote_only],
+                same: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn push_forces_and_deletes_on_a_plain_repository() {
+        let dir = tempfile::tempdir().unwrap();
+        let (source, _fsck) = open_store(&dir.path().join("source"));
+        let target = dir.path().join("target.git");
+        run(git_in(dir.path(), ["init", "--bare", "-q", "target.git"])).unwrap();
+        let remotes = RemoteStore::from(&source);
+        let repository = remotes.resolve(target.to_str().unwrap()).unwrap();
+        let (ref_name, tip) = note_ref(&source, "v");
+        let unrelated = unrelated_commit(&target);
+        run(git_in(&target, ["update-ref", &ref_name, &unrelated])).unwrap();
+        let extra = format!("{OBJECT_REFS}extra");
+        run(git_in(&target, ["update-ref", &extra, &unrelated])).unwrap();
+
+        let plain = PushSet {
+            send: vec![ref_name.clone()],
+            ..PushSet::default()
+        };
+        let digest = remotes.approval_digest(&plain.names()).unwrap();
+        let status = remotes.push(&repository, &plain, &digest).unwrap();
+        assert!(!status.success(), "a divergent ref is not a fast-forward");
+
+        let set = PushSet {
+            send: Vec::new(),
+            force: vec![ref_name.clone()],
+            delete: vec![extra.clone()],
+        };
+        assert_eq!(set.len(), 2);
+        let wrong = remotes.approval_digest(&set.force).unwrap();
+        let status = remotes.push(&repository, &set, &wrong).unwrap();
+        assert!(!status.success(), "the digest covers deleted names too");
+        let digest = remotes.approval_digest(&set.names()).unwrap();
+        let status = remotes.push(&repository, &set, &digest).unwrap();
+        assert!(status.success());
+        assert_eq!(
+            remotes.ls_remote(&repository).unwrap(),
+            BTreeMap::from([(ref_name, tip)])
+        );
+        assert_eq!(remotes.diff_remote(&repository).unwrap().same, 1);
+    }
+
+    #[test]
+    fn gage_store_target_rejects_force_and_delete() {
+        let dir = tempfile::tempdir().unwrap();
+        let (source, _fsck) = open_store(&dir.path().join("source"));
+        let (target, _fsck2) = open_store(&dir.path().join("target"));
+        let remotes = RemoteStore::from(&source);
+        remotes
+            .add("offsite", target.path().to_str().unwrap(), true)
+            .unwrap();
+        let repository = remotes.resolve("offsite").unwrap();
+        let (ref_name, _) = note_ref(&source, "v");
+        let (other_ref, _) = note_ref(&source, "w");
+        let set = PushSet {
+            send: vec![ref_name.clone(), other_ref.clone()],
+            ..PushSet::default()
+        };
+        assert!(remotes.push(&repository, &set, "").unwrap().success());
+        let unrelated = unrelated_commit(target.path());
+        run(git_in(target.path(), ["update-ref", &ref_name, &unrelated])).unwrap();
+
+        let force = PushSet {
+            force: vec![ref_name.clone()],
+            ..PushSet::default()
+        };
+        let status = remotes.push(&repository, &force, "").unwrap();
+        assert!(
+            !status.success(),
+            "the update hook refuses a non-fast-forward"
+        );
+        let delete = PushSet {
+            delete: vec![other_ref.clone()],
+            ..PushSet::default()
+        };
+        let status = remotes.push(&repository, &delete, "").unwrap();
+        assert!(!status.success(), "the update hook refuses a deletion");
+        let on_remote = remotes.ls_remote(&repository).unwrap();
+        assert_eq!(on_remote[&ref_name], unrelated);
+        assert!(on_remote.contains_key(&other_ref));
     }
 
     #[test]

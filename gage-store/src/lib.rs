@@ -42,6 +42,7 @@
 mod admin;
 mod attachment;
 mod content;
+pub use content::DirContentSource;
 mod dataset;
 mod error;
 mod fetch;
@@ -108,7 +109,9 @@ pub use query::{
     scan_watermark_table, tag_table,
 };
 pub use refs::{GENERATION, KEY_REFS, OBJECT_REFS, ROOT as REFS_ROOT, TAG_REFS};
-pub use remote::{FetchSource, Remote, RemoteStore, Repository, tracking_prefix};
+pub use remote::{
+    FetchSource, PushSet, Remote, RemoteDiff, RemoteStore, Repository, tracking_prefix,
+};
 pub use scan::{
     AgentAttrs, AgentRecord, DirFiles, LOG_NAMES, OBJECT_TYPE as SCAN_TYPE, ScanAttrs, ScanContent,
     ScanDeleted, ScanFiles, ScanQuery, ScanRecord, ScanStore, ScanTask, TaskAgent, TaskAttrs,

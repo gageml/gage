@@ -1,7 +1,8 @@
 //! Read access to the byte tree a stored session version carries.
 
+use std::fs;
 use std::io::{self, Read};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Stdio};
 
 use gage_session::ContentSource;
@@ -107,4 +108,55 @@ impl Drop for GitReader {
             drop(self.child.wait());
         }
     }
+}
+
+/// A [`ContentSource`] over a directory on disk, the `files.d` of a
+/// pending publish working tree. Paths are relative to the directory,
+/// with forward slashes, matching the keys [`GitContentSource`]
+/// returns for a committed tree.
+pub struct DirContentSource {
+    files_dir: PathBuf,
+}
+
+impl DirContentSource {
+    pub fn new(files_dir: impl Into<PathBuf>) -> Self {
+        Self {
+            files_dir: files_dir.into(),
+        }
+    }
+}
+
+impl ContentSource for DirContentSource {
+    fn paths(&self) -> io::Result<Vec<String>> {
+        let mut out = Vec::new();
+        collect_files(&self.files_dir, &self.files_dir, &mut out)?;
+        out.sort();
+        Ok(out)
+    }
+
+    fn open(&self, path: &str) -> io::Result<Box<dyn Read + Send>> {
+        Ok(Box::new(fs::File::open(self.files_dir.join(path))?))
+    }
+}
+
+/// Collect the files under `dir` as paths relative to `base`, with
+/// forward slashes. A missing directory yields no paths.
+fn collect_files(base: &Path, dir: &Path, out: &mut Vec<String>) -> io::Result<()> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    for entry in entries {
+        let path = entry?.path();
+        if path.is_dir() {
+            collect_files(base, &path, out)?;
+        } else if let Ok(rel) = path.strip_prefix(base) {
+            out.push(
+                rel.to_string_lossy()
+                    .replace(std::path::MAIN_SEPARATOR, "/"),
+            );
+        }
+    }
+    Ok(())
 }
