@@ -339,6 +339,12 @@ pub trait Source: Send + Sync {
     /// An unknown id is an error.
     fn delete_native(&self, native_id: &str) -> Result<(), DriverError>;
 
+    /// Move a native session into the project at `project`, an existing
+    /// directory, and record `project` as the session's working
+    /// directory. An unknown id, a session already in that project, and
+    /// a destination that already holds the id are errors.
+    fn move_native(&self, native_id: &str, project: &Path) -> Result<(), DriverError>;
+
     /// The project name this driver assigns to a directory. Matches
     /// the `project` column of the `session` table.
     fn project_name(&self, path: &Path) -> Result<String, DriverError>;
@@ -709,6 +715,9 @@ mod tests {
             unimplemented!()
         }
         fn delete_native(&self, _native_id: &str) -> Result<(), DriverError> {
+            unimplemented!()
+        }
+        fn move_native(&self, _native_id: &str, _project: &Path) -> Result<(), DriverError> {
             unimplemented!()
         }
         fn project_name(&self, _path: &Path) -> Result<String, DriverError> {

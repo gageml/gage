@@ -41,7 +41,8 @@ use crate::preflight;
 use crate::proc::find_claude;
 use crate::resolve::resolve_command;
 use crate::session::{
-    SESSION_RE, SessionInfo, delete_session, encode_project_dir, is_agent_tmp_slug, projects_dir,
+    SESSION_RE, SessionInfo, delete_session, encode_project_dir, is_agent_tmp_slug, move_session,
+    projects_dir,
 };
 use crate::session_reader::SessionReader;
 use crate::tables::{EntryTable, MessageTable, SessionTable, ToolUseTable};
@@ -663,6 +664,27 @@ impl Source for ClaudeSource {
         Ok(delete_session(&path)?)
     }
 
+    fn move_native(&self, native_id: &str, project: &Path) -> Result<(), DriverError> {
+        let (path, _meta) = self.session_file(native_id)?;
+        let project = fs::canonicalize(project)
+            .map_err(|e| DriverError::Other(format!("{}: {e}", project.display())))?;
+        let dest_dir = self.projects_dir.join(encode_project_dir(&project));
+        if path.parent() == Some(dest_dir.as_path()) {
+            return Err(DriverError::Other(format!(
+                "session {native_id} is already in {}",
+                project.display()
+            )));
+        }
+        let dest = dest_dir.join(format!("{native_id}.jsonl"));
+        if dest.exists() {
+            return Err(DriverError::Other(format!(
+                "destination already holds a session with this id: {}",
+                dest.display()
+            )));
+        }
+        Ok(move_session(&path, &dest_dir, &project)?)
+    }
+
     fn project_name(&self, path: &Path) -> Result<String, DriverError> {
         let canonical = match fs::canonicalize(path) {
             Ok(c) => c,
@@ -1189,6 +1211,64 @@ mod tests {
         assert!(!path.exists());
         assert!(!sidecar.exists());
         assert!(source.open_native(id).is_err());
+    }
+
+    #[test]
+    fn move_native_relocates_session_under_destination_slug() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+        let project = root.join("work").join("newproj");
+        fs::create_dir_all(&project).unwrap();
+        let project = fs::canonicalize(&project).unwrap();
+        let path = seed_session(
+            root,
+            "/Users/alice/Code/old",
+            id,
+            "{\"type\":\"user\",\"cwd\":\"/Users/alice/Code/old\"}\n",
+        );
+        let sidecar = path.with_extension("");
+        fs::create_dir_all(sidecar.join("subagents")).unwrap();
+
+        let source = ClaudeDriver::new().open_source(&options_for(root)).unwrap();
+        source.move_native(id, &project).unwrap();
+
+        let dest_dir = root.join("projects").join(encode_project_dir(&project));
+        let dest = dest_dir.join(format!("{id}.jsonl"));
+        assert!(!path.exists());
+        assert!(!sidecar.exists());
+        assert!(dest_dir.join(id).join("subagents").is_dir());
+        let moved = fs::read_to_string(&dest).unwrap();
+        let entry: serde_json::Value = serde_json::from_str(moved.trim()).unwrap();
+        assert_eq!(entry["cwd"], project.to_string_lossy().as_ref());
+    }
+
+    #[test]
+    fn move_native_refuses_same_project_and_occupied_destination() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+        let here = root.join("here");
+        let there = root.join("there");
+        fs::create_dir_all(&here).unwrap();
+        fs::create_dir_all(&there).unwrap();
+        let here = fs::canonicalize(&here).unwrap();
+        let there = fs::canonicalize(&there).unwrap();
+        let path = seed_session(root, &here.to_string_lossy(), id, "");
+
+        let source = ClaudeDriver::new().open_source(&options_for(root)).unwrap();
+        let err = source.move_native("nope", &there).unwrap_err();
+        assert!(err.to_string().contains("not found"), "{err}");
+        let err = source.move_native(id, &here).unwrap_err();
+        assert!(err.to_string().contains("already in"), "{err}");
+        // Written after the source walked its files, so the id still
+        // resolves to the copy under `here`.
+        seed_session(root, &there.to_string_lossy(), id, "");
+        let err = source.move_native(id, &there).unwrap_err();
+        assert!(err.to_string().contains("already holds"), "{err}");
+        let err = source.move_native(id, &root.join("missing")).unwrap_err();
+        assert!(err.to_string().contains("missing"), "{err}");
+        assert!(path.exists());
     }
 
     #[test]

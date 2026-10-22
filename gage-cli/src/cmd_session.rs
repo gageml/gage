@@ -1,7 +1,9 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap};
 use std::error::Error;
+use std::fs;
 use std::io::{self, IsTerminal};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -16,7 +18,7 @@ use datafusion::prelude::SessionContext;
 use gage_core::uuid::short_uuid;
 use gage_query::ContextBuilder;
 use gage_registry::driver::DriverRegistry;
-use gage_session::{Driver, Source, SourceOptions};
+use gage_session::{Driver, SessionLiveError, Source, SourceOptions};
 use gage_store::url::LineSelection;
 use gage_store::{DatasetStore, SessionRecord, SessionStore, Store, StoreError, TagStore};
 use gage_tui::session::{Backend, picker_page_size};
@@ -70,6 +72,15 @@ pub enum SessionCommand {
     /// Removes each session's files from the selected source. Stored
     /// sessions are not affected.
     Delete(SessionDeleteArgs),
+
+    /// Move a native session to another project
+    ///
+    /// Moves the session's files in the selected source to the project
+    /// at DIR and records DIR as the session's working directory, so
+    /// the harness resumes it from there. Stored sessions are not
+    /// affected. A session that is open in the harness is not moved;
+    /// --force skips that check.
+    Move(SessionMoveArgs),
 
     /// View a session
     View(SessionViewArgs),
@@ -264,6 +275,24 @@ pub struct SessionDeleteArgs {
     /// Delete empty sessions
     #[arg(long)]
     pub empty: bool,
+
+    /// Skip confirmation prompt
+    #[arg(short, long)]
+    pub yes: bool,
+}
+
+#[derive(Args)]
+#[command(next_display_order = 3)]
+pub struct SessionMoveArgs {
+    /// Session to move (ID or prefix)
+    pub session: String,
+
+    /// Project directory to move session to
+    pub dir: PathBuf,
+
+    /// Move session without checking that it is closed
+    #[arg(long)]
+    pub force: bool,
 
     /// Skip confirmation prompt
     #[arg(short, long)]
@@ -1583,6 +1612,65 @@ async fn delete_dialog(
         return Err(dialog::partial("Deleted", deleted, total, "session"));
     }
     Ok(format!("Deleted {}", count(deleted, "session")).into())
+}
+
+pub fn move_(source: Option<String>, stored: bool, args: SessionMoveArgs) -> Result<(), CliError> {
+    if stored {
+        return Err(CliError::message(
+            "gage session move: --stored does not apply; sessions are moved within a source",
+        ));
+    }
+    let registry = source::driver_registry();
+    let (driver, spec) = source::resolve_source(&registry, source.as_deref())
+        .map_err(|e| anyhow!("gage session move: {e}"))?;
+    let source = driver
+        .open_source(&SourceOptions::new(&spec))
+        .with_context(|| format!("gage session move: {spec}"))?;
+    let outcome = dialog::run("Move session", || move_dialog(&args, source.as_ref()));
+    source
+        .close()
+        .with_context(|| format!("gage session move: {spec}"))?;
+    outcome
+}
+
+fn move_dialog(args: &SessionMoveArgs, source: &dyn Source) -> Result<DialogResult, DialogError> {
+    let id = source
+        .find_native(&args.session)
+        .map_err(|e| DialogError::Failed(format!("{}: {e}", args.session)))?;
+    let dir = fs::canonicalize(&args.dir)
+        .map_err(|e| DialogError::Failed(format!("{}: {e}", args.dir.display())))?;
+    if !args.force {
+        match source.is_session_live(&id) {
+            Ok(false) => {}
+            Ok(true) => {
+                return Err(DialogError::Failed(format!(
+                    "Session {} is active. Close the session and run this command again.",
+                    short_uuid(&id)
+                )));
+            }
+            Err(SessionLiveError::Unknown(why)) => {
+                cli::log::warning(format!("Cannot tell whether session is open: {why}"))?;
+                return Err(DialogError::Failed(
+                    "Confirm the session is not open and use --force to move it".to_string(),
+                ));
+            }
+            Err(SessionLiveError::Driver(e)) => return Err(DialogError::Other(e.into())),
+        }
+    }
+
+    cli::log::remark(format!("Session: {}", short_uuid(&id)))?;
+    cli::log::remark(format!("To: {}", dir.display()))?;
+    if !args.yes {
+        let confirmed = cli::confirm("Continue?").initial_value(false).interact()?;
+        if !confirmed {
+            return Err(DialogError::Canceled);
+        }
+    }
+
+    source
+        .move_native(&id, &dir)
+        .map_err(|e| DialogError::Failed(e.to_string()))?;
+    Ok(format!("Moved session {} to {}", short_uuid(&id), dir.display()).into())
 }
 
 /// A session selected for deletion

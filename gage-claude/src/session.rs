@@ -7,7 +7,8 @@
 //! sessions themselves; it does not resolve them back to project paths.
 
 use std::fmt;
-use std::io;
+use std::fs::{self, File};
+use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use std::time::{Duration, SystemTime};
@@ -15,6 +16,7 @@ use std::time::{Duration, SystemTime};
 use gage_core::config::gage_home;
 use regex::Regex;
 use serde::{Serialize, Serializer};
+use serde_json::Value;
 
 pub static SESSION_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.jsonl$").unwrap()
@@ -392,6 +394,64 @@ pub fn delete_session(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Move a session's JSONL file and sidecar directory into `dest_dir`,
+/// rewriting each entry's `cwd` to `new_cwd`. The rewritten transcript
+/// is complete under a temporary name before it is renamed into place
+/// and the source is removed, so an interrupted move leaves the source
+/// readable.
+pub fn move_session(path: &Path, dest_dir: &Path, new_cwd: &Path) -> io::Result<()> {
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| io::Error::other(format!("not a session file: {}", path.display())))?;
+    fs::create_dir_all(dest_dir)?;
+    let dest = dest_dir.join(file_name);
+    let tmp = dest.with_extension("jsonl.tmp");
+    if let Err(e) = rewrite_cwd(path, &tmp, new_cwd) {
+        match fs::remove_file(&tmp) {
+            Ok(()) => {}
+            Err(rm) if rm.kind() == io::ErrorKind::NotFound => {}
+            Err(rm) => {
+                tracing::warn!(path = %tmp.display(), "partial transcript left behind: {rm}")
+            }
+        }
+        return Err(e);
+    }
+    fs::rename(&tmp, &dest)?;
+    let sidecar = path.with_extension("");
+    if sidecar.is_dir() {
+        fs::rename(&sidecar, dest.with_extension(""))?;
+    }
+    fs::remove_file(path)?;
+    Ok(())
+}
+
+/// Copy the transcript at `src` to `dest` with every entry's `cwd`
+/// set to `new_cwd`. An entry whose `cwd` is absent or not a string is
+/// copied as is. A non-empty line that is not JSON is an error naming
+/// the line.
+fn rewrite_cwd(src: &Path, dest: &Path, new_cwd: &Path) -> io::Result<()> {
+    let reader = BufReader::new(File::open(src)?);
+    let mut out = BufWriter::new(File::create(dest)?);
+    let new_cwd = Value::String(new_cwd.to_string_lossy().into_owned());
+    for (index, line) in reader.lines().enumerate() {
+        let line = line?;
+        if line.trim().is_empty() {
+            out.write_all(b"\n")?;
+            continue;
+        }
+        let mut entry: Value = serde_json::from_str(&line)
+            .map_err(|e| io::Error::other(format!("{}:{}: {e}", src.display(), index + 1)))?;
+        if let Some(cwd) = entry.get_mut("cwd")
+            && cwd.is_string()
+        {
+            *cwd = new_cwd.clone();
+        }
+        serde_json::to_writer(&mut out, &entry)?;
+        out.write_all(b"\n")?;
+    }
+    out.flush()
+}
+
 /// Whether a project slug belongs to an in-flight agent session. The
 /// runtime runs claude with cwd `~/.gage/tmp/<run_id>/cwd`, which
 /// Claude Code encodes to a slug containing `--gage-tmp-` (the double
@@ -422,6 +482,56 @@ pub fn encode_project_dir(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn move_session_rewrites_cwd_and_moves_sidecar() {
+        let tmp = TempDir::new().unwrap();
+        let src_dir = tmp.path().join("src");
+        let dest_dir = tmp.path().join("dest");
+        fs::create_dir_all(&src_dir).unwrap();
+        let path = src_dir.join("abc.jsonl");
+        fs::write(
+            &path,
+            "{\"type\":\"user\",\"cwd\":\"/old\"}\n\
+             {\"type\":\"summary\"}\n\
+             {\"type\":\"assistant\",\"cwd\":7}\n",
+        )
+        .unwrap();
+        let sidecar = path.with_extension("");
+        fs::create_dir_all(sidecar.join("subagents")).unwrap();
+
+        move_session(&path, &dest_dir, Path::new("/new")).unwrap();
+
+        assert!(!path.exists());
+        assert!(!sidecar.exists());
+        assert!(dest_dir.join("abc").join("subagents").is_dir());
+        let moved = fs::read_to_string(dest_dir.join("abc.jsonl")).unwrap();
+        let lines: Vec<Value> = moved
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(lines[0]["cwd"], "/new");
+        assert!(lines[1].get("cwd").is_none());
+        assert_eq!(lines[2]["cwd"], 7);
+        assert!(!dest_dir.join("abc.jsonl.tmp").exists());
+    }
+
+    #[test]
+    fn move_session_rejects_malformed_line_and_keeps_source() {
+        let tmp = TempDir::new().unwrap();
+        let src_dir = tmp.path().join("src");
+        let dest_dir = tmp.path().join("dest");
+        fs::create_dir_all(&src_dir).unwrap();
+        let path = src_dir.join("abc.jsonl");
+        fs::write(&path, "{\"cwd\":\"/old\"}\nnot json\n").unwrap();
+
+        let err = move_session(&path, &dest_dir, Path::new("/new")).unwrap_err();
+        assert!(err.to_string().contains("abc.jsonl:2"), "{err}");
+        assert!(path.exists());
+        assert!(!dest_dir.join("abc.jsonl").exists());
+        assert!(!dest_dir.join("abc.jsonl.tmp").exists());
+    }
 
     #[test]
     fn agent_tmp_slug_detected() {

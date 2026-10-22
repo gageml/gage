@@ -8,6 +8,7 @@
 //! object id and commit for `origin`.
 
 use clap::{Args, Subcommand};
+use gage_core::uuid::short_uuid;
 use gage_session::SourceOptions;
 use gage_store::{PublishStore, SessionRecord, SessionStore, Store};
 
@@ -22,6 +23,9 @@ pub enum PublishCommand {
     /// value the other publish commands take as their SESSION
     /// argument.
     Init(InitArgs),
+
+    /// List pending publish sessions
+    List,
 }
 
 #[derive(Args)]
@@ -38,7 +42,26 @@ pub async fn run(
 ) -> Result<(), CliError> {
     match command {
         PublishCommand::Init(args) => init(source, stored, args),
+        PublishCommand::List => list(),
     }
+}
+
+/// List the pending publish working trees, reading the file system.
+fn list() -> Result<(), CliError> {
+    let fail = |e: String| CliError::message(format!("gage session publish list: {e}"));
+    let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
+    let pending = PublishStore::from(&store)
+        .list()
+        .map_err(|e| fail(e.to_string()))?;
+    if pending.is_empty() {
+        println!("No pending publish sessions");
+        return Ok(());
+    }
+    for p in pending {
+        let title = p.attrs.summary.title.as_deref().unwrap_or("");
+        println!("{}  {}", short_uuid(&p.id), title);
+    }
+    Ok(())
 }
 
 fn init(source: Option<String>, stored: bool, args: InitArgs) -> Result<(), CliError> {

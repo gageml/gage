@@ -10,9 +10,11 @@
 //! session enters the store only on apply; abort deletes the
 //! directory and writes nothing.
 
+use std::ffi::OsStr;
 use std::fs;
-use std::io::Read;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
+use std::time::UNIX_EPOCH;
 
 use gage_core::uuid::new_uuid;
 
@@ -22,6 +24,24 @@ use crate::{SessionRecord, SessionStore, Store, StoreError};
 const PUBLISHES_DIR: &str = "publishes";
 const ATTRS_FILE: &str = "attrs.json";
 const REDACTED_FILE: &str = "redacted.json";
+
+/// Whether the data layer includes pending publish working trees in
+/// the session tables, set by `GAGE_SHOW_PUBLISHING=1`. Only the
+/// exact value `1` turns it on.
+pub fn show_publishing() -> bool {
+    std::env::var_os("GAGE_SHOW_PUBLISHING").as_deref() == Some(OsStr::new("1"))
+}
+
+/// One pending publish working tree, read from its staging directory.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PendingPublish {
+    /// The new session's object id, the directory name.
+    pub id: String,
+    pub attrs: SessionAttrsRecord,
+    pub root: PathBuf,
+    /// UNIX time millis of the working tree's last change.
+    pub modified_ms: i64,
+}
 
 /// The parent of publish staging directories, `publishes/` under Gage
 /// home.
@@ -149,6 +169,50 @@ impl<'a> PublishStore<'a> {
 
         Ok(PublishInit { id, origin })
     }
+
+    /// Every pending publish working tree under the publishes root, in
+    /// id order. A directory without a readable `attrs.json` is
+    /// skipped, since it is mid-write or not a publish. Empty when the
+    /// root does not exist.
+    pub fn list(&self) -> Result<Vec<PendingPublish>, StoreError> {
+        let entries = match fs::read_dir(&self.root) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(StoreError::ReadContent(e)),
+        };
+        let mut out = Vec::new();
+        for entry in entries {
+            let dir = entry.map_err(StoreError::ReadContent)?.path();
+            if !dir.is_dir() {
+                continue;
+            }
+            let layout = PublishDirLayout::new(&dir);
+            let bytes = match fs::read(layout.attrs_file()) {
+                Ok(bytes) => bytes,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(StoreError::ReadContent(e)),
+            };
+            let attrs: SessionAttrsRecord = serde_json::from_slice(&bytes)
+                .map_err(|e| StoreError::Parse(format!("publish attrs {}: {e}", dir.display())))?;
+            let Some(id) = layout.id().map(String::from) else {
+                continue;
+            };
+            let modified_ms = fs::metadata(&dir)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0);
+            out.push(PendingPublish {
+                id,
+                attrs,
+                root: dir,
+                modified_ms,
+            });
+        }
+        out.sort_by(|a, b| a.id.cmp(&b.id));
+        Ok(out)
+    }
 }
 
 #[cfg(test)]
@@ -192,5 +256,34 @@ mod tests {
         assert_eq!(fs::read_to_string(layout.redacted_file()).unwrap(), "[]\n");
         let staged = fs::read_to_string(layout.files_dir().join("session.jsonl")).unwrap();
         assert_eq!(staged, "hello\nworld\n");
+    }
+
+    #[test]
+    fn list_returns_pending_working_trees_in_id_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let mut session = crate::session::tests::fake("s1", &[("session.jsonl", "a\n")]);
+        let outcome = SessionStore::from(&store)
+            .add(&crate::session::tests::FakeDriver, &mut session)
+            .unwrap();
+        let original = SessionStore::from(&store)
+            .at_commit(&outcome.commit_sha)
+            .unwrap();
+
+        let publishes = tmp.path().join("publishes");
+        let publish = PublishStore::with_root(&store, &publishes);
+        assert!(publish.list().unwrap().is_empty());
+
+        let a = publish.init(&original).unwrap();
+        let b = publish.init(&original).unwrap();
+
+        let listed = publish.list().unwrap();
+        assert_eq!(listed.len(), 2);
+        let mut ids: Vec<&str> = listed.iter().map(|p| p.id.as_str()).collect();
+        let mut expected = vec![a.id.as_str(), b.id.as_str()];
+        ids.sort_unstable();
+        expected.sort_unstable();
+        assert_eq!(ids, expected);
+        assert!(listed.iter().all(|p| p.attrs.origin == a.origin));
     }
 }

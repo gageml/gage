@@ -348,6 +348,7 @@ async fn main() -> ExitCode {
                 cmd_session::SessionCommand::Delete(args) => {
                     cmd_session::delete(source, stored, args).await
                 }
+                cmd_session::SessionCommand::Move(args) => cmd_session::move_(source, stored, args),
                 cmd_session::SessionCommand::View(args) => {
                     cmd_session::view(source, stored, args).await
                 }

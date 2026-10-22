@@ -97,7 +97,9 @@ pub use note::{
     OBJECT_TYPE as NOTE_TYPE,
 };
 pub use object::SHORT_PREFIX_SET_SIZE;
-pub use publish::{PublishDirLayout, PublishInit, PublishStore, publishes_root};
+pub use publish::{
+    PendingPublish, PublishDirLayout, PublishInit, PublishStore, publishes_root, show_publishing,
+};
 pub use query::{
     LinkKind, NoteDocRow, ScanSource, ScopedIssue, ScopedNote, StoredNoteTable, StoredSessionTable,
     attachment_file_table, attachment_table, dataset_table, issue_event_table, issue_report_fn,

@@ -336,8 +336,9 @@ impl StoredSessionExec {
             .into_iter()
             .filter(|t| since.is_none_or(|ms| t.modified_ms.is_some_and(|m| m >= ms)))
             .collect();
-        if let Some(id_filter) = IdFilter::new(&self.filters, "id")? {
-            tips = id_filter.retain(tips, |t| t.id.as_str())?;
+        let id_filter = IdFilter::new(&self.filters, "id")?;
+        if let Some(f) = &id_filter {
+            tips = f.retain(tips, |t| t.id.as_str())?;
         }
         if let Some(n) = self.limit {
             tips.truncate(n);
@@ -401,6 +402,36 @@ impl StoredSessionExec {
             origins.append_value(&attrs.origin);
             summaries.append_value(summary_json(&attrs.summary)?);
             projects.append_option(attrs.project.as_deref());
+        }
+
+        // Pending publish working trees join the store-wide listing
+        // only under `GAGE_SHOW_PUBLISHING=1`. They are not members of
+        // any scan or dataset, so the fixed-version scopes never show
+        // them. They respect the same id filter and modified bound as
+        // the stored rows.
+        if self.versions.is_none() && crate::publish::show_publishing() {
+            let mut pending = crate::PublishStore::from(&*store)
+                .list()
+                .map_err(external)?;
+            if let Some(f) = &id_filter {
+                pending = f.retain(pending, |p| p.id.as_str())?;
+            }
+            pending.retain(|p| since.is_none_or(|ms| p.modified_ms >= ms));
+            for p in &pending {
+                ids.append_value(&p.id);
+                projects.append_option(p.attrs.project.as_deref());
+                modifieds.append_value(p.modified_ms);
+                createds.append_value(p.modified_ms);
+                session_types.append_value(&p.attrs.session_type);
+                drivers.append_value(&p.attrs.driver);
+                content_formats.append_value(&p.attrs.content_format);
+                sizes.append_value(p.attrs.size as i64);
+                origins.append_value(&p.attrs.origin);
+                summaries.append_value(summary_json(&p.attrs.summary)?);
+                id_displays.append_value(short_uuid(&p.id));
+                id_prefixes.append_value(short_uuid(&p.id));
+                locators.append_value(p.root.display().to_string());
+            }
         }
 
         let batch = RecordBatch::try_new(
@@ -546,15 +577,23 @@ mod tests {
     use datafusion::prelude::SessionContext;
 
     use super::StoredSessionTable;
-    use crate::SessionStore;
     use crate::session::tests::{FakeDriver, fake};
     use crate::test_support::open_store;
+    use crate::{PublishStore, SessionStore};
+
+    /// Serializes the tests that build a `session` table, because the
+    /// pending-publish test mutates `GAGE_HOME` and
+    /// `GAGE_SHOW_PUBLISHING`, which are process-global. A holder of
+    /// this lock sees the env clean, since the mutating test restores
+    /// both before it releases.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     /// The store-bound `session` table projects one row per live
     /// session, reading `native_id` and `project` from each object's
     /// attrs.
     #[tokio::test]
     async fn session_table_projects_stored_sessions() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         let (store, _fsck) = open_store(tmp.path());
         {
@@ -604,6 +643,7 @@ mod tests {
     /// driver reported them.
     #[tokio::test]
     async fn session_table_projects_summary_json() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         let (store, _fsck) = open_store(tmp.path());
         {
@@ -644,5 +684,72 @@ mod tests {
         let without: serde_json::Value = serde_json::from_str(summary.value(1)).unwrap();
         assert!(without.get("input_tokens").is_none());
         assert!(without.get("cost_usd").is_none());
+    }
+
+    async fn ids(ctx: &SessionContext, sql: &str) -> Vec<String> {
+        let batches = ctx.sql(sql).await.unwrap().collect().await.unwrap();
+        let mut out = Vec::new();
+        for batch in &batches {
+            let col = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            out.extend((0..batch.num_rows()).map(|i| col.value(i).to_string()));
+        }
+        out
+    }
+
+    /// With `GAGE_SHOW_PUBLISHING=1`, a pending publish working tree
+    /// joins the store-wide listing and respects an id filter; with it
+    /// unset it is absent.
+    #[tokio::test]
+    async fn session_table_includes_pending_publishes_under_env() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: env mutation is serialized by ENV_LOCK and both vars
+        // are restored before the lock is released.
+        unsafe {
+            std::env::set_var("GAGE_HOME", tmp.path());
+            std::env::remove_var("GAGE_SHOW_PUBLISHING");
+        }
+
+        let (store, _fsck) = open_store(tmp.path());
+        let mut session = fake("orig", &[("session.jsonl", "hello\n")]);
+        let outcome = SessionStore::from(&store)
+            .add(&FakeDriver, &mut session)
+            .unwrap();
+        let original = SessionStore::from(&store)
+            .at_commit(&outcome.commit_sha)
+            .unwrap();
+        let pending = PublishStore::from(&store).init(&original).unwrap();
+
+        let ctx = SessionContext::new();
+        ctx.register_table(
+            "session",
+            Arc::new(StoredSessionTable::new(Arc::new(Mutex::new(store)))),
+        )
+        .unwrap();
+
+        // Absent until the env opts in.
+        let hidden = ids(&ctx, "SELECT id FROM session").await;
+        assert!(!hidden.contains(&pending.id), "{hidden:?}");
+
+        unsafe { std::env::set_var("GAGE_SHOW_PUBLISHING", "1") };
+        let shown = ids(&ctx, "SELECT id FROM session ORDER BY id").await;
+        assert!(shown.contains(&pending.id), "{shown:?}");
+        assert!(shown.contains(&original.id), "{shown:?}");
+
+        let one = ids(
+            &ctx,
+            &format!("SELECT id FROM session WHERE id = '{}'", pending.id),
+        )
+        .await;
+        assert_eq!(one, vec![pending.id.clone()]);
+
+        unsafe {
+            std::env::remove_var("GAGE_SHOW_PUBLISHING");
+            std::env::remove_var("GAGE_HOME");
+        }
     }
 }
