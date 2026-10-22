@@ -6,14 +6,14 @@ conventions in _[Keep a Changelog]_. Release versions use [semantic versioning].
 [Keep a Changelog]: https://keepachangelog.com/en/1.1.0/
 [semantic versioning]: https://semver.org/spec/v2.0.0.html
 
-## [0.2.0-rc.1]
+## [0.2.0]
 
 ### Enhancements
 
 **Sharing and backup**
 
-- `gage push` and `gage fetch` move objects between a store and a remote,
-  taking everything an object links
+- `gage push` and `gage fetch` move objects between a store and a remote, taking
+  everything an object links
 - `gage backup` copies the whole store to a remote, and `gage fetch` restores it
 - `gage remote` manages remotes
 
