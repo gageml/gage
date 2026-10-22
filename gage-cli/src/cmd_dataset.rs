@@ -28,7 +28,9 @@ use crate::cmd_tag::TAG_HELP;
 use crate::dialog::{self, DialogError, DialogResult};
 use crate::error::CliError;
 use crate::human::{count, format_elapsed_ms};
-use crate::session_filter::{FILTER_ARG_NAMES, SessionFilterArgs, select_sessions};
+use crate::session_filter::{
+    FILTER_ARG_NAMES, SessionFilterArgs, native_session_lines, preview_sessions, select_sessions,
+};
 use crate::size_limit::SizeLimitArgs;
 use crate::source::SOURCE_HELP;
 use crate::style::{self, IdKind, styled_id};
@@ -80,7 +82,7 @@ pub struct DatasetAddArgs {
     pub size: SizeLimitArgs,
 
     /// Tag new dataset
-    #[arg(long, value_name = "NAME", long_help = format!("Tag new dataset\n\n{TAG_HELP}"))]
+    #[arg(short, long, value_name = "NAME", long_help = format!("Tag new dataset\n\n{TAG_HELP}"))]
     pub tag: Option<String>,
 
     /// Move tag if it exists
@@ -176,7 +178,10 @@ async fn add_dialog(args: &DatasetAddArgs, store: &Store) -> Result<DialogResult
             "Source",
             crate::source::describe_source(driver.as_ref(), &spec),
         )?;
-        dialog::step_value("Sessions", count(selected.len(), "session"))?;
+        let lines = native_session_lines(args.source.as_deref(), &selected)
+            .await
+            .map_err(|e| DialogError::Failed(format!("{e}")))?;
+        preview_sessions(&lines, IdKind::Native, None)?;
         selected
     } else {
         Vec::new()

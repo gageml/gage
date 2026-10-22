@@ -199,10 +199,18 @@ fn handle_result(result: Result<DialogResult, DialogError>) -> Result<(), CliErr
 /// concerns, `<short id> <detail>`, so a confirmation that follows
 /// refers to a visible list.
 pub fn step_list(label: &str, lines: impl IntoIterator<Item = String>) -> io::Result<()> {
+    step_lines(
+        label,
+        lines.into_iter().map(|line| style(line).dim().to_string()),
+    )
+}
+
+/// A step whose lines carry their own styling
+pub fn step_lines(label: &str, lines: impl IntoIterator<Item = String>) -> io::Result<()> {
     let mut text = label.to_string();
     for line in lines {
         text.push('\n');
-        text.push_str(&style(line).dim().to_string());
+        text.push_str(&line);
     }
     cli::log::step(text)
 }

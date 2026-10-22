@@ -64,9 +64,11 @@ use crate::error::CliError;
 use crate::human::{count, format_duration, format_elapsed_ms};
 use crate::scanner_attach;
 use crate::scanner_spec::{self, ResolvedSpec};
-use crate::session_filter::{FILTER_ARG_NAMES, SessionFilterArgs, select_sessions};
+use crate::session_filter::{
+    FILTER_ARG_NAMES, SessionFilterArgs, native_session_lines, preview_sessions, select_sessions,
+};
 use crate::source;
-use crate::style as s;
+use crate::style::{self as s, IdKind};
 
 /// Install the `tracing` subscriber for a scan: warnings and above to
 /// stderr, and the records layer into the active scan's directory at
@@ -245,7 +247,7 @@ pub struct ScanRunArgs {
     ignore_missing_attachments: bool,
 
     /// Tag new scan run
-    #[arg(long, value_name = "NAME", long_help = format!("Tag new scan run\n\n{TAG_HELP}"))]
+    #[arg(short, long, value_name = "NAME", long_help = format!("Tag new scan run\n\n{TAG_HELP}"))]
     tag: Option<String>,
 
     /// Move tag if it exists
@@ -1672,7 +1674,7 @@ async fn prepare_scan_dialog(
     // or none. The plan is a preview only; nothing is written until
     // after the confirmation.
     let plan = resolve_dataset_plan(&mut args, store).await?;
-    preview_dataset(&plan)?;
+    preview_dataset(&plan).await?;
 
     // A tag that cannot be added is reported before anything is
     // written
@@ -2062,7 +2064,7 @@ fn prompt_session_axis(filter: &mut SessionFilterArgs) -> Result<(), DialogError
     Ok(())
 }
 
-fn preview_dataset(plan: &DatasetPlan) -> Result<(), DialogError> {
+async fn preview_dataset(plan: &DatasetPlan) -> Result<(), DialogError> {
     match plan {
         DatasetPlan::Reuse {
             id, session_count, ..
@@ -2071,8 +2073,10 @@ fn preview_dataset(plan: &DatasetPlan) -> Result<(), DialogError> {
             cli::log::step(format!("Dataset\n{}", style(line).dim()))?;
         }
         DatasetPlan::New { selected } => {
-            let line = count(selected.len(), "session");
-            cli::log::step(format!("Sessions\n{}", style(line).dim()))?;
+            let lines = native_session_lines(None, selected)
+                .await
+                .map_err(|e| DialogError::Failed(format!("{e}")))?;
+            preview_sessions(&lines, IdKind::Native, None)?;
         }
         DatasetPlan::None => {
             cli::log::step(format!("Dataset\n{}", style("none").dim()))?;

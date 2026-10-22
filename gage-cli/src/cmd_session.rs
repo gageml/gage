@@ -18,7 +18,7 @@ use gage_query::ContextBuilder;
 use gage_registry::driver::DriverRegistry;
 use gage_session::{Driver, Source, SourceOptions};
 use gage_store::url::LineSelection;
-use gage_store::{DatasetStore, SessionRecord, SessionStore, Store};
+use gage_store::{DatasetStore, SessionRecord, SessionStore, Store, StoreError, TagStore};
 use gage_tui::session::{Backend, picker_page_size};
 use gage_tui::{ViewOptions, session_view};
 use tabled::{
@@ -32,10 +32,14 @@ use tabled::{
 use tokio::task::JoinSet;
 
 use crate::cmd_dataset::{AddEvent, AddView, add_native_to_dataset};
+use crate::cmd_tag::TAG_HELP;
 use crate::dialog::{self, DialogError, DialogResult};
 use crate::error::CliError;
 use crate::human::{count, format_elapsed_ms};
-use crate::session_filter::{FILTER_ARG_NAMES, SessionFilterArgs, select_sessions};
+use crate::session_filter::{
+    FILTER_ARG_NAMES, SessionFilterArgs, SessionLine, native_session_lines, preview_sessions,
+    select_sessions,
+};
 use crate::size_limit::SizeLimitArgs;
 use crate::source;
 use crate::style::{self, IdKind, styled_id, styled_target};
@@ -142,6 +146,23 @@ pub struct SessionAddArgs {
 
     #[command(flatten)]
     pub size: SizeLimitArgs,
+
+    /// Tag added session
+    #[arg(
+        short,
+        long,
+        value_name = "NAME",
+        long_help = format!(
+            "Tag added session\n\nApplies when one session is given. The tag names the \
+             stored session, whether it is added from a source or linked with --stored.\n\n\
+             {TAG_HELP}"
+        )
+    )]
+    pub tag: Option<String>,
+
+    /// Move tag if it exists
+    #[arg(long, requires = "tag")]
+    pub force_tag: bool,
 
     /// Skip confirmation prompt
     #[arg(short, long)]
@@ -707,7 +728,17 @@ pub async fn add(
             "gage session add: --stored --dataset takes stored session IDs; the selection flags apply to native sessions",
         ));
     }
+    if args.tag.is_some() && !selects_one_session(&args) {
+        return Err(CliError::message(
+            "gage session add: --tag applies to a single session; give one session ID and no selection flags",
+        ));
+    }
     dialog::run_async("Add sessions", || add_dialog(source, stored, args)).await
+}
+
+/// The selection is one positional session ID with no filter flags
+fn selects_one_session(args: &SessionAddArgs) -> bool {
+    args.sessions.len() == 1 && args.filter.is_empty()
 }
 
 async fn add_dialog(
@@ -730,8 +761,20 @@ async fn add_dialog(
             .max_bytes()
             .map_err(|e| DialogError::Other(e.into()))?,
     );
+    let tags = TagStore::from(&store);
+    // A tag that cannot be added is reported before anything is
+    // written, so the failure leaves the store untouched
+    if let Some(name) = &args.tag {
+        tags.check_available(name, args.force_tag)
+            .map_err(|e| match e {
+                StoreError::TagExists { .. } => {
+                    DialogError::Failed(format!("{e} (use --force-tag to move it)"))
+                }
+                e => DialogError::Failed(e.to_string()),
+            })?;
+    }
     let mut view = AddView::new();
-    match dataset_id {
+    let placed_ids = match dataset_id {
         Some(dataset_id) if stored => {
             let sessions = SessionStore::from(&store);
             // Resolve every argument before writing anything, so one
@@ -748,18 +791,17 @@ async fn add_dialog(
                 return Err(DialogError::Failed(errors.join("\n")));
             }
             dialog::step_value("Dataset", short_uuid(&dataset_id))?;
-            dialog::step_list(
-                "Sessions",
-                records.iter().map(|r| {
-                    format!(
-                        "{} (native {})",
-                        short_uuid(&r.id),
-                        short_uuid(r.attrs.native_id())
-                    )
-                }),
-            )?;
+            let lines: Vec<SessionLine> = records
+                .iter()
+                .map(|r| SessionLine {
+                    id: r.id.clone(),
+                    title: r.attrs.summary.title.clone(),
+                })
+                .collect();
+            preview_sessions(&lines, IdKind::Gage, args.tag.as_deref())?;
             confirm_add(args.yes)?;
-            link_stored(&store, &dataset_id, &records, &mut |e| view.on(e))?
+            link_stored(&store, &dataset_id, &records, &mut |e| view.on(e))?;
+            records.into_iter().map(|r| r.id).collect()
         }
         _ => {
             let registry = source::driver_registry();
@@ -777,7 +819,10 @@ async fn add_dialog(
             if let Some(id) = &dataset_id {
                 dialog::step_value("Dataset", short_uuid(id))?;
             }
-            dialog::step_value("Sessions", count(selected.len(), "session"))?;
+            let lines = native_session_lines(source.as_deref(), &selected)
+                .await
+                .map_err(|e| DialogError::Failed(format!("{e}")))?;
+            preview_sessions(&lines, IdKind::Native, args.tag.as_deref())?;
             confirm_add(args.yes)?;
             add_native(
                 &store,
@@ -788,9 +833,27 @@ async fn add_dialog(
                 &mut |e| view.on(e),
             )?
         }
-    }
+    };
     let done = view.done().to_string();
     view.finish()?;
+    if let Some(name) = &args.tag {
+        // The selection check in `add` admits one session, and an
+        // interrupted add of one session fails before this point
+        let id = placed_ids
+            .first()
+            .expect("a tagged add should place one session");
+        let added = tags
+            .add(name, id, args.force_tag)
+            .map_err(|e| DialogError::Failed(e.to_string()))?;
+        match added.previous_id {
+            Some(previous) => cli::log::info(format!(
+                "Moved tag {name} from {} to session {}",
+                short_uuid(&previous),
+                short_uuid(id)
+            ))?,
+            None => cli::log::info(format!("Tagged session {} as {name}", short_uuid(id)))?,
+        }
+    }
     Ok(done.into())
 }
 
@@ -872,7 +935,8 @@ fn link_stored(
 /// `dataset_id` is given, link them as members in the same operation,
 /// reporting each to `on_event`. `selected` holds native ids resolved
 /// by the shared session picker; they are re-checked against the
-/// opened source before anything is written.
+/// opened source before anything is written. Returns the stored id of
+/// each placed session, in `selected` order.
 fn add_native(
     store: &Store,
     source: Option<String>,
@@ -880,9 +944,9 @@ fn add_native(
     selected: &[String],
     max_bytes: Option<u64>,
     on_event: &mut dyn FnMut(AddEvent<'_>),
-) -> Result<(), DialogError> {
+) -> Result<Vec<String>, DialogError> {
     if let Some(dataset_id) = dataset_id {
-        add_native_to_dataset(
+        let outcomes = add_native_to_dataset(
             store,
             dataset_id,
             source.as_deref(),
@@ -891,7 +955,7 @@ fn add_native(
             on_event,
         )
         .map_err(DialogError::Failed)?;
-        return Ok(());
+        return Ok(outcomes.into_iter().map(|o| o.id).collect());
     }
     let registry = source::driver_registry();
     let (driver, spec) =
@@ -920,7 +984,7 @@ fn add_native(
         None => SessionStore::from(store),
     };
     let total = ids.len();
-    let mut placed = 0;
+    let mut placed: Vec<String> = Vec::with_capacity(total);
     for id in &ids {
         if dialog::interrupted() {
             break;
@@ -941,24 +1005,24 @@ fn add_native(
             native_id: id,
             dataset: None,
         });
-        placed += 1;
+        placed.push(outcome.id);
     }
     on_event(AddEvent::Done {
-        placed,
+        placed: placed.len(),
         dataset: None,
     });
     opened
         .close()
         .map_err(|e| DialogError::Failed(format!("{spec}: {e}")))?;
-    if placed < total {
+    if placed.len() < total {
         return Err(dialog::partial(
             "Interrupted after",
-            placed,
+            placed.len(),
             total,
             "session",
         ));
     }
-    Ok(())
+    Ok(placed)
 }
 
 /// Matches per corpus when every match is wanted. A search ranks its
@@ -1683,6 +1747,37 @@ mod tests {
         sort_hits_by_date(&mut hits);
         let lines: Vec<i64> = hits.iter().map(|h| h.line).collect();
         assert_eq!(lines, [3, 4, 5, 2, 1]);
+    }
+
+    /// `--tag` is accepted with exactly one positional session and
+    /// no filter flags.
+    #[test]
+    fn tag_requires_one_positional_session() {
+        fn args(sessions: &[&str], filter: SessionFilterArgs) -> SessionAddArgs {
+            SessionAddArgs {
+                sessions: sessions.iter().map(|s| s.to_string()).collect(),
+                dataset: None,
+                filter,
+                size: SizeLimitArgs { max_size: None },
+                tag: Some("baseline".to_string()),
+                force_tag: false,
+                yes: true,
+            }
+        }
+        let no_filter = || SessionFilterArgs {
+            project: None,
+            days: None,
+            today: false,
+            all: false,
+            limit: None,
+            sample: None,
+        };
+        assert!(selects_one_session(&args(&["7260"], no_filter())));
+        assert!(!selects_one_session(&args(&[], no_filter())));
+        assert!(!selects_one_session(&args(&["7260", "2956"], no_filter())));
+        let mut filtered = no_filter();
+        filtered.all = true;
+        assert!(!selects_one_session(&args(&["7260"], filtered)));
     }
 
     #[test]

@@ -7,17 +7,24 @@
 //! The same struct is used by `session add`, `dataset add`, and
 //! `scan`.
 
-use std::collections::HashSet;
-use std::fmt;
+use std::collections::{HashMap, HashSet};
+use std::fmt::{self, Write as _};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use clap::Args;
+use console::{Term, style, truncate_str};
+use datafusion::arrow::array::{Array, StringArray};
 use datafusion::prelude::SessionContext;
+use gage_core::style::IdKind;
+use gage_core::uuid::short_uuid;
 use gage_query::ContextBuilder;
 use gage_session::SourceOptions;
 use rand::seq::SliceRandom;
 
+use crate::dialog;
+use crate::human::count;
 use crate::source;
 
 /// Names of the arg fields on this struct, in the order the shared
@@ -210,6 +217,143 @@ pub async fn select_sessions(
     Ok(ids)
 }
 
+/// Sessions an add preview lists by name. A selection with more
+/// sessions than this and one line to spare lists this many and sums
+/// up the rest as "N other sessions".
+pub const PREVIEW_SESSIONS: usize = 5;
+
+/// One session of an add preview: its id and the title to show
+/// beside it. A native id or a stored id; the preview shows the short
+/// form of either.
+pub struct SessionLine {
+    pub id: String,
+    pub title: Option<String>,
+}
+
+/// Print the `Sessions` step of an add dialog: one line per session
+/// up to `PREVIEW_SESSIONS`, then a count of the rest. `kind` colors
+/// every id; `tag` is the name the add applies to the one session it
+/// lists.
+pub fn preview_sessions(
+    sessions: &[SessionLine],
+    kind: IdKind,
+    tag: Option<&str>,
+) -> io::Result<()> {
+    let width = Term::stderr().size().1 as usize;
+    dialog::step_lines(
+        "Sessions",
+        session_lines(sessions, kind, tag, preview_width(width)),
+    )
+}
+
+/// The columns a preview line may fill: the terminal width less the
+/// cliclack gutter and a right margin, with a floor so a narrow or
+/// unknown terminal still shows the id.
+fn preview_width(term_width: usize) -> usize {
+    term_width
+        .saturating_sub(DIALOG_GUTTER + RIGHT_MARGIN)
+        .max(MIN_PREVIEW_WIDTH)
+}
+
+/// Columns cliclack prints before a step's text
+const DIALOG_GUTTER: usize = 4;
+
+/// Columns left blank at the end of a preview line
+const RIGHT_MARGIN: usize = 2;
+
+const MIN_PREVIEW_WIDTH: usize = 20;
+
+/// The preview lines for `sessions`, each `<short id> [tag] [·
+/// title]` cut to `width` columns: the id in the kind's color, the
+/// rest dimmed. Every session is listed when the list fits in
+/// `PREVIEW_SESSIONS` plus the line a count would take; otherwise
+/// `PREVIEW_SESSIONS` are listed and the last line counts the rest.
+fn session_lines(
+    sessions: &[SessionLine],
+    kind: IdKind,
+    tag: Option<&str>,
+    width: usize,
+) -> Vec<String> {
+    let listed = if sessions.len() > PREVIEW_SESSIONS + 1 {
+        PREVIEW_SESSIONS
+    } else {
+        sessions.len()
+    };
+    let mut lines: Vec<String> = sessions
+        .iter()
+        .take(listed)
+        .map(|session| {
+            let id = short_uuid(&session.id);
+            let mut rest = String::new();
+            if let Some(tag) = tag {
+                write!(rest, " {tag}").unwrap();
+            }
+            if let Some(title) = &session.title {
+                rest.push_str(" ·");
+                for word in title.split_whitespace() {
+                    rest.push(' ');
+                    rest.push_str(word);
+                }
+            }
+            let rest = truncate_str(&rest, width.saturating_sub(id.chars().count()), "…");
+            format!("{}{}", kind.style_whole(id), style(rest).dim())
+        })
+        .collect();
+    if listed < sessions.len() {
+        let rest = count(sessions.len() - listed, "other session");
+        lines.push(style(rest).dim().italic().to_string());
+    }
+    lines
+}
+
+/// The preview lines for native sessions `ids` in `source`, titles
+/// read through the `native_session` table. The result keeps the
+/// order of `ids`.
+pub async fn native_session_lines(
+    source: Option<&str>,
+    ids: &[String],
+) -> anyhow::Result<Vec<SessionLine>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let registry = source::driver_registry();
+    let (_, spec) = source::resolve_source(&registry, source).map_err(anyhow::Error::msg)?;
+    let ctx = ContextBuilder::new(None).build().await;
+    let in_list: Vec<String> = ids.iter().map(|id| format!("'{}'", sql_str(id))).collect();
+    let sql = format!(
+        "SELECT id, title FROM native_session('{}') WHERE id IN ({})",
+        sql_str(&spec),
+        in_list.join(", ")
+    );
+    let batches = ctx.sql(&sql).await?.collect().await?;
+    let mut titles: HashMap<String, Option<String>> = HashMap::with_capacity(ids.len());
+    for batch in &batches {
+        let id_col = utf8_column(batch.column(0), &sql)?;
+        let title_col = utf8_column(batch.column(1), &sql)?;
+        for i in 0..batch.num_rows() {
+            let title = (!title_col.is_null(i)).then(|| title_col.value(i).to_string());
+            titles.insert(id_col.value(i).to_string(), title);
+        }
+    }
+    Ok(ids
+        .iter()
+        .map(|id| SessionLine {
+            id: id.clone(),
+            title: titles.get(id).cloned().flatten(),
+        })
+        .collect())
+}
+
+fn utf8_column<'a>(
+    column: &'a datafusion::arrow::array::ArrayRef,
+    sql: &str,
+) -> anyhow::Result<&'a StringArray> {
+    column
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .ok_or_else(|| anyhow::anyhow!("expected a Utf8 column from: {sql}"))
+}
+
 /// Resolve a `--project` value against the projects recorded in the
 /// source. Slug forms are matched first; anything else resolves as a
 /// path through the driver's `project_for_path`.
@@ -268,16 +412,10 @@ async fn project_for_path(ctx: &SessionContext, path: &Path) -> anyhow::Result<S
 
 /// The non-null values of a query's first column, in row order.
 async fn string_column(ctx: &SessionContext, sql: &str) -> anyhow::Result<Vec<String>> {
-    use datafusion::arrow::array::{Array, StringArray};
-
     let batches = ctx.sql(sql).await?.collect().await?;
     let mut out = Vec::new();
     for batch in &batches {
-        let col = batch
-            .column(0)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .ok_or_else(|| anyhow::anyhow!("expected a Utf8 column from: {sql}"))?;
+        let col = utf8_column(batch.column(0), sql)?;
         for i in 0..batch.num_rows() {
             if !col.is_null(i) {
                 out.push(col.value(i).to_string());
@@ -357,7 +495,94 @@ mod tests {
     use std::collections::HashSet;
     use std::path::{Path, PathBuf};
 
-    use super::{project_path_candidate, resolve_project_slug};
+    use console::style;
+    use gage_core::style::IdKind;
+
+    use super::{
+        DIALOG_GUTTER, MIN_PREVIEW_WIDTH, PREVIEW_SESSIONS, RIGHT_MARGIN, SessionLine,
+        preview_width, project_path_candidate, resolve_project_slug, session_lines,
+    };
+
+    fn session(id: &str, title: Option<&str>) -> SessionLine {
+        SessionLine {
+            id: id.to_string(),
+            title: title.map(str::to_string),
+        }
+    }
+
+    /// The line `session_lines` builds for a short id and the rest
+    /// of its text
+    fn line(kind: IdKind, id: &str, rest: &str) -> String {
+        format!("{}{}", kind.style_whole(id), style(rest).dim())
+    }
+
+    /// A preview line is the short id in the kind's color, the tag
+    /// when one applies, and the title after a bullet on one line,
+    /// cut to the width.
+    #[test]
+    fn session_line_shows_id_tag_and_title_within_width() {
+        console::set_colors_enabled(true);
+        let native = IdKind::Native;
+        let sessions = [session(
+            "af56a6a7-914d-469d-9aef-ca708e160264",
+            Some("Tag option\nfor  session add"),
+        )];
+        assert_eq!(
+            session_lines(&sessions, native, Some("examples/foo"), 80),
+            [line(
+                native,
+                "af56a6a7",
+                " examples/foo · Tag option for session add"
+            )]
+        );
+        assert_eq!(
+            session_lines(&sessions, native, None, 80),
+            [line(native, "af56a6a7", " · Tag option for session add")]
+        );
+        assert_eq!(
+            session_lines(&sessions, native, None, 20),
+            [line(native, "af56a6a7", " · Tag opti…")]
+        );
+        assert_eq!(
+            session_lines(
+                &[session("5h9m0k092zbsgse6ny8dskfyqb", None)],
+                IdKind::Gage,
+                None,
+                80
+            ),
+            [line(IdKind::Gage, "5h9m0k09", "")]
+        );
+    }
+
+    /// Every session is listed when the list fits in the lines a
+    /// capped preview would take; past that the preview lists
+    /// `PREVIEW_SESSIONS` and counts the rest.
+    #[test]
+    fn preview_lists_up_to_the_cap_then_counts_the_rest() {
+        let sessions: Vec<SessionLine> = (0..PREVIEW_SESSIONS + 1)
+            .map(|i| session(&format!("{i:0>8}"), None))
+            .collect();
+        assert_eq!(
+            session_lines(&sessions, IdKind::Native, None, 80).len(),
+            PREVIEW_SESSIONS + 1
+        );
+
+        let sessions: Vec<SessionLine> = (0..PREVIEW_SESSIONS + 3)
+            .map(|i| session(&format!("{i:0>8}"), None))
+            .collect();
+        let lines = session_lines(&sessions, IdKind::Native, None, 80);
+        assert_eq!(lines.len(), PREVIEW_SESSIONS + 1);
+        assert_eq!(
+            lines[PREVIEW_SESSIONS],
+            style("3 other sessions").dim().italic().to_string()
+        );
+    }
+
+    #[test]
+    fn preview_width_keeps_gutter_margin_and_floor() {
+        assert_eq!(preview_width(80), 80 - DIALOG_GUTTER - RIGHT_MARGIN);
+        assert_eq!(preview_width(0), MIN_PREVIEW_WIDTH);
+    }
 
     const HOME: &str = "/home/tester";
     const HOME_SLUG: &str = "-home-tester";

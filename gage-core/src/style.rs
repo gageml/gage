@@ -27,6 +27,16 @@ impl IdKind {
         self.style_on(prefix, tail, false)
     }
 
+    /// Styled display of a whole ID in the kind's dark shade, for a
+    /// line that marks no prefix
+    pub fn style_whole(self, id: &str) -> String {
+        match self {
+            IdKind::Gage => style(id).yellow(),
+            IdKind::Native => style(id).cyan(),
+        }
+        .to_string()
+    }
+
     /// Same as `style`, with color gated on stderr being a terminal
     /// when `stderr` is set, else on stdout
     fn style_on(self, prefix: &str, tail: &str, stderr: bool) -> String {
@@ -337,6 +347,19 @@ mod tests {
             console::style("aaa").cyan(),
         );
         assert_eq!(h.full("4045c48b-aaaa"), expected);
+    }
+
+    #[test]
+    fn whole_id_is_the_kind_dark_shade() {
+        console::set_colors_enabled(true);
+        assert_eq!(
+            IdKind::Gage.style_whole("5h9m0k09"),
+            console::style("5h9m0k09").yellow().to_string()
+        );
+        assert_eq!(
+            IdKind::Native.style_whole("af56a6a7"),
+            console::style("af56a6a7").cyan().to_string()
+        );
     }
 
     #[test]
