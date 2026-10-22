@@ -20,7 +20,10 @@ use gage_query::ContextBuilder;
 use gage_registry::driver::DriverRegistry;
 use gage_session::{Driver, SessionLiveError, Source, SourceOptions};
 use gage_store::url::LineSelection;
-use gage_store::{DatasetStore, SessionRecord, SessionStore, Store, StoreError, TagStore};
+use gage_store::{
+    DatasetStore, PublishStore, SessionRecord, SessionStore, Store, StoreError, TagStore,
+    show_publishing,
+};
 use gage_tui::session::{Backend, picker_page_size};
 use gage_tui::{ViewOptions, session_view};
 use tabled::{
@@ -1751,11 +1754,47 @@ async fn view_stored(
 ) -> Result<(), Box<dyn Error>> {
     let store = Store::open(&gage_store::store_path())?;
     let id = match prefix {
-        Some(prefix) => Some(SessionStore::from(&store).get(prefix)?.id),
+        Some(prefix) => Some(resolve_view_target(&store, prefix)?),
         None => None,
     };
     let backend = Backend::stored(store).await;
     session_view::run(backend, id.as_deref(), line, options).await
+}
+
+/// Resolve a view target to a session id. A stored session resolves
+/// through the store; when `GAGE_SHOW_PUBLISHING` is set, a prefix
+/// that matches no stored session is resolved against the pending
+/// publish working trees, so a publish in progress can be viewed.
+fn resolve_view_target(store: &Store, prefix: &str) -> Result<String, Box<dyn Error>> {
+    match SessionStore::from(store).get(prefix) {
+        Ok(record) => Ok(record.id),
+        Err(stored_err) => {
+            if show_publishing() {
+                let ids: Vec<String> = PublishStore::from(store)
+                    .list()?
+                    .into_iter()
+                    .map(|p| p.id)
+                    .collect();
+                if let Some(id) = pick_pending(prefix, &ids)? {
+                    return Ok(id);
+                }
+            }
+            Err(stored_err.into())
+        }
+    }
+}
+
+/// The one pending session id that starts with `prefix`: `None` when
+/// none match, an error when more than one does.
+fn pick_pending(prefix: &str, ids: &[String]) -> Result<Option<String>, String> {
+    let mut matches = ids.iter().filter(|id| id.starts_with(prefix));
+    let first = matches.next().cloned();
+    if first.is_some() && matches.next().is_some() {
+        return Err(format!(
+            "ambiguous id prefix {prefix}: matches more than one pending publish session"
+        ));
+    }
+    Ok(first)
 }
 
 async fn view_native(
@@ -1803,6 +1842,26 @@ fn warm_picker_sessions(source: &dyn Source) -> Result<(), Box<dyn Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pick_pending_resolves_a_unique_prefix() {
+        let ids = vec!["abc123".to_string(), "def456".to_string()];
+        assert_eq!(
+            pick_pending("abc", &ids).unwrap().as_deref(),
+            Some("abc123")
+        );
+        assert_eq!(
+            pick_pending("def456", &ids).unwrap().as_deref(),
+            Some("def456")
+        );
+        assert_eq!(pick_pending("zzz", &ids).unwrap(), None);
+    }
+
+    #[test]
+    fn pick_pending_rejects_an_ambiguous_prefix() {
+        let ids = vec!["abc1".to_string(), "abc2".to_string()];
+        assert!(pick_pending("abc", &ids).is_err());
+    }
 
     fn hit(line: i64, score: f32, timestamp_ms: Option<i64>) -> Hit {
         Hit {
