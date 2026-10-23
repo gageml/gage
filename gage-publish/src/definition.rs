@@ -13,7 +13,7 @@ use crate::PublishError;
 
 /// The filters with a built-in definition. Any other filter text is
 /// an instruction to the agent.
-pub const NAMED_FILTERS: &[&str] = &["pii", "nsfw", "secret"];
+pub const NAMED_FILTERS: &[&str] = &["pii", "language", "secret"];
 
 /// A reason code a redaction may carry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,6 +35,10 @@ pub const REASONS: &[Reason] = &[
     Reason {
         code: "privacy",
         description: "Private conversational content (candid tone directed at an agent)",
+    },
+    Reason {
+        code: "language",
+        description: "Profanity and other language unfit for a public record",
     },
     Reason {
         code: "pii",

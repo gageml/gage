@@ -43,7 +43,9 @@ pub struct PublishArgs {
     command: Option<PublishCommand>,
 
     /// Show available named filters and exit
-    #[arg(long, exclusive = true)]
+    ///
+    /// Like --help, prints the list and exits whatever else is given.
+    #[arg(long)]
     list_filters: bool,
 }
 
@@ -133,7 +135,7 @@ pub struct InitArgs {
     ///
     /// A filter name, or an instruction to an LLM describing what to
     /// remove. A text instruction may be given as @PATH to read it from
-    /// a file. Filter names are "pii", "nsfw", and "secret".
+    /// a file. Filter names are "pii", "language", and "secret".
     #[arg(short, long, value_name = "FILTER")]
     filter: Vec<String>,
 
@@ -194,7 +196,9 @@ pub struct RedactArgs {
     yes: bool,
 
     /// Show reason codes and exit
-    #[arg(long, exclusive = true)]
+    ///
+    /// Like --help, prints the list and exits whatever else is given.
+    #[arg(long)]
     list_reasons: bool,
 
     #[command(flatten)]

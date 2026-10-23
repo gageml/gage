@@ -112,10 +112,10 @@ static FILTERS: LazyLock<Vec<Filter>> = LazyLock::new(|| {
             ],
         },
         Filter {
-            name: "nsfw",
-            reason: "privacy",
+            name: "language",
+            reason: "language",
             description: "Remove profanity and other language unfit for a public record",
-            instructions: include_str!("../filters/nsfw.md"),
+            instructions: include_str!("../filters/language.md"),
             patterns: Vec::new(),
         },
     ]
