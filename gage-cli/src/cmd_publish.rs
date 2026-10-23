@@ -8,12 +8,13 @@
 //! object id and commit for `origin`.
 
 use std::cmp::Reverse;
+use std::sync::Arc;
 
 use clap::{Args, Subcommand};
 use cliclack as cli;
 use gage_core::style::IdHighlighter;
 use gage_core::uuid::short_uuid;
-use gage_session::SourceOptions;
+use gage_session::{Driver, NativeSession, SourceOptions};
 use gage_store::{PendingPublish, PublishStore, SESSION_TYPE, SessionRecord, SessionStore, Store};
 use tabled::{
     Table,
@@ -26,8 +27,9 @@ use tabled::{
 use crate::dialog::{self, DialogError};
 use crate::error::CliError;
 use crate::human::format_elapsed_ms;
+use crate::session_filter::{SessionLine, preview_sessions};
 use crate::source;
-use crate::style;
+use crate::style::{self, IdKind};
 
 #[derive(Subcommand)]
 pub enum PublishCommand {
@@ -52,6 +54,10 @@ pub struct InitArgs {
     /// Session to publish (tag, ID, or prefix)
     #[arg(value_name = "SESSION")]
     session: String,
+
+    /// Skip confirmation prompt
+    #[arg(short, long)]
+    yes: bool,
 }
 
 #[derive(Args)]
@@ -169,31 +175,101 @@ fn abort(args: AbortArgs) -> Result<(), CliError> {
     })
 }
 
+/// Stage a publish after confirmation. The original is resolved
+/// before the dialog opens, so a bad argument fails without a prompt,
+/// and a native session is added to the store only after the user
+/// confirms.
 fn init(source: Option<String>, stored: bool, args: InitArgs) -> Result<(), CliError> {
     let fail = |e: String| CliError::message(format!("gage session publish init: {e}"));
     let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
     let original = resolve_original(&store, source.as_deref(), stored, &args.session)?;
-    let outcome = PublishStore::from(&store)
-        .init(&original)
-        .map_err(|e| fail(e.to_string()))?;
-    println!("{}", outcome.id);
-    Ok(())
+
+    dialog::run("Publish session", || {
+        let (line, kind) = match &original {
+            Original::Stored(record) => (
+                SessionLine {
+                    id: record.id.clone(),
+                    title: record.attrs.summary.title.clone(),
+                },
+                IdKind::Gage,
+            ),
+            Original::Native {
+                driver,
+                spec,
+                native,
+            } => {
+                dialog::step_value("Source", source::describe_source(driver.as_ref(), spec))?;
+                (
+                    SessionLine {
+                        id: native.id().to_string(),
+                        title: native.attrs().title().map(String::from),
+                    },
+                    IdKind::Native,
+                )
+            }
+        };
+        preview_sessions(&[line], kind, None)?;
+        if !args.yes {
+            let confirmed = cli::confirm("Continue?").initial_value(true).interact()?;
+            if !confirmed {
+                return Err(DialogError::Canceled);
+            }
+        }
+        let record = original.into_stored(&store).map_err(DialogError::Failed)?;
+        let outcome = PublishStore::from(&store)
+            .init(&record)
+            .map_err(|e| DialogError::Failed(e.to_string()))?;
+        Ok(format!("Staged publish {}", short_uuid(&outcome.id)).into())
+    })
 }
 
-/// The stored session to publish. `--stored` resolves it in the
-/// store; otherwise it is a native session in `source`, added to the
-/// store first so it has an object id and commit for `origin`.
+/// The session a publish starts from, resolved but not yet written.
+enum Original {
+    /// A session already in the store, used as is.
+    Stored(Box<SessionRecord>),
+    /// A native session, added to the store when the publish is
+    /// confirmed so it has an object id and commit for `origin`.
+    Native {
+        driver: Arc<dyn Driver>,
+        spec: String,
+        native: Box<dyn NativeSession>,
+    },
+}
+
+impl Original {
+    /// The stored session to publish: the record as is, or the native
+    /// session added to the store now.
+    fn into_stored(self, store: &Store) -> Result<SessionRecord, String> {
+        match self {
+            Original::Stored(record) => Ok(*record),
+            Original::Native {
+                driver, mut native, ..
+            } => {
+                let sessions = SessionStore::from(store);
+                let outcome = sessions
+                    .add(driver.as_ref(), native.as_mut())
+                    .map_err(|e| e.to_string())?;
+                sessions
+                    .at_commit(&outcome.commit_sha)
+                    .map_err(|e| e.to_string())
+            }
+        }
+    }
+}
+
+/// Resolve `prefix` without writing. `--stored` resolves it in the
+/// store; otherwise it is a native session in `source`.
 fn resolve_original(
     store: &Store,
     source: Option<&str>,
     stored: bool,
     prefix: &str,
-) -> Result<SessionRecord, CliError> {
+) -> Result<Original, CliError> {
     let fail = |e: String| CliError::message(format!("gage session publish init: {e}"));
-    let sessions = SessionStore::from(store);
     if stored {
-        return sessions
+        return SessionStore::from(store)
             .get(prefix)
+            .map(|record| Original::Stored(Box::new(record)))
             .map_err(|e| fail(format!("{prefix}: {e}")));
     }
     let registry = source::driver_registry();
@@ -204,15 +280,14 @@ fn resolve_original(
     let native_id = opened
         .find_native(prefix)
         .map_err(|e| fail(format!("{prefix}: {e}")))?;
-    let mut native = opened
+    let native = opened
         .open_native(&native_id)
         .map_err(|e| fail(format!("{native_id}: {e}")))?;
-    let outcome = sessions
-        .add(driver.as_ref(), native.as_mut())
-        .map_err(|e| fail(e.to_string()))?;
-    sessions
-        .at_commit(&outcome.commit_sha)
-        .map_err(|e| fail(e.to_string()))
+    Ok(Original::Native {
+        driver,
+        spec,
+        native,
+    })
 }
 
 #[cfg(test)]
