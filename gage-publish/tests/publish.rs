@@ -88,8 +88,8 @@ fn init_runs_the_named_filters_and_records_their_instances() {
     let f = fixture();
     let publisher = Publisher::with_root(&f.store, &f.publish_root);
     let filters = [
-        FilterSpec::from_text("pii"),
-        FilterSpec::from_text("secret"),
+        "pii".parse::<FilterSpec>().unwrap(),
+        "secret".parse::<FilterSpec>().unwrap(),
     ];
     let init = publisher.init(&f.original, &filters).unwrap();
 
@@ -223,12 +223,45 @@ fn redact_applies_lines_text_and_spans_and_rejects_a_miss() {
     assert_eq!(publisher.definition(&init.id).unwrap().redactions.len(), 3);
 }
 
+/// A filter argument with whitespace is an instruction, anything else
+/// is a name, and a name outside the built-in set is an error.
 #[test]
-fn reinit_replaces_the_filters_and_their_redactions() {
+fn filter_spec_parses_names_and_instructions() {
+    assert_eq!(
+        "pii".parse::<FilterSpec>().unwrap(),
+        FilterSpec::Named("pii".to_string())
+    );
+    assert_eq!(
+        "remove the customer names".parse::<FilterSpec>().unwrap(),
+        FilterSpec::Prompt("remove the customer names".to_string())
+    );
+    let bad = "piii".parse::<FilterSpec>().unwrap_err();
+    assert!(matches!(bad, PublishError::Input(_)), "{bad}");
+    assert!(bad.to_string().contains("piii"), "{bad}");
+}
+
+/// `init` rejects a filter given twice.
+#[test]
+fn init_rejects_a_duplicate_filter() {
+    let f = fixture();
+    let publisher = Publisher::with_root(&f.store, &f.publish_root);
+    let pii = "pii".parse::<FilterSpec>().unwrap();
+    let dup = publisher
+        .init(&f.original, &[pii.clone(), pii])
+        .unwrap_err();
+    assert!(matches!(dup, PublishError::Input(_)), "{dup}");
+    assert!(publisher.store().list().unwrap().is_empty());
+}
+
+/// `filter_add` runs the new filter and keeps everything else;
+/// `filter_remove` takes the filter's redactions with it and leaves
+/// the user's. A filter already on the list is rejected.
+#[test]
+fn filter_add_and_remove_change_one_filters_redactions() {
     let f = fixture();
     let publisher = Publisher::with_root(&f.store, &f.publish_root);
     let init = publisher
-        .init(&f.original, &[FilterSpec::from_text("secret")])
+        .init(&f.original, &["secret".parse::<FilterSpec>().unwrap()])
         .unwrap();
     publisher
         .redact(
@@ -239,16 +272,31 @@ fn reinit_replaces_the_filters_and_their_redactions() {
         .unwrap();
 
     let definition = publisher
-        .reinit(&init.id, &[FilterSpec::from_text("pii")])
+        .filter_add(&init.id, &"pii".parse::<FilterSpec>().unwrap())
         .unwrap();
-    let authors: Vec<&str> = definition
-        .redactions
-        .iter()
-        .map(|r| r.author.as_str())
-        .collect();
-    assert!(authors.contains(&"user:test"), "{authors:?}");
-    assert!(authors.contains(&"filter:pii"), "{authors:?}");
-    assert!(!authors.contains(&"filter:secret"), "{authors:?}");
+    let authors = |d: &gage_publish::PublishDefinition| -> Vec<String> {
+        d.redactions.iter().map(|r| r.author.clone()).collect()
+    };
+    let added = authors(&definition);
+    assert!(added.contains(&"user:test".to_string()), "{added:?}");
+    assert!(added.contains(&"filter:pii".to_string()), "{added:?}");
+    assert!(added.contains(&"filter:secret".to_string()), "{added:?}");
+    assert_eq!(definition.filters.len(), 2);
+
+    let dup = publisher
+        .filter_add(&init.id, &"pii".parse::<FilterSpec>().unwrap())
+        .unwrap_err();
+    assert!(matches!(dup, PublishError::Input(_)), "{dup}");
+    assert_eq!(publisher.definition(&init.id).unwrap().filters.len(), 2);
+
+    let removed = publisher.filter_remove(&init.id, "secret").unwrap();
+    assert_eq!(removed.name.as_deref(), Some("secret"));
+    let definition = publisher.definition(&init.id).unwrap();
+    let left = authors(&definition);
+    assert!(left.contains(&"user:test".to_string()), "{left:?}");
+    assert!(left.contains(&"filter:pii".to_string()), "{left:?}");
+    assert!(!left.contains(&"filter:secret".to_string()), "{left:?}");
+    assert_eq!(definition.named_filters(), vec!["pii".to_string()]);
     let lines = staged_lines(&f.publish_root, &init.id);
     assert!(
         lines[1].contains("sk-ant-api03"),
@@ -260,6 +308,85 @@ fn reinit_replaces_the_filters_and_their_redactions() {
         "the email still is: {}",
         lines[1]
     );
+    assert_eq!(lines.len(), 4, "the user's dropped line stays dropped");
+}
+
+/// `filter_remove` matches a name first, then the one instruction the
+/// selector is a prefix of; no match and an ambiguous prefix are
+/// errors that change nothing.
+#[test]
+fn filter_remove_selects_by_name_then_by_instruction_prefix() {
+    let f = fixture();
+    let publisher = Publisher::with_root(&f.store, &f.publish_root);
+    let filters = [
+        "pii".parse::<FilterSpec>().unwrap(),
+        "remove customer names".parse::<FilterSpec>().unwrap(),
+        "remove internal hostnames".parse::<FilterSpec>().unwrap(),
+    ];
+    let init = publisher.init(&f.original, &filters).unwrap();
+
+    let ambiguous = publisher.filter_remove(&init.id, "remove").unwrap_err();
+    assert!(matches!(ambiguous, PublishError::Input(_)), "{ambiguous}");
+    let none = publisher.filter_remove(&init.id, "secret").unwrap_err();
+    assert!(matches!(none, PublishError::Input(_)), "{none}");
+    assert_eq!(publisher.definition(&init.id).unwrap().filters.len(), 3);
+
+    let removed = publisher
+        .filter_remove(&init.id, "remove customer")
+        .unwrap();
+    assert_eq!(removed.prompt.as_deref(), Some("remove customer names"));
+    let removed = publisher.filter_remove(&init.id, "pii").unwrap();
+    assert_eq!(removed.name.as_deref(), Some("pii"));
+    let definition = publisher.definition(&init.id).unwrap();
+    assert_eq!(definition.filters.len(), 1);
+    assert_eq!(
+        definition.filters[0].prompt.as_deref(),
+        Some("remove internal hostnames")
+    );
+    assert!(definition.redactions.is_empty(), "{definition:#?}");
+}
+
+/// `filter_run` re-runs one named filter, or every named filter, under
+/// new ids; a filter not on the list is an error.
+#[test]
+fn filter_run_reruns_one_or_every_named_filter() {
+    let f = fixture();
+    let publisher = Publisher::with_root(&f.store, &f.publish_root);
+    let filters = [
+        "pii".parse::<FilterSpec>().unwrap(),
+        "secret".parse::<FilterSpec>().unwrap(),
+    ];
+    let init = publisher.init(&f.original, &filters).unwrap();
+    let before = publisher.definition(&init.id).unwrap();
+
+    let missing = publisher
+        .filter_run(&init.id, Some("language"))
+        .unwrap_err();
+    assert!(matches!(missing, PublishError::Input(_)), "{missing}");
+
+    let one = publisher.filter_run(&init.id, Some("secret")).unwrap();
+    assert_eq!(one.redactions.len(), before.redactions.len());
+    let pii_ids = |d: &gage_publish::PublishDefinition| -> Vec<u64> {
+        d.redactions
+            .iter()
+            .filter(|r| r.author == "filter:pii")
+            .map(|r| r.id)
+            .collect()
+    };
+    assert_eq!(pii_ids(&one), pii_ids(&before), "pii did not run");
+    assert!(
+        one.redactions.iter().any(|r| r.author == "filter:secret"),
+        "{one:#?}"
+    );
+    assert_eq!(
+        one.next_id,
+        before.next_id + 1,
+        "the re-run key took a new id"
+    );
+
+    let all = publisher.filter_run(&init.id, None).unwrap();
+    assert_eq!(all.redactions.len(), before.redactions.len());
+    assert_ne!(pii_ids(&all), pii_ids(&before), "pii ran this time");
 }
 
 /// The staged summary follows the staged content: a dropped assistant
@@ -301,7 +428,7 @@ fn undo_removes_redactions_and_suppresses_a_filters() {
     let f = fixture();
     let publisher = Publisher::with_root(&f.store, &f.publish_root);
     let init = publisher
-        .init(&f.original, &[FilterSpec::from_text("secret")])
+        .init(&f.original, &["secret".parse::<FilterSpec>().unwrap()])
         .unwrap();
     let applied = publisher
         .redact(
@@ -345,9 +472,7 @@ fn undo_removes_redactions_and_suppresses_a_filters() {
     assert_eq!(definition.suppressions.len(), 1);
     assert!(staged_lines(&f.publish_root, &init.id)[1].contains("sk-ant-api03"));
 
-    let rerun = publisher
-        .reinit(&init.id, &[FilterSpec::from_text("secret")])
-        .unwrap();
+    let rerun = publisher.filter_run(&init.id, Some("secret")).unwrap();
     assert!(
         !rerun.redactions.iter().any(|r| r.author == "filter:secret"),
         "the suppressed key is not restored: {rerun:#?}"

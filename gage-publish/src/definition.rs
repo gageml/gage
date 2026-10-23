@@ -5,6 +5,7 @@
 //! committed.
 
 use std::fmt;
+use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
@@ -82,22 +83,31 @@ pub enum FilterSpec {
 }
 
 impl FilterSpec {
-    /// The filter `text` denotes: a named filter when `text` is one of
-    /// [`NAMED_FILTERS`], else an instruction.
-    pub fn from_text(text: &str) -> Self {
-        if NAMED_FILTERS.contains(&text) {
-            FilterSpec::Named(text.to_string())
-        } else {
-            FilterSpec::Prompt(text.to_string())
-        }
-    }
-
     /// The filter's name when it is a named filter.
     pub fn name(&self) -> Option<&str> {
         match self {
             FilterSpec::Named(name) => Some(name),
             FilterSpec::Prompt(_) => None,
         }
+    }
+}
+
+impl FromStr for FilterSpec {
+    type Err = PublishError;
+
+    /// A text with whitespace is an instruction. Anything else is a
+    /// name, and a name outside [`NAMED_FILTERS`] is an error.
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        if text.contains(char::is_whitespace) {
+            return Ok(FilterSpec::Prompt(text.to_string()));
+        }
+        if NAMED_FILTERS.contains(&text) {
+            return Ok(FilterSpec::Named(text.to_string()));
+        }
+        Err(PublishError::Input(format!(
+            "unknown filter {text:?}; filters are {}",
+            NAMED_FILTERS.join(", ")
+        )))
     }
 }
 
@@ -110,29 +120,25 @@ impl fmt::Display for FilterSpec {
     }
 }
 
-/// A filter as the definition records it, with the Gage version its
-/// deterministic rules last ran under.
+/// A filter as the definition records it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FilterEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
-    pub version: String,
 }
 
 impl FilterEntry {
-    pub fn new(spec: &FilterSpec, version: &str) -> Self {
+    pub fn new(spec: &FilterSpec) -> Self {
         match spec {
             FilterSpec::Named(name) => FilterEntry {
                 name: Some(name.clone()),
                 prompt: None,
-                version: version.to_string(),
             },
             FilterSpec::Prompt(prompt) => FilterEntry {
                 name: None,
                 prompt: Some(prompt.clone()),
-                version: version.to_string(),
             },
         }
     }
@@ -278,16 +284,47 @@ fn first_id() -> u64 {
 }
 
 impl PublishDefinition {
-    pub fn new(origin: &str, filters: &[FilterSpec], version: &str) -> Self {
+    pub fn new(origin: &str, filters: &[FilterSpec]) -> Self {
         Self {
             origin: origin.to_string(),
-            filters: filters
-                .iter()
-                .map(|f| FilterEntry::new(f, version))
-                .collect(),
+            filters: filters.iter().map(FilterEntry::new).collect(),
             redactions: Vec::new(),
             suppressions: Vec::new(),
             next_id: 1,
+        }
+    }
+
+    /// The names of the named filters on the list, in list order.
+    pub fn named_filters(&self) -> Vec<String> {
+        self.filters.iter().filter_map(|f| f.name.clone()).collect()
+    }
+
+    /// The filter `selector` denotes, with its index: the named filter
+    /// with that name, else the one prompt that starts with `selector`.
+    pub fn find_filter(&self, selector: &str) -> Result<(usize, &FilterEntry), PublishError> {
+        if let Some(found) = self
+            .filters
+            .iter()
+            .enumerate()
+            .find(|(_, f)| f.name.as_deref() == Some(selector))
+        {
+            return Ok(found);
+        }
+        let prompts: Vec<(usize, &FilterEntry)> = self
+            .filters
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| f.prompt.as_deref().is_some_and(|p| p.starts_with(selector)))
+            .collect();
+        match prompts.as_slice() {
+            [found] => Ok(*found),
+            [] => Err(PublishError::Input(format!(
+                "no filter named {selector:?} and no instruction starts with it"
+            ))),
+            _ => Err(PublishError::Input(format!(
+                "{selector:?} is a prefix of {} instructions",
+                prompts.len()
+            ))),
         }
     }
 
@@ -548,11 +585,7 @@ mod tests {
     fn definition_round_trips_and_numbers_redactions() {
         let mut d = PublishDefinition::new(
             "session:abc@def",
-            &[
-                FilterSpec::from_text("pii"),
-                FilterSpec::from_text("Ducks only"),
-            ],
-            "0.2.0",
+            &["pii".parse().unwrap(), "Ducks only".parse().unwrap()],
         );
         assert_eq!(d.original().unwrap(), ("abc", "def"));
         let first = d.push(

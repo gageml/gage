@@ -33,9 +33,6 @@ pub use definition::{
 pub use derive::{Applied, Instance, InstanceKind};
 pub use filter::{Filter, Pattern};
 
-/// The Gage version whose filter logic this build carries.
-pub const VERSION: &str = env!("CARGO_PKG_VERSION");
-
 /// The marker a redacted span or value is replaced with.
 pub const MARKER: &str = "[REDACTED]";
 
@@ -142,36 +139,87 @@ impl<'a> Publisher<'a> {
 
     /// Start a publish of `original` under `filters`: stage the
     /// directory, write the definition, run the deterministic rules of
-    /// every named filter, and build the staged session.
+    /// every named filter, and build the staged session. A filter
+    /// given twice is an error.
     pub fn init(
         &self,
         original: &SessionRecord,
         filters: &[FilterSpec],
     ) -> Result<PublishInit, PublishError> {
+        for (i, filter) in filters.iter().enumerate() {
+            if filters.iter().skip(i + 1).any(|other| other == filter) {
+                return Err(PublishError::Input(format!(
+                    "filter {filter} is given more than once"
+                )));
+            }
+        }
         let init = self.publish.init(original)?;
-        let mut definition = PublishDefinition::new(&init.origin, filters, VERSION);
-        self.run_filters(&mut definition)?;
+        let mut definition = PublishDefinition::new(&init.origin, filters);
+        let names = definition.named_filters();
+        self.run_filters(&mut definition, &names)?;
         self.build(&init.id, &mut definition)?;
         Ok(init)
     }
 
-    /// Replace the filters of the pending publish `id`: the old
-    /// filters' redactions go, the new filters run, and the staged
-    /// session is rebuilt.
-    pub fn reinit(
+    /// Add `filter` to the pending publish `id`, run its deterministic
+    /// rules, and rebuild. A filter already on the list is an error.
+    pub fn filter_add(
         &self,
         id: &str,
-        filters: &[FilterSpec],
+        filter: &FilterSpec,
     ) -> Result<PublishDefinition, PublishError> {
         let mut definition = self.definition(id)?;
-        definition.filters = filters
-            .iter()
-            .map(|f| FilterEntry::new(f, VERSION))
-            .collect();
-        definition
-            .redactions
-            .retain(|r| !r.author.starts_with("filter:"));
-        self.run_filters(&mut definition)?;
+        if definition.filters.iter().any(|f| f.spec() == *filter) {
+            return Err(PublishError::Input(format!(
+                "filter {filter} is already on the list"
+            )));
+        }
+        definition.filters.push(FilterEntry::new(filter));
+        if let Some(name) = filter.name() {
+            self.run_filters(&mut definition, &[name.to_string()])?;
+        }
+        self.build(id, &mut definition)?;
+        Ok(definition)
+    }
+
+    /// Remove the filter `selector` denotes from the pending publish
+    /// `id` with its redactions, and rebuild. `selector` is a filter
+    /// name, else a prefix of one instruction. The filter's
+    /// suppressions stay, so adding it back does not restore a
+    /// redaction that was undone. Returns the removed filter.
+    pub fn filter_remove(&self, id: &str, selector: &str) -> Result<FilterEntry, PublishError> {
+        let mut definition = self.definition(id)?;
+        let (index, _) = definition.find_filter(selector)?;
+        let removed = definition.filters.remove(index);
+        if let Some(name) = &removed.name {
+            let author = format!("filter:{name}");
+            definition.redactions.retain(|r| r.author != author);
+        }
+        self.build(id, &mut definition)?;
+        Ok(removed)
+    }
+
+    /// Re-run the deterministic rules of the named filter `name`, or of
+    /// every named filter on the list when `name` is `None`, and
+    /// rebuild. The filter's earlier redactions go.
+    pub fn filter_run(
+        &self,
+        id: &str,
+        name: Option<&str>,
+    ) -> Result<PublishDefinition, PublishError> {
+        let mut definition = self.definition(id)?;
+        let names = match name {
+            Some(name) => {
+                if !definition.named_filters().iter().any(|n| n == name) {
+                    return Err(PublishError::Input(format!(
+                        "no named filter {name:?} is on the list"
+                    )));
+                }
+                vec![name.to_string()]
+            }
+            None => definition.named_filters(),
+        };
+        self.run_filters(&mut definition, &names)?;
         self.build(id, &mut definition)?;
         Ok(definition)
     }
@@ -291,12 +339,16 @@ impl<'a> Publisher<'a> {
         Ok(())
     }
 
-    /// Run every named filter's deterministic rules over the original
-    /// and record their redactions, replacing the filter's earlier
-    /// ones.
-    fn run_filters(&self, definition: &mut PublishDefinition) -> Result<(), PublishError> {
+    /// Run the deterministic rules of the named filters `names` over
+    /// the original and record their redactions, replacing the
+    /// filter's earlier ones.
+    fn run_filters(
+        &self,
+        definition: &mut PublishDefinition,
+        names: &[String],
+    ) -> Result<(), PublishError> {
         let session = self.open_original(definition)?;
-        derive::run_filters(definition, &session)
+        derive::run_filters(definition, &session, names)
     }
 
     /// Rebuild the staged session of `id` from the original plus

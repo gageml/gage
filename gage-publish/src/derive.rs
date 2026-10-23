@@ -216,22 +216,18 @@ fn literal_regex(literal: &str) -> Regex {
         .expect("an escaped literal is a valid regex")
 }
 
-/// Run the deterministic rules of every named filter in `definition`
-/// over the original and record their redactions as the filter's,
-/// replacing the filter's earlier ones.
+/// Run the deterministic rules of the named filters `names` over the
+/// original and record their redactions as the filter's, replacing
+/// the filter's earlier ones.
 pub fn run_filters(
     definition: &mut PublishDefinition,
     session: &SessionText,
+    names: &[String],
 ) -> Result<(), PublishError> {
-    let names: Vec<String> = definition
-        .filters
-        .iter()
-        .filter_map(|f| f.spec().name().map(String::from))
-        .collect();
     for name in names {
         let author = format!("filter:{name}");
         definition.redactions.retain(|r| r.author != author);
-        let Some(filter) = Filter::named(&name) else {
+        let Some(filter) = Filter::named(name) else {
             continue;
         };
         // One text redaction per distinct literal; the first rule to
@@ -248,7 +244,7 @@ pub fn run_filters(
             }
             let found = session
                 .descriptor
-                .filter_values(&name, &entry.json)
+                .filter_values(name, &entry.json)
                 .map_err(|e| PublishError::Input(format!("line {}: {e}", entry.line)))?;
             for literal in found.literals {
                 literals

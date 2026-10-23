@@ -1,7 +1,7 @@
 //! `gage session publish`: the pending-publish life cycle commands.
 //!
 //! `init` stages a publish of a session; `redact`, `status`, `undo`,
-//! `abort`, and `apply` follow. The source session is resolved
+//! `refresh`, the `filter` commands, `abort`, and `apply` follow. The source session is resolved
 //! through the session command's `--source` and `--stored`, the way
 //! `gage scan` resolves sessions: a `--stored` session is used as is,
 //! and a native session is added to the store first so it has an
@@ -15,7 +15,10 @@ use clap::{Args, Subcommand};
 use cliclack as cli;
 use gage_core::style::IdHighlighter;
 use gage_core::uuid::short_uuid;
-use gage_publish::{Filter, FilterSpec, PublishDefinition, Publisher, REASONS, RedactionInput};
+use gage_publish::{
+    Filter, FilterEntry, FilterSpec, PublishDefinition, PublishError, Publisher, REASONS,
+    RedactionInput,
+};
 use gage_session::{Driver, NativeSession, SourceOptions};
 use gage_store::{PendingPublish, PublishStore, SESSION_TYPE, SessionRecord, SessionStore, Store};
 use tabled::{
@@ -28,6 +31,7 @@ use tabled::{
 };
 
 use crate::author::resolve_author;
+use crate::cmd_note::value_cell;
 use crate::dialog::{self, DialogError};
 use crate::error::CliError;
 use crate::human::{count, format_elapsed_ms};
@@ -117,6 +121,9 @@ pub enum PublishCommand {
     /// nothing changes.
     Refresh(RefreshArgs),
 
+    /// Manage filters of a pending publish
+    Filter(FilterArgs),
+
     /// Abort a pending publish
     ///
     /// Deletes staged publish. Nothing was written to store.
@@ -126,8 +133,6 @@ pub enum PublishCommand {
 #[derive(Args)]
 pub struct InitArgs {
     /// Session to publish (tag, ID, or prefix)
-    ///
-    /// With --reinit, pending publish session to update (ID or prefix).
     #[arg(value_name = "SESSION")]
     session: String,
 
@@ -146,20 +151,13 @@ pub struct InitArgs {
     stored: bool,
 
     /// Filter to apply (repeatable)
-    ///
-    /// A filter name, or an instruction to an LLM describing what to
-    /// remove. A text instruction may be given as @PATH to read it from
-    /// a file. Filter names are "pii", "language", and "secret".
-    #[arg(short, long, value_name = "FILTER")]
+    #[arg(
+        short,
+        long,
+        value_name = "FILTER",
+        long_help = format!("Filter to apply (repeatable)\n\n{FILTER_HELP}")
+    )]
     filter: Vec<String>,
-
-    /// Replace filters of a pending publish
-    ///
-    /// SESSION names a pending publish. Filters given replace its
-    /// filter list, so a filter to keep is repeated. To publish a
-    /// different session, abort and run init with that session.
-    #[arg(long)]
-    reinit: bool,
 
     /// Skip confirmation prompt
     #[arg(short, long)]
@@ -285,6 +283,113 @@ pub struct AbortArgs {
     no_source: NoSource,
 }
 
+/// The paragraph `init --filter` and `filter add` share on what a
+/// filter argument is.
+const FILTER_HELP: &str = "A filter name, or an instruction to an LLM describing what to \
+remove. An instruction contains a space and may be given as @PATH to read it from a file. \
+Filter names are \"pii\", \"language\", and \"secret\".";
+
+/// The `filter` group declares the `--source` and `--stored` override
+/// itself: none of its commands takes them, so the group capturing a
+/// flag given before the command is the rejection wanted.
+#[derive(Args)]
+pub struct FilterArgs {
+    #[command(subcommand)]
+    command: FilterCommand,
+
+    #[command(flatten)]
+    no_source: NoSource,
+}
+
+#[derive(Subcommand)]
+pub enum FilterCommand {
+    /// Add a filter to a pending publish
+    ///
+    /// A named filter's deterministic rules run at once. A filter
+    /// already on the list is an error.
+    Add(FilterAddArgs),
+
+    /// Remove a filter from a pending publish
+    ///
+    /// Filter's redactions are removed with it. A redaction undone
+    /// earlier stays suppressed if filter is added again.
+    Remove(FilterRemoveArgs),
+
+    /// Run named filters of a pending publish again
+    ///
+    /// Filter's earlier redactions are replaced by what its rules find
+    /// now.
+    Run(FilterRunArgs),
+
+    /// List filters of a pending publish
+    List(FilterListArgs),
+}
+
+#[derive(Args)]
+pub struct FilterAddArgs {
+    /// Pending publish session to change (ID or prefix)
+    #[arg(value_name = "SESSION", required_unless_present = "list_filters")]
+    session: Option<String>,
+
+    /// Filter to add
+    #[arg(
+        value_name = "FILTER",
+        required_unless_present = "list_filters",
+        long_help = format!("Filter to add\n\n{FILTER_HELP}")
+    )]
+    filter: Option<String>,
+
+    /// Skip confirmation prompt
+    #[arg(short, long)]
+    yes: bool,
+
+    /// Show available named filters and exit
+    ///
+    /// Like --help, prints the list and exits whatever else is given.
+    #[arg(long)]
+    list_filters: bool,
+}
+
+#[derive(Args)]
+pub struct FilterRemoveArgs {
+    /// Pending publish session to change (ID or prefix)
+    #[arg(value_name = "SESSION")]
+    session: String,
+
+    /// Filter to remove
+    ///
+    /// A filter name, else a prefix of one instruction on the list. A
+    /// prefix of more than one instruction is an error.
+    #[arg(value_name = "FILTER")]
+    filter: String,
+
+    /// Skip confirmation prompt
+    #[arg(short, long)]
+    yes: bool,
+}
+
+#[derive(Args)]
+pub struct FilterRunArgs {
+    /// Pending publish session to change (ID or prefix)
+    #[arg(value_name = "SESSION")]
+    session: String,
+
+    /// Named filter to run (default every named filter on list)
+    #[arg(value_name = "NAME")]
+    name: Option<String>,
+
+    /// Skip confirmation prompt
+    #[arg(short, long)]
+    yes: bool,
+}
+
+#[derive(Args)]
+pub struct FilterListArgs {
+    /// Pending publish session to show (ID or prefix)
+    #[arg(value_name = "SESSION")]
+    session: String,
+}
+
 /// Every publish command declares its own `--source` and `--stored`
 /// in place of the `gage session` globals: `init` takes them to
 /// resolve the original, and the rest reject them.
@@ -319,6 +424,15 @@ pub async fn run(args: PublishArgs) -> Result<(), CliError> {
         PublishCommand::Refresh(args) => {
             args.no_source.reject("gage session publish refresh")?;
             refresh(args)
+        }
+        PublishCommand::Filter(args) => {
+            args.no_source.reject("gage session publish filter")?;
+            match args.command {
+                FilterCommand::Add(args) => filter_add(args),
+                FilterCommand::Remove(args) => filter_remove(args),
+                FilterCommand::Run(args) => filter_run(args),
+                FilterCommand::List(args) => filter_list(args),
+            }
         }
         PublishCommand::Abort(args) => {
             args.no_source.reject("gage session publish abort")?;
@@ -404,20 +518,8 @@ fn init(args: InitArgs) -> Result<(), CliError> {
     let filters = args
         .filter
         .iter()
-        .map(|text| {
-            text_value("gage session publish init", "--filter", text)
-                .map(|text| FilterSpec::from_text(text.trim_end()))
-        })
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| fail(e.to_string()))?;
-    if args.reinit {
-        if source.is_some() {
-            return Err(fail(
-                "--source does not apply with --reinit; SESSION names a pending publish".into(),
-            ));
-        }
-        return reinit(&store, session, &filters, args.yes);
-    }
+        .map(|text| parse_filter("gage session publish init", "--filter", text))
+        .collect::<Result<Vec<_>, _>>()?;
     let original = resolve_original(&store, source.as_deref(), stored, session)?;
 
     dialog::run("Publish session", || {
@@ -499,32 +601,14 @@ fn filter_rows() -> Vec<Vec<String>> {
         .collect()
 }
 
-/// Replace the filters of a pending publish after confirmation. The
-/// old filters' redactions go, the new filters run, and the staged
-/// session is rebuilt.
-fn reinit(store: &Store, prefix: &str, filters: &[FilterSpec], yes: bool) -> Result<(), CliError> {
-    let fail = |e: String| CliError::message(format!("gage session publish init: {e}"));
-    let publisher = Publisher::new(store);
-    let pending = publisher
-        .store()
-        .get(prefix)
-        .map_err(|e| fail(e.to_string()))?;
-    dialog::run("Publish session", || {
-        dialog::step_value("Session", short_uuid(&pending.id))?;
-        dialog::step_value("Origin", &pending.attrs.origin)?;
-        filters_step(filters)?;
-        if !yes {
-            let confirmed = cli::confirm("Continue?").initial_value(true).interact()?;
-            if !confirmed {
-                return Err(DialogError::Canceled);
-            }
-        }
-        let definition = publisher
-            .reinit(&pending.id, filters)
-            .map_err(|e| DialogError::Failed(e.to_string()))?;
-        report_filter_redactions(&definition)?;
-        Ok(format!("Updated publish {}", short_uuid(&pending.id)).into())
-    })
+/// The filter `text` denotes, with `@PATH` read as a file. An unknown
+/// name is an error naming `command` and `option`.
+fn parse_filter(command: &str, option: &str, text: &str) -> Result<FilterSpec, CliError> {
+    let fail = |e: String| CliError::message(format!("{command}: {e}"));
+    let text = text_value(command, option, text).map_err(|e| fail(e.to_string()))?;
+    text.trim_end()
+        .parse()
+        .map_err(|e: PublishError| fail(format!("{option}: {e}")))
 }
 
 /// The `Filters` step of the dialog: one line per filter, or `none`.
@@ -864,6 +948,188 @@ fn refresh(args: RefreshArgs) -> Result<(), CliError> {
         )
         .into())
     })
+}
+
+/// Add a filter after confirmation. The filter is parsed before the
+/// dialog opens, so an unknown name fails without a prompt.
+fn filter_add(args: FilterAddArgs) -> Result<(), CliError> {
+    let command = "gage session publish filter add";
+    let fail = |e: String| CliError::message(format!("{command}: {e}"));
+    if args.list_filters {
+        list_filters();
+        return Ok(());
+    }
+    let (Some(session), Some(filter)) = (args.session.as_deref(), args.filter.as_deref()) else {
+        return Err(fail("SESSION and FILTER are required".into()));
+    };
+    let filter = parse_filter(command, "FILTER", filter)?;
+    let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
+    let publisher = Publisher::new(&store);
+    let pending = publisher
+        .store()
+        .get(session)
+        .map_err(|e| fail(e.to_string()))?;
+
+    dialog::run("Add publish filter", || {
+        dialog::step_value("Session", short_uuid(&pending.id))?;
+        dialog::step_value("Filter", value_cell(&filter.to_string()))?;
+        if !args.yes {
+            let confirmed = cli::confirm("Continue?").initial_value(true).interact()?;
+            if !confirmed {
+                return Err(DialogError::Canceled);
+            }
+        }
+        let definition = publisher
+            .filter_add(&pending.id, &filter)
+            .map_err(|e| DialogError::Failed(e.to_string()))?;
+        report_filter_redactions(&definition)?;
+        Ok(format!("Added filter {}", value_cell(&filter.to_string())).into())
+    })
+}
+
+/// Remove a filter after confirmation. The selector is resolved
+/// against the definition before the dialog opens.
+fn filter_remove(args: FilterRemoveArgs) -> Result<(), CliError> {
+    let fail = |e: String| CliError::message(format!("gage session publish filter remove: {e}"));
+    let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
+    let publisher = Publisher::new(&store);
+    let pending = publisher
+        .store()
+        .get(&args.session)
+        .map_err(|e| fail(e.to_string()))?;
+    let definition = publisher
+        .definition(&pending.id)
+        .map_err(|e| fail(e.to_string()))?;
+    let (_, entry) = definition
+        .find_filter(&args.filter)
+        .map_err(|e| fail(e.to_string()))?;
+    let target = filter_cell(entry);
+    let author = filter_author(entry);
+    let redactions = definition
+        .redactions
+        .iter()
+        .filter(|r| Some(r.author.as_str()) == author.as_deref())
+        .count();
+
+    dialog::run("Remove publish filter", || {
+        dialog::step_value("Session", short_uuid(&pending.id))?;
+        dialog::step_value("Filter", &target)?;
+        dialog::step_value("Redactions", count(redactions, "redaction"))?;
+        if !args.yes {
+            let confirmed = cli::confirm("Continue?").initial_value(true).interact()?;
+            if !confirmed {
+                return Err(DialogError::Canceled);
+            }
+        }
+        publisher
+            .filter_remove(&pending.id, &args.filter)
+            .map_err(|e| DialogError::Failed(e.to_string()))?;
+        Ok(format!("Removed filter {target}").into())
+    })
+}
+
+/// Re-run one named filter, or every named filter, after confirmation.
+/// A name not on the list fails before the dialog opens.
+fn filter_run(args: FilterRunArgs) -> Result<(), CliError> {
+    let fail = |e: String| CliError::message(format!("gage session publish filter run: {e}"));
+    let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
+    let publisher = Publisher::new(&store);
+    let pending = publisher
+        .store()
+        .get(&args.session)
+        .map_err(|e| fail(e.to_string()))?;
+    let definition = publisher
+        .definition(&pending.id)
+        .map_err(|e| fail(e.to_string()))?;
+    let names = match &args.name {
+        Some(name) => {
+            if !definition.named_filters().iter().any(|n| n == name) {
+                return Err(fail(format!("no named filter {name:?} is on the list")));
+            }
+            vec![name.clone()]
+        }
+        None => definition.named_filters(),
+    };
+    if names.is_empty() {
+        return Err(fail("no named filters are on the list".into()));
+    }
+
+    dialog::run("Run publish filters", || {
+        dialog::step_value("Session", short_uuid(&pending.id))?;
+        dialog::step_list("Filters", names.iter().cloned())?;
+        if !args.yes {
+            let confirmed = cli::confirm("Continue?").initial_value(true).interact()?;
+            if !confirmed {
+                return Err(DialogError::Canceled);
+            }
+        }
+        let definition = publisher
+            .filter_run(&pending.id, args.name.as_deref())
+            .map_err(|e| DialogError::Failed(e.to_string()))?;
+        report_filter_redactions(&definition)?;
+        Ok(format!("Ran {}", count(names.len(), "filter")).into())
+    })
+}
+
+/// Print the filters of a pending publish as a table: the name or the
+/// instruction on one line, its type, and the redactions it authored.
+fn filter_list(args: FilterListArgs) -> Result<(), CliError> {
+    let fail = |e: String| CliError::message(format!("gage session publish filter list: {e}"));
+    let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
+    let publisher = Publisher::new(&store);
+    let pending = publisher
+        .store()
+        .get(&args.session)
+        .map_err(|e| fail(e.to_string()))?;
+    let definition = publisher
+        .definition(&pending.id)
+        .map_err(|e| fail(e.to_string()))?;
+    if definition.filters.is_empty() {
+        println!("No filters");
+        return Ok(());
+    }
+    let header: Vec<String> = ["Filter", "Type", "Redactions"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let rows = definition.filters.iter().map(|f| {
+        let author = filter_author(f);
+        let redactions = definition
+            .redactions
+            .iter()
+            .filter(|r| Some(r.author.as_str()) == author.as_deref())
+            .count();
+        let kind = match author {
+            Some(_) => "name",
+            None => "instruction",
+        };
+        vec![filter_cell(f), kind.to_string(), redactions.to_string()]
+    });
+    let term_width = console::Term::stdout().size().1 as usize;
+    let table = Table::from_iter(std::iter::once(header).chain(rows))
+        .with(Style::rounded())
+        .with(
+            Width::truncate(term_width)
+                .suffix("…")
+                .priority(Priority::max(true)),
+        )
+        .modify(Rows::first(), style::tty(Color::FG_BRIGHT_YELLOW))
+        .modify(Columns::one(2), Alignment::right())
+        .modify(Columns::one(1).not(Rows::first()), style::dim())
+        .to_string();
+    println!("{table}");
+    Ok(())
+}
+
+/// A filter as a one-line cell: its name, or its instruction
+/// flattened and cut.
+fn filter_cell(filter: &FilterEntry) -> String {
+    value_cell(&filter.spec().to_string())
+}
+
+/// The author a named filter's redactions carry, `filter:<name>`.
+fn filter_author(filter: &FilterEntry) -> Option<String> {
+    filter.name.as_ref().map(|name| format!("filter:{name}"))
 }
 
 /// Delete a pending publish after confirmation. The id is resolved
