@@ -15,22 +15,60 @@ use crate::PublishError;
 /// an instruction to the agent.
 pub const NAMED_FILTERS: &[&str] = &["pii", "nsfw", "secret"];
 
-/// The reason codes a redaction may carry.
-pub const REASONS: &[&str] = &[
-    "privacy",
-    "pii",
-    "secret",
-    "confidential",
-    "opaque",
-    "policy",
-    "safety",
-    "scope",
-    "statute",
-];
+/// A reason code a redaction may carry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Reason {
+    pub code: &'static str,
+    /// One line on what the code covers, for a listing
+    pub description: &'static str,
+}
 
-/// The reasons that attach to expression rather than information, and
-/// so are redacted per span.
-pub const EXPRESSION_REASONS: &[&str] = &["privacy"];
+impl Reason {
+    /// The reason with `code`, when there is one.
+    pub fn find(code: &str) -> Option<&'static Reason> {
+        REASONS.iter().find(|r| r.code == code)
+    }
+}
+
+/// The reason codes, in listing order.
+pub const REASONS: &[Reason] = &[
+    Reason {
+        code: "privacy",
+        description: "Private conversational content (candid tone directed at an agent)",
+    },
+    Reason {
+        code: "pii",
+        description: "Content identifying a person (name, email address, phone number)",
+    },
+    Reason {
+        code: "secret",
+        description: "A credential or key (password, API key, token)",
+    },
+    Reason {
+        code: "confidential",
+        description: "Trade secrets and commercial, financial, or privileged content",
+    },
+    Reason {
+        code: "opaque",
+        description: "Content that cannot be evaluated",
+    },
+    Reason {
+        code: "policy",
+        description: "Internal personnel rules and practices of an organization",
+    },
+    Reason {
+        code: "safety",
+        description: "Content whose disclosure could endanger a person's life or safety",
+    },
+    Reason {
+        code: "scope",
+        description: "Content not applicable to the publish scope",
+    },
+    Reason {
+        code: "statute",
+        description: "Content a statute exempts from disclosure",
+    },
+];
 
 /// One filter of a publish: a named filter, or an instruction to the
 /// agent describing what to remove.
@@ -317,12 +355,12 @@ pub enum RedactionInput {
 }
 
 impl RedactionInput {
-    /// `<LINE> [<LINE_END> [<REASON>]]`. A missing end is the line
-    /// itself; a missing reason is `scope`.
-    pub fn parse_lines(spec: &str) -> Result<Self, PublishError> {
+    /// `<LINE> [<LINE_END>]` under `reason`. A missing end is the line
+    /// itself.
+    pub fn parse_lines(spec: &str, reason: &str) -> Result<Self, PublishError> {
         let mut parts = spec.split_whitespace();
         let bad = |why: String| PublishError::Input(format!("lines {spec:?}: {why}"));
-        let shape = || bad("expected <LINE> [<LINE_END> [<REASON>]]".to_string());
+        let shape = || bad("expected <LINE> [<LINE_END>]".to_string());
         let line: u32 = parts
             .next()
             .ok_or_else(shape)?
@@ -332,14 +370,13 @@ impl RedactionInput {
             Some(end) => end.parse().map_err(|e| bad(format!("line end: {e}")))?,
             None => line,
         };
-        let reason = parts.next().unwrap_or("scope");
         if parts.next().is_some() {
             return Err(shape());
         }
         if line == 0 || line_end < line {
-            return Err(PublishError::Input(format!(
-                "lines {spec:?}: lines are 1-based and the end is not before the start"
-            )));
+            return Err(bad(
+                "lines are 1-based and the end is not before the start".to_string()
+            ));
         }
         check_reason(reason)?;
         Ok(RedactionInput::Lines {
@@ -349,32 +386,24 @@ impl RedactionInput {
         })
     }
 
-    /// `<REASON> <TEXT>`, the literal running to the end.
-    pub fn parse_text(spec: &str) -> Result<Self, PublishError> {
-        let bad = || PublishError::Input(format!("text {spec:?}: expected <REASON> <TEXT>"));
-        let (reason, literal) = spec.trim_start().split_once(' ').ok_or_else(bad)?;
-        let literal = literal.trim_start();
+    /// A literal redacted everywhere under `reason`.
+    pub fn parse_text(literal: &str, reason: &str) -> Result<Self, PublishError> {
         if literal.is_empty() {
-            return Err(bad());
+            return Err(PublishError::Input("text: literal is empty".to_string()));
         }
         check_reason(reason)?;
-        if EXPRESSION_REASONS.contains(&reason) {
-            return Err(PublishError::Input(format!(
-                "text {spec:?}: {reason} is an expression reason; use a span redaction"
-            )));
-        }
         Ok(RedactionInput::Text {
             reason: reason.to_string(),
             literal: literal.to_string(),
         })
     }
 
-    /// `<LINE> <SEQ> <REASON> <MODE> <TEXT>`, the literal running to
+    /// `<LINE> <SEQ> <MODE> <TEXT>` under `reason`; the literal runs to
     /// the end.
-    pub fn parse_span(spec: &str) -> Result<Self, PublishError> {
+    pub fn parse_span(spec: &str, reason: &str) -> Result<Self, PublishError> {
         let bad = |why: String| PublishError::Input(format!("span {spec:?}: {why}"));
-        let shape = || bad("expected <LINE> <SEQ> <REASON> <MODE> <TEXT>".to_string());
-        let mut parts = spec.trim_start().splitn(5, ' ');
+        let shape = || bad("expected <LINE> <SEQ> <MODE> <TEXT>".to_string());
+        let mut parts = spec.trim_start().splitn(4, ' ');
         let line: u32 = parts
             .next()
             .ok_or_else(shape)?
@@ -385,18 +414,12 @@ impl RedactionInput {
             .ok_or_else(shape)?
             .parse()
             .map_err(|e| bad(format!("seq: {e}")))?;
-        let reason = parts.next().ok_or_else(shape)?;
         let mode: SpanMode = parts.next().ok_or_else(shape)?.parse()?;
         let literal = parts.next().ok_or_else(shape)?.trim_start();
         if literal.is_empty() {
             return Err(shape());
         }
         check_reason(reason)?;
-        if !EXPRESSION_REASONS.contains(&reason) {
-            return Err(PublishError::Input(format!(
-                "span {spec:?}: {reason} is an information reason; use a text redaction"
-            )));
-        }
         Ok(RedactionInput::Span {
             line,
             seq,
@@ -407,15 +430,19 @@ impl RedactionInput {
     }
 }
 
+/// `reason` is a known code.
 fn check_reason(reason: &str) -> Result<(), PublishError> {
-    if REASONS.contains(&reason) {
-        Ok(())
-    } else {
-        Err(PublishError::Input(format!(
-            "unknown reason {reason:?}; reasons are {}",
-            REASONS.join(", ")
-        )))
+    if Reason::find(reason).is_some() {
+        return Ok(());
     }
+    Err(PublishError::Input(format!(
+        "unknown reason {reason:?}; reasons are {}",
+        REASONS
+            .iter()
+            .map(|r| r.code)
+            .collect::<Vec<_>>()
+            .join(", ")
+    )))
 }
 
 #[cfg(test)]
@@ -423,9 +450,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn lines_spec_defaults_the_end_and_the_reason() {
+    fn lines_spec_defaults_the_end() {
         assert_eq!(
-            RedactionInput::parse_lines("7").unwrap(),
+            RedactionInput::parse_lines("7", "scope").unwrap(),
             RedactionInput::Lines {
                 line: 7,
                 line_end: 7,
@@ -433,34 +460,36 @@ mod tests {
             }
         );
         assert_eq!(
-            RedactionInput::parse_lines("10 15 opaque").unwrap(),
+            RedactionInput::parse_lines("10 15", "opaque").unwrap(),
             RedactionInput::Lines {
                 line: 10,
                 line_end: 15,
                 reason: "opaque".into()
             }
         );
-        assert!(RedactionInput::parse_lines("15 10").is_err());
-        assert!(RedactionInput::parse_lines("1 1 nope").is_err());
+        assert!(RedactionInput::parse_lines("15 10", "scope").is_err());
+        assert!(RedactionInput::parse_lines("1 1 scope", "scope").is_err());
+        assert!(RedactionInput::parse_lines("1", "nope").is_err());
     }
 
     #[test]
-    fn text_spec_is_reason_then_literal_with_spaces() {
+    fn text_takes_any_reason_and_a_non_empty_literal() {
         assert_eq!(
-            RedactionInput::parse_text("secret sk-ant api key").unwrap(),
+            RedactionInput::parse_text("sk-ant api key", "secret").unwrap(),
             RedactionInput::Text {
                 reason: "secret".into(),
                 literal: "sk-ant api key".into()
             }
         );
-        assert!(RedactionInput::parse_text("secret").is_err());
-        assert!(RedactionInput::parse_text("privacy fucking").is_err());
+        assert!(RedactionInput::parse_text("fucking", "privacy").is_ok());
+        assert!(RedactionInput::parse_text("", "secret").is_err());
+        assert!(RedactionInput::parse_text("x", "nope").is_err());
     }
 
     #[test]
     fn span_spec_names_the_value_the_mode_and_the_literal() {
         assert_eq!(
-            RedactionInput::parse_span("12 0 privacy remove fucking hell").unwrap(),
+            RedactionInput::parse_span("12 0 remove fucking hell", "privacy").unwrap(),
             RedactionInput::Span {
                 line: 12,
                 seq: 0,
@@ -469,8 +498,17 @@ mod tests {
                 literal: "fucking hell".into()
             }
         );
-        assert!(RedactionInput::parse_span("12 0 secret mark x").is_err());
-        assert!(RedactionInput::parse_span("12 0 privacy drop x").is_err());
+        assert!(RedactionInput::parse_span("12 0 mark x", "secret").is_ok());
+        assert!(RedactionInput::parse_span("12 0 drop x", "privacy").is_err());
+    }
+
+    #[test]
+    fn every_reason_has_a_description() {
+        for r in REASONS {
+            assert!(!r.description.is_empty(), "{}", r.code);
+        }
+        assert!(Reason::find("scope").is_some());
+        assert!(Reason::find("nope").is_none());
     }
 
     #[test]

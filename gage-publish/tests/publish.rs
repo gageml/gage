@@ -165,8 +165,8 @@ fn redact_applies_lines_text_and_spans_and_rejects_a_miss() {
         .redact(
             &init.id,
             &[
-                RedactionInput::parse_lines("5 5 opaque").unwrap(),
-                RedactionInput::parse_text("pii garrett").unwrap(),
+                RedactionInput::parse_lines("5", "opaque").unwrap(),
+                RedactionInput::parse_text("garrett", "pii").unwrap(),
                 // Line 1's text values in document order: type, cwd,
                 // message.role, message.content
                 RedactionInput::Span {
@@ -215,7 +215,7 @@ fn redact_applies_lines_text_and_spans_and_rejects_a_miss() {
     let miss = publisher
         .redact(
             &init.id,
-            &[RedactionInput::parse_text("secret nothing-like-this").unwrap()],
+            &[RedactionInput::parse_text("nothing-like-this", "secret").unwrap()],
             "user:test",
         )
         .unwrap_err();
@@ -233,7 +233,7 @@ fn reinit_replaces_the_filters_and_their_redactions() {
     publisher
         .redact(
             &init.id,
-            &[RedactionInput::parse_lines("5").unwrap()],
+            &[RedactionInput::parse_lines("5", "scope").unwrap()],
             "user:test",
         )
         .unwrap();
@@ -280,7 +280,7 @@ fn the_staged_summary_follows_the_derived_content() {
     publisher
         .redact(
             &init.id,
-            &[RedactionInput::parse_lines("1 2").unwrap()],
+            &[RedactionInput::parse_lines("1 2", "scope").unwrap()],
             "user:test",
         )
         .unwrap();

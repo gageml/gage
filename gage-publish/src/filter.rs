@@ -12,6 +12,8 @@ pub struct Filter {
     pub name: &'static str,
     /// The reason code its redactions carry
     pub reason: &'static str,
+    /// One line on what the filter removes, for a listing
+    pub description: &'static str,
     /// The instruction prose for the agent
     pub instructions: &'static str,
     patterns: Vec<Pattern>,
@@ -49,6 +51,11 @@ impl Filter {
         FILTERS.iter().find(|f| f.name == name)
     }
 
+    /// Every named filter, in listing order.
+    pub fn all() -> &'static [Filter] {
+        &FILTERS
+    }
+
     pub fn patterns(&self) -> &[Pattern] {
         &self.patterns
     }
@@ -68,6 +75,7 @@ static FILTERS: LazyLock<Vec<Filter>> = LazyLock::new(|| {
         Filter {
             name: "pii",
             reason: "pii",
+            description: "Remove personally identifiable information",
             instructions: include_str!("../filters/pii.md"),
             patterns: vec![
                 Pattern::new("email", r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"),
@@ -84,6 +92,7 @@ static FILTERS: LazyLock<Vec<Filter>> = LazyLock::new(|| {
         Filter {
             name: "secret",
             reason: "secret",
+            description: "Remove passwords, API keys, and other secrets",
             instructions: include_str!("../filters/secret.md"),
             patterns: vec![
                 Pattern::new("aws-access-key", r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"),
@@ -105,6 +114,7 @@ static FILTERS: LazyLock<Vec<Filter>> = LazyLock::new(|| {
         Filter {
             name: "nsfw",
             reason: "privacy",
+            description: "Remove profanity and other language unfit for a public record",
             instructions: include_str!("../filters/nsfw.md"),
             patterns: Vec::new(),
         },
@@ -116,11 +126,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_named_filter_has_prose() {
+    fn every_named_filter_has_prose_and_a_description() {
         for name in crate::NAMED_FILTERS {
             let filter = Filter::named(name).unwrap();
             assert!(!filter.instructions.trim().is_empty(), "{name}");
+            assert!(!filter.description.is_empty(), "{name}");
         }
+        assert_eq!(Filter::all().len(), crate::NAMED_FILTERS.len());
         assert!(Filter::named("ducks").is_none());
     }
 

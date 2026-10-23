@@ -27,8 +27,8 @@ use gage_store::{
 };
 
 pub use definition::{
-    EXPRESSION_REASONS, FilterEntry, FilterSpec, NAMED_FILTERS, PublishDefinition, REASONS,
-    Redaction, RedactionInput, RedactionKind, SpanMode, Suppression,
+    FilterEntry, FilterSpec, NAMED_FILTERS, PublishDefinition, REASONS, Reason, Redaction,
+    RedactionInput, RedactionKind, SpanMode, Suppression,
 };
 pub use derive::{Applied, Instance, InstanceKind};
 pub use filter::{Filter, Pattern};

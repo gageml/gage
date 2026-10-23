@@ -353,9 +353,7 @@ async fn main() -> ExitCode {
                     cmd_session::view(source, stored, args).await
                 }
                 cmd_session::SessionCommand::Find(args) => cmd_session::find(args).await,
-                cmd_session::SessionCommand::Publish { command } => {
-                    cmd_publish::run(source, stored, command).await
-                }
+                cmd_session::SessionCommand::Publish(args) => cmd_publish::run(args).await,
             },
             Command::Dataset { command } => match command {
                 cmd_dataset::DatasetCommand::Add(args) => cmd_dataset::add(args).await,

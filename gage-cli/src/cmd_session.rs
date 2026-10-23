@@ -99,10 +99,7 @@ pub enum SessionCommand {
     Find(SessionFindArgs),
 
     /// Publish a shareable copy of a session
-    Publish {
-        #[command(subcommand)]
-        command: crate::cmd_publish::PublishCommand,
-    },
+    Publish(crate::cmd_publish::PublishArgs),
 }
 
 #[derive(Args)]

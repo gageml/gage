@@ -15,14 +15,15 @@ use clap::{Args, Subcommand};
 use cliclack as cli;
 use gage_core::style::IdHighlighter;
 use gage_core::uuid::short_uuid;
-use gage_publish::{FilterSpec, PublishDefinition, Publisher, RedactionInput};
+use gage_publish::{Filter, FilterSpec, PublishDefinition, Publisher, REASONS, RedactionInput};
 use gage_session::{Driver, NativeSession, SourceOptions};
 use gage_store::{PendingPublish, PublishStore, SESSION_TYPE, SessionRecord, SessionStore, Store};
 use tabled::{
     Table,
     settings::{
-        Alignment, Color, Style,
+        Alignment, Color, Style, Width,
         object::{Columns, Object, Rows},
+        peaker::Priority,
     },
 };
 
@@ -35,6 +36,49 @@ use crate::source;
 use crate::style::{self, IdKind};
 use crate::text_arg::text_value;
 
+#[derive(Args)]
+#[command(args_conflicts_with_subcommands = true)]
+pub struct PublishArgs {
+    #[command(subcommand)]
+    command: Option<PublishCommand>,
+
+    /// Show available named filters and exit
+    #[arg(long, exclusive = true)]
+    list_filters: bool,
+}
+
+/// Overrides of the `gage session` global `--source` and `--stored`
+/// for a publish command that takes neither. The override keeps the
+/// inherited options out of the command's help, the way `find`
+/// declares its own; a value given anyway is rejected. The override
+/// is declared on each leaf command and not on the `publish` group,
+/// because a declaration on the group captures the flags meant for
+/// `init`.
+#[derive(Args)]
+struct NoSource {
+    #[arg(id = "source", long = "source", hide = true)]
+    source: Option<String>,
+
+    #[arg(id = "stored", short = 'S', long = "stored", hide = true)]
+    stored: bool,
+}
+
+impl NoSource {
+    fn reject(&self, command: &str) -> Result<(), CliError> {
+        if self.source.is_some() {
+            return Err(CliError::message(format!(
+                "{command}: --source does not apply; SESSION names a pending publish"
+            )));
+        }
+        if self.stored {
+            return Err(CliError::message(format!(
+                "{command}: --stored does not apply; SESSION names a pending publish"
+            )));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Subcommand)]
 pub enum PublishCommand {
     /// Start a publish of a session
@@ -45,13 +89,13 @@ pub enum PublishCommand {
     Init(InitArgs),
 
     /// List pending publish sessions
-    List,
+    List(ListArgs),
 
     /// Add redactions to a pending publish
     ///
-    /// Each redaction is applied to staged session at once. A text
-    /// redaction is matched against every text value of session; a
-    /// span redaction applies within one value.
+    /// Every redaction given carries --reason and is applied to staged
+    /// session at once. A text redaction is matched against every text
+    /// value of session; a span redaction applies within one value.
     Redact(RedactArgs),
 
     /// Show filters and redactions of a pending publish
@@ -70,6 +114,20 @@ pub struct InitArgs {
     /// With --reinit, pending publish session to update (ID or prefix).
     #[arg(value_name = "SESSION")]
     session: String,
+
+    /// Session source
+    #[arg(
+        id = "source",
+        short = 's',
+        long = "source",
+        value_name = "SOURCE",
+        long_help = format!("Session source\n\n{}", source::SOURCE_HELP)
+    )]
+    source: Option<String>,
+
+    /// Publish a stored session
+    #[arg(id = "stored", short = 'S', long = "stored", conflicts_with = "source")]
+    stored: bool,
 
     /// Filter to apply (repeatable)
     ///
@@ -93,39 +151,54 @@ pub struct InitArgs {
 }
 
 #[derive(Args)]
+pub struct ListArgs {
+    #[command(flatten)]
+    no_source: NoSource,
+}
+
+#[derive(Args)]
 pub struct RedactArgs {
     /// Pending publish session to redact (ID or prefix)
-    #[arg(value_name = "SESSION")]
-    session: String,
+    #[arg(value_name = "SESSION", required_unless_present = "list_reasons")]
+    session: Option<String>,
+
+    /// Reason for every redaction given (default scope)
+    ///
+    /// A reason code; see --list-reasons. Required with --text and
+    /// --span; lines dropped without a reason are recorded as "scope".
+    #[arg(short, long, value_name = "REASON")]
+    reason: Option<String>,
 
     /// Lines to drop (repeatable)
     ///
-    /// "LINE", "LINE LINE_END", or "LINE LINE_END REASON". Lines are
-    /// session entry lines, as in entry table. Reason defaults to
-    /// "scope".
+    /// "LINE" or "LINE LINE_END", session entry lines as in entry
+    /// table.
     #[arg(short, long, value_name = "LINES")]
     lines: Vec<String>,
 
     /// Text to redact everywhere (repeatable)
     ///
-    /// "REASON TEXT". TEXT is matched case-insensitively against every
-    /// text value of session and runs to end of value. Reason is an
-    /// information reason: pii, secret, confidential, opaque, policy,
-    /// safety, or statute.
+    /// Matched case-insensitively against every text value of session.
     #[arg(short, long, value_name = "TEXT")]
     text: Vec<String>,
 
     /// Span to redact within one value (repeatable)
     ///
-    /// "LINE SEQ REASON MODE TEXT". LINE and SEQ name a text_block row.
-    /// MODE is "remove" or "mark". Reason is an expression reason:
-    /// privacy.
-    #[arg(short = 'p', long, value_name = "SPAN")]
+    /// "LINE SEQ MODE TEXT". LINE and SEQ name a text_block row, MODE is
+    /// "remove" or "mark", and TEXT runs to end of value.
+    #[arg(short, long, value_name = "SPAN")]
     span: Vec<String>,
 
     /// Skip confirmation prompt
     #[arg(short, long)]
     yes: bool,
+
+    /// Show reason codes and exit
+    #[arg(long, exclusive = true)]
+    list_reasons: bool,
+
+    #[command(flatten)]
+    no_source: NoSource,
 }
 
 #[derive(Args)]
@@ -133,6 +206,9 @@ pub struct StatusArgs {
     /// Pending publish session to show (ID or prefix)
     #[arg(value_name = "SESSION")]
     session: String,
+
+    #[command(flatten)]
+    no_source: NoSource,
 }
 
 #[derive(Args)]
@@ -144,19 +220,42 @@ pub struct AbortArgs {
     /// Skip confirmation prompt
     #[arg(short, long)]
     yes: bool,
+
+    #[command(flatten)]
+    no_source: NoSource,
 }
 
-pub async fn run(
-    source: Option<String>,
-    stored: bool,
-    command: PublishCommand,
-) -> Result<(), CliError> {
+/// Every publish command declares its own `--source` and `--stored`
+/// in place of the `gage session` globals: `init` takes them to
+/// resolve the original, and the rest reject them.
+pub async fn run(args: PublishArgs) -> Result<(), CliError> {
+    if args.list_filters {
+        list_filters();
+        return Ok(());
+    }
+    let Some(command) = args.command else {
+        return Err(CliError::message(
+            "gage session publish: a command is required; see gage session publish --help",
+        ));
+    };
     match command {
-        PublishCommand::Init(args) => init(source, stored, args),
-        PublishCommand::List => list(),
-        PublishCommand::Redact(args) => redact(args),
-        PublishCommand::Status(args) => status(args),
-        PublishCommand::Abort(args) => abort(args),
+        PublishCommand::Init(args) => init(args),
+        PublishCommand::List(args) => {
+            args.no_source.reject("gage session publish list")?;
+            list()
+        }
+        PublishCommand::Redact(args) => {
+            args.no_source.reject("gage session publish redact")?;
+            redact(args)
+        }
+        PublishCommand::Status(args) => {
+            args.no_source.reject("gage session publish status")?;
+            status(args)
+        }
+        PublishCommand::Abort(args) => {
+            args.no_source.reject("gage session publish abort")?;
+            abort(args)
+        }
     }
 }
 
@@ -229,8 +328,10 @@ fn origin_cell(origin: &str, highlighter: &IdHighlighter) -> String {
 /// before the dialog opens, so a bad argument fails without a prompt,
 /// and a native session is added to the store only after the user
 /// confirms.
-fn init(source: Option<String>, stored: bool, args: InitArgs) -> Result<(), CliError> {
+fn init(args: InitArgs) -> Result<(), CliError> {
     let fail = |e: String| CliError::message(format!("gage session publish init: {e}"));
+    let session = args.session.as_str();
+    let (source, stored) = (args.source.clone(), args.stored);
     let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
     let filters = args
         .filter
@@ -247,9 +348,9 @@ fn init(source: Option<String>, stored: bool, args: InitArgs) -> Result<(), CliE
                 "--source does not apply with --reinit; SESSION names a pending publish".into(),
             ));
         }
-        return reinit(&store, &args.session, &filters, args.yes);
+        return reinit(&store, session, &filters, args.yes);
     }
-    let original = resolve_original(&store, source.as_deref(), stored, &args.session)?;
+    let original = resolve_original(&store, source.as_deref(), stored, session)?;
 
     dialog::run("Publish session", || {
         let (line, kind) = match &original {
@@ -294,6 +395,40 @@ fn init(source: Option<String>, stored: bool, args: InitArgs) -> Result<(), CliE
         report_filter_redactions(&definition)?;
         Ok(format!("Staged publish {}", short_uuid(&outcome.id)).into())
     })
+}
+
+/// Print the named filters as a table, the way `gage scan
+/// --list-scanners` prints scanners.
+fn list_filters() {
+    let header: Vec<String> = ["Filter", "Description"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let rows = filter_rows();
+    let term_width = console::Term::stdout().size().1 as usize;
+    let table = Table::from_iter(std::iter::once(header).chain(rows))
+        .with(Style::rounded())
+        .with(
+            Width::wrap(term_width)
+                .keep_words(true)
+                .priority(Priority::max(true)),
+        )
+        .modify(Rows::first(), style::tty(Color::FG_BRIGHT_YELLOW))
+        .modify(
+            Columns::one(0).not(Rows::first()),
+            style::tty(Color::FG_BRIGHT_YELLOW),
+        )
+        .modify(Columns::one(1).not(Rows::first()), style::dim())
+        .to_string();
+    println!("{table}");
+}
+
+/// One row per named filter: name and description.
+fn filter_rows() -> Vec<Vec<String>> {
+    Filter::all()
+        .iter()
+        .map(|f| vec![f.name.to_string(), f.description.to_string()])
+        .collect()
 }
 
 /// Replace the filters of a pending publish after confirmation. The
@@ -369,27 +504,47 @@ fn report_filter_redactions(definition: &PublishDefinition) -> io::Result<()> {
 /// against the session before any is recorded.
 fn redact(args: RedactArgs) -> Result<(), CliError> {
     let fail = |e: String| CliError::message(format!("gage session publish redact: {e}"));
-    let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
-    let publisher = Publisher::new(&store);
-    let pending = publisher
-        .store()
-        .get(&args.session)
-        .map_err(|e| fail(e.to_string()))?;
+    if args.list_reasons {
+        list_reasons();
+        return Ok(());
+    }
+    let Some(session) = args.session.as_deref() else {
+        return Err(fail("SESSION is required".into()));
+    };
+    // Every spec is parsed before the store is opened. Lines default to
+    // "scope"; text and spans need the caller's reason.
+    let lines_reason = args.reason.as_deref().unwrap_or("scope");
     let mut inputs = Vec::new();
     for spec in &args.lines {
-        inputs.push(RedactionInput::parse_lines(spec).map_err(|e| fail(e.to_string()))?);
+        inputs.push(
+            RedactionInput::parse_lines(spec, lines_reason).map_err(|e| fail(e.to_string()))?,
+        );
     }
-    for spec in &args.text {
-        inputs.push(RedactionInput::parse_text(spec).map_err(|e| fail(e.to_string()))?);
-    }
-    for spec in &args.span {
-        inputs.push(RedactionInput::parse_span(spec).map_err(|e| fail(e.to_string()))?);
+    if !args.text.is_empty() || !args.span.is_empty() {
+        let reason = args
+            .reason
+            .as_deref()
+            .ok_or_else(|| fail("--reason is required with --text and --span".into()))?;
+        for literal in &args.text {
+            inputs.push(
+                RedactionInput::parse_text(literal, reason).map_err(|e| fail(e.to_string()))?,
+            );
+        }
+        for spec in &args.span {
+            inputs.push(RedactionInput::parse_span(spec, reason).map_err(|e| fail(e.to_string()))?);
+        }
     }
     if inputs.is_empty() {
         return Err(fail(
             "no redactions given; use --lines, --text, or --span".into(),
         ));
     }
+    let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
+    let publisher = Publisher::new(&store);
+    let pending = publisher
+        .store()
+        .get(session)
+        .map_err(|e| fail(e.to_string()))?;
     let author = resolve_author(None);
 
     dialog::run("Redact publish", || {
@@ -426,7 +581,34 @@ fn redact(args: RedactArgs) -> Result<(), CliError> {
     })
 }
 
-/// A redaction input as the dialog lists it.
+/// Print the reason codes as a table.
+fn list_reasons() {
+    let header: Vec<String> = ["Reason", "Description"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let rows = REASONS
+        .iter()
+        .map(|r| vec![r.code.to_string(), r.description.to_string()]);
+    let term_width = console::Term::stdout().size().1 as usize;
+    let table = Table::from_iter(std::iter::once(header).chain(rows))
+        .with(Style::rounded())
+        .with(
+            Width::wrap(term_width)
+                .keep_words(true)
+                .priority(Priority::max(true)),
+        )
+        .modify(Rows::first(), style::tty(Color::FG_BRIGHT_YELLOW))
+        .modify(
+            Columns::one(0).not(Rows::first()),
+            style::tty(Color::FG_BRIGHT_YELLOW),
+        )
+        .modify(Columns::one(1).not(Rows::first()), style::dim())
+        .to_string();
+    println!("{table}");
+}
+
+/// A redaction input as the dialog lists it, with its reason.
 fn describe_input(input: &RedactionInput) -> String {
     match input {
         RedactionInput::Lines {
@@ -684,13 +866,24 @@ mod tests {
     }
 
     #[test]
+    fn filter_rows_list_every_named_filter_with_a_description() {
+        let rows = filter_rows();
+        let mut names: Vec<&str> = rows.iter().map(|r| r[0].as_str()).collect();
+        names.sort_unstable();
+        let mut expected = gage_publish::NAMED_FILTERS.to_vec();
+        expected.sort_unstable();
+        assert_eq!(names, expected);
+        assert!(rows.iter().all(|r| r.len() == 2 && !r[1].is_empty()));
+    }
+
+    #[test]
     fn inputs_are_described_for_the_dialog() {
         assert_eq!(
-            describe_input(&RedactionInput::parse_lines("3").unwrap()),
+            describe_input(&RedactionInput::parse_lines("3", "scope").unwrap()),
             "lines 3 (scope)"
         );
         assert_eq!(
-            describe_input(&RedactionInput::parse_text("secret abc 123").unwrap()),
+            describe_input(&RedactionInput::parse_text("abc 123", "secret").unwrap()),
             "text \"abc 123\" (secret)"
         );
     }
