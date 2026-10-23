@@ -18,7 +18,8 @@ use std::time::UNIX_EPOCH;
 
 use gage_core::uuid::new_uuid;
 
-use crate::session::{FILES_TREE, SessionAttrsRecord};
+use crate::index::IdMatch;
+use crate::session::{FILES_TREE, OBJECT_TYPE, SessionAttrsRecord};
 use crate::{SessionRecord, SessionStore, Store, StoreError};
 
 const PUBLISHES_DIR: &str = "publishes";
@@ -170,6 +171,47 @@ impl<'a> PublishStore<'a> {
         Ok(PublishInit { id, origin })
     }
 
+    /// The one pending publish whose id is `id_or_prefix` or starts
+    /// with it. No match is `ObjectNotFound`; more than one is
+    /// `AmbiguousId` naming the candidates.
+    pub fn get(&self, id_or_prefix: &str) -> Result<PendingPublish, StoreError> {
+        let mut matches: Vec<PendingPublish> = self
+            .list()?
+            .into_iter()
+            .filter(|p| p.id.starts_with(id_or_prefix))
+            .collect();
+        match matches.len() {
+            0 => Err(StoreError::ObjectNotFound(id_or_prefix.to_string())),
+            1 => Ok(matches.remove(0)),
+            _ => Err(StoreError::AmbiguousId(
+                id_or_prefix.to_string(),
+                matches
+                    .into_iter()
+                    .map(|p| IdMatch {
+                        id: p.id,
+                        tip_sha: String::new(),
+                        object_type: OBJECT_TYPE.to_string(),
+                        deleted: false,
+                    })
+                    .collect(),
+            )),
+        }
+    }
+
+    /// Delete the staging directory of the pending publish `id`.
+    /// Nothing was written to the store, so nothing in the store
+    /// changes. An unknown id is `ObjectNotFound`.
+    pub fn abort(&self, id: &str) -> Result<(), StoreError> {
+        let root = self.root.join(id);
+        match fs::remove_dir_all(&root) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                Err(StoreError::ObjectNotFound(id.to_string()))
+            }
+            Err(e) => Err(StoreError::ReadContent(e)),
+        }
+    }
+
     /// Every pending publish working tree under the publishes root, in
     /// id order. A directory without a readable `attrs.json` is
     /// skipped, since it is mid-write or not a publish. Empty when the
@@ -285,5 +327,69 @@ mod tests {
         expected.sort_unstable();
         assert_eq!(ids, expected);
         assert!(listed.iter().all(|p| p.attrs.origin == a.origin));
+    }
+
+    /// `get` resolves a full id or a unique prefix, reports no match,
+    /// and reports an ambiguous prefix with its candidates.
+    #[test]
+    fn get_resolves_a_pending_publish_by_id_or_unique_prefix() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let mut session = crate::session::tests::fake("s1", &[("session.jsonl", "a\n")]);
+        let outcome = SessionStore::from(&store)
+            .add(&crate::session::tests::FakeDriver, &mut session)
+            .unwrap();
+        let original = SessionStore::from(&store)
+            .at_commit(&outcome.commit_sha)
+            .unwrap();
+        let publish = PublishStore::with_root(&store, tmp.path().join("publishes"));
+        let a = publish.init(&original).unwrap();
+        let b = publish.init(&original).unwrap();
+
+        assert_eq!(publish.get(&a.id).unwrap().id, a.id);
+        // Ids are random, so find a prefix of `a` that `b` does not share
+        let unique =
+            a.id.char_indices()
+                .map(|(i, _)| &a.id[..=i])
+                .find(|p| !b.id.starts_with(p))
+                .unwrap();
+        assert_eq!(publish.get(unique).unwrap().id, a.id);
+
+        let missing = publish.get("zzzz").unwrap_err();
+        assert!(matches!(missing, StoreError::ObjectNotFound(ref p) if p == "zzzz"));
+
+        let ambiguous = publish.get("").unwrap_err();
+        assert!(
+            matches!(ambiguous, StoreError::AmbiguousId(_, ref c) if c.len() == 2),
+            "{ambiguous}"
+        );
+    }
+
+    /// `abort` deletes the staging directory and nothing else; a
+    /// second abort of the same id is `ObjectNotFound`.
+    #[test]
+    fn abort_deletes_the_staging_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let mut session = crate::session::tests::fake("s1", &[("session.jsonl", "a\n")]);
+        let outcome = SessionStore::from(&store)
+            .add(&crate::session::tests::FakeDriver, &mut session)
+            .unwrap();
+        let original = SessionStore::from(&store)
+            .at_commit(&outcome.commit_sha)
+            .unwrap();
+        let publishes = tmp.path().join("publishes");
+        let publish = PublishStore::with_root(&store, &publishes);
+        let a = publish.init(&original).unwrap();
+        let b = publish.init(&original).unwrap();
+
+        publish.abort(&a.id).unwrap();
+        assert!(!publishes.join(&a.id).exists());
+        assert!(publishes.join(&b.id).exists());
+        assert_eq!(publish.list().unwrap().len(), 1);
+        assert_eq!(SessionStore::from(&store).iter().unwrap().count(), 1);
+
+        let again = publish.abort(&a.id).unwrap_err();
+        assert!(matches!(again, StoreError::ObjectNotFound(ref id) if *id == a.id));
     }
 }

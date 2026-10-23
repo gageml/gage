@@ -10,7 +10,9 @@
 use std::cmp::Reverse;
 
 use clap::{Args, Subcommand};
+use cliclack as cli;
 use gage_core::style::IdHighlighter;
+use gage_core::uuid::short_uuid;
 use gage_session::SourceOptions;
 use gage_store::{PendingPublish, PublishStore, SESSION_TYPE, SessionRecord, SessionStore, Store};
 use tabled::{
@@ -21,6 +23,7 @@ use tabled::{
     },
 };
 
+use crate::dialog::{self, DialogError};
 use crate::error::CliError;
 use crate::human::format_elapsed_ms;
 use crate::source;
@@ -37,6 +40,11 @@ pub enum PublishCommand {
 
     /// List pending publish sessions
     List,
+
+    /// Abort a pending publish
+    ///
+    /// Deletes staged publish. Nothing was written to store.
+    Abort(AbortArgs),
 }
 
 #[derive(Args)]
@@ -44,6 +52,17 @@ pub struct InitArgs {
     /// Session to publish (tag, ID, or prefix)
     #[arg(value_name = "SESSION")]
     session: String,
+}
+
+#[derive(Args)]
+pub struct AbortArgs {
+    /// Pending publish session to abort (ID or prefix)
+    #[arg(value_name = "SESSION")]
+    session: String,
+
+    /// Skip confirmation prompt
+    #[arg(short, long)]
+    yes: bool,
 }
 
 pub async fn run(
@@ -54,6 +73,7 @@ pub async fn run(
     match command {
         PublishCommand::Init(args) => init(source, stored, args),
         PublishCommand::List => list(),
+        PublishCommand::Abort(args) => abort(args),
     }
 }
 
@@ -120,6 +140,33 @@ fn origin_cell(origin: &str, highlighter: &IdHighlighter) -> String {
     };
     let commit: String = commit.chars().take(8).collect();
     format!("{} {}", highlighter.short(id), console::style(commit).dim())
+}
+
+/// Delete a pending publish after confirmation. The id is resolved
+/// before the dialog opens, so a bad argument fails without a prompt.
+fn abort(args: AbortArgs) -> Result<(), CliError> {
+    let fail = |e: String| CliError::message(format!("gage session publish abort: {e}"));
+    let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
+    let publish = PublishStore::from(&store);
+    let pending = publish
+        .get(&args.session)
+        .map_err(|e| fail(e.to_string()))?;
+
+    dialog::run("Abort publish", || {
+        dialog::step_value("Session", short_uuid(&pending.id))?;
+        dialog::step_value("Origin", &pending.attrs.origin)?;
+        cli::log::remark("Original session is unaffected")?;
+        if !args.yes {
+            let confirmed = cli::confirm("Continue?").initial_value(false).interact()?;
+            if !confirmed {
+                return Err(DialogError::Canceled);
+            }
+        }
+        publish
+            .abort(&pending.id)
+            .map_err(|e| DialogError::Other(e.into()))?;
+        Ok(format!("Aborted publish {}", short_uuid(&pending.id)).into())
+    })
 }
 
 fn init(source: Option<String>, stored: bool, args: InitArgs) -> Result<(), CliError> {
