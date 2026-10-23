@@ -41,16 +41,9 @@ use crate::style::{self, IdKind};
 use crate::text_arg::text_value;
 
 #[derive(Args)]
-#[command(args_conflicts_with_subcommands = true)]
 pub struct PublishArgs {
     #[command(subcommand)]
-    command: Option<PublishCommand>,
-
-    /// Show available named filters and exit
-    ///
-    /// Like --help, prints the list and exits whatever else is given.
-    #[arg(long)]
-    list_filters: bool,
+    command: PublishCommand,
 }
 
 /// Overrides of the `gage session` global `--source` and `--stored`
@@ -131,10 +124,11 @@ pub enum PublishCommand {
 }
 
 #[derive(Args)]
+#[command(override_usage = "gage session publish init [OPTIONS] <SESSION>")]
 pub struct InitArgs {
     /// Session to publish (tag, ID, or prefix)
-    #[arg(value_name = "SESSION")]
-    session: String,
+    #[arg(value_name = "SESSION", required_unless_present = "list_filters")]
+    session: Option<String>,
 
     /// Session source
     #[arg(
@@ -162,6 +156,12 @@ pub struct InitArgs {
     /// Skip confirmation prompt
     #[arg(short, long)]
     yes: bool,
+
+    /// Show available named filters and exit
+    ///
+    /// Like --help, prints the list and exits whatever else is given.
+    #[arg(long)]
+    list_filters: bool,
 }
 
 #[derive(Args)]
@@ -171,6 +171,7 @@ pub struct ListArgs {
 }
 
 #[derive(Args)]
+#[command(override_usage = "gage session publish redact [OPTIONS] <SESSION>")]
 pub struct RedactArgs {
     /// Pending publish session to redact (ID or prefix)
     #[arg(value_name = "SESSION", required_unless_present = "list_reasons")]
@@ -326,6 +327,7 @@ pub enum FilterCommand {
 }
 
 #[derive(Args)]
+#[command(override_usage = "gage session publish filter add [OPTIONS] <SESSION> <FILTER>")]
 pub struct FilterAddArgs {
     /// Pending publish session to change (ID or prefix)
     #[arg(value_name = "SESSION", required_unless_present = "list_filters")]
@@ -394,16 +396,7 @@ pub struct FilterListArgs {
 /// in place of the `gage session` globals: `init` takes them to
 /// resolve the original, and the rest reject them.
 pub async fn run(args: PublishArgs) -> Result<(), CliError> {
-    if args.list_filters {
-        list_filters();
-        return Ok(());
-    }
-    let Some(command) = args.command else {
-        return Err(CliError::message(
-            "gage session publish: a command is required; see gage session publish --help",
-        ));
-    };
-    match command {
+    match args.command {
         PublishCommand::Init(args) => init(args),
         PublishCommand::List(args) => {
             args.no_source.reject("gage session publish list")?;
@@ -512,7 +505,13 @@ fn origin_cell(origin: &str, highlighter: &IdHighlighter) -> String {
 /// confirms.
 fn init(args: InitArgs) -> Result<(), CliError> {
     let fail = |e: String| CliError::message(format!("gage session publish init: {e}"));
-    let session = args.session.as_str();
+    if args.list_filters {
+        list_filters();
+        return Ok(());
+    }
+    let Some(session) = args.session.as_deref() else {
+        return Err(fail("SESSION is required".into()));
+    };
     let (source, stored) = (args.source.clone(), args.stored);
     let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
     let filters = args
