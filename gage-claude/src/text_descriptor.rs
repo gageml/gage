@@ -1,7 +1,7 @@
 //! The Claude driver's text descriptor: which fields of a transcript
-//! line are identifiers, timestamps, digests, or signatures rather
-//! than text, which blocks are atomic, and which fields a named filter
-//! treats as sensitive by type. The `text_block` table and the publish
+//! line are identifiers, timestamps, digests, signatures, or
+//! enumerations rather than text, which blocks are atomic, and which
+//! fields a named filter treats as sensitive by type. The `text_block` table and the publish
 //! redaction engine read it.
 //! `schema/claude-jsonl-1/text_descriptor.json` holds the pattern
 //! lists beside the content schemas of the same format.
@@ -68,10 +68,10 @@ mod tests {
             .collect()
     }
 
-    /// No identifier, timestamp, or signature of the sample transcript
-    /// is a text value.
+    /// No identifier, timestamp, signature, or enumeration of the sample
+    /// transcript is a text value.
     #[test]
-    fn identifiers_and_timestamps_are_not_text() {
+    fn identifiers_timestamps_and_enumerations_are_not_text() {
         let structural: HashSet<&str> = [
             "/uuid",
             "/parentUuid",
@@ -80,10 +80,25 @@ mod tests {
             "/requestId",
             "/promptId",
             "/sourceToolAssistantUUID",
+            "/type",
+            "/version",
+            "/entrypoint",
+            "/userType",
+            "/permissionMode",
+            "/effort",
+            "/requestedModel",
             "/message/id",
+            "/message/role",
+            "/message/type",
+            "/message/model",
+            "/message/stop_reason",
+            "/message/usage/service_tier",
+            "/message/content/0/type",
             "/message/content/0/id",
+            "/message/content/0/name",
             "/message/content/0/tool_use_id",
             "/message/content/0/signature",
+            "/message/content/0/caller/type",
         ]
         .into_iter()
         .collect();

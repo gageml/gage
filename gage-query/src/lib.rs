@@ -1078,8 +1078,9 @@ mod tests {
     }
 
     /// `text_block` reads a stored session through its driver: one row
-    /// per text value in document order, identifiers and signatures
-    /// excluded, under the scope's session filter and the `line` filter.
+    /// per text value in document order, identifiers, signatures, and
+    /// enumerations excluded, under the scope's session filter and the
+    /// `line` filter.
     #[tokio::test]
     async fn text_block_reads_stored_sessions_through_the_driver() {
         let (_tmp, store) = open_store();
@@ -1123,37 +1124,23 @@ mod tests {
              FROM text_block ORDER BY line, seq",
         )
         .await;
-        // Every string whose field is not an identifier, timestamp,
-        // digest, or signature is a row, enumerations included; the
-        // thinking signature and the tool_use_id are not
+        // Every string whose field has degrees of freedom is a row; the
+        // identifiers, timestamps, the thinking signature, and the
+        // enumerations (type, role, model, block type) are not
         assert_eq!(
             rows,
             [
-                "1:0 user",
-                "1:1 /w/proj",
-                "1:2 user",
-                "1:3 fix it",
-                "2:0 assistant",
-                "2:1 assistant",
-                "2:2 claude-x",
-                "2:3 thinking",
-                "2:4 plan",
-                "2:5 text",
-                "2:6 done",
-                "3:0 user",
-                "3:1 user",
-                "3:2 tool_result",
-                "3:3 out",
-                "3:4 out",
+                "1:0 /w/proj",
+                "1:1 fix it",
+                "2:0 plan",
+                "2:1 done",
+                "3:0 out",
+                "3:1 out",
             ]
         );
 
-        let filtered = strings(
-            &ctx,
-            "SELECT text FROM text_block WHERE line = 2 AND seq >= 4",
-        )
-        .await;
-        assert_eq!(filtered, ["plan", "text", "done"]);
+        let filtered = strings(&ctx, "SELECT text FROM text_block WHERE line = 2").await;
+        assert_eq!(filtered, ["plan", "done"]);
     }
 
     /// The default context lists the system columns after the

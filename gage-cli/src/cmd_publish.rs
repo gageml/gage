@@ -995,7 +995,6 @@ mod tests {
     /// title, and the age.
     #[test]
     fn pending_rows_are_newest_first_with_id_origin_and_age() {
-        console::set_colors_enabled(false);
         let now = now_ms();
         let orig1 = "cccccccc-0000-4000-8000-000000000003";
         let orig2 = "dddddddd-0000-4000-8000-000000000004";
@@ -1021,12 +1020,19 @@ mod tests {
         let rows = pending_rows(vec![older.clone(), newer.clone()], &highlighter);
 
         assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0][0], short_uuid(&newer.id));
-        assert_eq!(rows[0][1], format!("{} fedcba98", short_uuid(orig2)));
+        let plain = |cell: &str| console::strip_ansi_codes(cell).into_owned();
+        assert_eq!(plain(&rows[0][0]), short_uuid(&newer.id));
+        assert_eq!(
+            plain(&rows[0][1]),
+            format!("{} fedcba98", short_uuid(orig2))
+        );
         assert_eq!(rows[0][2], "Fix the duck");
         assert_eq!(rows[0][3], "5s ago");
-        assert_eq!(rows[1][0], short_uuid(&older.id));
-        assert_eq!(rows[1][1], format!("{} 01234567", short_uuid(orig1)));
+        assert_eq!(plain(&rows[1][0]), short_uuid(&older.id));
+        assert_eq!(
+            plain(&rows[1][1]),
+            format!("{} 01234567", short_uuid(orig1))
+        );
         assert_eq!(rows[1][2], "");
         assert_eq!(rows[1][3], "1h ago");
     }
@@ -1035,10 +1041,9 @@ mod tests {
     /// shown as stored.
     #[test]
     fn origin_cell_shows_a_native_origin_as_stored() {
-        console::set_colors_enabled(false);
         let highlighter = IdHighlighter::new(vec![]);
         assert_eq!(
-            origin_cell("claude:/home/u/.claude/abc", &highlighter),
+            console::strip_ansi_codes(&origin_cell("claude:/home/u/.claude/abc", &highlighter)),
             "claude:/home/u/.claude/abc"
         );
     }

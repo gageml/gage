@@ -167,11 +167,11 @@ fn redact_applies_lines_text_and_spans_and_rejects_a_miss() {
             &[
                 RedactionInput::parse_lines("5", "opaque").unwrap(),
                 RedactionInput::parse_text("garrett", "pii", true).unwrap(),
-                // Line 1's text values in document order: type, cwd,
-                // message.role, message.content
+                // Line 1's text values in document order: cwd, then
+                // message.content
                 RedactionInput::Span {
                     line: 1,
-                    seq: 3,
+                    seq: 1,
                     reason: "language".into(),
                     literal: "fucking".into(),
                     mark: false,
