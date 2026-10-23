@@ -52,10 +52,8 @@ mod tests {
     use std::fs;
     use std::path::Path;
 
-    use gage_session::TextValue;
-    use serde_json::Value;
-
     use super::*;
+    use gage_session::TextValue;
 
     const SAMPLE: &str = include_str!("../schema/claude-jsonl-1/sample.jsonl");
 
@@ -137,16 +135,16 @@ mod tests {
         assert!(find(4, "/toolUseResult/stdout").atomic);
     }
 
-    /// A value at a safe path is an opaque token: no whitespace, and
-    /// only the characters of an identifier, a timestamp, a digest, or
-    /// a signature. A safe pattern that selects free text fails here.
+    /// A value the descriptor excludes as safe is an opaque token: no
+    /// whitespace, and only the characters of an identifier, a
+    /// timestamp, a digest, a signature, or an enumeration. The
+    /// excluded strings are found by subtraction: every string of the
+    /// line, through a descriptor with no safe list, minus the text
+    /// values the real descriptor keeps. A safe pattern that covers
+    /// free text fails here.
     fn check_safe_shapes(text: &str) -> Vec<String> {
-        let lists: Lists = serde_json::from_str(DESCRIPTOR).unwrap();
-        let paths: Vec<serde_json_path::JsonPath> = lists
-            .safe
-            .iter()
-            .map(|p| serde_json_path::JsonPath::parse(p).unwrap())
-            .collect();
+        let all = TextDescriptor::new(&[], &[]).unwrap();
+        let real = text_descriptor();
         let opaque = |s: &str| {
             s.chars()
                 .all(|c| c.is_ascii_alphanumeric() || "_:+/=.-".contains(c))
@@ -156,20 +154,23 @@ mod tests {
             if line.trim().is_empty() {
                 continue;
             }
-            let Ok(entry) = serde_json::from_str::<Value>(line) else {
+            let Ok(every) = all.text_values(line) else {
                 continue;
             };
-            for (path, compiled) in lists.safe.iter().zip(&paths) {
-                for node in compiled.query_located(&entry).iter() {
-                    if let Some(s) = node.node().as_str()
-                        && !opaque(s)
-                    {
-                        failures.push(format!(
-                            "line {}: {path} selects text at {}: {s:?}",
-                            i + 1,
-                            node.location().to_json_pointer()
-                        ));
-                    }
+            let kept: HashSet<String> = real
+                .text_values(line)
+                .unwrap()
+                .into_iter()
+                .map(|v| v.pointer)
+                .collect();
+            for v in every {
+                if !kept.contains(&v.pointer) && !opaque(&v.text) {
+                    failures.push(format!(
+                        "line {}: safe path {} holds text {:?}",
+                        i + 1,
+                        v.pointer,
+                        v.text
+                    ));
                 }
             }
         }

@@ -5,7 +5,7 @@
 //! rest. [`TextBlockBatch`] builds the table's batch, so every driver
 //! produces one schema.
 
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 use std::error::Error;
 use std::fmt;
 use std::sync::{Arc, LazyLock};
@@ -128,12 +128,172 @@ pub fn text_blocks(
 /// fields whose type is not text, the subtrees whose text values are
 /// redacted whole, and per named filter the fields whose type says
 /// their value is sensitive. All are lists of JSONPath (RFC 9535)
-/// patterns evaluated against each entry.
+/// patterns. A pattern selects a node and covers every string under
+/// it.
 #[derive(Debug, Clone)]
 pub struct TextDescriptor {
-    safe: Vec<JsonPath>,
-    atomic: Vec<JsonPath>,
+    safe: PathSet,
+    atomic: PathSet,
     filters: Vec<FilterPaths>,
+}
+
+/// A set of path patterns matched against a string's JSON Pointer by
+/// prefix. A plain pattern, member names and `[*]` only, is held as a
+/// normalized pointer prefix in a prefix-free ordered set, so one
+/// predecessor lookup decides it in O(log n) comparisons. A pattern
+/// JSONPath alone can express, a filter or a descendant, is evaluated
+/// against the parsed entry.
+#[derive(Debug, Clone, Default)]
+struct PathSet {
+    prefixes: BTreeSet<String>,
+    irregular: Vec<JsonPath>,
+}
+
+impl PathSet {
+    fn compile(patterns: &[&str]) -> std::result::Result<Self, DescriptorError> {
+        let mut set = Self::default();
+        for pattern in patterns {
+            match plain_prefix(pattern) {
+                Some(prefix) => set.insert(prefix),
+                None => {
+                    set.irregular
+                        .push(JsonPath::parse(pattern).map_err(|e| DescriptorError {
+                            pattern: pattern.to_string(),
+                            message: e.to_string(),
+                        })?)
+                }
+            }
+        }
+        Ok(set)
+    }
+
+    /// Insert `prefix`, keeping the set prefix-free: a prefix already
+    /// covered by an ancestor is redundant, and descendants of a new
+    /// prefix are removed.
+    fn insert(&mut self, prefix: String) {
+        if self.covers_normalized(&prefix) {
+            return;
+        }
+        let below: Vec<String> = self
+            .prefixes
+            .range(prefix.clone()..)
+            .take_while(|p| covered_by(p, &prefix))
+            .cloned()
+            .collect();
+        for p in below {
+            self.prefixes.remove(&p);
+        }
+        self.prefixes.insert(prefix);
+    }
+
+    /// Whether a normalized pointer is at or under one of the plain
+    /// prefixes. The set is prefix-free, so the greatest prefix at or
+    /// below `key` is the only candidate.
+    fn covers_normalized(&self, key: &str) -> bool {
+        self.prefixes
+            .range(..=key.to_string())
+            .next_back()
+            .is_some_and(|p| covered_by(key, p))
+    }
+
+    /// The pointers the irregular patterns select in `value`; empty
+    /// when there are none.
+    fn irregular_pointers(&self, value: Option<&Value>) -> Vec<String> {
+        let Some(value) = value else {
+            return Vec::new();
+        };
+        self.irregular
+            .iter()
+            .flat_map(|p| {
+                p.query_located(value)
+                    .locations()
+                    .map(|l| l.to_json_pointer())
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    /// Whether a string at `pointer` (and its normalized form `key`)
+    /// is covered, by a plain prefix or by a node an irregular pattern
+    /// selected.
+    fn covers(&self, pointer: &str, key: &str, irregular: &[String]) -> bool {
+        self.covers_normalized(key) || irregular.iter().any(|root| covered_by(pointer, root))
+    }
+
+    fn has_irregular(&self) -> bool {
+        !self.irregular.is_empty()
+    }
+}
+
+/// Compile JSONPath patterns, naming the one that fails.
+fn compile(patterns: &[&str]) -> std::result::Result<Vec<JsonPath>, DescriptorError> {
+    patterns
+        .iter()
+        .map(|p| {
+            JsonPath::parse(p).map_err(|e| DescriptorError {
+                pattern: p.to_string(),
+                message: e.to_string(),
+            })
+        })
+        .collect()
+}
+
+/// Whether `key` equals `prefix` or continues it at a segment boundary.
+fn covered_by(key: &str, prefix: &str) -> bool {
+    key.strip_prefix(prefix)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+}
+
+/// The normalized pointer prefix of a plain pattern: `$`, then `.name`
+/// and `[*]` steps, with a trailing `.*` or `[*]` selecting the parent
+/// subtree. `None` for any other JSONPath, which is evaluated as such.
+fn plain_prefix(pattern: &str) -> Option<String> {
+    let mut rest = pattern.strip_prefix('$')?;
+    let mut prefix = String::new();
+    while !rest.is_empty() {
+        if let Some(after) = rest.strip_prefix("[*]") {
+            prefix.push_str("/*");
+            rest = after;
+        } else if let Some(after) = rest.strip_prefix('.') {
+            if after.starts_with('.') {
+                return None;
+            }
+            let end = after.find(['.', '[']).unwrap_or(after.len());
+            let name = &after[..end];
+            if name.is_empty() || name.contains('?') {
+                return None;
+            }
+            if name == "*" {
+                return if after[end..].is_empty() {
+                    Some(prefix)
+                } else {
+                    None
+                };
+            }
+            prefix.push('/');
+            prefix.push_str(&name.replace('~', "~0").replace('/', "~1"));
+            rest = &after[end..];
+        } else {
+            return None;
+        }
+    }
+    Some(prefix)
+}
+
+/// A pointer with every array index replaced by `*`, the form the
+/// plain prefixes take.
+fn normalize(pointer: &str) -> String {
+    pointer
+        .split('/')
+        .map(|seg| {
+            if !seg.is_empty() && seg.bytes().all(|b| b.is_ascii_digit()) {
+                "*"
+            } else {
+                seg
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// The typed-sensitive paths of one named filter.
@@ -185,8 +345,8 @@ impl TextDescriptor {
     /// Compile the `safe` and `atomic` pattern lists.
     pub fn new(safe: &[&str], atomic: &[&str]) -> std::result::Result<Self, DescriptorError> {
         Ok(Self {
-            safe: compile(safe)?,
-            atomic: compile(atomic)?,
+            safe: PathSet::compile(safe)?,
+            atomic: PathSet::compile(atomic)?,
             filters: Vec::new(),
         })
     }
@@ -247,15 +407,20 @@ impl TextDescriptor {
     }
 
     /// The text values of one entry, in document order. `json` is the
-    /// entry as the harness wrote it. A string at a safe path is
-    /// excluded even inside an atomic subtree.
+    /// entry as the harness wrote it. A string at or under a safe path
+    /// is excluded even inside an atomic subtree. The entry is parsed
+    /// into a `Value` only when an irregular pattern needs it.
     pub fn text_values(
         &self,
         json: &str,
     ) -> std::result::Result<Vec<TextValue>, serde_json::Error> {
-        let value: Value = serde_json::from_str(json)?;
-        let safe = pointers(&self.safe, &value);
-        let atomic = pointers(&self.atomic, &value);
+        let value: Option<Value> = if self.safe.has_irregular() || self.atomic.has_irregular() {
+            Some(serde_json::from_str(json)?)
+        } else {
+            None
+        };
+        let safe_roots = self.safe.irregular_pointers(value.as_ref());
+        let atomic_roots = self.atomic.irregular_pointers(value.as_ref());
         let mut strings = Vec::new();
         let mut deserializer = serde_json::Deserializer::from_str(json);
         Collect {
@@ -265,44 +430,20 @@ impl TextDescriptor {
         .deserialize(&mut deserializer)?;
         Ok(strings
             .into_iter()
-            .filter(|(pointer, _)| !safe.contains(pointer))
-            .map(|(pointer, text)| {
-                let atomic = atomic
-                    .iter()
-                    .any(|root| pointer == *root || pointer.starts_with(&format!("{root}/")));
-                TextValue {
+            .filter_map(|(pointer, text)| {
+                let key = normalize(&pointer);
+                if self.safe.covers(&pointer, &key, &safe_roots) {
+                    return None;
+                }
+                let atomic = self.atomic.covers(&pointer, &key, &atomic_roots);
+                Some(TextValue {
                     pointer,
                     text,
                     atomic,
-                }
+                })
             })
             .collect())
     }
-}
-
-fn compile(patterns: &[&str]) -> std::result::Result<Vec<JsonPath>, DescriptorError> {
-    patterns
-        .iter()
-        .map(|p| {
-            JsonPath::parse(p).map_err(|e| DescriptorError {
-                pattern: p.to_string(),
-                message: e.to_string(),
-            })
-        })
-        .collect()
-}
-
-/// The JSON Pointers of every node the patterns select in `value`.
-fn pointers(paths: &[JsonPath], value: &Value) -> HashSet<String> {
-    paths
-        .iter()
-        .flat_map(|p| {
-            p.query_located(value)
-                .locations()
-                .map(|l| l.to_json_pointer())
-                .collect::<Vec<_>>()
-        })
-        .collect()
 }
 
 /// Walks a JSON document in its written order and records every
@@ -468,6 +609,58 @@ mod tests {
             FilterValues::default()
         );
         assert_eq!(descriptor.filter_names().collect::<Vec<_>>(), ["pii"]);
+    }
+
+    /// A safe pattern covers the subtree under the node it selects, and
+    /// a descendant pattern falls back to JSONPath evaluation.
+    #[test]
+    fn safe_covers_subtrees_and_irregular_patterns_still_work() {
+        let descriptor = TextDescriptor::new(
+            &[
+                "$.message.usage",
+                "$..git_state.error",
+                "$.permissionDecision.*",
+            ],
+            &[],
+        )
+        .unwrap();
+        let line = r#"{"message":{"usage":{"service_tier":"standard","iterations":[{"type":"message"}]},"text":"hi"},"permissionDecision":{"decision":"accept"},"params":{"git_state":{"error":"pending","root":"/w"}}}"#;
+        let pointers: Vec<String> = descriptor
+            .text_values(line)
+            .unwrap()
+            .into_iter()
+            .map(|v| v.pointer)
+            .collect();
+        assert_eq!(pointers, ["/message/text", "/params/git_state/root"]);
+    }
+
+    #[test]
+    fn plain_prefixes_normalize_and_the_set_stays_prefix_free() {
+        assert_eq!(
+            plain_prefix("$.message.content[*].type").as_deref(),
+            Some("/message/content/*/type")
+        );
+        assert_eq!(
+            plain_prefix("$.permissionDecision.*").as_deref(),
+            Some("/permissionDecision")
+        );
+        assert_eq!(plain_prefix("$..git_state").as_deref(), None);
+        assert_eq!(
+            plain_prefix("$.message.content[?@.type == 'x']").as_deref(),
+            None
+        );
+        assert_eq!(
+            normalize("/message/content/12/text"),
+            "/message/content/*/text"
+        );
+
+        let set = PathSet::compile(&["$.a.b", "$.a", "$.a.c", "$.ab"]).unwrap();
+        assert_eq!(
+            set.prefixes.iter().cloned().collect::<Vec<_>>(),
+            ["/a", "/ab"]
+        );
+        assert!(set.covers_normalized("/a/c/d"));
+        assert!(!set.covers_normalized("/abc"));
     }
 
     #[test]
