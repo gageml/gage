@@ -23,13 +23,10 @@ issues they hold. Results are YAML pages naming their cursor and next page.
 
 Tables:
 
-- session (id, project, title, model, message_count, line_count, is_empty,
-  input_tokens, output_tokens, cached_tokens, cost_usd, created, modified,
-  session_type, driver, content_format, native_id, native_source,
-  native_size, native_mtime, files_changed, files_referenced) - token columns
-  are session totals: prompt tokens sent, tokens generated, cached part of
-  input; cost_usd is the harness's figure or null; files_changed are
-  paths a call wrote, files_referenced other paths its input named
+- session (id, project, created, modified, session_type, driver,
+  content_format, size, origin, summary) - `summary` is the driver's JSON:
+  title, model, message_count, line_count, is_empty, the token totals, and
+  cost_usd when reported; `origin` is the session's source URL
 - entry (session_id, line, uuid, type, subtype, timestamp, raw) - one row per
   transcript line, `raw` its JSON
 - message (session_id, line, uuid, type, subtype, timestamp, text,
@@ -39,6 +36,8 @@ Tables:
   result_uuid, result_timestamp, output, is_error, input_raw, result_raw,
   files_changed) - one tool call with its result; `files_changed` is the
   paths written, null when unknown
+- text_block (session_id, line, seq, text) - each text value of an entry in
+  document order; ids, timestamps, and enumerations are left out
 - note (id, name, author, value, text, metadata, target, scan, work_id,
   created, modified) - `name` is the note kind
 - session_note (session_id, note_id, lines) - notes on a session, with the

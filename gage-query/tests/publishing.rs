@@ -1,5 +1,6 @@
 //! `GAGE_SHOW_PUBLISHING=1` includes a pending publish working tree in
-//! the `session`, `entry`, `message`, and `tool_use` tables. The test
+//! the `session`, `entry`, `message`, `tool_use`, and `text_block`
+//! tables. The test
 //! runs in its own process, so its environment mutation does not race
 //! the library tests.
 
@@ -101,6 +102,17 @@ async fn pending_publish_appears_in_row_tables_under_env() {
     )
     .await;
     assert_eq!(tools, ["Bash"], "tool_use");
+
+    let blocks = strings(
+        &ctx,
+        &format!("SELECT text FROM text_block WHERE session_id = '{id}' ORDER BY line, seq"),
+    )
+    .await;
+    assert_eq!(
+        blocks,
+        ["/w/proj", "hello there", "hi", "Bash", "ls", "out"],
+        "text_block"
+    );
 
     unsafe {
         std::env::remove_var("GAGE_SHOW_PUBLISHING");

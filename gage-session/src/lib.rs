@@ -23,6 +23,7 @@ pub mod content_schema;
 pub mod filter;
 pub mod status;
 pub mod system_col;
+pub mod text_block;
 pub mod tool_use;
 
 pub use agent::{
@@ -33,6 +34,10 @@ pub use content_schema::{
 };
 pub use status::{AuthInfo, DriverStatus, Field, HarnessInfo, InstallInfo};
 pub use system_col::{SYSTEM_META_KEY, is_system, system};
+pub use text_block::{
+    DescriptorError, TextBlock, TextBlockBatch, TextDescriptor, TextValue, text_block_batch,
+    text_block_schema, text_blocks,
+};
 pub use tool_use::{ToolUse, ToolUseBatch, tool_use_batch, tool_use_schema};
 
 /// What a driver opens and how it reads it. `new` names the source as
@@ -144,6 +149,15 @@ pub trait Driver: Send + Sync {
     /// undescribed.
     fn content_schemas(&self) -> Vec<ContentSchema> {
         Vec::new()
+    }
+
+    /// The driver's description of the strings it writes in
+    /// `content_format`: which fields are not text and which subtrees
+    /// are atomic, for the `text_block` table and the publish
+    /// redaction engine. The default is none, for a driver whose
+    /// sessions cannot be published.
+    fn text_descriptor(&self, _content_format: &str) -> Option<TextDescriptor> {
+        None
     }
 
     /// Start an agent on this driver's harness and return the handle
@@ -438,6 +452,20 @@ pub trait StoredSession {
     /// call-line order. The core builds the `tool_use` table from the
     /// result.
     fn tool_uses(&mut self) -> Box<dyn Iterator<Item = Result<ToolUse, DriverError>> + '_>;
+    /// The native JSON text of each entry, in line order, for the
+    /// `text_block` walk: the same lines `entries` yields rows for, as
+    /// the harness wrote them, so the walk sees each entry's document
+    /// order.
+    fn entry_json(&mut self) -> Box<dyn Iterator<Item = Result<EntryJson, DriverError>> + '_>;
+}
+
+/// One entry of a stored session as the harness wrote it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntryJson {
+    /// 1-based line in the session's native content
+    pub line: u32,
+    /// The entry's JSON text
+    pub json: String,
 }
 
 /// The attributes of a native session. An implementation decides how

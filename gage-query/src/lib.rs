@@ -8,11 +8,11 @@
 //!
 //! Named tables are store data. `session` is one row per live stored
 //! session object, from [`gage_store::StoredSessionTable`]. `entry`,
-//! `message`, and `tool_use` are the rows of those sessions: the core
-//! resolves the session set and plans every read ([`scope`]), and the
-//! driver that wrote each session deserializes its bytes into
-//! normalized rows the core turns into batches ([`rows`],
-//! [`stored_rows`]).
+//! `message`, `tool_use`, and `text_block` are the rows of those
+//! sessions: the core resolves the session set and plans every read
+//! ([`scope`]), and the driver that wrote each session deserializes
+//! its bytes into normalized rows the core turns into batches
+//! ([`rows`], [`stored_rows`]).
 //! `note` is one row per live note object, from
 //! [`gage_store::StoredNoteTable`]. `issue` is one row per live issue
 //! object and `issue_event` one row per change entry across them.
@@ -188,7 +188,14 @@ impl ContextBuilder {
             ),
             (
                 "tool_use",
-                Arc::new(StoredRowsTable::new(RowKind::ToolUse, sessions)),
+                Arc::new(StoredRowsTable::new(
+                    RowKind::ToolUse,
+                    Arc::clone(&sessions),
+                )),
+            ),
+            (
+                "text_block",
+                Arc::new(StoredRowsTable::new(RowKind::TextBlock, sessions)),
             ),
             ("note", Arc::new(StoredNoteTable::new(Arc::clone(&store)))),
             ("dataset", dataset_table(Arc::clone(&store))),
@@ -249,8 +256,8 @@ impl ContextBuilder {
 }
 
 /// Register one scan's tables: `session` at the members' linked
-/// versions, `entry`, `message`, and `tool_use` over them, and every
-/// other table from the scan source.
+/// versions, `entry`, `message`, `tool_use`, and `text_block` over
+/// them, and every other table from the scan source.
 fn build_scan_scope(
     ctx: SessionContext,
     store: Arc<Mutex<Store>>,
@@ -290,7 +297,14 @@ fn build_scan_scope(
         ),
         (
             "tool_use",
-            Arc::new(StoredRowsTable::new(RowKind::ToolUse, sessions)),
+            Arc::new(StoredRowsTable::new(
+                RowKind::ToolUse,
+                Arc::clone(&sessions),
+            )),
+        ),
+        (
+            "text_block",
+            Arc::new(StoredRowsTable::new(RowKind::TextBlock, sessions)),
         ),
     ];
     tables.extend(scan_scope_tables(&store, scope.source()));
@@ -1061,6 +1075,68 @@ mod tests {
         )
         .await;
         assert_eq!(native_rows, ["Edit", "Read"]);
+    }
+
+    /// `text_block` reads a stored session through its driver: one row
+    /// per text value in document order, structural fields excluded,
+    /// under the scope's session filter and the `line` filter.
+    #[tokio::test]
+    async fn text_block_reads_stored_sessions_through_the_driver() {
+        let (_tmp, store) = open_store();
+        let claude_root = tempfile::tempdir().unwrap();
+        let native_id = "11111111-2222-3333-4444-777777777777";
+        let project_dir = claude_root.path().join("projects").join("-w-proj");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        std::fs::write(
+            project_dir.join(format!("{native_id}.jsonl")),
+            concat!(
+                r#"{"type":"user","uuid":"u1","timestamp":"2025-01-01T00:00:00Z","cwd":"/w/proj","message":{"role":"user","content":"fix it"}}"#,
+                "\n",
+                r#"{"type":"assistant","uuid":"a1","timestamp":"2025-01-01T00:00:01Z","message":{"role":"assistant","model":"claude-x","content":[{"type":"thinking","thinking":"plan","signature":"sig"},{"type":"text","text":"done"}]}}"#,
+                "\n",
+                r#"{"type":"user","uuid":"u2","timestamp":"2025-01-01T00:00:02Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"out"}]},"toolUseResult":{"stdout":"out"}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        let spec = format!("claude:{}", claude_root.path().display());
+        let registry = DriverRegistry::builtin();
+        let driver = registry.driver_for(&spec).unwrap();
+        let source = driver
+            .open_source(SourceOptions::new(&spec).cache_root(claude_root.path().join("cache")))
+            .unwrap();
+        let mut native = source.open_native(native_id).unwrap();
+        {
+            let store = store.lock().unwrap();
+            SessionStore::from(&*store)
+                .add(driver.as_ref(), native.as_mut())
+                .unwrap();
+        }
+
+        let ctx = ContextBuilder::new(Some(store))
+            .cache_root(claude_root.path().join("cache"))
+            .build()
+            .await;
+        let rows = strings(
+            &ctx,
+            "SELECT CAST(line AS VARCHAR) || ':' || CAST(seq AS VARCHAR) || ' ' || text \
+             FROM text_block ORDER BY line, seq",
+        )
+        .await;
+        assert_eq!(
+            rows,
+            [
+                "1:0 /w/proj",
+                "1:1 fix it",
+                "2:0 plan",
+                "2:1 done",
+                "3:0 out",
+                "3:1 out",
+            ]
+        );
+
+        let filtered = strings(&ctx, "SELECT text FROM text_block WHERE line = 2").await;
+        assert_eq!(filtered, ["plan", "done"]);
     }
 
     /// The default context lists the system columns after the

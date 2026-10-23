@@ -15,3 +15,4 @@ pub mod session;
 pub mod session_reader;
 pub mod stats;
 pub mod tables;
+mod text_descriptor;

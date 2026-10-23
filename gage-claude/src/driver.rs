@@ -22,10 +22,10 @@ use std::time::{Duration, SystemTime};
 use gage_core::config::{default_cache_root, plugin_marketplace_dir};
 use gage_session::{
     AgentSession, AgentSpec, AuthInfo, ContentSchema, ContentSink, ContentSource, Driver,
-    DriverError, DriverStatus, DriverTables, Entry, Field, HarnessInfo, InstallInfo, InstallReport,
-    InstallUi, MaintenanceOutcome, MaintenanceStatus, MessageTextHit, NativeLookupError,
-    NativeSession, ResolveSession, SessionAttrs, SessionLiveError, Source, SourceOptions,
-    StoredSession, ToolUse, split_scheme,
+    DriverError, DriverStatus, DriverTables, Entry, EntryJson, Field, HarnessInfo, InstallInfo,
+    InstallReport, InstallUi, MaintenanceOutcome, MaintenanceStatus, MessageTextHit,
+    NativeLookupError, NativeSession, ResolveSession, SessionAttrs, SessionLiveError, Source,
+    SourceOptions, StoredSession, TextDescriptor, ToolUse, split_scheme,
 };
 use serde::Deserialize;
 
@@ -46,6 +46,7 @@ use crate::session::{
 };
 use crate::session_reader::SessionReader;
 use crate::tables::{EntryTable, MessageTable, SessionTable, ToolUseTable};
+use crate::text_descriptor;
 
 /// MCP server name under which Gage registers in `.mcp.json`.
 const MCP_SERVER_NAME: &str = "gage";
@@ -119,6 +120,10 @@ impl Driver for ClaudeDriver {
     /// Drops the `claude-` vendor prefix every Claude model name carries
     fn content_schemas(&self) -> Vec<ContentSchema> {
         content_schema::content_schemas()
+    }
+
+    fn text_descriptor(&self, content_format: &str) -> Option<TextDescriptor> {
+        (content_format == CONTENT_FORMAT).then(text_descriptor::text_descriptor)
     }
 
     fn format_model(&self, model: &str) -> String {
@@ -1190,6 +1195,43 @@ impl StoredSession for ClaudeStoredSession {
         }
         Box::new(collector.finish().into_iter().map(Ok).chain(failures))
     }
+
+    /// Each line of `session.jsonl` as written, numbered as `entries`
+    /// numbers it. Blank lines, unparseable lines, and lines without a
+    /// type consume a line number and yield nothing, as they do for
+    /// `entries`.
+    fn entry_json(&mut self) -> Box<dyn Iterator<Item = Result<EntryJson, DriverError>> + '_> {
+        use std::io::BufRead;
+        let reader = match self.source.open("session.jsonl") {
+            Ok(r) => io::BufReader::new(r),
+            Err(e) => return Box::new(std::iter::once(Err(DriverError::Io(e)))),
+        };
+        Box::new(
+            reader
+                .lines()
+                .enumerate()
+                .filter_map(|(i, item)| match item {
+                    Ok(text) => is_entry(&text).then(|| {
+                        Ok(EntryJson {
+                            line: i as u32 + 1,
+                            json: text,
+                        })
+                    }),
+                    Err(e) => Some(Err(DriverError::Io(e))),
+                }),
+        )
+    }
+}
+
+/// Whether a transcript line is one `entries` yields a row for: JSON
+/// with a `type`.
+fn is_entry(text: &str) -> bool {
+    if text.trim().is_empty() {
+        return false;
+    }
+    serde_json::from_str::<serde_json::Value>(text)
+        .ok()
+        .is_some_and(|v| v.get("type").and_then(serde_json::Value::as_str).is_some())
 }
 
 #[cfg(test)]

@@ -1,0 +1,37 @@
+{
+  "safe": [
+    "$.uuid",
+    "$.parentUuid",
+    "$.sessionId",
+    "$.timestamp",
+    "$.type",
+    "$.subtype",
+    "$.version",
+    "$.entrypoint",
+    "$.userType",
+    "$.promptId",
+    "$.permissionMode",
+    "$.requestId",
+    "$.effort",
+    "$.requestedModel",
+    "$.slug",
+    "$.sourceToolAssistantUUID",
+    "$.permissionDecision.*",
+    "$.message.role",
+    "$.message.id",
+    "$.message.type",
+    "$.message.model",
+    "$.message.stop_reason",
+    "$.message.usage.service_tier",
+    "$.message.content[*].type",
+    "$.message.content[*].id",
+    "$.message.content[*].tool_use_id",
+    "$.message.content[*].signature",
+    "$.message.content[*].caller.type"
+  ],
+  "atomic": [
+    "$.message.content[?@.type == 'tool_use']",
+    "$.message.content[?@.type == 'tool_result']",
+    "$.toolUseResult"
+  ]
+}
