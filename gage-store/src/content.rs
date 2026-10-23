@@ -1,11 +1,11 @@
 //! Read access to the byte tree a stored session version carries.
 
 use std::fs;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Stdio};
 
-use gage_session::ContentSource;
+use gage_session::{ContentSink, ContentSource};
 
 use crate::git::{git_in, run};
 
@@ -136,6 +136,31 @@ impl ContentSource for DirContentSource {
 
     fn open(&self, path: &str) -> io::Result<Box<dyn Read + Send>> {
         Ok(Box::new(fs::File::open(self.files_dir.join(path))?))
+    }
+}
+
+/// A [`ContentSink`] over a directory on disk, the `files.d` of a
+/// pending publish working tree. A path's parent directories are
+/// created as needed.
+pub struct DirContentSink {
+    files_dir: PathBuf,
+}
+
+impl DirContentSink {
+    pub fn new(files_dir: impl Into<PathBuf>) -> Self {
+        Self {
+            files_dir: files_dir.into(),
+        }
+    }
+}
+
+impl ContentSink for DirContentSink {
+    fn create<'a>(&'a mut self, path: &str) -> io::Result<Box<dyn Write + 'a>> {
+        let dest = self.files_dir.join(path);
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        Ok(Box::new(fs::File::create(dest)?))
     }
 }
 

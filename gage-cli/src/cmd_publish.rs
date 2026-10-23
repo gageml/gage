@@ -8,28 +8,32 @@
 //! object id and commit for `origin`.
 
 use std::cmp::Reverse;
+use std::io;
 use std::sync::Arc;
 
 use clap::{Args, Subcommand};
 use cliclack as cli;
 use gage_core::style::IdHighlighter;
 use gage_core::uuid::short_uuid;
+use gage_publish::{FilterSpec, PublishDefinition, Publisher, RedactionInput};
 use gage_session::{Driver, NativeSession, SourceOptions};
 use gage_store::{PendingPublish, PublishStore, SESSION_TYPE, SessionRecord, SessionStore, Store};
 use tabled::{
     Table,
     settings::{
-        Color, Style,
+        Alignment, Color, Style,
         object::{Columns, Object, Rows},
     },
 };
 
+use crate::author::resolve_author;
 use crate::dialog::{self, DialogError};
 use crate::error::CliError;
-use crate::human::format_elapsed_ms;
+use crate::human::{count, format_elapsed_ms};
 use crate::session_filter::{SessionLine, preview_sessions};
 use crate::source;
 use crate::style::{self, IdKind};
+use crate::text_arg::text_value;
 
 #[derive(Subcommand)]
 pub enum PublishCommand {
@@ -43,6 +47,16 @@ pub enum PublishCommand {
     /// List pending publish sessions
     List,
 
+    /// Add redactions to a pending publish
+    ///
+    /// Each redaction is applied to staged session at once. A text
+    /// redaction is matched against every text value of session; a
+    /// span redaction applies within one value.
+    Redact(RedactArgs),
+
+    /// Show filters and redactions of a pending publish
+    Status(StatusArgs),
+
     /// Abort a pending publish
     ///
     /// Deletes staged publish. Nothing was written to store.
@@ -52,12 +66,73 @@ pub enum PublishCommand {
 #[derive(Args)]
 pub struct InitArgs {
     /// Session to publish (tag, ID, or prefix)
+    ///
+    /// With --reinit, pending publish session to update (ID or prefix).
     #[arg(value_name = "SESSION")]
     session: String,
+
+    /// Filter to apply (repeatable)
+    ///
+    /// A filter name, or an instruction to an LLM describing what to
+    /// remove. A text instruction may be given as @PATH to read it from
+    /// a file. Filter names are "pii", "nsfw", and "secret".
+    #[arg(short, long, value_name = "FILTER")]
+    filter: Vec<String>,
+
+    /// Replace filters of a pending publish
+    ///
+    /// SESSION names a pending publish. Filters given replace its
+    /// filter list, so a filter to keep is repeated. To publish a
+    /// different session, abort and run init with that session.
+    #[arg(long)]
+    reinit: bool,
 
     /// Skip confirmation prompt
     #[arg(short, long)]
     yes: bool,
+}
+
+#[derive(Args)]
+pub struct RedactArgs {
+    /// Pending publish session to redact (ID or prefix)
+    #[arg(value_name = "SESSION")]
+    session: String,
+
+    /// Lines to drop (repeatable)
+    ///
+    /// "LINE", "LINE LINE_END", or "LINE LINE_END REASON". Lines are
+    /// session entry lines, as in entry table. Reason defaults to
+    /// "scope".
+    #[arg(short, long, value_name = "LINES")]
+    lines: Vec<String>,
+
+    /// Text to redact everywhere (repeatable)
+    ///
+    /// "REASON TEXT". TEXT is matched case-insensitively against every
+    /// text value of session and runs to end of value. Reason is an
+    /// information reason: pii, secret, confidential, opaque, policy,
+    /// safety, or statute.
+    #[arg(short, long, value_name = "TEXT")]
+    text: Vec<String>,
+
+    /// Span to redact within one value (repeatable)
+    ///
+    /// "LINE SEQ REASON MODE TEXT". LINE and SEQ name a text_block row.
+    /// MODE is "remove" or "mark". Reason is an expression reason:
+    /// privacy.
+    #[arg(short = 'p', long, value_name = "SPAN")]
+    span: Vec<String>,
+
+    /// Skip confirmation prompt
+    #[arg(short, long)]
+    yes: bool,
+}
+
+#[derive(Args)]
+pub struct StatusArgs {
+    /// Pending publish session to show (ID or prefix)
+    #[arg(value_name = "SESSION")]
+    session: String,
 }
 
 #[derive(Args)]
@@ -79,6 +154,8 @@ pub async fn run(
     match command {
         PublishCommand::Init(args) => init(source, stored, args),
         PublishCommand::List => list(),
+        PublishCommand::Redact(args) => redact(args),
+        PublishCommand::Status(args) => status(args),
         PublishCommand::Abort(args) => abort(args),
     }
 }
@@ -148,33 +225,6 @@ fn origin_cell(origin: &str, highlighter: &IdHighlighter) -> String {
     format!("{} {}", highlighter.short(id), console::style(commit).dim())
 }
 
-/// Delete a pending publish after confirmation. The id is resolved
-/// before the dialog opens, so a bad argument fails without a prompt.
-fn abort(args: AbortArgs) -> Result<(), CliError> {
-    let fail = |e: String| CliError::message(format!("gage session publish abort: {e}"));
-    let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
-    let publish = PublishStore::from(&store);
-    let pending = publish
-        .get(&args.session)
-        .map_err(|e| fail(e.to_string()))?;
-
-    dialog::run("Abort publish", || {
-        dialog::step_value("Session", short_uuid(&pending.id))?;
-        dialog::step_value("Origin", &pending.attrs.origin)?;
-        cli::log::remark("Original session is unaffected")?;
-        if !args.yes {
-            let confirmed = cli::confirm("Continue?").initial_value(false).interact()?;
-            if !confirmed {
-                return Err(DialogError::Canceled);
-            }
-        }
-        publish
-            .abort(&pending.id)
-            .map_err(|e| DialogError::Other(e.into()))?;
-        Ok(format!("Aborted publish {}", short_uuid(&pending.id)).into())
-    })
-}
-
 /// Stage a publish after confirmation. The original is resolved
 /// before the dialog opens, so a bad argument fails without a prompt,
 /// and a native session is added to the store only after the user
@@ -182,6 +232,23 @@ fn abort(args: AbortArgs) -> Result<(), CliError> {
 fn init(source: Option<String>, stored: bool, args: InitArgs) -> Result<(), CliError> {
     let fail = |e: String| CliError::message(format!("gage session publish init: {e}"));
     let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
+    let filters = args
+        .filter
+        .iter()
+        .map(|text| {
+            text_value("gage session publish init", "--filter", text)
+                .map(|text| FilterSpec::from_text(text.trim_end()))
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| fail(e.to_string()))?;
+    if args.reinit {
+        if source.is_some() {
+            return Err(fail(
+                "--source does not apply with --reinit; SESSION names a pending publish".into(),
+            ));
+        }
+        return reinit(&store, &args.session, &filters, args.yes);
+    }
     let original = resolve_original(&store, source.as_deref(), stored, &args.session)?;
 
     dialog::run("Publish session", || {
@@ -209,6 +276,7 @@ fn init(source: Option<String>, stored: bool, args: InitArgs) -> Result<(), CliE
             }
         };
         preview_sessions(&[line], kind, None)?;
+        filters_step(&filters)?;
         if !args.yes {
             let confirmed = cli::confirm("Continue?").initial_value(true).interact()?;
             if !confirmed {
@@ -216,10 +284,252 @@ fn init(source: Option<String>, stored: bool, args: InitArgs) -> Result<(), CliE
             }
         }
         let record = original.into_stored(&store).map_err(DialogError::Failed)?;
-        let outcome = PublishStore::from(&store)
-            .init(&record)
+        let publisher = Publisher::new(&store);
+        let outcome = publisher
+            .init(&record, &filters)
             .map_err(|e| DialogError::Failed(e.to_string()))?;
+        let definition = publisher
+            .definition(&outcome.id)
+            .map_err(|e| DialogError::Failed(e.to_string()))?;
+        report_filter_redactions(&definition)?;
         Ok(format!("Staged publish {}", short_uuid(&outcome.id)).into())
+    })
+}
+
+/// Replace the filters of a pending publish after confirmation. The
+/// old filters' redactions go, the new filters run, and the staged
+/// session is rebuilt.
+fn reinit(store: &Store, prefix: &str, filters: &[FilterSpec], yes: bool) -> Result<(), CliError> {
+    let fail = |e: String| CliError::message(format!("gage session publish init: {e}"));
+    let publisher = Publisher::new(store);
+    let pending = publisher
+        .store()
+        .get(prefix)
+        .map_err(|e| fail(e.to_string()))?;
+    dialog::run("Publish session", || {
+        dialog::step_value("Session", short_uuid(&pending.id))?;
+        dialog::step_value("Origin", &pending.attrs.origin)?;
+        filters_step(filters)?;
+        if !yes {
+            let confirmed = cli::confirm("Continue?").initial_value(true).interact()?;
+            if !confirmed {
+                return Err(DialogError::Canceled);
+            }
+        }
+        let definition = publisher
+            .reinit(&pending.id, filters)
+            .map_err(|e| DialogError::Failed(e.to_string()))?;
+        report_filter_redactions(&definition)?;
+        Ok(format!("Updated publish {}", short_uuid(&pending.id)).into())
+    })
+}
+
+/// The `Filters` step of the dialog: one line per filter, or `none`.
+fn filters_step(filters: &[FilterSpec]) -> io::Result<()> {
+    if filters.is_empty() {
+        return dialog::step_value("Filters", "none");
+    }
+    dialog::step_list("Filters", filters.iter().map(|f| f.to_string()))
+}
+
+/// Report what the named filters' deterministic rules redacted.
+fn report_filter_redactions(definition: &PublishDefinition) -> io::Result<()> {
+    let by_filter: Vec<(String, usize, usize)> = definition
+        .filters
+        .iter()
+        .filter_map(|f| f.spec().name().map(String::from))
+        .map(|name| {
+            let author = format!("filter:{name}");
+            let mine: Vec<_> = definition
+                .redactions
+                .iter()
+                .filter(|r| r.author == author)
+                .collect();
+            let instances = mine.iter().map(|r| r.instances).sum();
+            (name, mine.len(), instances)
+        })
+        .collect();
+    if by_filter.is_empty() {
+        return Ok(());
+    }
+    dialog::step_list(
+        "Filter redactions",
+        by_filter.into_iter().map(|(name, redactions, instances)| {
+            format!(
+                "{name}: {}, {}",
+                count(redactions, "redaction"),
+                count(instances, "instance")
+            )
+        }),
+    )
+}
+
+/// Add redactions to a pending publish after confirmation. Every spec
+/// is parsed before the dialog opens, and every redaction is resolved
+/// against the session before any is recorded.
+fn redact(args: RedactArgs) -> Result<(), CliError> {
+    let fail = |e: String| CliError::message(format!("gage session publish redact: {e}"));
+    let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
+    let publisher = Publisher::new(&store);
+    let pending = publisher
+        .store()
+        .get(&args.session)
+        .map_err(|e| fail(e.to_string()))?;
+    let mut inputs = Vec::new();
+    for spec in &args.lines {
+        inputs.push(RedactionInput::parse_lines(spec).map_err(|e| fail(e.to_string()))?);
+    }
+    for spec in &args.text {
+        inputs.push(RedactionInput::parse_text(spec).map_err(|e| fail(e.to_string()))?);
+    }
+    for spec in &args.span {
+        inputs.push(RedactionInput::parse_span(spec).map_err(|e| fail(e.to_string()))?);
+    }
+    if inputs.is_empty() {
+        return Err(fail(
+            "no redactions given; use --lines, --text, or --span".into(),
+        ));
+    }
+    let author = resolve_author(None);
+
+    dialog::run("Redact publish", || {
+        dialog::step_value("Session", short_uuid(&pending.id))?;
+        dialog::step_list("Redactions", inputs.iter().map(describe_input))?;
+        if !args.yes {
+            let confirmed = cli::confirm("Continue?").initial_value(true).interact()?;
+            if !confirmed {
+                return Err(DialogError::Canceled);
+            }
+        }
+        let applied = publisher
+            .redact(&pending.id, &inputs, &author)
+            .map_err(|e| DialogError::Failed(e.to_string()))?;
+        dialog::step_list(
+            "Applied",
+            applied.iter().map(|a| {
+                format!(
+                    "{} {} {} ({})",
+                    a.id,
+                    a.kind,
+                    a.detail,
+                    count(a.instances, "instance")
+                )
+            }),
+        )?;
+        let instances: usize = applied.iter().map(|a| a.instances).sum();
+        Ok(format!(
+            "Applied {}, {}",
+            count(applied.len(), "redaction"),
+            count(instances, "instance")
+        )
+        .into())
+    })
+}
+
+/// A redaction input as the dialog lists it.
+fn describe_input(input: &RedactionInput) -> String {
+    match input {
+        RedactionInput::Lines {
+            line,
+            line_end,
+            reason,
+        } if line == line_end => format!("lines {line} ({reason})"),
+        RedactionInput::Lines {
+            line,
+            line_end,
+            reason,
+        } => format!("lines {line}-{line_end} ({reason})"),
+        RedactionInput::Text { reason, literal } => format!("text {literal:?} ({reason})"),
+        RedactionInput::Span {
+            line,
+            seq,
+            reason,
+            mode,
+            literal,
+        } => format!("span {line} {seq} {mode} {literal:?} ({reason})"),
+    }
+}
+
+/// Show the filters and redactions of a pending publish.
+fn status(args: StatusArgs) -> Result<(), CliError> {
+    let fail = |e: String| CliError::message(format!("gage session publish status: {e}"));
+    let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
+    let publisher = Publisher::new(&store);
+    let pending = publisher
+        .store()
+        .get(&args.session)
+        .map_err(|e| fail(e.to_string()))?;
+    let definition = publisher
+        .definition(&pending.id)
+        .map_err(|e| fail(e.to_string()))?;
+
+    println!("Session: {}", short_uuid(&pending.id));
+    println!("Origin:  {}", definition.origin);
+    let filters: Vec<String> = definition
+        .filters
+        .iter()
+        .map(|f| f.spec().to_string())
+        .collect();
+    println!(
+        "Filters: {}",
+        if filters.is_empty() {
+            "none".to_string()
+        } else {
+            filters.join(", ")
+        }
+    );
+    if definition.redactions.is_empty() {
+        println!("No redactions");
+        return Ok(());
+    }
+    let header: Vec<String> = ["Id", "Author", "Type", "Reason", "Detail", "Instances"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let rows = definition.redactions.iter().map(|r| {
+        vec![
+            r.id.to_string(),
+            r.author.clone(),
+            r.kind.kind_name().to_string(),
+            r.kind.reason().to_string(),
+            r.kind.detail(),
+            r.instances.to_string(),
+        ]
+    });
+    let table = Table::from_iter(std::iter::once(header).chain(rows))
+        .with(Style::rounded())
+        .modify(Rows::first(), style::tty(Color::FG_BRIGHT_YELLOW))
+        .modify(Columns::one(5), Alignment::right())
+        .modify(Columns::new(1..4).not(Rows::first()), style::dim())
+        .to_string();
+    println!("{table}");
+    Ok(())
+}
+
+/// Delete a pending publish after confirmation. The id is resolved
+/// before the dialog opens, so a bad argument fails without a prompt.
+fn abort(args: AbortArgs) -> Result<(), CliError> {
+    let fail = |e: String| CliError::message(format!("gage session publish abort: {e}"));
+    let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
+    let publish = PublishStore::from(&store);
+    let pending = publish
+        .get(&args.session)
+        .map_err(|e| fail(e.to_string()))?;
+
+    dialog::run("Abort publish", || {
+        dialog::step_value("Session", short_uuid(&pending.id))?;
+        dialog::step_value("Origin", &pending.attrs.origin)?;
+        cli::log::remark("Original session is unaffected")?;
+        if !args.yes {
+            let confirmed = cli::confirm("Continue?").initial_value(false).interact()?;
+            if !confirmed {
+                return Err(DialogError::Canceled);
+            }
+        }
+        publish
+            .abort(&pending.id)
+            .map_err(|e| DialogError::Other(e.into()))?;
+        Ok(format!("Aborted publish {}", short_uuid(&pending.id)).into())
     })
 }
 
@@ -295,7 +605,6 @@ mod tests {
     use std::path::PathBuf;
 
     use gage_core::datetime::now_ms;
-    use gage_core::uuid::short_uuid;
     use gage_store::{SessionAttrsRecord, SummaryAttrs};
 
     use super::*;
@@ -317,7 +626,7 @@ mod tests {
                     ..SummaryAttrs::default()
                 },
             },
-            root: PathBuf::from("/tmp/publishes").join(id),
+            root: PathBuf::from("/tmp/publish").join(id),
             modified_ms,
         }
     }
@@ -371,6 +680,18 @@ mod tests {
         assert_eq!(
             origin_cell("claude:/home/u/.claude/abc", &highlighter),
             "claude:/home/u/.claude/abc"
+        );
+    }
+
+    #[test]
+    fn inputs_are_described_for_the_dialog() {
+        assert_eq!(
+            describe_input(&RedactionInput::parse_lines("3").unwrap()),
+            "lines 3 (scope)"
+        );
+        assert_eq!(
+            describe_input(&RedactionInput::parse_text("secret abc 123").unwrap()),
+            "text \"abc 123\" (secret)"
         );
     }
 }

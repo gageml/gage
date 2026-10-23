@@ -433,18 +433,29 @@ pub fn is_message_row(entry: &serde_json::Value) -> bool {
 /// re-derives — staleness is self-healing, never wrong rows.
 pub fn derive_session(session_id: &str, path: &Path) -> Result<DerivedSession> {
     let fingerprint = Fingerprint::stat(path)?;
-    let reader = SessionReader::open(path)?;
+    let project = path
+        .parent()
+        .and_then(|p| p.file_name())
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    derive_session_from(session_id, SessionReader::open(path)?, fingerprint, project)
+}
 
+/// Derive the rows and aggregates of the transcript `reader` yields.
+/// `fingerprint` and `project` are the facts the content itself does
+/// not carry; [`derive_session`] takes them from the file.
+pub fn derive_session_from<R: std::io::Read>(
+    session_id: &str,
+    reader: SessionReader<R>,
+    fingerprint: Fingerprint,
+    project: String,
+) -> Result<DerivedSession> {
     let mut b = RowBuilders::new();
     let mut tool_uses = ToolUseCollector::new();
     let mut attrs = ClaudeSessionAttrs {
         native_mtime_ms: fingerprint.mtime_ms,
         native_size: fingerprint.size,
-        project: path
-            .parent()
-            .and_then(|p| p.file_name())
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default(),
+        project,
         is_empty: true,
         ..Default::default()
     };

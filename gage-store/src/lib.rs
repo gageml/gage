@@ -42,7 +42,7 @@
 mod admin;
 mod attachment;
 mod content;
-pub use content::DirContentSource;
+pub use content::{DirContentSink, DirContentSource};
 mod dataset;
 mod error;
 mod fetch;
@@ -99,7 +99,7 @@ pub use note::{
 };
 pub use object::SHORT_PREFIX_SET_SIZE;
 pub use publish::{
-    PendingPublish, PublishDirLayout, PublishInit, PublishStore, publishes_root, show_publishing,
+    PendingPublish, PublishDirLayout, PublishInit, PublishStore, publish_root, show_publishing,
 };
 pub use query::{
     LinkKind, NoteDocRow, ScanSource, ScopedIssue, ScopedNote, StoredNoteTable, StoredSessionTable,

@@ -110,7 +110,27 @@ async fn pending_publish_appears_in_row_tables_under_env() {
     .await;
     assert_eq!(
         blocks,
-        ["/w/proj", "hello there", "hi", "Bash", "ls", "out"],
+        [
+            "user",
+            "/w/proj",
+            "user",
+            "hello there",
+            "assistant",
+            "assistant",
+            "claude-x",
+            "text",
+            "hi",
+            "assistant",
+            "assistant",
+            "claude-x",
+            "tool_use",
+            "Bash",
+            "ls",
+            "user",
+            "user",
+            "tool_result",
+            "out",
+        ],
         "text_block"
     );
 

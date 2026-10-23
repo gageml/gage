@@ -6,6 +6,7 @@ members = [
     "gage-core",
     "gage-index",
     "gage-log",
+    "gage-publish",
     "gage-lsp",
     "gage-mcp",
     "gage-query",

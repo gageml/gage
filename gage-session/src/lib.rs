@@ -9,6 +9,7 @@
 //! driver may also run an agent on its harness; see [`agent`].
 
 use std::any::Any;
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
 use std::io::{self, Read, Write};
@@ -21,6 +22,7 @@ use datafusion::datasource::TableProvider;
 pub mod agent;
 pub mod content_schema;
 pub mod filter;
+pub mod json_edit;
 pub mod status;
 pub mod system_col;
 pub mod text_block;
@@ -32,11 +34,12 @@ pub use agent::{
 pub use content_schema::{
     ContentField, ContentSchema, content_schema_batch, content_schema_schema,
 };
+pub use json_edit::{EditError, edit_strings};
 pub use status::{AuthInfo, DriverStatus, Field, HarnessInfo, InstallInfo};
 pub use system_col::{SYSTEM_META_KEY, is_system, system};
 pub use text_block::{
-    DescriptorError, TextBlock, TextBlockBatch, TextDescriptor, TextValue, text_block_batch,
-    text_block_schema, text_blocks,
+    DescriptorError, FilterValues, TextBlock, TextBlockBatch, TextDescriptor, TextValue,
+    text_block_batch, text_block_schema, text_blocks,
 };
 pub use tool_use::{ToolUse, ToolUseBatch, tool_use_batch, tool_use_schema};
 
@@ -457,6 +460,31 @@ pub trait StoredSession {
     /// the harness wrote them, so the walk sees each entry's document
     /// order.
     fn entry_json(&mut self) -> Box<dyn Iterator<Item = Result<EntryJson, DriverError>> + '_>;
+    /// Write this session's content into `sink` with `derivation`
+    /// applied: a dropped line is left out, a replaced line is written
+    /// as the given text, and every other byte of every path is
+    /// reproduced as stored.
+    fn write_derived(
+        &mut self,
+        derivation: &Derivation,
+        sink: &mut dyn ContentSink,
+    ) -> Result<(), DriverError>;
+    /// The driver's attributes of the stored content, computed the way
+    /// they are for a native session. The fingerprint fields describe
+    /// no native artifact: the mtime is the epoch and the size is the
+    /// content's.
+    fn attrs(&mut self) -> Result<Box<dyn SessionAttrs>, DriverError>;
+}
+
+/// The changes a derived session makes to its original, by native
+/// line number.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Derivation {
+    /// Lines left out of the derived content
+    pub dropped: BTreeSet<u32>,
+    /// Lines written as the given entry JSON text instead of the
+    /// original
+    pub replaced: BTreeMap<u32, String>,
 }
 
 /// One entry of a stored session as the harness wrote it.

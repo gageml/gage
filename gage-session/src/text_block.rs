@@ -125,13 +125,35 @@ pub fn text_blocks(
 }
 
 /// What a driver knows about the strings of one content format: the
-/// fields whose type is not text, and the subtrees whose text values
-/// are redacted whole. Both are lists of JSONPath (RFC 9535) patterns
-/// evaluated against each entry.
+/// fields whose type is not text, the subtrees whose text values are
+/// redacted whole, and per named filter the fields whose type says
+/// their value is sensitive. All are lists of JSONPath (RFC 9535)
+/// patterns evaluated against each entry.
 #[derive(Debug, Clone)]
 pub struct TextDescriptor {
     safe: Vec<JsonPath>,
     atomic: Vec<JsonPath>,
+    filters: Vec<FilterPaths>,
+}
+
+/// The typed-sensitive paths of one named filter.
+#[derive(Debug, Clone)]
+struct FilterPaths {
+    name: String,
+    /// Fields whose value is itself the sensitive literal
+    literal: Vec<JsonPath>,
+    /// Fields whose whole value is replaced
+    value: Vec<JsonPath>,
+}
+
+/// What a filter's typed-sensitive paths select in one entry.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FilterValues {
+    /// The string values at the filter's `literal` paths
+    pub literals: Vec<String>,
+    /// The JSON Pointers of the string values at the filter's `value`
+    /// paths
+    pub values: Vec<String>,
 }
 
 /// A text value of one entry with its classification.
@@ -165,7 +187,63 @@ impl TextDescriptor {
         Ok(Self {
             safe: compile(safe)?,
             atomic: compile(atomic)?,
+            filters: Vec::new(),
         })
+    }
+
+    /// Add the typed-sensitive paths of the named filter `name`.
+    pub fn with_filter(
+        mut self,
+        name: &str,
+        literal: &[&str],
+        value: &[&str],
+    ) -> std::result::Result<Self, DescriptorError> {
+        self.filters.push(FilterPaths {
+            name: name.to_string(),
+            literal: compile(literal)?,
+            value: compile(value)?,
+        });
+        Ok(self)
+    }
+
+    /// The names of the filters with typed-sensitive paths.
+    pub fn filter_names(&self) -> impl Iterator<Item = &str> {
+        self.filters.iter().map(|f| f.name.as_str())
+    }
+
+    /// What the filter `name`'s typed-sensitive paths select in one
+    /// entry. Empty for a filter without paths.
+    pub fn filter_values(
+        &self,
+        name: &str,
+        json: &str,
+    ) -> std::result::Result<FilterValues, serde_json::Error> {
+        let Some(paths) = self.filters.iter().find(|f| f.name == name) else {
+            return Ok(FilterValues::default());
+        };
+        let entry: Value = serde_json::from_str(json)?;
+        let literals = paths
+            .literal
+            .iter()
+            .flat_map(|p| {
+                p.query(&entry)
+                    .iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        let values = paths
+            .value
+            .iter()
+            .flat_map(|p| {
+                p.query_located(&entry)
+                    .iter()
+                    .filter(|n| n.node().is_string())
+                    .map(|n| n.location().to_json_pointer())
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        Ok(FilterValues { literals, values })
     }
 
     /// The text values of one entry, in document order. `json` is the
@@ -374,6 +452,22 @@ mod tests {
         let values = descriptor().text_values(line).unwrap();
         let pointers: Vec<&str> = values.iter().map(|v| v.pointer.as_str()).collect();
         assert_eq!(pointers, ["/a~1b", "/c~0d", "/note"]);
+    }
+
+    #[test]
+    fn filter_values_select_literals_and_whole_values() {
+        let descriptor = descriptor()
+            .with_filter("pii", &["$..user_identity"], &["$.context.email"])
+            .unwrap();
+        let line = r#"{"context":{"email":"The user is a@b.c"},"params":{"classifier":{"user_identity":"garrett"}},"n":{"user_identity":5}}"#;
+        let found = descriptor.filter_values("pii", line).unwrap();
+        assert_eq!(found.literals, ["garrett"]);
+        assert_eq!(found.values, ["/context/email"]);
+        assert_eq!(
+            descriptor.filter_values("secret", line).unwrap(),
+            FilterValues::default()
+        );
+        assert_eq!(descriptor.filter_names().collect::<Vec<_>>(), ["pii"]);
     }
 
     #[test]

@@ -21,9 +21,9 @@ use std::time::{Duration, SystemTime};
 
 use gage_core::config::{default_cache_root, plugin_marketplace_dir};
 use gage_session::{
-    AgentSession, AgentSpec, AuthInfo, ContentSchema, ContentSink, ContentSource, Driver,
-    DriverError, DriverStatus, DriverTables, Entry, EntryJson, Field, HarnessInfo, InstallInfo,
-    InstallReport, InstallUi, MaintenanceOutcome, MaintenanceStatus, MessageTextHit,
+    AgentSession, AgentSpec, AuthInfo, ContentSchema, ContentSink, ContentSource, Derivation,
+    Driver, DriverError, DriverStatus, DriverTables, Entry, EntryJson, Field, HarnessInfo,
+    InstallInfo, InstallReport, InstallUi, MaintenanceOutcome, MaintenanceStatus, MessageTextHit,
     NativeLookupError, NativeSession, ResolveSession, SessionAttrs, SessionLiveError, Source,
     SourceOptions, StoredSession, TextDescriptor, ToolUse, split_scheme,
 };
@@ -32,8 +32,8 @@ use serde::Deserialize;
 use crate::content_schema;
 use crate::home::ClaudeHome;
 use crate::index::{
-    ClaudeSessionAttrs, IndexStore, LockMode, ReconcileEvent, ToolUseCollector, derive_entry,
-    derive_session,
+    ClaudeSessionAttrs, Fingerprint, IndexStore, LockMode, ReconcileEvent, ToolUseCollector,
+    derive_entry, derive_session, derive_session_from,
 };
 use crate::model::resolve_model;
 use crate::plugin;
@@ -1220,6 +1220,66 @@ impl StoredSession for ClaudeStoredSession {
                     Err(e) => Some(Err(DriverError::Io(e))),
                 }),
         )
+    }
+
+    fn write_derived(
+        &mut self,
+        derivation: &Derivation,
+        sink: &mut dyn ContentSink,
+    ) -> Result<(), DriverError> {
+        self.write_derived_content(derivation, sink)
+    }
+
+    /// The transcript's attributes through the same derivation a
+    /// native session gets. The project is not in the content; the
+    /// store keeps the original's.
+    fn attrs(&mut self) -> Result<Box<dyn SessionAttrs>, DriverError> {
+        let mut reader = self.source.open("session.jsonl")?;
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes)?;
+        let fingerprint = Fingerprint {
+            mtime_ms: 0,
+            size: bytes.len() as u64,
+        };
+        let derived = derive_session_from(
+            &self.native_id,
+            SessionReader::new(bytes.as_slice()),
+            fingerprint,
+            String::new(),
+        )
+        .map_err(|e| DriverError::Other(format!("stored session {}: {e}", self.native_id)))?;
+        Ok(Box::new(derived.attrs))
+    }
+}
+
+impl ClaudeStoredSession {
+    /// `session.jsonl` with `derivation` applied, line by line, and
+    /// every other path copied as stored.
+    fn write_derived_content(
+        &mut self,
+        derivation: &Derivation,
+        sink: &mut dyn ContentSink,
+    ) -> Result<(), DriverError> {
+        use std::io::{BufRead, Write};
+        for path in self.source.paths()? {
+            let mut reader = self.source.open(&path)?;
+            let mut writer = sink.create(&path)?;
+            if path != "session.jsonl" {
+                io::copy(&mut reader, &mut writer)?;
+                continue;
+            }
+            for (i, line) in io::BufReader::new(reader).lines().enumerate() {
+                let line = line?;
+                let number = i as u32 + 1;
+                if derivation.dropped.contains(&number) {
+                    continue;
+                }
+                let text = derivation.replaced.get(&number).unwrap_or(&line);
+                writer.write_all(text.as_bytes())?;
+                writer.write_all(b"\n")?;
+            }
+        }
+        Ok(())
     }
 }
 

@@ -1,14 +1,17 @@
 //! Pending session publish operations.
 //!
 //! A publish is staged as a directory under Gage home,
-//! `publishes/<session id>/`, named by the new session's object id.
+//! `publish/<session id>/`, named by the new session's object id.
 //! The directory holds the derived session's final tree layout:
 //! `attrs.json` with `origin`, the `files.d` content, and
 //! `redacted.json`. It is the same shape an added session's tree has,
 //! so one decoder serves both the staged directory and a committed
-//! session, the way a scan directory mirrors a stored scan. The
-//! session enters the store only on apply; abort deletes the
-//! directory and writes nothing.
+//! session, the way a scan directory mirrors a stored scan. Beside it,
+//! `publish/<session id>.publish.json` is the publish definition: the
+//! instructions the staged session is derived from, which may hold
+//! anything and is never committed. The session enters the store only
+//! on apply; abort deletes the directory and the definition and
+//! writes nothing.
 
 use std::ffi::OsStr;
 use std::fs;
@@ -22,9 +25,10 @@ use crate::index::IdMatch;
 use crate::session::{FILES_TREE, OBJECT_TYPE, SessionAttrsRecord};
 use crate::{SessionRecord, SessionStore, Store, StoreError};
 
-const PUBLISHES_DIR: &str = "publishes";
+const PUBLISH_DIR: &str = "publish";
 const ATTRS_FILE: &str = "attrs.json";
 const REDACTED_FILE: &str = "redacted.json";
+const DEFINITION_SUFFIX: &str = ".publish.json";
 
 /// Whether the data layer includes pending publish working trees in
 /// the session tables, set by `GAGE_SHOW_PUBLISHING=1`. Only the
@@ -44,20 +48,20 @@ pub struct PendingPublish {
     pub modified_ms: i64,
 }
 
-/// The parent of publish staging directories, `publishes/` under Gage
+/// The parent of publish staging directories, `publish/` under Gage
 /// home.
-pub fn publishes_root() -> PathBuf {
-    gage_core::config::gage_home().join(PUBLISHES_DIR)
+pub fn publish_root() -> PathBuf {
+    gage_core::config::gage_home().join(PUBLISH_DIR)
 }
 
-/// The on-disk layout of one pending publish, `publishes/<id>/`.
+/// The on-disk layout of one pending publish, `publish/<id>/`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublishDirLayout {
     root: PathBuf,
 }
 
 impl PublishDirLayout {
-    /// The layout rooted at `root`, `publishes/<id>/`.
+    /// The layout rooted at `root`, `publish/<id>/`.
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
     }
@@ -105,7 +109,7 @@ impl<'a> From<&'a Store> for PublishStore<'a> {
     fn from(store: &'a Store) -> Self {
         PublishStore {
             store,
-            root: publishes_root(),
+            root: publish_root(),
         }
     }
 }
@@ -119,11 +123,24 @@ impl<'a> PublishStore<'a> {
         }
     }
 
+    /// The definition file of the pending publish `id`,
+    /// `publish/<id>.publish.json`: the instructions the staged session
+    /// is derived from. Never committed.
+    pub fn definition_file(&self, id: &str) -> PathBuf {
+        self.root.join(format!("{id}{DEFINITION_SUFFIX}"))
+    }
+
+    /// The staging directory of the pending publish `id`.
+    pub fn layout(&self, id: &str) -> PublishDirLayout {
+        PublishDirLayout::new(self.root.join(id))
+    }
+
     /// Start a publish of `original`, a stored session. Generates the
     /// new session id, creates the staging directory, copies
     /// `original`'s content into `files.d`, writes `attrs.json` with
     /// `origin` naming `original` and an empty `redacted.json`.
-    /// Returns the new id. No store object is written.
+    /// Returns the new id. The definition beside the directory is the
+    /// publish engine's to write. No store object is written.
     pub fn init(&self, original: &SessionRecord) -> Result<PublishInit, StoreError> {
         let id = new_uuid();
         let origin = format!("session:{}@{}", original.id, original.commit_sha);
@@ -198,21 +215,27 @@ impl<'a> PublishStore<'a> {
         }
     }
 
-    /// Delete the staging directory of the pending publish `id`.
-    /// Nothing was written to the store, so nothing in the store
-    /// changes. An unknown id is `ObjectNotFound`.
+    /// Delete the staging directory and the definition of the pending
+    /// publish `id`. Nothing was written to the store, so nothing in
+    /// the store changes. An unknown id is `ObjectNotFound`; a
+    /// definition already deleted by hand is not an error.
     pub fn abort(&self, id: &str) -> Result<(), StoreError> {
         let root = self.root.join(id);
         match fs::remove_dir_all(&root) {
-            Ok(()) => Ok(()),
+            Ok(()) => {}
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                Err(StoreError::ObjectNotFound(id.to_string()))
+                return Err(StoreError::ObjectNotFound(id.to_string()));
             }
+            Err(e) => return Err(StoreError::ReadContent(e)),
+        }
+        match fs::remove_file(self.definition_file(id)) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(StoreError::ReadContent(e)),
         }
     }
 
-    /// Every pending publish working tree under the publishes root, in
+    /// Every pending publish working tree under the publish root, in
     /// id order. A directory without a readable `attrs.json` is
     /// skipped, since it is mid-write or not a publish. Empty when the
     /// root does not exist.
@@ -274,12 +297,12 @@ mod tests {
             .at_commit(&outcome.commit_sha)
             .unwrap();
 
-        let publishes = tmp.path().join("publishes");
-        let init = PublishStore::with_root(&store, &publishes)
+        let publish_dir = tmp.path().join("publish");
+        let init = PublishStore::with_root(&store, &publish_dir)
             .init(&original)
             .unwrap();
 
-        let layout = PublishDirLayout::new(publishes.join(&init.id));
+        let layout = PublishDirLayout::new(publish_dir.join(&init.id));
         assert_eq!(layout.id(), Some(init.id.as_str()));
         assert_eq!(
             init.origin,
@@ -312,8 +335,8 @@ mod tests {
             .at_commit(&outcome.commit_sha)
             .unwrap();
 
-        let publishes = tmp.path().join("publishes");
-        let publish = PublishStore::with_root(&store, &publishes);
+        let publish_dir = tmp.path().join("publish");
+        let publish = PublishStore::with_root(&store, &publish_dir);
         assert!(publish.list().unwrap().is_empty());
 
         let a = publish.init(&original).unwrap();
@@ -342,7 +365,7 @@ mod tests {
         let original = SessionStore::from(&store)
             .at_commit(&outcome.commit_sha)
             .unwrap();
-        let publish = PublishStore::with_root(&store, tmp.path().join("publishes"));
+        let publish = PublishStore::with_root(&store, tmp.path().join("publish"));
         let a = publish.init(&original).unwrap();
         let b = publish.init(&original).unwrap();
 
@@ -365,8 +388,8 @@ mod tests {
         );
     }
 
-    /// `abort` deletes the staging directory and nothing else; a
-    /// second abort of the same id is `ObjectNotFound`.
+    /// `abort` deletes the staging directory and the definition and
+    /// nothing else; a second abort of the same id is `ObjectNotFound`.
     #[test]
     fn abort_deletes_the_staging_directory() {
         let tmp = tempfile::tempdir().unwrap();
@@ -378,14 +401,18 @@ mod tests {
         let original = SessionStore::from(&store)
             .at_commit(&outcome.commit_sha)
             .unwrap();
-        let publishes = tmp.path().join("publishes");
-        let publish = PublishStore::with_root(&store, &publishes);
+        let publish_dir = tmp.path().join("publish");
+        let publish = PublishStore::with_root(&store, &publish_dir);
         let a = publish.init(&original).unwrap();
         let b = publish.init(&original).unwrap();
+        fs::write(publish.definition_file(&a.id), b"{}\n").unwrap();
+        fs::write(publish.definition_file(&b.id), b"{}\n").unwrap();
 
         publish.abort(&a.id).unwrap();
-        assert!(!publishes.join(&a.id).exists());
-        assert!(publishes.join(&b.id).exists());
+        assert!(!publish_dir.join(&a.id).exists());
+        assert!(!publish.definition_file(&a.id).exists());
+        assert!(publish_dir.join(&b.id).exists());
+        assert!(publish.definition_file(&b.id).exists());
         assert_eq!(publish.list().unwrap().len(), 1);
         assert_eq!(SessionStore::from(&store).iter().unwrap().count(), 1);
 

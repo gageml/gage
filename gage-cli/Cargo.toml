@@ -30,6 +30,7 @@ tokio-util = "0.7"
 console = "0.16.2"
 pulldown-cmark = { version = "0.13", default-features = false }
 serde_json = "1"
+gage-publish = { path = "../gage-publish" }
 gage-query = { path = "../gage-query" }
 gage-registry = { path = "../gage-registry" }
 gage-runtime = { path = "../gage-runtime" }

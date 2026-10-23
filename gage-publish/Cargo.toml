@@ -1,0 +1,23 @@
+[package]
+name = "gage-publish"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+gage-core = { path = "../gage-core" }
+gage-registry = { path = "../gage-registry" }
+gage-session = { path = "../gage-session" }
+gage-store = { path = "../gage-store" }
+regex = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+gage-claude = { path = "../gage-claude" }
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

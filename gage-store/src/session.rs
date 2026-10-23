@@ -129,17 +129,20 @@ pub struct SummaryAttrs {
     pub cost_usd: Option<f64>,
 }
 
-fn collect_summary(attrs: &dyn SessionAttrs) -> SummaryAttrs {
-    SummaryAttrs {
-        title: attrs.title().map(String::from),
-        model: attrs.model().map(String::from),
-        message_count: attrs.message_count(),
-        is_empty: attrs.is_empty(),
-        line_count: attrs.line_count(),
-        input_tokens: attrs.input_tokens(),
-        output_tokens: attrs.output_tokens(),
-        cached_tokens: attrs.cached_tokens(),
-        cost_usd: attrs.cost_usd(),
+impl SummaryAttrs {
+    /// The summary of a session from the driver's attributes.
+    pub fn from_attrs(attrs: &dyn SessionAttrs) -> Self {
+        SummaryAttrs {
+            title: attrs.title().map(String::from),
+            model: attrs.model().map(String::from),
+            message_count: attrs.message_count(),
+            is_empty: attrs.is_empty(),
+            line_count: attrs.line_count(),
+            input_tokens: attrs.input_tokens(),
+            output_tokens: attrs.output_tokens(),
+            cached_tokens: attrs.cached_tokens(),
+            cost_usd: attrs.cost_usd(),
+        }
     }
 }
 
@@ -259,7 +262,7 @@ impl<'a> SessionStore<'a> {
         let project = session.attrs().project_name().map(String::from);
         let id = session_object_id(driver.name(), &native_id);
         let session_type = session.session_type().to_string();
-        let summary = collect_summary(session.attrs());
+        let summary = SummaryAttrs::from_attrs(session.attrs());
         let attrs = |content_format: String, size: u64| SessionAttrsRecord {
             driver: format!("{} {}", driver.name(), driver.version()),
             origin: origin.clone(),
