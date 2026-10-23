@@ -103,6 +103,20 @@ pub enum PublishCommand {
     /// Show filters and redactions of a pending publish
     Status(StatusArgs),
 
+    /// Remove redactions from a pending publish
+    ///
+    /// Each ID is one listed by status. Staged session is rebuilt from
+    /// original with remaining redactions. A named filter's redaction,
+    /// once removed, is not restored when filter runs again.
+    Undo(UndoArgs),
+
+    /// Rebuild a pending publish from its definition
+    ///
+    /// Re-applies publish definition file as it is on disk, for a
+    /// definition edited by hand. An invalid definition is reported and
+    /// nothing changes.
+    Refresh(RefreshArgs),
+
     /// Abort a pending publish
     ///
     /// Deletes staged publish. Nothing was written to store.
@@ -186,10 +200,18 @@ pub struct RedactArgs {
 
     /// Span to redact within one value (repeatable)
     ///
-    /// "LINE SEQ MODE TEXT". LINE and SEQ name a text_block row, MODE is
-    /// "remove" or "mark", and TEXT runs to end of value.
+    /// "LINE SEQ TEXT". LINE and SEQ name a text_block row, and TEXT runs
+    /// to end of value.
     #[arg(short, long, value_name = "SPAN")]
     span: Vec<String>,
+
+    /// Remove redacted text without a marker
+    ///
+    /// Applies to every --text and --span redaction given. Without it a
+    /// redacted span is replaced by "[REDACTED]"; with it the span is
+    /// removed and surrounding whitespace is normalized.
+    #[arg(short = 'n', long)]
+    no_mark: bool,
 
     /// Skip confirmation prompt
     #[arg(short, long)]
@@ -210,6 +232,40 @@ pub struct StatusArgs {
     /// Pending publish session to show (ID or prefix)
     #[arg(value_name = "SESSION")]
     session: String,
+
+    #[command(flatten)]
+    no_source: NoSource,
+}
+
+#[derive(Args)]
+pub struct UndoArgs {
+    /// Pending publish session to change (ID or prefix)
+    #[arg(value_name = "SESSION")]
+    session: String,
+
+    /// Redaction IDs to remove
+    ///
+    /// IDs as status lists them.
+    #[arg(value_name = "ID", required = true)]
+    ids: Vec<u64>,
+
+    /// Skip confirmation prompt
+    #[arg(short, long)]
+    yes: bool,
+
+    #[command(flatten)]
+    no_source: NoSource,
+}
+
+#[derive(Args)]
+pub struct RefreshArgs {
+    /// Pending publish session to rebuild (ID or prefix)
+    #[arg(value_name = "SESSION")]
+    session: String,
+
+    /// Skip confirmation prompt
+    #[arg(short, long)]
+    yes: bool,
 
     #[command(flatten)]
     no_source: NoSource,
@@ -255,6 +311,14 @@ pub async fn run(args: PublishArgs) -> Result<(), CliError> {
         PublishCommand::Status(args) => {
             args.no_source.reject("gage session publish status")?;
             status(args)
+        }
+        PublishCommand::Undo(args) => {
+            args.no_source.reject("gage session publish undo")?;
+            undo(args)
+        }
+        PublishCommand::Refresh(args) => {
+            args.no_source.reject("gage session publish refresh")?;
+            refresh(args)
         }
         PublishCommand::Abort(args) => {
             args.no_source.reject("gage session publish abort")?;
@@ -529,13 +593,17 @@ fn redact(args: RedactArgs) -> Result<(), CliError> {
             .reason
             .as_deref()
             .ok_or_else(|| fail("--reason is required with --text and --span".into()))?;
+        let mark = !args.no_mark;
         for literal in &args.text {
             inputs.push(
-                RedactionInput::parse_text(literal, reason).map_err(|e| fail(e.to_string()))?,
+                RedactionInput::parse_text(literal, reason, mark)
+                    .map_err(|e| fail(e.to_string()))?,
             );
         }
         for spec in &args.span {
-            inputs.push(RedactionInput::parse_span(spec, reason).map_err(|e| fail(e.to_string()))?);
+            inputs.push(
+                RedactionInput::parse_span(spec, reason, mark).map_err(|e| fail(e.to_string()))?,
+            );
         }
     }
     if inputs.is_empty() {
@@ -625,15 +693,24 @@ fn describe_input(input: &RedactionInput) -> String {
             line_end,
             reason,
         } => format!("lines {line}-{line_end} ({reason})"),
-        RedactionInput::Text { reason, literal } => format!("text {literal:?} ({reason})"),
+        RedactionInput::Text {
+            reason,
+            literal,
+            mark,
+        } => format!("text {literal:?} ({reason}{})", no_mark(*mark)),
         RedactionInput::Span {
             line,
             seq,
             reason,
-            mode,
             literal,
-        } => format!("span {line} {seq} {mode} {literal:?} ({reason})"),
+            mark,
+        } => format!("span {line} {seq} {literal:?} ({reason}{})", no_mark(*mark)),
     }
+}
+
+/// The suffix a dialog line carries for a redaction without a marker.
+fn no_mark(mark: bool) -> &'static str {
+    if mark { "" } else { ", no mark" }
 }
 
 /// Show the filters and redactions of a pending publish.
@@ -690,6 +767,103 @@ fn status(args: StatusArgs) -> Result<(), CliError> {
         .to_string();
     println!("{table}");
     Ok(())
+}
+
+/// Remove redactions after confirmation. Every id is checked against
+/// the definition before the dialog opens.
+fn undo(args: UndoArgs) -> Result<(), CliError> {
+    let fail = |e: String| CliError::message(format!("gage session publish undo: {e}"));
+    let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
+    let publisher = Publisher::new(&store);
+    let pending = publisher
+        .store()
+        .get(&args.session)
+        .map_err(|e| fail(e.to_string()))?;
+    let definition = publisher
+        .definition(&pending.id)
+        .map_err(|e| fail(e.to_string()))?;
+    let mut targets = Vec::new();
+    for id in &args.ids {
+        let r = definition
+            .redactions
+            .iter()
+            .find(|r| r.id == *id)
+            .ok_or_else(|| fail(format!("no redaction with id {id}")))?;
+        targets.push(r.clone());
+    }
+
+    dialog::run("Undo redactions", || {
+        dialog::step_value("Session", short_uuid(&pending.id))?;
+        dialog::step_list(
+            "Redactions",
+            targets.iter().map(|r| {
+                format!(
+                    "{} {} {} ({}, {})",
+                    r.id,
+                    r.kind.kind_name(),
+                    r.kind.detail(),
+                    r.kind.reason(),
+                    r.author
+                )
+            }),
+        )?;
+        if targets.iter().any(|r| r.author.starts_with("filter:")) {
+            cli::log::remark("A filter's redaction stays removed when the filter runs again")?;
+        }
+        if !args.yes {
+            let confirmed = cli::confirm("Continue?").initial_value(true).interact()?;
+            if !confirmed {
+                return Err(DialogError::Canceled);
+            }
+        }
+        let removed = publisher
+            .undo(&pending.id, &args.ids)
+            .map_err(|e| DialogError::Failed(e.to_string()))?;
+        Ok(format!("Removed {}", count(removed.len(), "redaction")).into())
+    })
+}
+
+/// Rebuild a pending publish from its definition after confirmation.
+fn refresh(args: RefreshArgs) -> Result<(), CliError> {
+    let fail = |e: String| CliError::message(format!("gage session publish refresh: {e}"));
+    let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
+    let publisher = Publisher::new(&store);
+    let pending = publisher
+        .store()
+        .get(&args.session)
+        .map_err(|e| fail(e.to_string()))?;
+    let definition = publisher
+        .definition(&pending.id)
+        .map_err(|e| fail(e.to_string()))?;
+    definition.validate().map_err(|e| fail(e.to_string()))?;
+
+    dialog::run("Refresh publish", || {
+        dialog::step_value("Session", short_uuid(&pending.id))?;
+        dialog::step_value(
+            "Definition",
+            format!(
+                "{}, {}",
+                count(definition.filters.len(), "filter"),
+                count(definition.redactions.len(), "redaction")
+            ),
+        )?;
+        if !args.yes {
+            let confirmed = cli::confirm("Continue?").initial_value(true).interact()?;
+            if !confirmed {
+                return Err(DialogError::Canceled);
+            }
+        }
+        let rebuilt = publisher
+            .refresh(&pending.id)
+            .map_err(|e| DialogError::Failed(e.to_string()))?;
+        let instances: usize = rebuilt.redactions.iter().map(|r| r.instances).sum();
+        Ok(format!(
+            "Refreshed publish {}, {}",
+            short_uuid(&pending.id),
+            count(instances, "instance")
+        )
+        .into())
+    })
 }
 
 /// Delete a pending publish after confirmation. The id is resolved
@@ -887,8 +1061,12 @@ mod tests {
             "lines 3 (scope)"
         );
         assert_eq!(
-            describe_input(&RedactionInput::parse_text("abc 123", "secret").unwrap()),
+            describe_input(&RedactionInput::parse_text("abc 123", "secret", true).unwrap()),
             "text \"abc 123\" (secret)"
+        );
+        assert_eq!(
+            describe_input(&RedactionInput::parse_span("1 2 damn", "language", false).unwrap()),
+            "span 1 2 \"damn\" (language, no mark)"
         );
     }
 }

@@ -44,7 +44,10 @@ pub struct PendingPublish {
     pub id: String,
     pub attrs: SessionAttrsRecord,
     pub root: PathBuf,
-    /// UNIX time millis of the working tree's last change.
+    /// UNIX time millis of the working tree's last change: the newest
+    /// mtime of the directory, `attrs.json`, and `redacted.json`. A
+    /// rebuild rewrites the two files in place, which leaves the
+    /// directory's own mtime alone, so the files are what move it.
     pub modified_ms: i64,
 }
 
@@ -262,11 +265,10 @@ impl<'a> PublishStore<'a> {
             let Some(id) = layout.id().map(String::from) else {
                 continue;
             };
-            let modified_ms = fs::metadata(&dir)
-                .and_then(|m| m.modified())
-                .ok()
-                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                .map(|d| d.as_millis() as i64)
+            let modified_ms = [dir.clone(), layout.attrs_file(), layout.redacted_file()]
+                .iter()
+                .map(|p| mtime_ms(p))
+                .max()
                 .unwrap_or(0);
             out.push(PendingPublish {
                 id,
@@ -280,10 +282,52 @@ impl<'a> PublishStore<'a> {
     }
 }
 
+/// The mtime of `path` in UNIX millis; 0 when it cannot be read.
+fn mtime_ms(path: &Path) -> i64 {
+    fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_support::open_store;
+
+    /// A rebuild rewrites `redacted.json` in place without touching the
+    /// directory, so the listing's `modified_ms` follows the file.
+    #[test]
+    fn modified_follows_the_newest_file_in_the_working_tree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let mut session = crate::session::tests::fake("s1", &[("session.jsonl", "a\n")]);
+        let outcome = SessionStore::from(&store)
+            .add(&crate::session::tests::FakeDriver, &mut session)
+            .unwrap();
+        let original = SessionStore::from(&store)
+            .at_commit(&outcome.commit_sha)
+            .unwrap();
+        let publish = PublishStore::with_root(&store, tmp.path().join("publish"));
+        let init = publish.init(&original).unwrap();
+        let before = publish.list().unwrap()[0].modified_ms;
+
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(90);
+        let redacted = fs::File::options()
+            .write(true)
+            .open(publish.layout(&init.id).redacted_file())
+            .unwrap();
+        redacted.set_modified(later).unwrap();
+
+        let after = publish.list().unwrap()[0].modified_ms;
+        assert!(after > before, "{before} -> {after}");
+        assert_eq!(
+            after,
+            later.duration_since(UNIX_EPOCH).unwrap().as_millis() as i64
+        );
+    }
 
     #[test]
     fn init_stages_a_derived_session_directory() {

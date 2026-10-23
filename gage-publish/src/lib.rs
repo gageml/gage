@@ -28,7 +28,7 @@ use gage_store::{
 
 pub use definition::{
     FilterEntry, FilterSpec, NAMED_FILTERS, PublishDefinition, REASONS, Reason, Redaction,
-    RedactionInput, RedactionKind, SpanMode, Suppression,
+    RedactionInput, RedactionKind, Suppression,
 };
 pub use derive::{Applied, Instance, InstanceKind};
 pub use filter::{Filter, Pattern};
@@ -218,6 +218,51 @@ impl<'a> Publisher<'a> {
             .filter(|r| ids.contains(&r.id))
             .map(Applied::from)
             .collect())
+    }
+
+    /// Remove the redactions `ids` from the pending publish `id` and
+    /// rebuild. Every id must exist, or nothing changes. A filter's
+    /// redaction leaves a suppression behind so a re-run of the filter
+    /// does not restore it. Returns the removed redactions.
+    pub fn undo(&self, id: &str, ids: &[u64]) -> Result<Vec<Redaction>, PublishError> {
+        let mut definition = self.definition(id)?;
+        let missing: Vec<String> = ids
+            .iter()
+            .filter(|i| !definition.redactions.iter().any(|r| r.id == **i))
+            .map(u64::to_string)
+            .collect();
+        if !missing.is_empty() {
+            return Err(PublishError::Input(format!(
+                "no redaction with id {}",
+                missing.join(", ")
+            )));
+        }
+        let (removed, kept): (Vec<Redaction>, Vec<Redaction>) = definition
+            .redactions
+            .drain(..)
+            .partition(|r| ids.contains(&r.id));
+        definition.redactions = kept;
+        for r in &removed {
+            if r.author.starts_with("filter:") {
+                definition.suppressions.push(Suppression {
+                    author: r.author.clone(),
+                    rule: r.rule.clone(),
+                    kind: r.kind.clone(),
+                });
+            }
+        }
+        self.build(id, &mut definition)?;
+        Ok(removed)
+    }
+
+    /// Rebuild the pending publish `id` from its definition as it is on
+    /// disk, for a definition edited by hand. The definition is checked
+    /// first and an invalid one is an error naming the redaction.
+    pub fn refresh(&self, id: &str) -> Result<PublishDefinition, PublishError> {
+        let mut definition = self.definition(id)?;
+        definition.validate()?;
+        self.build(id, &mut definition)?;
+        Ok(definition)
     }
 
     /// The definition of the pending publish `id`.

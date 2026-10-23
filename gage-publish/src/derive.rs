@@ -10,7 +10,7 @@ use gage_store::{DirContentSink, PublishDirLayout, SummaryAttrs};
 use regex::{Regex, RegexBuilder};
 use serde_json::{Value, json};
 
-use crate::definition::{PublishDefinition, Redaction, RedactionInput, RedactionKind, SpanMode};
+use crate::definition::{PublishDefinition, Redaction, RedactionInput, RedactionKind};
 use crate::filter::Filter;
 use crate::{MARKER, PublishError};
 
@@ -74,7 +74,8 @@ pub enum InstanceKind {
         /// Zero-based byte offsets, `end` inclusive
         start: usize,
         end: usize,
-        mode: SpanMode,
+        /// Whether the marker replaces the span; otherwise it is removed
+        mark: bool,
     },
     Value {
         line: u32,
@@ -166,16 +167,21 @@ pub fn resolve_inputs(
                 line_end: *line_end,
                 reason: reason.clone(),
             }),
-            RedactionInput::Text { reason, literal } => Ok(RedactionKind::Text {
+            RedactionInput::Text {
+                reason,
+                literal,
+                mark,
+            } => Ok(RedactionKind::Text {
                 reason: reason.clone(),
                 literal: literal.clone(),
+                mark: *mark,
             }),
             RedactionInput::Span {
                 line,
                 seq,
                 reason,
-                mode,
                 literal,
+                mark,
             } => {
                 let value = session
                     .entry(*line)
@@ -194,8 +200,8 @@ pub fn resolve_inputs(
                     line: *line,
                     pointer: value.pointer.clone(),
                     reason: reason.clone(),
-                    mode: *mode,
                     literal: literal.clone(),
+                    mark: *mark,
                 })
             }
         })
@@ -253,26 +259,34 @@ pub fn run_filters(
                 values.push((entry.line, pointer, "typed".to_string()));
             }
         }
-        for (literal, rule) in literals {
-            definition.push(
-                &author,
-                Some(rule),
-                RedactionKind::Text {
-                    reason: filter.reason.to_string(),
-                    literal,
-                },
-            );
-        }
-        for (line, pointer, rule) in values {
-            definition.push(
-                &author,
-                Some(rule),
+        let mut candidates: Vec<(String, RedactionKind)> = literals
+            .into_iter()
+            .map(|(literal, rule)| {
+                (
+                    rule,
+                    RedactionKind::Text {
+                        reason: filter.reason.to_string(),
+                        literal,
+                        mark: true,
+                    },
+                )
+            })
+            .collect();
+        candidates.extend(values.into_iter().map(|(line, pointer, rule)| {
+            (
+                rule,
                 RedactionKind::Value {
                     line,
                     pointer,
                     reason: filter.reason.to_string(),
                 },
-            );
+            )
+        }));
+        for (rule, kind) in candidates {
+            if definition.is_suppressed(&author, &kind) {
+                continue;
+            }
+            definition.push(&author, Some(rule), kind);
         }
     }
     Ok(())
@@ -362,7 +376,7 @@ fn expand(
             line: *line,
             line_end: *line_end,
         })),
-        RedactionKind::Text { literal, .. } => {
+        RedactionKind::Text { literal, mark, .. } => {
             let regex = literal_regex(literal);
             for entry in &session.entries {
                 if dropped.contains(&entry.line) {
@@ -370,7 +384,7 @@ fn expand(
                 }
                 for value in &entry.values {
                     out.extend(
-                        matches_in(&regex, value, entry.line, SpanMode::Mark)
+                        matches_in(&regex, value, entry.line, *mark)
                             .into_iter()
                             .map(&instance),
                     );
@@ -380,8 +394,8 @@ fn expand(
         RedactionKind::Span {
             line,
             pointer,
-            mode,
             literal,
+            mark,
             ..
         } => {
             if dropped.contains(line) {
@@ -393,7 +407,7 @@ fn expand(
                 .and_then(|e| e.values.iter().find(|v| v.pointer == *pointer))
             {
                 out.extend(
-                    matches_in(&regex, value, *line, *mode)
+                    matches_in(&regex, value, *line, *mark)
                         .into_iter()
                         .map(&instance),
                 );
@@ -418,7 +432,7 @@ fn expand(
 
 /// The instances a literal produces in one value: one `Value` when the
 /// value is atomic and matches, else one `Span` per match.
-fn matches_in(regex: &Regex, value: &TextValue, line: u32, mode: SpanMode) -> Vec<InstanceKind> {
+fn matches_in(regex: &Regex, value: &TextValue, line: u32, mark: bool) -> Vec<InstanceKind> {
     let mut found = regex.find_iter(&value.text).peekable();
     if found.peek().is_none() {
         return Vec::new();
@@ -435,20 +449,21 @@ fn matches_in(regex: &Regex, value: &TextValue, line: u32, mode: SpanMode) -> Ve
             pointer: value.pointer.clone(),
             start: m.start(),
             end: m.end() - 1,
-            mode,
+            mark,
         })
         .collect()
 }
 
 /// The `(pointer, new text)` edits of one entry from the instances on
 /// its line. A value with a `Value` instance becomes the marker; spans
-/// are merged where they overlap and applied from the end.
+/// are merged where they overlap, a merged span is marked when any
+/// part of it was, and they are applied from the end.
 fn line_edits(
     entry: &EntryText,
     instances: &[Instance],
 ) -> Result<Vec<(String, String)>, PublishError> {
     let mut whole: BTreeSet<&str> = BTreeSet::new();
-    let mut spans: BTreeMap<&str, Vec<(usize, usize, SpanMode)>> = BTreeMap::new();
+    let mut spans: BTreeMap<&str, Vec<(usize, usize, bool)>> = BTreeMap::new();
     for i in instances.iter().filter(|i| i.line() == entry.line) {
         match &i.kind {
             InstanceKind::Value { pointer, .. } => {
@@ -458,12 +473,12 @@ fn line_edits(
                 pointer,
                 start,
                 end,
-                mode,
+                mark,
                 ..
             } => spans
                 .entry(pointer)
                 .or_default()
-                .push((*start, *end, *mode)),
+                .push((*start, *end, *mark)),
             InstanceKind::Line { .. } => {}
         }
     }
@@ -483,31 +498,30 @@ fn line_edits(
                 PublishError::Input(format!("line {}: no value at {pointer}", entry.line))
             })?;
         ranges.sort_by_key(|(start, _, _)| *start);
-        let mut merged: Vec<(usize, usize, SpanMode)> = Vec::new();
-        for (start, end, mode) in ranges {
+        let mut merged: Vec<(usize, usize, bool)> = Vec::new();
+        for (start, end, mark) in ranges {
             match merged.last_mut() {
                 Some(last) if start <= last.1 + 1 => {
                     last.1 = last.1.max(end);
-                    if mode == SpanMode::Mark {
-                        last.2 = SpanMode::Mark;
-                    }
+                    last.2 |= mark;
                 }
-                _ => merged.push((start, end, mode)),
+                _ => merged.push((start, end, mark)),
             }
         }
         let mut text = value.text.clone();
-        for (start, end, mode) in merged.into_iter().rev() {
-            text = apply_span(&text, start, end, mode);
+        for (start, end, mark) in merged.into_iter().rev() {
+            text = apply_span(&text, start, end, mark);
         }
         edits.push((pointer.to_string(), text));
     }
     Ok(edits)
 }
 
-/// `text` with the byte span `start..=end` marked or removed. A
-/// removal bounded by a space on both sides also removes the space
-/// that follows, so the words around it keep one space between them.
-fn apply_span(text: &str, start: usize, end: usize, mode: SpanMode) -> String {
+/// `text` with the byte span `start..=end` replaced by the marker, or
+/// removed when `mark` is false. A removal bounded by a space on both
+/// sides also removes the space that follows, so the words around it
+/// keep one space between them.
+fn apply_span(text: &str, start: usize, end: usize, mark: bool) -> String {
     let mut end = end + 1;
     let mut start = start;
     // A span must sit on character boundaries; a literal match always does
@@ -517,16 +531,14 @@ fn apply_span(text: &str, start: usize, end: usize, mode: SpanMode) -> String {
     while end < text.len() && !text.is_char_boundary(end) {
         end += 1;
     }
-    match mode {
-        SpanMode::Mark => format!("{}{MARKER}{}", &text[..start], &text[end..]),
-        SpanMode::Remove => {
-            let before = &text[..start];
-            let after = &text[end..];
-            let bounded = before.ends_with(' ') && after.starts_with(' ');
-            let after = if bounded { &after[1..] } else { after };
-            format!("{before}{after}")
-        }
+    if mark {
+        return format!("{}{MARKER}{}", &text[..start], &text[end..]);
     }
+    let before = &text[..start];
+    let after = &text[end..];
+    let bounded = before.ends_with(' ') && after.starts_with(' ');
+    let after = if bounded { &after[1..] } else { after };
+    format!("{before}{after}")
 }
 
 /// Rewrite `size` and the driver summary in the staged `attrs.json`
@@ -577,13 +589,13 @@ mod tests {
     #[test]
     fn removal_takes_one_bounding_space_and_marking_keeps_both() {
         assert_eq!(
-            apply_span("What are you fucking asking me?", 13, 19, SpanMode::Remove),
+            apply_span("What are you fucking asking me?", 13, 19, false),
             "What are you asking me?"
         );
         assert_eq!(
-            apply_span("What are you fucking asking me?", 13, 19, SpanMode::Mark),
+            apply_span("What are you fucking asking me?", 13, 19, true),
             "What are you [REDACTED] asking me?"
         );
-        assert_eq!(apply_span("fucking hell", 0, 6, SpanMode::Remove), " hell");
+        assert_eq!(apply_span("fucking hell", 0, 6, false), " hell");
     }
 }

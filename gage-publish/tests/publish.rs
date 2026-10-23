@@ -4,7 +4,7 @@
 
 use std::fs;
 
-use gage_publish::{FilterSpec, PublishError, Publisher, RedactionInput, SpanMode};
+use gage_publish::{FilterSpec, PublishError, Publisher, RedactionInput};
 use gage_registry::driver::DriverRegistry;
 use gage_session::SourceOptions;
 use gage_store::{SessionRecord, SessionStore, Store};
@@ -166,15 +166,15 @@ fn redact_applies_lines_text_and_spans_and_rejects_a_miss() {
             &init.id,
             &[
                 RedactionInput::parse_lines("5", "opaque").unwrap(),
-                RedactionInput::parse_text("garrett", "pii").unwrap(),
+                RedactionInput::parse_text("garrett", "pii", true).unwrap(),
                 // Line 1's text values in document order: type, cwd,
                 // message.role, message.content
                 RedactionInput::Span {
                     line: 1,
                     seq: 3,
-                    reason: "privacy".into(),
-                    mode: SpanMode::Remove,
+                    reason: "language".into(),
                     literal: "fucking".into(),
+                    mark: false,
                 },
             ],
             "user:test",
@@ -215,7 +215,7 @@ fn redact_applies_lines_text_and_spans_and_rejects_a_miss() {
     let miss = publisher
         .redact(
             &init.id,
-            &[RedactionInput::parse_text("nothing-like-this", "secret").unwrap()],
+            &[RedactionInput::parse_text("nothing-like-this", "secret", true).unwrap()],
             "user:test",
         )
         .unwrap_err();
@@ -292,4 +292,97 @@ fn the_staged_summary_follows_the_derived_content() {
         "{before} -> {after}"
     );
     assert_eq!(after["title"], title, "{after}");
+}
+
+/// `undo` removes redactions by id and rebuilds; an unknown id changes
+/// nothing; a filter's undone redaction is suppressed on re-run.
+#[test]
+fn undo_removes_redactions_and_suppresses_a_filters() {
+    let f = fixture();
+    let publisher = Publisher::with_root(&f.store, &f.publish_root);
+    let init = publisher
+        .init(&f.original, &[FilterSpec::from_text("secret")])
+        .unwrap();
+    let applied = publisher
+        .redact(
+            &init.id,
+            &[RedactionInput::parse_lines("5", "scope").unwrap()],
+            "user:test",
+        )
+        .unwrap();
+    assert_eq!(staged_lines(&f.publish_root, &init.id).len(), 4);
+
+    let miss = publisher.undo(&init.id, &[applied[0].id, 99]).unwrap_err();
+    assert!(miss.to_string().contains("99"), "{miss}");
+    assert_eq!(
+        staged_lines(&f.publish_root, &init.id).len(),
+        4,
+        "nothing changed"
+    );
+
+    let removed = publisher.undo(&init.id, &[applied[0].id]).unwrap();
+    assert_eq!(removed.len(), 1);
+    assert_eq!(
+        staged_lines(&f.publish_root, &init.id).len(),
+        5,
+        "line 5 is back"
+    );
+    let definition = publisher.definition(&init.id).unwrap();
+    assert!(
+        definition.suppressions.is_empty(),
+        "a user's undo leaves no suppression"
+    );
+    assert_eq!(definition.next_id, applied[0].id + 1, "ids are not reused");
+
+    let secret_id = definition
+        .redactions
+        .iter()
+        .find(|r| r.author == "filter:secret")
+        .unwrap()
+        .id;
+    publisher.undo(&init.id, &[secret_id]).unwrap();
+    let definition = publisher.definition(&init.id).unwrap();
+    assert_eq!(definition.suppressions.len(), 1);
+    assert!(staged_lines(&f.publish_root, &init.id)[1].contains("sk-ant-api03"));
+
+    let rerun = publisher
+        .reinit(&init.id, &[FilterSpec::from_text("secret")])
+        .unwrap();
+    assert!(
+        !rerun.redactions.iter().any(|r| r.author == "filter:secret"),
+        "the suppressed key is not restored: {rerun:#?}"
+    );
+    assert!(staged_lines(&f.publish_root, &init.id)[1].contains("sk-ant-api03"));
+}
+
+/// `refresh` re-applies a definition edited by hand and rejects an
+/// invalid one without touching the staged session.
+#[test]
+fn refresh_reapplies_a_hand_edited_definition() {
+    let f = fixture();
+    let publisher = Publisher::with_root(&f.store, &f.publish_root);
+    let init = publisher.init(&f.original, &[]).unwrap();
+    let path = publisher.store().definition_file(&init.id);
+
+    let mut json: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    json["redactions"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "id": 1, "author": "user:hand", "type": "text", "reason": "pii", "literal": "garrett"
+        }));
+    json["next_id"] = serde_json::json!(2);
+    fs::write(&path, serde_json::to_string_pretty(&json).unwrap()).unwrap();
+
+    let rebuilt = publisher.refresh(&init.id).unwrap();
+    assert_eq!(rebuilt.redactions.len(), 1);
+    assert_eq!(rebuilt.redactions[0].instances, 3, "{rebuilt:#?}");
+    assert!(staged_lines(&f.publish_root, &init.id)[0].contains("/home/[REDACTED]/proj"));
+
+    json["redactions"][0]["reason"] = serde_json::json!("bogus");
+    fs::write(&path, serde_json::to_string_pretty(&json).unwrap()).unwrap();
+    let err = publisher.refresh(&init.id).unwrap_err();
+    assert!(err.to_string().contains("redaction 1"), "{err}");
+    assert!(err.to_string().contains("bogus"), "{err}");
+    assert!(staged_lines(&f.publish_root, &init.id)[0].contains("/home/[REDACTED]/proj"));
 }

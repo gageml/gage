@@ -1,6 +1,6 @@
 //! `GAGE_SHOW_PUBLISHING=1` includes a pending publish working tree in
 //! the `session`, `entry`, `message`, `tool_use`, and `text_block`
-//! tables. The test
+//! tables, and a rebuilt working tree is re-read by the same context. The test
 //! runs in its own process, so its environment mutation does not race
 //! the library tests.
 
@@ -72,6 +72,7 @@ async fn pending_publish_appears_in_row_tables_under_env() {
         .at_commit(&outcome.commit_sha)
         .unwrap();
     let pending = PublishStore::from(&store).init(&original).unwrap();
+    let layout = PublishStore::from(&store).layout(&pending.id);
 
     let ctx = ContextBuilder::new(Some(Arc::new(Mutex::new(store))))
         .build()
@@ -103,6 +104,29 @@ async fn pending_publish_appears_in_row_tables_under_env() {
     .await;
     assert_eq!(tools, ["Bash"], "tool_use");
 
+    // A rebuild rewrites the staged content and `redacted.json` in
+    // place. The row cache keys a pending session by its working tree's
+    // modified time, so the same context serves the new content on the
+    // next query, which is what the session view's reload relies on.
+    let staged = layout.files_dir().join("session.jsonl");
+    let rewritten = std::fs::read_to_string(&staged)
+        .unwrap()
+        .replace("hello there", "hello [REDACTED]");
+    std::fs::write(&staged, rewritten).unwrap();
+    let later = std::time::SystemTime::now() + std::time::Duration::from_secs(90);
+    std::fs::File::options()
+        .write(true)
+        .open(layout.redacted_file())
+        .unwrap()
+        .set_modified(later)
+        .unwrap();
+    let reread = strings(
+        &ctx,
+        &format!("SELECT text FROM message WHERE session_id = '{id}' AND line = 1"),
+    )
+    .await;
+    assert_eq!(reread, ["hello [REDACTED]"], "rebuilt content is re-read");
+
     let blocks = strings(
         &ctx,
         &format!("SELECT text FROM text_block WHERE session_id = '{id}' ORDER BY line, seq"),
@@ -114,7 +138,7 @@ async fn pending_publish_appears_in_row_tables_under_env() {
             "user",
             "/w/proj",
             "user",
-            "hello there",
+            "hello [REDACTED]",
             "assistant",
             "assistant",
             "claude-x",

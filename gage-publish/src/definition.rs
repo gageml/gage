@@ -5,7 +5,6 @@
 //! committed.
 
 use std::fmt;
-use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
@@ -147,39 +146,6 @@ impl FilterEntry {
     }
 }
 
-/// How a span redaction replaces its span.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum SpanMode {
-    /// Remove the span and normalize the whitespace it leaves
-    Remove,
-    /// Replace the span with the marker
-    Mark,
-}
-
-impl FromStr for SpanMode {
-    type Err = PublishError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "remove" => Ok(SpanMode::Remove),
-            "mark" => Ok(SpanMode::Mark),
-            other => Err(PublishError::Input(format!(
-                "mode must be \"remove\" or \"mark\", not {other:?}"
-            ))),
-        }
-    }
-}
-
-impl fmt::Display for SpanMode {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            SpanMode::Remove => "remove",
-            SpanMode::Mark => "mark",
-        })
-    }
-}
-
 /// What one redaction instruction does.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
@@ -190,16 +156,23 @@ pub enum RedactionKind {
         line_end: u32,
         reason: String,
     },
-    /// Redact `literal` wherever it appears in the session
-    Text { reason: String, literal: String },
+    /// Redact `literal` wherever it appears in the session. `mark`
+    /// puts the marker in its place; otherwise the span is removed
+    Text {
+        reason: String,
+        literal: String,
+        #[serde(default = "mark_default")]
+        mark: bool,
+    },
     /// Redact `literal` within the one text value at `pointer` of
     /// `line`
     Span {
         line: u32,
         pointer: String,
         reason: String,
-        mode: SpanMode,
         literal: String,
+        #[serde(default = "mark_default")]
+        mark: bool,
     },
     /// Replace the whole text value at `pointer` of `line`
     Value {
@@ -207,6 +180,10 @@ pub enum RedactionKind {
         pointer: String,
         reason: String,
     },
+}
+
+fn mark_default() -> bool {
+    true
 }
 
 impl RedactionKind {
@@ -234,14 +211,19 @@ impl RedactionKind {
         match self {
             RedactionKind::Lines { line, line_end, .. } if line == line_end => line.to_string(),
             RedactionKind::Lines { line, line_end, .. } => format!("{line}-{line_end}"),
-            RedactionKind::Text { literal, .. } => literal.clone(),
+            RedactionKind::Text { literal, mark, .. } => {
+                format!("{literal}{}", if *mark { "" } else { " (no mark)" })
+            }
             RedactionKind::Span {
                 line,
                 pointer,
-                mode,
                 literal,
+                mark,
                 ..
-            } => format!("{line} {pointer} {mode} {literal}"),
+            } => format!(
+                "{line} {pointer} {literal}{}",
+                if *mark { "" } else { " (no mark)" }
+            ),
             RedactionKind::Value { line, pointer, .. } => format!("{line} {pointer}"),
         }
     }
@@ -265,13 +247,15 @@ pub struct Redaction {
 }
 
 /// A filter's redaction that `undo` removed and a re-run of the
-/// filter must not restore.
+/// filter must not restore: the filter, the rule, and the redaction
+/// it produced.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Suppression {
     pub author: String,
-    pub rule: String,
-    pub line: u32,
-    pub pointer: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule: Option<String>,
+    #[serde(flatten)]
+    pub kind: RedactionKind,
 }
 
 /// The definition of one pending publish.
@@ -321,6 +305,47 @@ impl PublishDefinition {
         id
     }
 
+    /// Whether a filter's candidate redaction was undone before and
+    /// must not be recorded again.
+    pub fn is_suppressed(&self, author: &str, kind: &RedactionKind) -> bool {
+        self.suppressions
+            .iter()
+            .any(|s| s.author == author && s.kind == *kind)
+    }
+
+    /// Check a definition as read from disk, which may have been
+    /// edited by hand: every reason is a known code, every literal is
+    /// non-empty, every line range is ordered, and ids are unique and
+    /// below `next_id`.
+    pub fn validate(&self) -> Result<(), PublishError> {
+        self.original()?;
+        let mut seen = std::collections::HashSet::new();
+        for r in &self.redactions {
+            let at = |why: String| PublishError::Input(format!("redaction {}: {why}", r.id));
+            if !seen.insert(r.id) {
+                return Err(at("id is not unique".to_string()));
+            }
+            if r.id >= self.next_id {
+                return Err(at(format!("id is not below next_id {}", self.next_id)));
+            }
+            check_reason(r.kind.reason()).map_err(|e| at(e.to_string()))?;
+            match &r.kind {
+                RedactionKind::Lines { line, line_end, .. } if *line == 0 || line_end < line => {
+                    return Err(at(
+                        "lines are 1-based and the end is not before the start".into()
+                    ));
+                }
+                RedactionKind::Text { literal, .. } | RedactionKind::Span { literal, .. }
+                    if literal.is_empty() =>
+                {
+                    return Err(at("literal is empty".into()));
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
     /// The `(id, commit)` of the original the `origin` names.
     pub fn original(&self) -> Result<(&str, &str), PublishError> {
         self.origin
@@ -347,14 +372,15 @@ pub enum RedactionInput {
     Text {
         reason: String,
         literal: String,
+        mark: bool,
     },
     /// `seq` names the value within `line` as `text_block` numbers it
     Span {
         line: u32,
         seq: u32,
         reason: String,
-        mode: SpanMode,
         literal: String,
+        mark: bool,
     },
 }
 
@@ -390,8 +416,9 @@ impl RedactionInput {
         })
     }
 
-    /// A literal redacted everywhere under `reason`.
-    pub fn parse_text(literal: &str, reason: &str) -> Result<Self, PublishError> {
+    /// A literal redacted everywhere under `reason`, marked unless
+    /// `mark` is false.
+    pub fn parse_text(literal: &str, reason: &str, mark: bool) -> Result<Self, PublishError> {
         if literal.is_empty() {
             return Err(PublishError::Input("text: literal is empty".to_string()));
         }
@@ -399,15 +426,16 @@ impl RedactionInput {
         Ok(RedactionInput::Text {
             reason: reason.to_string(),
             literal: literal.to_string(),
+            mark,
         })
     }
 
-    /// `<LINE> <SEQ> <MODE> <TEXT>` under `reason`; the literal runs to
-    /// the end.
-    pub fn parse_span(spec: &str, reason: &str) -> Result<Self, PublishError> {
+    /// `<LINE> <SEQ> <TEXT>` under `reason`, marked unless `mark` is
+    /// false; the literal runs to the end.
+    pub fn parse_span(spec: &str, reason: &str, mark: bool) -> Result<Self, PublishError> {
         let bad = |why: String| PublishError::Input(format!("span {spec:?}: {why}"));
-        let shape = || bad("expected <LINE> <SEQ> <MODE> <TEXT>".to_string());
-        let mut parts = spec.trim_start().splitn(4, ' ');
+        let shape = || bad("expected <LINE> <SEQ> <TEXT>".to_string());
+        let mut parts = spec.trim_start().splitn(3, ' ');
         let line: u32 = parts
             .next()
             .ok_or_else(shape)?
@@ -418,7 +446,6 @@ impl RedactionInput {
             .ok_or_else(shape)?
             .parse()
             .map_err(|e| bad(format!("seq: {e}")))?;
-        let mode: SpanMode = parts.next().ok_or_else(shape)?.parse()?;
         let literal = parts.next().ok_or_else(shape)?.trim_start();
         if literal.is_empty() {
             return Err(shape());
@@ -428,8 +455,8 @@ impl RedactionInput {
             line,
             seq,
             reason: reason.to_string(),
-            mode,
             literal: literal.to_string(),
+            mark,
         })
     }
 }
@@ -479,31 +506,33 @@ mod tests {
     #[test]
     fn text_takes_any_reason_and_a_non_empty_literal() {
         assert_eq!(
-            RedactionInput::parse_text("sk-ant api key", "secret").unwrap(),
+            RedactionInput::parse_text("sk-ant api key", "secret", true).unwrap(),
             RedactionInput::Text {
                 reason: "secret".into(),
-                literal: "sk-ant api key".into()
+                literal: "sk-ant api key".into(),
+                mark: true,
             }
         );
-        assert!(RedactionInput::parse_text("fucking", "privacy").is_ok());
-        assert!(RedactionInput::parse_text("", "secret").is_err());
-        assert!(RedactionInput::parse_text("x", "nope").is_err());
+        assert!(RedactionInput::parse_text("fucking", "language", false).is_ok());
+        assert!(RedactionInput::parse_text("", "secret", true).is_err());
+        assert!(RedactionInput::parse_text("x", "nope", true).is_err());
     }
 
     #[test]
-    fn span_spec_names_the_value_the_mode_and_the_literal() {
+    fn span_spec_names_the_value_and_the_literal() {
         assert_eq!(
-            RedactionInput::parse_span("12 0 remove fucking hell", "privacy").unwrap(),
+            RedactionInput::parse_span("12 0 fucking hell", "language", false).unwrap(),
             RedactionInput::Span {
                 line: 12,
                 seq: 0,
-                reason: "privacy".into(),
-                mode: SpanMode::Remove,
-                literal: "fucking hell".into()
+                reason: "language".into(),
+                literal: "fucking hell".into(),
+                mark: false,
             }
         );
-        assert!(RedactionInput::parse_span("12 0 mark x", "secret").is_ok());
-        assert!(RedactionInput::parse_span("12 0 drop x", "privacy").is_err());
+        assert!(RedactionInput::parse_span("12 0 x", "secret", true).is_ok());
+        assert!(RedactionInput::parse_span("12 x", "language", true).is_err());
+        assert!(RedactionInput::parse_span("12 0", "language", true).is_err());
     }
 
     #[test]
@@ -532,6 +561,7 @@ mod tests {
             RedactionKind::Text {
                 reason: "secret".into(),
                 literal: "abc".into(),
+                mark: true,
             },
         );
         let second = d.push(
