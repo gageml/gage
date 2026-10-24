@@ -137,10 +137,11 @@ impl Backend {
         );
         let batches = self.ctx.sql(&sql).await?.collect().await?;
         let row = batches.iter().find(|b| b.num_rows() > 0);
-        let value = row
+        let mut value = row
             .map(first_row_as_value)
             .transpose()?
             .unwrap_or(Value::Null);
+        nest_summary(&mut value);
         let pending = row.is_some_and(is_pending_publish);
         Ok(Session {
             id: session_id.to_string(),
@@ -497,6 +498,22 @@ fn is_pending_publish(batch: &RecordBatch) -> bool {
     locators.is_valid(0) && !locators.value(0).starts_with("git:")
 }
 
+/// Replace the row's `summary` text with the JSON object it holds, so
+/// the pane's YAML nests its keys. The stored `summary` column is a
+/// text column that carries a JSON object; a value that does not
+/// parse is left as text, which the pane still shows.
+fn nest_summary(row: &mut Value) {
+    let Some(summary) = row.get_mut("summary") else {
+        return;
+    };
+    let Some(text) = summary.as_str() else {
+        return;
+    };
+    if let Ok(parsed) = serde_json::from_str::<Value>(text) {
+        *summary = parsed;
+    }
+}
+
 fn first_row_as_value(batch: &RecordBatch) -> Result<Value, Box<dyn Error>> {
     let keep: Vec<usize> = batch
         .schema()
@@ -645,6 +662,10 @@ pub(crate) mod tests {
         let origin = doc.session.value["origin"].as_str().unwrap();
         assert!(origin.ends_with(&f.native_id), "{origin}");
         assert!(doc.session.value.get("locator").is_none());
+        let summary = doc.session.value["summary"]
+            .as_object()
+            .expect("the summary column should load as a nested object");
+        assert!(summary.contains_key("message_count"));
         assert!(!doc.session.pending);
         assert!(doc.notes.is_empty());
 

@@ -142,3 +142,25 @@ impl Entry {
         serde_yml::to_string(&self.value).expect("Value is always YAML serializable")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    /// A nested object renders as an indented YAML mapping, not as
+    /// one quoted scalar.
+    #[test]
+    fn session_yaml_nests_object_values() {
+        let session = Session {
+            id: "s1".to_string(),
+            value: json!({"id": "s1", "summary": {"title": "T", "message_count": 2}}),
+            pending: false,
+        };
+        let yaml = session.yaml();
+        assert!(yaml.contains("\nsummary:\n"), "{yaml}");
+        assert!(yaml.contains("\n  title: T\n"), "{yaml}");
+        assert!(yaml.contains("\n  message_count: 2\n"), "{yaml}");
+    }
+}
