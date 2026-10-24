@@ -25,7 +25,7 @@ use ratatui::widgets::{
 };
 use serde_json::Value;
 
-use crate::doc::{Document, Note};
+use crate::doc::{Document, EntryBody, Note};
 use crate::hint;
 use crate::options::ViewOptions;
 use crate::outline::{CollapseOutcome, Outline, RowKind};
@@ -33,7 +33,7 @@ use crate::picker::{self, PickColumn, PickItem, Picker, PickerAction};
 use crate::session::{self, Backend};
 use crate::syntax::Highlighter;
 use crate::textarea::TextArea;
-use crate::{message, styles};
+use crate::{markdown, message, styles};
 
 pub fn run(
     terminal: &mut DefaultTerminal,
@@ -1539,7 +1539,7 @@ fn draw_body(frame: &mut Frame, state: &mut AppState, area: Rect) {
         Some(RowKind::Entry { index }) => {
             let snap = state.doc.entries.get(index).map(|e| EntrySnap {
                 yaml: e.yaml(),
-                message: e.message().cloned(),
+                body: e.body(),
             });
             match snap {
                 Some(snap) => draw_entry(frame, state, &snap, inner),
@@ -1668,16 +1668,20 @@ fn civil_from_days(z: i64) -> Option<(i32, u32, u32)> {
 
 struct EntrySnap {
     yaml: String,
-    message: Option<serde_json::Value>,
+    body: Option<EntryBody>,
 }
 
 fn draw_entry(frame: &mut Frame, state: &mut AppState, entry: &EntrySnap, area: Rect) {
     let mut sections: Vec<Section> = Vec::new();
-    // Filtered view hides the native source behind the rendered message;
-    // entries with no message keep it, or the pane would be blank
-    let show_source = state.view.source || entry.message.is_none();
-    if let Some(message) = &entry.message {
-        let panel = Paragraph::new(message::render(message))
+    // Filtered view hides the native source behind the rendered body;
+    // entries with none keep it, or the pane would be blank
+    let show_source = state.view.source || entry.body.is_none();
+    if let Some(body) = &entry.body {
+        let lines = match body {
+            EntryBody::Text(text) => markdown::render(text),
+            EntryBody::Tool(message) => message::render(message),
+        };
+        let panel = Paragraph::new(lines)
             .wrap(Wrap { trim: false })
             .block(Block::default().padding(Padding::uniform(1)));
         sections.push(Section::from_paragraph(panel, area.width));
@@ -2022,11 +2026,40 @@ mod tests {
                     uuid: Some(format!("u{line}")),
                     entry_type: "user".into(),
                     message_subtype: Some("text".into()),
+                    message_text: None,
                     value: serde_json::json!({"type": "user"}),
                 })
                 .collect(),
             turns: Vec::new(),
             notes: Vec::new(),
+        }
+    }
+
+    /// A message entry's body is its `message.text`, rendered as
+    /// markdown; text that is not markdown renders as it is. A
+    /// thinking row renders the same way as a prompt or a reply.
+    #[test]
+    fn message_rows_render_their_text_column() {
+        let mut doc = doc_with_entries(3);
+        doc.entries[0].message_text = Some("Hello **world** from the prompt".into());
+        doc.entries[1].entry_type = "assistant".into();
+        doc.entries[1].message_subtype = Some("thinking".into());
+        doc.entries[1].message_text = Some("- step one\n- step two".into());
+        doc.entries[2].entry_type = "assistant".into();
+        doc.entries[2].message_text = Some("a < b > c {not markdown".into());
+        let mut state = AppState::new(doc, &ViewOptions::default(), DocSource::Backend, false);
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+
+        for (line, expected) in [
+            (1, "Hello world from the prompt"),
+            (2, "step one"),
+            (3, "a < b > c {not markdown"),
+        ] {
+            state.select_line(line);
+            terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+            let text = screen(&terminal);
+            assert!(text.contains(expected), "line {line}:\n{text}");
+            assert!(!text.contains("native source"), "line {line}:\n{text}");
         }
     }
 

@@ -119,8 +119,19 @@ pub struct Entry {
     /// The message subtype the driver derived, from the `message`
     /// table; `None` for an entry that is not a message
     pub message_subtype: Option<String>,
+    /// The message's text, from the `message` table; `None` for an
+    /// entry that is not a message
+    pub message_text: Option<String>,
     /// The harness's row, verbatim
     pub value: Value,
+}
+
+/// What the rendered view shows for an entry.
+pub enum EntryBody {
+    /// The message text, rendered as markdown
+    Text(String),
+    /// A tool call or tool result, rendered from the message value
+    Tool(Value),
 }
 
 impl Entry {
@@ -140,6 +151,16 @@ impl Entry {
 
     pub fn message(&self) -> Option<&Value> {
         self.value.get("message")
+    }
+
+    /// The rendered view's content: the message text for a message
+    /// that is not a tool call or result, the message value for a tool
+    /// call or result, nothing for an entry without a message.
+    pub fn body(&self) -> Option<EntryBody> {
+        match self.message_subtype.as_deref() {
+            Some("tool_use" | "tool_result") => self.message().cloned().map(EntryBody::Tool),
+            _ => self.message_text.clone().map(EntryBody::Text),
+        }
     }
 
     pub fn yaml(&self) -> String {

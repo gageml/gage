@@ -359,3 +359,38 @@ fn heading_level(level: HeadingLevel) -> usize {
         HeadingLevel::H6 => 6,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Any text renders: unterminated and malformed markdown produces
+    /// lines that still carry the text.
+    #[test]
+    fn malformed_markdown_still_renders_its_text() {
+        for input in [
+            "```unterminated\ncode",
+            "| a | b |\n|---",
+            "***",
+            "<",
+            "[link](",
+            "* item\n    1. nested\n> quote **bold",
+            "text\u{0}with\u{1b}control",
+        ] {
+            let lines = render(input);
+            assert!(!lines.is_empty(), "{input:?}");
+            let shown: String = lines
+                .iter()
+                .map(|l| {
+                    l.spans
+                        .iter()
+                        .map(|s| s.content.as_ref())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(!shown.trim().is_empty(), "{input:?} rendered blank");
+        }
+        assert!(render("").is_empty());
+    }
+}

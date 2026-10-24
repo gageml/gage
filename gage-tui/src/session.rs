@@ -164,7 +164,7 @@ impl Backend {
     async fn load_entries(&self, session_id: &str) -> Result<Vec<Entry>, Box<dyn Error>> {
         let id = sql_str(session_id);
         let sql = format!(
-            "SELECT e.line, e.uuid, e.type, m.subtype, e.raw \
+            "SELECT e.line, e.uuid, e.type, m.subtype, e.raw, m.text \
              FROM {} e LEFT JOIN {} m ON m.session_id = '{id}' AND m.line = e.line \
              WHERE e.session_id = '{id}' ORDER BY e.line",
             self.entry_rel(),
@@ -178,6 +178,7 @@ impl Backend {
             let types = column::<StringArray>(batch, 2);
             let subtypes = column::<StringArray>(batch, 3);
             let raws = column::<StringArray>(batch, 4);
+            let texts = column::<StringArray>(batch, 5);
             for i in 0..batch.num_rows() {
                 // A driver that supplies no raw row leaves the entry
                 // with nothing to render; it still holds its line
@@ -191,6 +192,7 @@ impl Backend {
                     uuid: uuids.is_valid(i).then(|| uuids.value(i).to_string()),
                     entry_type: types.value(i).to_string(),
                     message_subtype: subtypes.is_valid(i).then(|| subtypes.value(i).to_string()),
+                    message_text: texts.is_valid(i).then(|| texts.value(i).to_string()),
                     value,
                 });
             }
@@ -736,6 +738,8 @@ pub(crate) mod tests {
         let doc = backend.load(&f.session_id).await.unwrap();
         assert_eq!(doc.entries.len(), 2);
         assert_eq!(doc.entries[0].entry_type(), "user");
+        assert_eq!(doc.entries[0].message_text.as_deref(), Some("hello there"));
+        assert_eq!(doc.entries[1].message_text.as_deref(), Some("hi"));
         let origin = doc.session.value["origin"].as_str().unwrap();
         assert!(origin.ends_with(&f.native_id), "{origin}");
         assert!(doc.session.value.get("locator").is_none());
