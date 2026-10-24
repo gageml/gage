@@ -3793,6 +3793,7 @@ mod tests {
             },
             entries: Vec::new(),
             turns: Vec::new(),
+            tool_uses: Vec::new(),
             notes: Vec::new(),
             redactions: Vec::new(),
         };

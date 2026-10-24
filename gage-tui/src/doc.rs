@@ -15,6 +15,9 @@ pub struct Document {
     /// rows of one API response share a turn, numbered in order of
     /// first appearance; every other row has none
     pub turns: Vec<Option<usize>>,
+    /// The session's tool calls, in the order the `tool_use` table
+    /// yields them, which is the order of the calls in the session
+    pub tool_uses: Vec<ToolUse>,
     pub notes: Vec<Note>,
     /// The records of a published session's `redacted.json`, in
     /// original line order; empty for a session that is not a publish
@@ -41,7 +44,7 @@ impl Redaction {
     fn dropped_lines(&self) -> Option<(u32, u32)> {
         match self.kind {
             RedactedKind::Line => Some((self.line, self.line_end.unwrap_or(self.line))),
-            RedactedKind::Span | RedactedKind::Value => None,
+            RedactedKind::Span | RedactedKind::Value | RedactedKind::Attr => None,
         }
     }
 }
@@ -247,8 +250,57 @@ pub struct Entry {
 pub enum EntryBody {
     /// The message text, rendered as markdown
     Text(String),
-    /// A tool call or tool result, rendered from the message value
-    Tool(Value),
+    /// The calls a tool call entry made
+    ToolCalls(Vec<ToolUse>),
+    /// The results a tool result entry returned
+    ToolResults(Vec<ToolUse>),
+}
+
+/// One row of the `tool_use` table, as the viewer shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolUse {
+    /// Line of the entry that made the call
+    pub line: u32,
+    /// Line of the entry that returned the result, when one did
+    pub result_line: Option<u32>,
+    pub name: String,
+    /// The call input, JSON as the harness recorded it
+    pub input: String,
+    /// The result content as text
+    pub output: Option<String>,
+    pub is_error: Option<bool>,
+}
+
+impl Document {
+    /// The rendered view's content for the entry at `index`: its tool
+    /// calls for a tool call row, its results for a tool result row,
+    /// its message text for any other message, nothing for an entry
+    /// without a message or for a tool row the `tool_use` table has
+    /// no rows for.
+    pub fn entry_body(&self, index: usize) -> Option<EntryBody> {
+        let entry = self.entries.get(index)?;
+        match entry.message_subtype.as_deref() {
+            Some("tool_use") => {
+                let calls: Vec<ToolUse> = self
+                    .tool_uses
+                    .iter()
+                    .filter(|t| t.line == entry.line)
+                    .cloned()
+                    .collect();
+                (!calls.is_empty()).then_some(EntryBody::ToolCalls(calls))
+            }
+            Some("tool_result") => {
+                let results: Vec<ToolUse> = self
+                    .tool_uses
+                    .iter()
+                    .filter(|t| t.result_line == Some(entry.line))
+                    .cloned()
+                    .collect();
+                (!results.is_empty()).then_some(EntryBody::ToolResults(results))
+            }
+            _ => entry.message_text.clone().map(EntryBody::Text),
+        }
+    }
 }
 
 impl Entry {
@@ -263,20 +315,6 @@ impl Entry {
         match self.message_subtype.as_deref() {
             Some("text") | None => &self.entry_type,
             Some(sub) => sub,
-        }
-    }
-
-    pub fn message(&self) -> Option<&Value> {
-        self.value.get("message")
-    }
-
-    /// The rendered view's content: the message text for a message
-    /// that is not a tool call or result, the message value for a tool
-    /// call or result, nothing for an entry without a message.
-    pub fn body(&self) -> Option<EntryBody> {
-        match self.message_subtype.as_deref() {
-            Some("tool_use" | "tool_result") => self.message().cloned().map(EntryBody::Tool),
-            _ => self.message_text.clone().map(EntryBody::Text),
         }
     }
 
@@ -325,6 +363,7 @@ mod tests {
                 })
                 .collect(),
             turns: Vec::new(),
+            tool_uses: Vec::new(),
             notes: Vec::new(),
             redactions: vec![
                 redaction(RedactedKind::Span, 1, None),

@@ -33,7 +33,7 @@ use crate::picker::{self, PickColumn, PickItem, Picker, PickerAction};
 use crate::session::{self, Backend};
 use crate::syntax::Highlighter;
 use crate::textarea::TextArea;
-use crate::{markdown, message, styles};
+use crate::{markdown, styles, tool};
 
 pub fn run(
     terminal: &mut DefaultTerminal,
@@ -1622,7 +1622,7 @@ fn draw_body(frame: &mut Frame, state: &mut AppState, area: Rect) {
             };
             let snap = state.doc.entries.get(index).map(|e| EntrySnap {
                 yaml: e.yaml(),
-                body: e.body(),
+                body: state.doc.entry_body(index),
                 redactions,
             });
             match snap {
@@ -1701,7 +1701,8 @@ fn draw_dropped(frame: &mut Frame, doc: &Document, dropped: &Dropped, area: Rect
 
 /// One record as the content pane lists it: where it applied, its
 /// reason, and its author. A span names its property and byte
-/// offsets, a value its property, and a line record its lines.
+/// offsets, a value its property, a line record its lines, and an
+/// attr record its attribute.
 fn redaction_line(r: &Redaction) -> Line<'static> {
     let property = r.property.clone().unwrap_or_default();
     let location = match r.kind {
@@ -1711,6 +1712,7 @@ fn redaction_line(r: &Redaction) -> Line<'static> {
             _ => property,
         },
         RedactedKind::Value => property,
+        RedactedKind::Attr => format!("attr {property}"),
     };
     Line::from(vec![
         Span::raw(location),
@@ -1816,7 +1818,8 @@ fn draw_entry(frame: &mut Frame, state: &mut AppState, entry: &EntrySnap, area: 
     if let Some(body) = &entry.body {
         let lines = match body {
             EntryBody::Text(text) => markdown::render(text),
-            EntryBody::Tool(message) => message::render(message),
+            EntryBody::ToolCalls(calls) => tool::calls(calls),
+            EntryBody::ToolResults(results) => tool::results(results),
         };
         let panel = Paragraph::new(lines)
             .wrap(Wrap { trim: false })
@@ -2053,7 +2056,7 @@ mod tests {
     use ratatui::crossterm::event::KeyEvent;
 
     use super::*;
-    use crate::doc::{Entry, Session};
+    use crate::doc::{Entry, Session, ToolUse};
     use crate::session::tests::fixture;
 
     /// The rendered screen as one string, rows joined by newlines
@@ -2129,6 +2132,7 @@ mod tests {
             },
             entries: Vec::new(),
             turns: Vec::new(),
+            tool_uses: Vec::new(),
             notes: Vec::new(),
             redactions: Vec::new(),
         };
@@ -2337,6 +2341,7 @@ mod tests {
                 })
                 .collect(),
             turns: Vec::new(),
+            tool_uses: Vec::new(),
             notes: Vec::new(),
             redactions: Vec::new(),
         }
@@ -2368,6 +2373,45 @@ mod tests {
             assert!(text.contains(expected), "line {line}:\n{text}");
             assert!(!text.contains("native source"), "line {line}:\n{text}");
         }
+    }
+
+    /// A tool call row shows each call's tool and input from the
+    /// `tool_use` table; a tool result row shows each result's tool,
+    /// error status, and output. Neither reads the message text.
+    #[test]
+    fn tool_rows_render_from_the_tool_use_table() {
+        let mut doc = doc_with_entries(2);
+        doc.entries[0].entry_type = "assistant".into();
+        doc.entries[0].message_subtype = Some("tool_use".into());
+        doc.entries[0].message_text = Some("PROSE-NOT-SHOWN".into());
+        doc.entries[1].message_subtype = Some("tool_result".into());
+        doc.entries[1].message_text = Some("RESULT-TEXT-NOT-SHOWN".into());
+        doc.tool_uses = vec![ToolUse {
+            line: 1,
+            result_line: Some(2),
+            name: "Bash".into(),
+            input: r#"{"command":"ls -la"}"#.into(),
+            output: Some("total 0\nfile.txt".into()),
+            is_error: Some(true),
+        }];
+        let options = ViewOptions::parse("tools").unwrap();
+        let mut state = AppState::new(doc, &options, DocSource::Backend, false);
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+
+        state.select_line(1);
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let text = screen(&terminal);
+        assert!(text.contains("Tool  Bash"), "{text}");
+        assert!(text.contains(r#""command": "ls -la""#), "{text}");
+        assert!(!text.contains("PROSE-NOT-SHOWN"), "{text}");
+
+        state.select_line(2);
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let text = screen(&terminal);
+        assert!(text.contains("Tool  Bash"), "{text}");
+        assert!(text.contains("Status  error"), "{text}");
+        assert!(text.contains("file.txt"), "{text}");
+        assert!(!text.contains("RESULT-TEXT-NOT-SHOWN"), "{text}");
     }
 
     /// A document of `count` entries alternating user and assistant,

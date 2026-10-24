@@ -13,7 +13,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use datafusion::arrow::array::{
-    Array, Int64Array, RecordBatch, StringArray, TimestampMillisecondArray, UInt64Array,
+    Array, BooleanArray, Int64Array, RecordBatch, StringArray, TimestampMillisecondArray,
+    UInt64Array,
 };
 use datafusion::arrow::json::ArrayWriter;
 use datafusion::prelude::SessionContext;
@@ -26,7 +27,7 @@ use gage_store::{NoteEdit, NoteFull, NoteInput, NoteStore, NoteValue, RedactedKi
 use ratatui::crossterm::terminal;
 use serde_json::Value;
 
-use crate::doc::{Document, Entry, Note, Redaction, Session};
+use crate::doc::{Document, Entry, Note, Redaction, Session, ToolUse};
 use crate::format;
 
 #[derive(Clone)]
@@ -118,6 +119,7 @@ impl Backend {
         }
         let entries = self.load_entries(session_id).await?;
         let turns = self.load_turns(session_id, &entries).await?;
+        let tool_uses = self.load_tool_uses(session_id).await?;
         // A native session is never a publish, and its context has no
         // `redacted` relation
         let (notes, redactions) = match self.kind {
@@ -131,6 +133,7 @@ impl Backend {
             session,
             entries,
             turns,
+            tool_uses,
             notes,
             redactions,
         })
@@ -268,6 +271,7 @@ impl Backend {
                     "line" => RedactedKind::Line,
                     "span" => RedactedKind::Span,
                     "value" => RedactedKind::Value,
+                    "attr" => RedactedKind::Attr,
                     other => return Err(format!("unknown redacted kind {other:?}").into()),
                 };
                 let line_at = |col: &Int64Array| -> Result<Option<u32>, Box<dyn Error>> {
@@ -299,6 +303,42 @@ impl Backend {
             }
         }
         Ok(redactions)
+    }
+
+    /// The session's tool calls in the order the table yields them,
+    /// which is the order of the calls in the session; the rows are
+    /// not sorted, so calls on one line keep that order.
+    async fn load_tool_uses(&self, session_id: &str) -> Result<Vec<ToolUse>, Box<dyn Error>> {
+        let sql = format!(
+            "SELECT line, result_line, name, input_raw, output, is_error \
+             FROM {} WHERE session_id = '{}'",
+            self.tool_use_rel(),
+            sql_str(session_id),
+        );
+        let batches = self.ctx.sql(&sql).await?.collect().await?;
+        let mut tool_uses = Vec::new();
+        for batch in &batches {
+            let lines = column::<Int64Array>(batch, 0);
+            let result_lines = column::<Int64Array>(batch, 1);
+            let names = column::<StringArray>(batch, 2);
+            let inputs = column::<StringArray>(batch, 3);
+            let outputs = column::<StringArray>(batch, 4);
+            let is_errors = column::<BooleanArray>(batch, 5);
+            for i in 0..batch.num_rows() {
+                tool_uses.push(ToolUse {
+                    line: u32::try_from(lines.value(i))?,
+                    result_line: result_lines
+                        .is_valid(i)
+                        .then(|| u32::try_from(result_lines.value(i)))
+                        .transpose()?,
+                    name: names.value(i).to_string(),
+                    input: inputs.value(i).to_string(),
+                    output: outputs.is_valid(i).then(|| outputs.value(i).to_string()),
+                    is_error: is_errors.is_valid(i).then(|| is_errors.value(i)),
+                });
+            }
+        }
+        Ok(tool_uses)
     }
 
     /// The notes targeting the session, oldest first. The target URL
@@ -494,6 +534,13 @@ impl Backend {
         match &self.kind {
             Kind::Native { spec, .. } => format!("native_message('{}')", sql_str(spec)),
             Kind::Stored { .. } => "message".to_string(),
+        }
+    }
+
+    fn tool_use_rel(&self) -> String {
+        match &self.kind {
+            Kind::Native { spec, .. } => format!("native_tool_use('{}')", sql_str(spec)),
+            Kind::Stored { .. } => "tool_use".to_string(),
         }
     }
 }
@@ -760,6 +807,56 @@ pub(crate) mod tests {
             .unwrap();
         let doc = native.load(&f.native_id).await.unwrap();
         assert_eq!(doc.turns, expected);
+    }
+
+    /// A tool call row's calls and a tool result row's results come
+    /// from the `tool_use` table, paired by line. The stored and native
+    /// backends agree.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn tool_uses_load_from_the_tool_use_table() {
+        let f = fixture_with_content(concat!(
+            r#"{"type":"user","uuid":"u1","timestamp":"2025-01-01T00:00:00Z","cwd":"/w/proj","message":{"role":"user","content":"list"}}"#,
+            "\n",
+            r#"{"type":"assistant","uuid":"a1","timestamp":"2025-01-01T00:00:01Z","message":{"id":"msg_1","role":"assistant","model":"claude-x","content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"ls"}},{"type":"tool_use","id":"toolu_2","name":"Read","input":{"file_path":"/w/proj/a"}}]}}"#,
+            "\n",
+            r#"{"type":"user","uuid":"u2","timestamp":"2025-01-01T00:00:02Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"a\nb"},{"type":"tool_result","tool_use_id":"toolu_2","content":"missing","is_error":true}]}}"#,
+            "\n",
+        ));
+        let expected = vec![
+            ToolUse {
+                line: 2,
+                result_line: Some(3),
+                name: "Bash".into(),
+                input: r#"{"command":"ls"}"#.into(),
+                output: Some("a\nb".into()),
+                is_error: Some(false),
+            },
+            ToolUse {
+                line: 2,
+                result_line: Some(3),
+                name: "Read".into(),
+                input: r#"{"file_path":"/w/proj/a"}"#.into(),
+                output: Some("missing".into()),
+                is_error: Some(true),
+            },
+        ];
+
+        let stored = Backend::stored(f.store).await;
+        let doc = stored.load(&f.session_id).await.unwrap();
+        assert_eq!(doc.entries[1].message_subtype.as_deref(), Some("tool_use"));
+        assert_eq!(
+            doc.entries[2].message_subtype.as_deref(),
+            Some("tool_result")
+        );
+        assert_eq!(doc.tool_uses, expected);
+
+        let native = Backend::native(&f.spec)
+            .cache_root(&f.cache_root)
+            .open()
+            .await
+            .unwrap();
+        let doc = native.load(&f.native_id).await.unwrap();
+        assert_eq!(doc.tool_uses, expected);
     }
 
     #[test]

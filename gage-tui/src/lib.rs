@@ -6,7 +6,6 @@ mod format;
 mod hint;
 mod item_table;
 mod markdown;
-mod message;
 mod options;
 mod outline;
 mod panel;
@@ -21,6 +20,7 @@ mod styles;
 mod syntax;
 pub mod text;
 mod textarea;
+mod tool;
 mod tree;
 
 pub use options::ViewOptions;
