@@ -23,6 +23,7 @@ use crate::content::GitContentSource;
 use crate::dataset::{DatasetMembers, DatasetStore};
 use crate::index::{ObjectQuery, Order, SelectedTip};
 use crate::object::{EditOutcome, Object, ObjectTree, object_ref, require_type};
+use crate::publish::{REDACTED_FILE, RedactedRecord, parse_redacted};
 use crate::writer::{TreeInput, is_dot_git, mktree, write_blob_stream};
 use crate::{Store, StoreError};
 
@@ -443,6 +444,17 @@ impl<'a> SessionStore<'a> {
     pub fn at_commit(&self, commit_sha: &str) -> Result<SessionRecord, StoreError> {
         let object = self.store.read_object(commit_sha)?;
         decode(object)
+    }
+
+    /// The `redacted.json` records of the session version at
+    /// `commit_sha`: what its publish changed in the original. A
+    /// session that is not a publish has none.
+    pub fn redacted(&self, commit_sha: &str) -> Result<Vec<RedactedRecord>, StoreError> {
+        let object = self.store.read_object(commit_sha)?;
+        match object.tree.blobs.get(REDACTED_FILE) {
+            Some(bytes) => parse_redacted(bytes),
+            None => Ok(Vec::new()),
+        }
     }
 
     /// The byte tree of the session version at `commit_sha`, for the

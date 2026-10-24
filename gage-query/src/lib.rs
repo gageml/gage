@@ -12,7 +12,9 @@
 //! sessions: the core resolves the session set and plans every read
 //! ([`scope`]), and the driver that wrote each session deserializes
 //! its bytes into normalized rows the core turns into batches
-//! ([`rows`], [`stored_rows`]).
+//! ([`rows`], [`stored_rows`]). `redacted` is the records of a
+//! published session's `redacted.json`, over the same session set
+//! ([`redacted`]).
 //! `note` is one row per live note object, from
 //! [`gage_store::StoredNoteTable`]. `issue` is one row per live issue
 //! object and `issue_event` one row per change entry across them.
@@ -43,6 +45,7 @@ mod native;
 mod patch;
 mod print_format;
 mod project;
+pub mod redacted;
 mod repl;
 pub mod rows;
 pub mod scope;
@@ -195,7 +198,14 @@ impl ContextBuilder {
             ),
             (
                 "text_block",
-                Arc::new(StoredRowsTable::new(RowKind::TextBlock, sessions)),
+                Arc::new(StoredRowsTable::new(
+                    RowKind::TextBlock,
+                    Arc::clone(&sessions),
+                )),
+            ),
+            (
+                "redacted",
+                Arc::new(StoredRowsTable::new(RowKind::Redacted, sessions)),
             ),
             ("note", Arc::new(StoredNoteTable::new(Arc::clone(&store)))),
             ("dataset", dataset_table(Arc::clone(&store))),
@@ -256,8 +266,8 @@ impl ContextBuilder {
 }
 
 /// Register one scan's tables: `session` at the members' linked
-/// versions, `entry`, `message`, `tool_use`, and `text_block` over
-/// them, and every other table from the scan source.
+/// versions, `entry`, `message`, `tool_use`, `text_block`, and
+/// `redacted` over them, and every other table from the scan source.
 fn build_scan_scope(
     ctx: SessionContext,
     store: Arc<Mutex<Store>>,
@@ -304,7 +314,14 @@ fn build_scan_scope(
         ),
         (
             "text_block",
-            Arc::new(StoredRowsTable::new(RowKind::TextBlock, sessions)),
+            Arc::new(StoredRowsTable::new(
+                RowKind::TextBlock,
+                Arc::clone(&sessions),
+            )),
+        ),
+        (
+            "redacted",
+            Arc::new(StoredRowsTable::new(RowKind::Redacted, sessions)),
         ),
     ];
     tables.extend(scan_scope_tables(&store, scope.source()));
@@ -537,7 +554,7 @@ mod tests {
     use gage_session::SourceOptions;
     use gage_store::{
         DatasetStore, IssueInput, IssueStatus, IssueStore, NoteInput, NoteStore, NoteValue,
-        ScanStore, SessionSpec, SessionStore, StatusReason, Store, TagStore,
+        PublishStore, ScanStore, SessionSpec, SessionStore, StatusReason, Store, TagStore,
     };
     use tempfile::TempDir;
 
@@ -1141,6 +1158,107 @@ mod tests {
 
         let filtered = strings(&ctx, "SELECT text FROM text_block WHERE line = 2").await;
         assert_eq!(filtered, ["plan", "done"]);
+    }
+
+    /// `redacted` reads a published session's `redacted.json`: one
+    /// row per record with the record's fields in the table's columns,
+    /// under the scope's session filter and the `line` filter. The
+    /// original session has no rows.
+    #[tokio::test]
+    async fn redacted_reads_a_published_sessions_records() {
+        let (tmp, store) = open_store();
+        let claude_root = tempfile::tempdir().unwrap();
+        let native_id = "11111111-2222-3333-4444-888888888888";
+        let project_dir = claude_root.path().join("projects").join("-w-proj");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        std::fs::write(
+            project_dir.join(format!("{native_id}.jsonl")),
+            concat!(
+                r#"{"type":"user","uuid":"u1","timestamp":"2025-01-01T00:00:00Z","cwd":"/w/proj","message":{"role":"user","content":"hello there"}}"#,
+                "\n",
+                r#"{"type":"assistant","uuid":"a1","timestamp":"2025-01-01T00:00:01Z","message":{"role":"assistant","model":"claude-x","content":[{"type":"text","text":"hi"}]}}"#,
+                "\n",
+                r#"{"type":"user","uuid":"u2","timestamp":"2025-01-01T00:00:02Z","message":{"role":"user","content":"bye"}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        let spec = format!("claude:{}", claude_root.path().display());
+        let registry = DriverRegistry::builtin();
+        let driver = registry.driver_for(&spec).unwrap();
+        let source = driver
+            .open_source(SourceOptions::new(&spec).cache_root(claude_root.path().join("cache")))
+            .unwrap();
+        let mut native = source.open_native(native_id).unwrap();
+        let (original_id, published_id) = {
+            let store = store.lock().unwrap();
+            let outcome = SessionStore::from(&*store)
+                .add(driver.as_ref(), native.as_mut())
+                .unwrap();
+            let original = SessionStore::from(&*store)
+                .at_commit(&outcome.commit_sha)
+                .unwrap();
+            let publish = PublishStore::with_root(&store, tmp.path().join("publish"));
+            let init = publish.init(&original).unwrap();
+            let layout = publish.layout(&init.id);
+            // Line 2 is dropped and the greeting on line 1 is redacted
+            let staged = layout.files_dir().join("session.jsonl");
+            let lines: Vec<String> = std::fs::read_to_string(&staged)
+                .unwrap()
+                .lines()
+                .map(|l| l.replace("hello there", "hello [REDACTED]"))
+                .collect();
+            std::fs::write(&staged, format!("{}\n{}\n", lines[0], lines[2])).unwrap();
+            std::fs::write(
+                layout.redacted_file(),
+                concat!(
+                    "[\n",
+                    r#"  ["span", 1, "/message/content", 6, 10, "pii", "filter:pii"],"#,
+                    "\n",
+                    r#"  ["line", 2, 2, "scope", "user:t"]"#,
+                    "\n]\n",
+                ),
+            )
+            .unwrap();
+            publish.apply(&init.id).unwrap();
+            (outcome.id, init.id)
+        };
+
+        let ctx = ContextBuilder::new(Some(store))
+            .cache_root(claude_root.path().join("cache"))
+            .build()
+            .await;
+        let rows = strings(
+            &ctx,
+            "SELECT kind || ' ' || CAST(line AS VARCHAR) \
+                 || ' ' || COALESCE(CAST(line_end AS VARCHAR), '-') \
+                 || ' ' || COALESCE(property, '-') \
+                 || ' ' || COALESCE(CAST(span_start AS VARCHAR), '-') \
+                 || ' ' || COALESCE(CAST(span_end AS VARCHAR), '-') \
+                 || ' ' || reason || ' ' || author \
+             FROM redacted ORDER BY line, kind",
+        )
+        .await;
+        assert_eq!(
+            rows,
+            [
+                "span 1 - /message/content 6 10 pii filter:pii",
+                "line 2 2 - - - scope user:t",
+            ]
+        );
+
+        let by_session = strings(
+            &ctx,
+            &format!("SELECT kind FROM redacted WHERE session_id = '{published_id}' AND line = 2"),
+        )
+        .await;
+        assert_eq!(by_session, ["line"]);
+        let none = strings(
+            &ctx,
+            &format!("SELECT kind FROM redacted WHERE session_id = '{original_id}'"),
+        )
+        .await;
+        assert!(none.is_empty(), "{none:?}");
     }
 
     /// The default context lists the system columns after the

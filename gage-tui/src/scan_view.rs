@@ -3794,6 +3794,7 @@ mod tests {
             entries: Vec::new(),
             turns: Vec::new(),
             notes: Vec::new(),
+            redactions: Vec::new(),
         };
         let view = app::AppState::new(doc, &ViewOptions::default(), app::DocSource::Backend, false);
         let backend = tokio::runtime::Builder::new_current_thread()

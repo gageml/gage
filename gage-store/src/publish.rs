@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use gage_core::uuid::new_uuid;
+use serde_json::Value;
 
 use crate::index::IdMatch;
 use crate::object::{ObjectTree, object_ref};
@@ -30,7 +31,7 @@ use crate::{SessionRecord, SessionStore, Store, StoreError};
 
 const PUBLISH_DIR: &str = "publish";
 const ATTRS_FILE: &str = "attrs.json";
-const REDACTED_FILE: &str = "redacted.json";
+pub(crate) const REDACTED_FILE: &str = "redacted.json";
 const DEFINITION_SUFFIX: &str = ".publish.json";
 
 /// Whether the data layer includes pending publish working trees in
@@ -93,6 +94,146 @@ impl PublishDirLayout {
     pub fn redacted_file(&self) -> PathBuf {
         self.root.join(REDACTED_FILE)
     }
+
+    /// The records of the staged `redacted.json`.
+    pub fn read_redacted(&self) -> Result<Vec<RedactedRecord>, StoreError> {
+        let bytes = fs::read(self.redacted_file()).map_err(StoreError::ReadContent)?;
+        parse_redacted(&bytes)
+    }
+}
+
+/// One record of a session's `redacted.json`: one effect of its
+/// publish on the original session. Every line number is the
+/// original's; the derived session's lines are renumbered around the
+/// dropped ones.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RedactedRecord {
+    pub kind: RedactedKind,
+    /// The original line, 1-based; the first dropped line of a `Line`
+    /// record.
+    pub line: u32,
+    /// The last dropped line of a `Line` record, inclusive.
+    pub line_end: Option<u32>,
+    /// JSON Pointer to the text value a `Span` or `Value` record
+    /// touches.
+    pub property: Option<String>,
+    /// Zero-based UTF-8 byte offsets of a `Span` record, `span_end`
+    /// inclusive.
+    pub span_start: Option<u64>,
+    pub span_end: Option<u64>,
+    pub reason: String,
+    pub author: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RedactedKind {
+    /// One or more lines were left out of the derived session.
+    Line,
+    /// A byte span of one text value was removed or replaced by the
+    /// marker.
+    Span,
+    /// A whole text value was replaced by the marker.
+    Value,
+}
+
+impl RedactedKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RedactedKind::Line => "line",
+            RedactedKind::Span => "span",
+            RedactedKind::Value => "value",
+        }
+    }
+}
+
+/// Decode the `redacted.json` text: a JSON array of typed arrays,
+/// `["line", line, line_end, reason, author]`,
+/// `["span", line, property, span_start, span_end, reason, author]`,
+/// and `["value", line, property, reason, author]`.
+pub fn parse_redacted(bytes: &[u8]) -> Result<Vec<RedactedRecord>, StoreError> {
+    let value: Value = serde_json::from_slice(bytes)
+        .map_err(|e| StoreError::Parse(format!("{REDACTED_FILE}: {e}")))?;
+    let Some(records) = value.as_array() else {
+        return Err(StoreError::Parse(format!(
+            "{REDACTED_FILE}: expected an array of records"
+        )));
+    };
+    records
+        .iter()
+        .enumerate()
+        .map(|(i, record)| {
+            parse_redacted_record(record)
+                .map_err(|e| StoreError::Parse(format!("{REDACTED_FILE} record {i}: {e}")))
+        })
+        .collect()
+}
+
+fn parse_redacted_record(record: &Value) -> Result<RedactedRecord, String> {
+    let fields = record
+        .as_array()
+        .ok_or_else(|| "expected an array".to_string())?;
+    let kind = fields
+        .first()
+        .and_then(Value::as_str)
+        .ok_or_else(|| "expected a kind string first".to_string())?;
+    let field = |i: usize| fields.get(i).ok_or_else(|| format!("missing field {i}"));
+    let text = |i: usize| {
+        field(i)?
+            .as_str()
+            .map(String::from)
+            .ok_or_else(|| format!("field {i} is not a string"))
+    };
+    let line = |i: usize| {
+        field(i)?
+            .as_u64()
+            .and_then(|n| u32::try_from(n).ok())
+            .ok_or_else(|| format!("field {i} is not a line number"))
+    };
+    let offset = |i: usize| {
+        field(i)?
+            .as_u64()
+            .ok_or_else(|| format!("field {i} is not a byte offset"))
+    };
+    let (kind, line_end, property, span_start, span_end, reason, author) = match kind {
+        "line" => (
+            RedactedKind::Line,
+            Some(line(2)?),
+            None,
+            None,
+            None,
+            text(3)?,
+            text(4)?,
+        ),
+        "span" => (
+            RedactedKind::Span,
+            None,
+            Some(text(2)?),
+            Some(offset(3)?),
+            Some(offset(4)?),
+            text(5)?,
+            text(6)?,
+        ),
+        "value" => (
+            RedactedKind::Value,
+            None,
+            Some(text(2)?),
+            None,
+            None,
+            text(3)?,
+            text(4)?,
+        ),
+        other => return Err(format!("unknown kind {other:?}")),
+    };
+    Ok(RedactedRecord {
+        kind,
+        line: line(1)?,
+        line_end,
+        property,
+        span_start,
+        span_end,
+        reason,
+        author,
+    })
 }
 
 /// The new session that `init` staged.
@@ -600,6 +741,108 @@ mod tests {
                 fs::copy(entry.path(), dest).unwrap();
             }
         }
+    }
+
+    /// The record parser reads every kind with its fields in the
+    /// positions the design gives them, and names a malformed record.
+    #[test]
+    fn parse_redacted_reads_every_record_kind() {
+        let text = concat!(
+            "[\n",
+            r#"  ["line", 1, 4, "scope", "session:abc"],"#,
+            "\n",
+            r#"  ["span", 5, "/message/content", 4, 23, "pii", "filter:pii"],"#,
+            "\n",
+            r#"  ["value", 7, "/toolUseResult/stdout", "secret", "filter:secret"]"#,
+            "\n]\n",
+        );
+        let records = parse_redacted(text.as_bytes()).unwrap();
+        assert_eq!(
+            records,
+            [
+                RedactedRecord {
+                    kind: RedactedKind::Line,
+                    line: 1,
+                    line_end: Some(4),
+                    property: None,
+                    span_start: None,
+                    span_end: None,
+                    reason: "scope".into(),
+                    author: "session:abc".into(),
+                },
+                RedactedRecord {
+                    kind: RedactedKind::Span,
+                    line: 5,
+                    line_end: None,
+                    property: Some("/message/content".into()),
+                    span_start: Some(4),
+                    span_end: Some(23),
+                    reason: "pii".into(),
+                    author: "filter:pii".into(),
+                },
+                RedactedRecord {
+                    kind: RedactedKind::Value,
+                    line: 7,
+                    line_end: None,
+                    property: Some("/toolUseResult/stdout".into()),
+                    span_start: None,
+                    span_end: None,
+                    reason: "secret".into(),
+                    author: "filter:secret".into(),
+                },
+            ]
+        );
+        assert!(parse_redacted(b"[]\n").unwrap().is_empty());
+
+        let bad = parse_redacted(br#"[["line", 1, 4, "scope", "a"], ["span", 2, "/p", "x"]]"#)
+            .unwrap_err();
+        assert!(
+            matches!(bad, StoreError::Parse(ref m) if m.contains("record 1") && m.contains("field 3")),
+            "{bad}"
+        );
+        let unknown = parse_redacted(br#"[["drop", 1]]"#).unwrap_err();
+        assert!(
+            matches!(unknown, StoreError::Parse(ref m) if m.contains("unknown kind")),
+            "{unknown}"
+        );
+    }
+
+    /// A committed publish serves its records through the session
+    /// store; a session added from a native source has none.
+    #[test]
+    fn redacted_reads_the_committed_blob() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let mut session = crate::session::tests::fake("s1", &[("session.jsonl", "a\nb\nc\n")]);
+        let outcome = SessionStore::from(&store)
+            .add(&crate::session::tests::FakeDriver, &mut session)
+            .unwrap();
+        let original = SessionStore::from(&store)
+            .at_commit(&outcome.commit_sha)
+            .unwrap();
+        let publish = PublishStore::with_root(&store, tmp.path().join("publish"));
+        let init = publish.init(&original).unwrap();
+        let layout = publish.layout(&init.id);
+        fs::write(layout.files_dir().join("session.jsonl"), "a\nc\n").unwrap();
+        fs::write(
+            layout.redacted_file(),
+            r#"[["line", 2, 2, "scope", "user:t"], ["value", 3, "/text", "pii", "filter:pii"]]"#,
+        )
+        .unwrap();
+        let staged = layout.read_redacted().unwrap();
+        assert_eq!(staged.len(), 2);
+
+        let commit = publish.apply(&init.id).unwrap();
+        let committed = SessionStore::from(&store).redacted(&commit).unwrap();
+        assert_eq!(committed, staged);
+        assert_eq!(committed[0].kind, RedactedKind::Line);
+        assert_eq!((committed[0].line, committed[0].line_end), (2, Some(2)));
+        assert_eq!(committed[1].property.as_deref(), Some("/text"));
+
+        let none = SessionStore::from(&store)
+            .redacted(&outcome.commit_sha)
+            .unwrap();
+        assert!(none.is_empty());
     }
 
     /// `abort` deletes the staging directory and the definition and

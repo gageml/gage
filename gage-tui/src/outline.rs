@@ -19,6 +19,12 @@ pub struct Outline {
     /// `entry_hidden[i]` marks entry `i` as filtered out, omitted from the
     /// rows unless the entry carries notes.
     entry_hidden: Vec<bool>,
+    /// `dropped_anchors[j]` is the entry index the `j`th run of dropped
+    /// lines precedes, `entry_hidden.len()` for a run after the last
+    /// entry. Runs are in line order, so anchors never decrease.
+    dropped_anchors: Vec<usize>,
+    /// Whether the dropped runs have rows
+    dropped_shown: bool,
     visible: Vec<Row>,
 }
 
@@ -40,6 +46,10 @@ pub enum RowKind {
         entry_index: Option<usize>,
         note_id: String,
     },
+    /// The `index`th run of lines a publish dropped, shown in place
+    Dropped {
+        index: usize,
+    },
 }
 
 pub enum CollapseOutcome {
@@ -53,6 +63,8 @@ impl Outline {
         session_note_ids: Vec<String>,
         entry_note_ids: Vec<Vec<String>>,
         entry_hidden: Vec<bool>,
+        dropped_anchors: Vec<usize>,
+        dropped_shown: bool,
     ) -> Self {
         let mut o = Self {
             session_expanded: false,
@@ -60,6 +72,8 @@ impl Outline {
             session_note_ids,
             entry_note_ids,
             entry_hidden,
+            dropped_anchors,
+            dropped_shown,
             visible: Vec::new(),
         };
         o.rebuild();
@@ -70,6 +84,13 @@ impl Outline {
     /// Used when a view-option toggle changes which entries qualify.
     pub fn set_hidden(&mut self, entry_hidden: Vec<bool>) {
         self.entry_hidden = entry_hidden;
+        self.rebuild();
+    }
+
+    /// Show or hide the dropped runs and rebuild. Used when the
+    /// redactions view option toggles.
+    pub fn set_dropped_shown(&mut self, shown: bool) {
+        self.dropped_shown = shown;
         self.rebuild();
     }
 
@@ -130,11 +151,13 @@ impl Outline {
         session_note_ids: Vec<String>,
         entry_note_ids: Vec<Vec<String>>,
         entry_hidden: Vec<bool>,
+        dropped_anchors: Vec<usize>,
     ) {
         self.entry_expanded.retain(|i| *i < entry_note_ids.len());
         self.session_note_ids = session_note_ids;
         self.entry_note_ids = entry_note_ids;
         self.entry_hidden = entry_hidden;
+        self.dropped_anchors = dropped_anchors;
         self.rebuild();
     }
 
@@ -212,7 +235,7 @@ impl Outline {
                     self.entry_expanded.remove(&index);
                 }
             }
-            RowKind::Note { .. } => return,
+            RowKind::Note { .. } | RowKind::Dropped { .. } => return,
         }
         self.rebuild();
     }
@@ -256,7 +279,22 @@ impl Outline {
                 });
             }
         }
+        let mut dropped = self.dropped_anchors.iter().enumerate().peekable();
+        let mut push_dropped_before = |entry: usize, rows: &mut Vec<Row>| {
+            if !self.dropped_shown {
+                return;
+            }
+            while let Some((index, _)) = dropped.next_if(|(_, anchor)| **anchor <= entry) {
+                rows.push(Row {
+                    level: 1,
+                    has_children: false,
+                    expanded: false,
+                    kind: RowKind::Dropped { index },
+                });
+            }
+        };
         for (i, notes) in self.entry_note_ids.iter().enumerate() {
+            push_dropped_before(i, &mut rows);
             // A noted entry always shows: a note declares the entry
             // mattered to someone
             if self.entry_hidden.get(i).copied().unwrap_or(false) && notes.is_empty() {
@@ -284,6 +322,7 @@ impl Outline {
                 }
             }
         }
+        push_dropped_before(entry_count, &mut rows);
         self.visible = rows;
     }
 }
@@ -306,7 +345,7 @@ mod tests {
     fn filter_hides_marked_entries() {
         let notes = vec![Vec::new(), Vec::new(), Vec::new()];
         let hidden = vec![false, true, false];
-        let o = Outline::new(Vec::new(), notes, hidden);
+        let o = Outline::new(Vec::new(), notes, hidden, Vec::new(), false);
         assert_eq!(entry_indices(&o), [0, 2]);
     }
 
@@ -314,7 +353,7 @@ mod tests {
     fn set_hidden_revises_the_filter() {
         let notes = vec![Vec::new(), Vec::new()];
         let hidden = vec![true, true];
-        let mut o = Outline::new(Vec::new(), notes, hidden);
+        let mut o = Outline::new(Vec::new(), notes, hidden, Vec::new(), false);
         assert_eq!(entry_indices(&o), [] as [usize; 0]);
         o.set_hidden(vec![false, false]);
         assert_eq!(entry_indices(&o), [0, 1]);
@@ -324,14 +363,20 @@ mod tests {
     fn expansion_round_trips() {
         let notes = vec![vec!["n1".to_string()], vec!["n2".to_string()]];
         let hidden = vec![false, false];
-        let mut o = Outline::new(vec!["s1".to_string()], notes.clone(), hidden.clone());
+        let mut o = Outline::new(
+            vec!["s1".to_string()],
+            notes.clone(),
+            hidden.clone(),
+            Vec::new(),
+            false,
+        );
         let session_row = 0;
         let entry1_row = 2;
         o.toggle(session_row);
         o.toggle(entry1_row);
         let (session_expanded, entry_expanded) = o.expansion();
 
-        let mut fresh = Outline::new(vec!["s1".to_string()], notes, hidden);
+        let mut fresh = Outline::new(vec!["s1".to_string()], notes, hidden, Vec::new(), false);
         fresh.set_expansion(session_expanded, entry_expanded);
         let expanded: Vec<bool> = fresh.rows().iter().map(|r| r.expanded).collect();
         // session (expanded), s1, entry 0 (expanded), n1, entry 1
@@ -341,17 +386,55 @@ mod tests {
     #[test]
     fn set_expansion_drops_stale_entries() {
         let notes = vec![vec!["n1".to_string()]];
-        let mut o = Outline::new(Vec::new(), notes, vec![false]);
+        let mut o = Outline::new(Vec::new(), notes, vec![false], Vec::new(), false);
         o.set_expansion(false, HashSet::from([0, 5]));
         let (_, entry_expanded) = o.expansion();
         assert_eq!(entry_expanded, HashSet::from([0]));
+    }
+
+    /// A dropped run's row sits before its anchor entry, after the
+    /// last entry when anchored past the end, and only while shown.
+    /// A run anchored to a hidden entry still shows in its place.
+    #[test]
+    fn dropped_runs_sit_before_their_anchor_entries() {
+        let kinds = |o: &Outline| -> Vec<String> {
+            o.rows()
+                .iter()
+                .map(|r| match r.kind {
+                    RowKind::Session => "session".to_string(),
+                    RowKind::Entry { index } => format!("entry {index}"),
+                    RowKind::Note { .. } => "note".to_string(),
+                    RowKind::Dropped { index } => format!("dropped {index}"),
+                })
+                .collect()
+        };
+        let notes = vec![Vec::new(), Vec::new(), Vec::new()];
+        let hidden = vec![false, true, false];
+        let mut o = Outline::new(Vec::new(), notes, hidden, vec![0, 1, 1, 3], false);
+        assert_eq!(kinds(&o), ["session", "entry 0", "entry 2"]);
+        o.set_dropped_shown(true);
+        assert_eq!(
+            kinds(&o),
+            [
+                "session",
+                "dropped 0",
+                "entry 0",
+                "dropped 1",
+                "dropped 2",
+                "entry 2",
+                "dropped 3",
+            ]
+        );
+        assert!(!o.toggle(1), "a dropped row has no children");
+        o.set_dropped_shown(false);
+        assert_eq!(kinds(&o), ["session", "entry 0", "entry 2"]);
     }
 
     #[test]
     fn noted_entry_survives_filter() {
         let notes = vec![vec!["n1".to_string()], Vec::new()];
         let hidden = vec![true, true];
-        let o = Outline::new(Vec::new(), notes, hidden);
+        let o = Outline::new(Vec::new(), notes, hidden, Vec::new(), false);
         assert_eq!(entry_indices(&o), [0]);
     }
 }

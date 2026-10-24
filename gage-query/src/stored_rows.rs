@@ -1,7 +1,7 @@
-//! The `entry`, `message`, `tool_use`, and `text_block` tables over
-//! stored sessions.
+//! The `entry`, `message`, `tool_use`, `text_block`, and `redacted`
+//! tables over stored sessions.
 //!
-//! One provider type serves the four tables; [`RowKind`] selects the
+//! One provider type serves the five tables; [`RowKind`] selects the
 //! shape. A scan resolves the session set through the
 //! [`SessionSet`], then streams one batch per session, reading each
 //! session's rows through its driver on first touch. Filters on
@@ -33,6 +33,7 @@ use datafusion::prelude::Expr;
 use futures::StreamExt;
 use gage_session::filter::{self, RowFilter};
 
+use crate::redacted::redacted_schema;
 use crate::rows::{RowCache, entry_rows, entry_schema, message_rows, message_schema};
 use crate::scope::{SessionSet, StoredSessionRef};
 use gage_session::{text_block_schema, tool_use_schema};
@@ -45,6 +46,7 @@ pub enum RowKind {
     Message,
     ToolUse,
     TextBlock,
+    Redacted,
 }
 
 impl RowKind {
@@ -54,6 +56,7 @@ impl RowKind {
             RowKind::Message => message_schema(),
             RowKind::ToolUse => tool_use_schema(),
             RowKind::TextBlock => text_block_schema(),
+            RowKind::Redacted => redacted_schema(),
         }
     }
 
@@ -69,6 +72,7 @@ impl RowKind {
             RowKind::Message => message_rows(scope.rows(session, cache)?.as_ref()),
             RowKind::ToolUse => Ok(scope.tool_uses(session, cache)?.as_ref().clone()),
             RowKind::TextBlock => Ok(scope.text_blocks(session, cache)?.as_ref().clone()),
+            RowKind::Redacted => Ok(scope.redacted(session, cache)?.as_ref().clone()),
         }
     }
 
@@ -77,6 +81,7 @@ impl RowKind {
     fn line_col(self) -> usize {
         match self {
             RowKind::Entry | RowKind::Message | RowKind::TextBlock => 1,
+            RowKind::Redacted => 2,
             RowKind::ToolUse => 3,
         }
     }

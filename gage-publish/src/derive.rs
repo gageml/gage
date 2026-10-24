@@ -658,7 +658,63 @@ fn dir_size(dir: &std::path::Path) -> Result<u64, PublishError> {
 
 #[cfg(test)]
 mod tests {
+    use gage_store::{RedactedKind, parse_redacted};
+
     use super::*;
+
+    /// Every record the writer produces reads back through the store's
+    /// parser with the same fields, so the two sides agree on the
+    /// record layout.
+    #[test]
+    fn records_round_trip_through_the_store_parser() {
+        let instance = |kind| Instance {
+            redaction: 1,
+            reason: "pii".to_string(),
+            author: "filter:pii".to_string(),
+            kind,
+        };
+        let instances = [
+            instance(InstanceKind::Line {
+                line: 1,
+                line_end: 4,
+            }),
+            instance(InstanceKind::Span {
+                line: 5,
+                pointer: "/message/content".to_string(),
+                start: 4,
+                end: 23,
+                mark: true,
+            }),
+            instance(InstanceKind::Value {
+                line: 7,
+                pointer: "/toolUseResult/stdout".to_string(),
+            }),
+        ];
+        let text = serde_json::to_string(&Value::Array(
+            instances.iter().map(Instance::record).collect(),
+        ))
+        .unwrap();
+        let records = parse_redacted(text.as_bytes()).unwrap();
+        assert_eq!(records.len(), 3);
+        assert_eq!(records[0].kind, RedactedKind::Line);
+        assert_eq!((records[0].line, records[0].line_end), (1, Some(4)));
+        assert_eq!(records[1].kind, RedactedKind::Span);
+        assert_eq!(records[1].property.as_deref(), Some("/message/content"));
+        assert_eq!(
+            (records[1].span_start, records[1].span_end),
+            (Some(4), Some(23))
+        );
+        assert_eq!(records[2].kind, RedactedKind::Value);
+        assert_eq!(
+            records[2].property.as_deref(),
+            Some("/toolUseResult/stdout")
+        );
+        assert!(
+            records
+                .iter()
+                .all(|r| r.reason == "pii" && r.author == "filter:pii")
+        );
+    }
 
     #[test]
     fn removal_only_accepts_removals_and_markers_and_rejects_additions() {

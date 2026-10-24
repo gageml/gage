@@ -22,11 +22,11 @@ use gage_registry::driver::DriverRegistry;
 use gage_session::Driver;
 use gage_session::is_system;
 use gage_store::url::{self, LineSelection};
-use gage_store::{NoteEdit, NoteFull, NoteInput, NoteStore, NoteValue, Store};
+use gage_store::{NoteEdit, NoteFull, NoteInput, NoteStore, NoteValue, RedactedKind, Store};
 use ratatui::crossterm::terminal;
 use serde_json::Value;
 
-use crate::doc::{Document, Entry, Note, Session};
+use crate::doc::{Document, Entry, Note, Redaction, Session};
 use crate::format;
 
 #[derive(Clone)]
@@ -118,15 +118,21 @@ impl Backend {
         }
         let entries = self.load_entries(session_id).await?;
         let turns = self.load_turns(session_id, &entries).await?;
-        let notes = match self.kind {
-            Kind::Native { .. } => Vec::new(),
-            Kind::Stored { .. } => self.load_notes(session_id).await?,
+        // A native session is never a publish, and its context has no
+        // `redacted` relation
+        let (notes, redactions) = match self.kind {
+            Kind::Native { .. } => (Vec::new(), Vec::new()),
+            Kind::Stored { .. } => (
+                self.load_notes(session_id).await?,
+                self.load_redactions(session_id).await?,
+            ),
         };
         Ok(Document {
             session,
             entries,
             turns,
             notes,
+            redactions,
         })
     }
 
@@ -236,6 +242,63 @@ impl Backend {
             .iter()
             .map(|e| by_line.get(&e.line).copied())
             .collect())
+    }
+
+    /// The records of a stored session's `redacted.json`, in original
+    /// line order; none for a session that is not a publish.
+    async fn load_redactions(&self, session_id: &str) -> Result<Vec<Redaction>, Box<dyn Error>> {
+        let sql = format!(
+            "SELECT kind, line, line_end, property, span_start, span_end, reason, author \
+             FROM redacted WHERE session_id = '{}' ORDER BY line, property, span_start",
+            sql_str(session_id)
+        );
+        let batches = self.ctx.sql(&sql).await?.collect().await?;
+        let mut redactions = Vec::new();
+        for batch in &batches {
+            let kinds = column::<StringArray>(batch, 0);
+            let lines = column::<Int64Array>(batch, 1);
+            let line_ends = column::<Int64Array>(batch, 2);
+            let properties = column::<StringArray>(batch, 3);
+            let span_starts = column::<Int64Array>(batch, 4);
+            let span_ends = column::<Int64Array>(batch, 5);
+            let reasons = column::<StringArray>(batch, 6);
+            let authors = column::<StringArray>(batch, 7);
+            for i in 0..batch.num_rows() {
+                let kind = match kinds.value(i) {
+                    "line" => RedactedKind::Line,
+                    "span" => RedactedKind::Span,
+                    "value" => RedactedKind::Value,
+                    other => return Err(format!("unknown redacted kind {other:?}").into()),
+                };
+                let line_at = |col: &Int64Array| -> Result<Option<u32>, Box<dyn Error>> {
+                    Ok(if col.is_valid(i) {
+                        Some(u32::try_from(col.value(i))?)
+                    } else {
+                        None
+                    })
+                };
+                let offset_at = |col: &Int64Array| -> Result<Option<u64>, Box<dyn Error>> {
+                    Ok(if col.is_valid(i) {
+                        Some(u64::try_from(col.value(i))?)
+                    } else {
+                        None
+                    })
+                };
+                redactions.push(Redaction {
+                    kind,
+                    line: u32::try_from(lines.value(i))?,
+                    line_end: line_at(line_ends)?,
+                    property: properties
+                        .is_valid(i)
+                        .then(|| properties.value(i).to_string()),
+                    span_start: offset_at(span_starts)?,
+                    span_end: offset_at(span_ends)?,
+                    reason: reasons.value(i).to_string(),
+                    author: authors.value(i).to_string(),
+                });
+            }
+        }
+        Ok(redactions)
     }
 
     /// The notes targeting the session, oldest first. The target URL

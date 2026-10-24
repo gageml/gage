@@ -12,7 +12,7 @@ use std::io;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use gage_store::NoteValue;
+use gage_store::{NoteValue, RedactedKind};
 use ratatui::DefaultTerminal;
 use ratatui::Frame;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -25,7 +25,7 @@ use ratatui::widgets::{
 };
 use serde_json::Value;
 
-use crate::doc::{Document, EntryBody, Note};
+use crate::doc::{Document, Dropped, EntryBody, Note, Redaction};
 use crate::hint;
 use crate::options::ViewOptions;
 use crate::outline::{CollapseOutcome, Outline, RowKind};
@@ -327,6 +327,7 @@ pub(crate) fn handle_key(
                 KeyCode::Char('e') => state.toggle_all_entries(),
                 KeyCode::Char('s') => state.toggle_source(),
                 KeyCode::Char('n') => state.toggle_turns(),
+                KeyCode::Char('r') => state.toggle_redactions(),
                 KeyCode::Enter | KeyCode::Char('q') | KeyCode::Esc => {
                     state.dialog = Dialog::None;
                 }
@@ -622,6 +623,8 @@ impl AppState {
             session_note_ids,
             entry_note_ids,
             entry_hidden(&doc, options),
+            dropped_anchors(&doc),
+            options.redactions,
         );
         let mut list_state = ListState::default();
         list_state.select(Some(0));
@@ -871,10 +874,11 @@ impl AppState {
         .map_err(|e| io::Error::other(e.to_string()))?;
         let (session_note_ids, entry_note_ids) = note_projection(&doc);
         let hidden = entry_hidden(&doc, &self.view);
+        let anchors = dropped_anchors(&doc);
         self.doc = doc;
         let pane_row = self.selected_pane_row();
         self.outline
-            .reload(session_note_ids, entry_note_ids, hidden);
+            .reload(session_note_ids, entry_note_ids, hidden, anchors);
         let new_sel = prior
             .and_then(|kind| {
                 self.outline
@@ -934,15 +938,36 @@ impl AppState {
     /// Recompute the membership mask and reapply it, keeping the selection
     /// and its place in the pane when its row survives the rebuild.
     fn apply_filter(&mut self) {
+        let (prior, pane_row) = self.selection_snapshot();
+        self.outline.set_hidden(entry_hidden(&self.doc, &self.view));
+        self.reselect(prior, pane_row);
+    }
+
+    /// Toggle the redactions of a published session: the dropped-line
+    /// rows in the outline, the mark on each redacted entry, and the
+    /// records in the content pane.
+    fn toggle_redactions(&mut self) {
+        self.view.redactions = !self.view.redactions;
+        let (prior, pane_row) = self.selection_snapshot();
+        self.outline.set_dropped_shown(self.view.redactions);
+        self.reselect(prior, pane_row);
+    }
+
+    /// The selected row's kind and its distance from the top of the
+    /// pane, taken before an outline rebuild.
+    fn selection_snapshot(&self) -> (Option<RowKind>, usize) {
         let prior = self
             .list_state
             .selected()
             .and_then(|i| self.outline.row(i))
             .map(|r| r.kind.clone());
-        let pane_row = self.selected_pane_row();
-        self.outline.set_hidden(entry_hidden(&self.doc, &self.view));
-        // Reselect the same row; a filtered-out entry falls back to
-        // the nearest preceding visible entry.
+        (prior, self.selected_pane_row())
+    }
+
+    /// Reselect `prior` after a rebuild at the same place in the pane.
+    /// A filtered-out entry falls back to the nearest preceding visible
+    /// entry; a hidden dropped run falls back to the entry it preceded.
+    fn reselect(&mut self, prior: Option<RowKind>, pane_row: usize) {
         let new_sel = prior
             .and_then(|kind| {
                 self.outline
@@ -951,6 +976,10 @@ impl AppState {
                     .position(|r| same_row(&r.kind, &kind))
                     .or_else(|| match kind {
                         RowKind::Entry { index } => nearest_prev_entry(&self.outline, index),
+                        RowKind::Dropped { index } => {
+                            let anchor = self.doc.dropped().get(index).map(|d| d.anchor)?;
+                            nearest_prev_entry(&self.outline, anchor)
+                        }
                         _ => None,
                     })
             })
@@ -973,9 +1002,10 @@ impl AppState {
     fn replace_doc(&mut self, doc: Document) {
         let (session_note_ids, entry_note_ids) = note_projection(&doc);
         let hidden = entry_hidden(&doc, &self.view);
+        let anchors = dropped_anchors(&doc);
         self.doc = doc;
         self.outline
-            .reload(session_note_ids, entry_note_ids, hidden);
+            .reload(session_note_ids, entry_note_ids, hidden, anchors);
         self.list_state.select(Some(0));
         *self.list_state.offset_mut() = 0;
         self.body_scroll = 0;
@@ -1016,8 +1046,17 @@ impl AppState {
         match &row.kind {
             RowKind::Entry { index } => Some(*index),
             RowKind::Note { entry_index, .. } => *entry_index,
-            RowKind::Session => None,
+            RowKind::Session | RowKind::Dropped { .. } => None,
         }
+    }
+
+    /// Whether the selected row is a run of dropped lines, which has
+    /// no entry a note could target.
+    fn selected_dropped(&self) -> bool {
+        self.list_state
+            .selected()
+            .and_then(|i| self.outline.row(i))
+            .is_some_and(|r| matches!(r.kind, RowKind::Dropped { .. }))
     }
 
     fn selected_note(&self) -> Option<&Note> {
@@ -1033,7 +1072,7 @@ impl AppState {
     }
 
     fn begin_add_note(&mut self) {
-        if self.list_state.selected().is_none() {
+        if self.list_state.selected().is_none() || self.selected_dropped() {
             return;
         }
         let entry_index = self.selected_entry_index();
@@ -1117,6 +1156,7 @@ fn same_row(a: &RowKind, b: &RowKind) -> bool {
         (RowKind::Session, RowKind::Session) => true,
         (RowKind::Entry { index: a }, RowKind::Entry { index: b }) => a == b,
         (RowKind::Note { note_id: a, .. }, RowKind::Note { note_id: b, .. }) => a == b,
+        (RowKind::Dropped { index: a }, RowKind::Dropped { index: b }) => a == b,
         _ => false,
     }
 }
@@ -1165,6 +1205,12 @@ fn note_projection(doc: &Document) -> (Vec<String>, Vec<Vec<String>>) {
         })
         .collect();
     (session, entries)
+}
+
+/// The entry index each run of dropped lines precedes, for the
+/// outline to place the run's row.
+fn dropped_anchors(doc: &Document) -> Vec<usize> {
+    doc.dropped().iter().map(|d| d.anchor).collect()
 }
 
 /// User-editable note names: comments and open codes.
@@ -1417,13 +1463,12 @@ fn draw_outline(frame: &mut Frame, state: &mut AppState, area: Rect) {
     }
 
     let selected = state.list_state.selected();
-    let turns = state.view.turns.then_some(state.doc.turns.as_slice());
     let items: Vec<ListItem> = state
         .outline
         .rows()
         .iter()
         .enumerate()
-        .map(|(i, row)| row_to_item(row, &state.doc, Some(i) == selected, turns))
+        .map(|(i, row)| row_to_item(row, &state.doc, Some(i) == selected, &state.view))
         .collect();
 
     let title = if state.view.all_entries {
@@ -1464,7 +1509,7 @@ fn row_to_item(
     row: &crate::outline::Row,
     doc: &Document,
     is_selected: bool,
-    turns: Option<&[Option<usize>]>,
+    view: &ViewOptions,
 ) -> ListItem<'static> {
     let indent = "  ".repeat(row.level.saturating_sub(1));
     let glyph = if row.has_children {
@@ -1488,7 +1533,10 @@ fn row_to_item(
             } else {
                 styles::Text::dim()
             };
-            let turn = turns.and_then(|t| t.get(*index).copied().flatten());
+            let turn = view
+                .turns
+                .then(|| doc.turns.get(*index).copied().flatten())
+                .flatten();
             let mut spans = vec![
                 prefix,
                 Span::styled(format!("{} ", index + 1), number_style),
@@ -1501,6 +1549,10 @@ fn row_to_item(
                     Style::new().add_modifier(Modifier::DIM | Modifier::ITALIC),
                 ));
             }
+            if view.redactions && !doc.entry_redactions(*index).is_empty() {
+                spans.push(Span::raw(" "));
+                spans.push(Span::styled("redacted", styles::Text::dim()));
+            }
             Line::from(spans)
         }
         RowKind::Note { note_id, .. } => {
@@ -1510,8 +1562,29 @@ fn row_to_item(
                 .unwrap_or_else(|| "?".to_string());
             Line::from(vec![prefix, Span::raw(label)])
         }
+        RowKind::Dropped { index } => Line::from(vec![
+            prefix,
+            Span::styled(dropped_header(doc, *index), styles::Text::dim()),
+        ]),
     };
     ListItem::new(line)
+}
+
+/// The label of a run of dropped lines: the original lines and the
+/// word, `2-3 redacted`, or `6 redacted` for one line.
+fn dropped_header(doc: &Document, index: usize) -> String {
+    match doc.dropped().get(index) {
+        Some(d) => format!("{} redacted", line_range(d.line, d.line_end)),
+        None => "? redacted".to_string(),
+    }
+}
+
+fn line_range(line: u32, line_end: u32) -> String {
+    if line_end > line {
+        format!("{line}-{line_end}")
+    } else {
+        line.to_string()
+    }
 }
 
 fn draw_body(frame: &mut Frame, state: &mut AppState, area: Rect) {
@@ -1537,9 +1610,20 @@ fn draw_body(frame: &mut Frame, state: &mut AppState, area: Rect) {
             draw_scrollable(frame, state, lines, inner);
         }
         Some(RowKind::Entry { index }) => {
+            let redactions = if state.view.redactions {
+                state
+                    .doc
+                    .entry_redactions(index)
+                    .into_iter()
+                    .map(redaction_line)
+                    .collect()
+            } else {
+                Vec::new()
+            };
             let snap = state.doc.entries.get(index).map(|e| EntrySnap {
                 yaml: e.yaml(),
                 body: e.body(),
+                redactions,
             });
             match snap {
                 Some(snap) => draw_entry(frame, state, &snap, inner),
@@ -1549,6 +1633,10 @@ fn draw_body(frame: &mut Frame, state: &mut AppState, area: Rect) {
         Some(RowKind::Note { note_id, .. }) => match state.doc.note(&note_id) {
             Some(note) => draw_note(frame, note, inner),
             None => draw_placeholder(frame, "(missing note)", inner),
+        },
+        Some(RowKind::Dropped { index }) => match state.doc.dropped().get(index) {
+            Some(dropped) => draw_dropped(frame, &state.doc, dropped, inner),
+            None => draw_placeholder(frame, "(missing redaction)", inner),
         },
         None => draw_placeholder(frame, "(no selection)", inner),
     }
@@ -1574,6 +1662,7 @@ fn body_title(doc: &Document, kind: Option<&RowKind>) -> String {
                 .unwrap_or_else(|| "?".to_string());
             format!("{head} • {name}")
         }
+        Some(RowKind::Dropped { index }) => dropped_header(doc, *index),
         None => "Body".to_string(),
     }
 }
@@ -1584,6 +1673,51 @@ fn entry_header(doc: &Document, index: usize) -> String {
         .get(index)
         .map_or("?".to_string(), |e| e.label().to_string());
     format!("{} {}", index + 1, kind)
+}
+
+/// The content of a run of dropped lines: the `line` records that
+/// cover it, one per line with its reason and author.
+fn draw_dropped(frame: &mut Frame, doc: &Document, dropped: &Dropped, area: Rect) {
+    let mut lines = vec![
+        Line::from(Span::styled(
+            format!(
+                "lines {} of the original were dropped",
+                line_range(dropped.line, dropped.line_end)
+            ),
+            styles::Text::dim(),
+        )),
+        Line::from(""),
+    ];
+    lines.extend(
+        doc.dropped_redactions(dropped)
+            .into_iter()
+            .map(redaction_line),
+    );
+    let p = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .block(Block::default().padding(Padding::uniform(1)));
+    frame.render_widget(p, area);
+}
+
+/// One record as the content pane lists it: where it applied, its
+/// reason, and its author. A span names its property and byte
+/// offsets, a value its property, and a line record its lines.
+fn redaction_line(r: &Redaction) -> Line<'static> {
+    let property = r.property.clone().unwrap_or_default();
+    let location = match r.kind {
+        RedactedKind::Line => format!("lines {}", line_range(r.line, r.line_end.unwrap_or(r.line))),
+        RedactedKind::Span => match (r.span_start, r.span_end) {
+            (Some(start), Some(end)) => format!("{property} {start}-{end}"),
+            _ => property,
+        },
+        RedactedKind::Value => property,
+    };
+    Line::from(vec![
+        Span::raw(location),
+        Span::styled(" · ", styles::Text::dim()),
+        Span::raw(r.reason.clone()),
+        Span::styled(format!(" · {}", r.author), styles::Text::dim()),
+    ])
 }
 
 fn draw_note(frame: &mut Frame, note: &Note, area: Rect) {
@@ -1669,6 +1803,9 @@ fn civil_from_days(z: i64) -> Option<(i32, u32, u32)> {
 struct EntrySnap {
     yaml: String,
     body: Option<EntryBody>,
+    /// The entry's redaction records as listed, empty when the view
+    /// option is off or the entry has none
+    redactions: Vec<Line<'static>>,
 }
 
 fn draw_entry(frame: &mut Frame, state: &mut AppState, entry: &EntrySnap, area: Rect) {
@@ -1685,15 +1822,28 @@ fn draw_entry(frame: &mut Frame, state: &mut AppState, entry: &EntrySnap, area: 
             .wrap(Wrap { trim: false })
             .block(Block::default().padding(Padding::uniform(1)));
         sections.push(Section::from_paragraph(panel, area.width));
-        if show_source {
-            sections.push(Section::from_paragraph(
-                Paragraph::new(Line::from(Span::styled(
-                    "--- native source ---",
-                    styles::Text::dim(),
-                ))),
-                area.width,
-            ));
-        }
+    }
+    if !entry.redactions.is_empty() {
+        let mut lines = vec![Line::from(Span::styled(
+            "--- redacted ---",
+            styles::Text::dim(),
+        ))];
+        lines.extend(entry.redactions.iter().cloned());
+        sections.push(Section::from_paragraph(
+            Paragraph::new(lines)
+                .wrap(Wrap { trim: false })
+                .block(Block::default().padding(Padding::new(1, 1, 0, 1))),
+            area.width,
+        ));
+    }
+    if entry.body.is_some() && show_source {
+        sections.push(Section::from_paragraph(
+            Paragraph::new(Line::from(Span::styled(
+                "--- native source ---",
+                styles::Text::dim(),
+            ))),
+            area.width,
+        ));
     }
     if show_source {
         sections.push(Section::from_paragraph(
@@ -1842,6 +1992,7 @@ fn draw_options(frame: &mut Frame, view: &ViewOptions) {
         Line::raw(""),
         option_line('s', view.source, false, "Native source"),
         option_line('n', view.turns, false, "Turns"),
+        option_line('r', view.redactions, false, "Redactions"),
     ];
     let hint = hint::dialog_line(&[("Enter", "close")]);
     crate::dialog::draw_menu(frame, "View options", lines, hint);
@@ -1961,6 +2112,7 @@ mod tests {
                 RowKind::Note { note_id, .. } => {
                     format!("note {}", state.doc.note(note_id).unwrap().text())
                 }
+                RowKind::Dropped { index } => format!("dropped {index}"),
             })
             .collect()
     }
@@ -1978,14 +2130,168 @@ mod tests {
             entries: Vec::new(),
             turns: Vec::new(),
             notes: Vec::new(),
+            redactions: Vec::new(),
         };
         let mut state = AppState::new(doc, &ViewOptions::default(), DocSource::Backend, false);
         state.toggle_tools();
         state.toggle_turns();
+        state.toggle_redactions();
         let saved = state.save_ui();
         assert!(saved.view().tools);
         assert!(saved.view().turns);
+        assert!(saved.view().redactions);
         assert!(saved.view().user);
+    }
+
+    /// A derived session: five kept entries of an original whose
+    /// lines 2-3 were dropped, with a span redacted on the first entry.
+    fn doc_with_redactions() -> Document {
+        use crate::doc::Redaction;
+        let mut doc = doc_with_entries(5);
+        doc.entries[0].message_text = Some("hello [REDACTED]".into());
+        doc.redactions = vec![
+            Redaction {
+                kind: RedactedKind::Span,
+                line: 1,
+                line_end: None,
+                property: Some("/message/content".into()),
+                span_start: Some(6),
+                span_end: Some(10),
+                reason: "pii".into(),
+                author: "filter:pii".into(),
+            },
+            Redaction {
+                kind: RedactedKind::Line,
+                line: 2,
+                line_end: Some(3),
+                property: None,
+                span_start: None,
+                span_end: None,
+                reason: "scope".into(),
+                author: "user:t".into(),
+            },
+        ];
+        doc
+    }
+
+    /// The `r` option adds a row for each dropped run before the entry
+    /// that followed it, marks the entries with text redactions, and
+    /// lists the records in the content pane; off again, the outline
+    /// is as before and the selection falls back to the following
+    /// entry.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn redactions_option_shows_dropped_runs_and_records() {
+        let backend = test_backend().await;
+        let mut state = AppState::new(
+            doc_with_redactions(),
+            &ViewOptions::default(),
+            DocSource::Backend,
+            false,
+        );
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        assert_eq!(
+            outline_labels(&state),
+            [
+                "<Session>",
+                "entry 0",
+                "entry 1",
+                "entry 2",
+                "entry 3",
+                "entry 4"
+            ]
+        );
+        press(&mut state, &backend, KeyCode::Char('j'));
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let text = screen(&terminal);
+        assert!(!text.contains("redacted"), "{text}");
+
+        press(&mut state, &backend, KeyCode::Char('v'));
+        press(&mut state, &backend, KeyCode::Char('r'));
+        assert!(state.view.redactions);
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        assert!(screen(&terminal).contains("r [x] Redactions"));
+        press(&mut state, &backend, KeyCode::Enter);
+        assert_eq!(
+            outline_labels(&state),
+            [
+                "<Session>",
+                "entry 0",
+                "dropped 0",
+                "entry 1",
+                "entry 2",
+                "entry 3",
+                "entry 4"
+            ]
+        );
+        // Entry 0 keeps the selection and shows its span record
+        assert_eq!(state.selected_entry_index(), Some(0));
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let text = screen(&terminal);
+        assert!(text.contains("1 user redacted"), "{text}");
+        assert!(text.contains("--- redacted ---"), "{text}");
+        assert!(
+            text.contains("/message/content 6-10 · pii · filter:pii"),
+            "{text}"
+        );
+        assert!(text.contains("2-3 redacted"), "{text}");
+
+        // With the native source on, a blank line separates the
+        // records from the source header
+        press(&mut state, &backend, KeyCode::Char('v'));
+        press(&mut state, &backend, KeyCode::Char('s'));
+        press(&mut state, &backend, KeyCode::Enter);
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let text = screen(&terminal);
+        let rows: Vec<&str> = text.lines().collect();
+        let record = rows
+            .iter()
+            .position(|r| r.contains("filter:pii"))
+            .expect("the span record row should render");
+        // The body pane is the last bordered column of a row
+        let body = |row: &str| row.rsplit('│').nth(1).unwrap_or("").trim().to_string();
+        assert!(body(rows[record + 1]).is_empty(), "{text}");
+        assert_eq!(body(rows[record + 2]), "--- native source ---", "{text}");
+        press(&mut state, &backend, KeyCode::Char('v'));
+        press(&mut state, &backend, KeyCode::Char('s'));
+        press(&mut state, &backend, KeyCode::Enter);
+
+        // The dropped row lists the line records that cover it, and
+        // `n` offers no note on it
+        press(&mut state, &backend, KeyCode::Char('j'));
+        assert!(matches!(
+            selected_kind(&state),
+            RowKind::Dropped { index: 0 }
+        ));
+        assert_eq!(state.selected_entry_index(), None);
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let text = screen(&terminal);
+        assert!(
+            text.contains("lines 2-3 of the original were dropped"),
+            "{text}"
+        );
+        assert!(text.contains("lines 2-3 · scope · user:t"), "{text}");
+        press(&mut state, &backend, KeyCode::Char('n'));
+        assert!(matches!(state.dialog, Dialog::NotesUnavailable(_)));
+        press(&mut state, &backend, KeyCode::Enter);
+
+        press(&mut state, &backend, KeyCode::Char('v'));
+        press(&mut state, &backend, KeyCode::Char('r'));
+        press(&mut state, &backend, KeyCode::Enter);
+        assert!(!state.view.redactions);
+        assert_eq!(
+            outline_labels(&state),
+            [
+                "<Session>",
+                "entry 0",
+                "entry 1",
+                "entry 2",
+                "entry 3",
+                "entry 4"
+            ]
+        );
+        assert_eq!(state.selected_entry_index(), Some(1));
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        assert!(!screen(&terminal).contains("redacted"));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -2032,6 +2338,7 @@ mod tests {
                 .collect(),
             turns: Vec::new(),
             notes: Vec::new(),
+            redactions: Vec::new(),
         }
     }
 
@@ -2346,6 +2653,7 @@ mod tests {
             all_entries: true,
             source: false,
             turns: false,
+            redactions: false,
         };
         for label in [
             "user",

@@ -97,6 +97,7 @@ impl ScanScope {
     }
 }
 
+use crate::redacted::redacted_batch;
 use crate::rows::{RowCache, derive_batch};
 
 /// One stored session version selected for a scan
@@ -114,9 +115,9 @@ pub struct StoredSessionRef {
     pub native_id: String,
     pub content_format: String,
     pub driver_name: String,
-    /// The `files.d` of a pending publish working tree when this
-    /// session is staged on disk rather than committed; `None` for a
-    /// stored session, which reads from its commit.
+    /// The working tree of a pending publish when this session is
+    /// staged on disk rather than committed; `None` for a stored
+    /// session, which reads from its commit.
     pub root: Option<PathBuf>,
 }
 
@@ -157,7 +158,6 @@ impl StoredSessionRef {
             .map(|(name, _)| name)
             .unwrap_or(&pending.attrs.driver)
             .to_string();
-        let files_dir = PublishDirLayout::new(&pending.root).files_dir();
         StoredSessionRef {
             commit: format!("publishing:{}@{}", pending.id, pending.modified_ms),
             type_version: String::new(),
@@ -167,7 +167,7 @@ impl StoredSessionRef {
             content_format: pending.attrs.content_format,
             driver_name,
             id: pending.id,
-            root: Some(files_dir),
+            root: Some(pending.root),
         }
     }
 
@@ -336,10 +336,39 @@ impl SessionSet {
         Ok(batch)
     }
 
+    /// The `redacted` batch of `session`: the records of its
+    /// `redacted.json`, from the working tree of a pending publish or
+    /// the blob of a commit, cached as [`rows`] caches the derived
+    /// batch.
+    ///
+    /// [`rows`]: SessionSet::rows
+    pub(crate) fn redacted(
+        &self,
+        session: &StoredSessionRef,
+        cache: &RowCache,
+    ) -> Result<Arc<RecordBatch>> {
+        if let Some(batch) = cache.get_redacted(&session.commit) {
+            return Ok(batch);
+        }
+        let records = match &session.root {
+            Some(root) => PublishDirLayout::new(root).read_redacted(),
+            None => {
+                let store = self.lock();
+                SessionStore::from(&*store).redacted(&session.commit)
+            }
+        }
+        .map_err(external)?;
+        let batch = Arc::new(redacted_batch(&session.id, &records)?);
+        cache.insert_redacted(&session.commit, Arc::clone(&batch));
+        Ok(batch)
+    }
+
     fn read_stored(&self, session: &StoredSessionRef) -> Result<Box<dyn StoredSession>> {
         let driver = self.driver(&session.driver_name)?;
         let content: Box<dyn ContentSource> = match &session.root {
-            Some(files_dir) => Box::new(DirContentSource::new(files_dir.clone())),
+            Some(root) => Box::new(DirContentSource::new(
+                PublishDirLayout::new(root).files_dir(),
+            )),
             None => {
                 let store = self.lock();
                 SessionStore::from(&*store).content(&session.commit)

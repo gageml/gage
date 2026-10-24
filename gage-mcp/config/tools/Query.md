@@ -38,6 +38,9 @@ Tables:
   paths written, null when unknown
 - text_block (session_id, line, seq, text) - each text value of an entry in
   document order; ids, timestamps, and enumerations are left out
+- redacted (session_id, kind, line, line_end, property, span_start, span_end,
+  reason, author) - a publish's changes to its original, by original line;
+  `kind` is line, span, or value
 - note (id, name, author, value, text, metadata, target, scan, work_id,
   created, modified) - `name` is the note kind
 - session_note (session_id, note_id, lines) - notes on a session, with the
@@ -59,7 +62,7 @@ Tables:
   modified); attachment_file (attachment_id, path, size, text)
 
 Functions: issue_report('<id>') renders one issue as markdown;
-related_issue('<id>' [, min_score]) lists the issues similar enough to be duplicate candidates, best first;
+related_issue('<id>' [, min_score]) lists likely duplicates, best first;
 age(ts) renders time since a timestamp, as in 3h ago.
 blame('<file>' [, lines]) and native_blame('<source>', '<file>' [, lines])
 give one row per file line with the call that wrote it: (line, text,
@@ -81,8 +84,7 @@ source URL: '' is the default source, 'claude:' the default Claude Code
 source, and 'claude:/path' a projects directory. native_session returns
 the same columns minus line_count, created, and modified, plus
 content_format, mtime, and size; `id` is the native UUID; the other three
-return the stored tables' columns with it as `session_id`. Use these to
-read a session before it is added to the store.
+return the stored tables' columns with it as `session_id`.
 
 Read a session by `session_id` ordered by `line`, taking
 `substr(text, 1, 800)` over full `text` or `raw` on wide rows.
