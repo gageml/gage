@@ -4,7 +4,7 @@ use std::fmt;
 
 /// View state for the session outline and content pane. The membership
 /// flags (`assistant`, `user`, `tools`, `all_entries`) choose which
-/// entries populate the left tree; `details` and `turns` are independent
+/// entries populate the left tree; `source` and `turns` are independent
 /// of membership and change only how an entry renders.
 #[derive(Debug, Clone)]
 pub struct ViewOptions {
@@ -16,8 +16,8 @@ pub struct ViewOptions {
     pub tools: bool,
     /// Every entry, including bookkeeping, system, and summary entries
     pub all_entries: bool,
-    /// Raw entry detail in the content pane
-    pub details: bool,
+    /// Native source of the entry in the content pane
+    pub source: bool,
     /// Turn markers in the outline
     pub turns: bool,
 }
@@ -29,7 +29,7 @@ impl Default for ViewOptions {
             user: true,
             tools: false,
             all_entries: false,
-            details: false,
+            source: false,
             turns: false,
         }
     }
@@ -55,7 +55,7 @@ impl ViewOptions {
                 "u" | "user" => opts.user = on,
                 "t" | "tools" => opts.tools = on,
                 "e" | "entries" => opts.all_entries = on,
-                "d" | "details" => opts.details = on,
+                "s" | "source" => opts.source = on,
                 "n" | "turns" => opts.turns = on,
                 other => return Err(UnknownOption(other.to_string())),
             }
@@ -86,7 +86,7 @@ mod tests {
         assert!(o.user);
         assert!(!o.tools);
         assert!(!o.all_entries);
-        assert!(!o.details);
+        assert!(!o.source);
         assert!(!o.turns);
     }
 
@@ -105,9 +105,9 @@ mod tests {
 
     #[test]
     fn comma_list_enables_default_off_options() {
-        let o = ViewOptions::parse("tools,details,turns,entries").unwrap();
+        let o = ViewOptions::parse("tools,source,turns,entries").unwrap();
         assert!(o.tools);
-        assert!(o.details);
+        assert!(o.source);
         assert!(o.turns);
         assert!(o.all_entries);
     }

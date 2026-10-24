@@ -325,7 +325,7 @@ pub(crate) fn handle_key(
                 KeyCode::Char('u') => state.toggle_user(),
                 KeyCode::Char('t') => state.toggle_tools(),
                 KeyCode::Char('e') => state.toggle_all_entries(),
-                KeyCode::Char('d') => state.toggle_details(),
+                KeyCode::Char('s') => state.toggle_source(),
                 KeyCode::Char('n') => state.toggle_turns(),
                 KeyCode::Enter | KeyCode::Char('q') | KeyCode::Esc => {
                     state.dialog = Dialog::None;
@@ -964,10 +964,10 @@ impl AppState {
         self.select_at_pane_row(new_sel, pane_row);
     }
 
-    /// Toggle raw entry detail in the content pane. Independent of the
+    /// Toggle the native source in the content pane. Independent of the
     /// tree filter.
-    fn toggle_details(&mut self) {
-        self.view.details = !self.view.details;
+    fn toggle_source(&mut self) {
+        self.view.source = !self.view.source;
     }
 
     fn toggle_turns(&mut self) {
@@ -1685,22 +1685,25 @@ struct EntrySnap {
 
 fn draw_entry(frame: &mut Frame, state: &mut AppState, entry: &EntrySnap, area: Rect) {
     let mut sections: Vec<Section> = Vec::new();
-    // Filtered view hides the raw YAML behind the rendered message;
+    // Filtered view hides the native source behind the rendered message;
     // entries with no message keep it, or the pane would be blank
-    let show_raw = state.view.details || entry.message.is_none();
+    let show_source = state.view.source || entry.message.is_none();
     if let Some(message) = &entry.message {
         let panel = Paragraph::new(message::render(message))
             .wrap(Wrap { trim: false })
             .block(Block::default().padding(Padding::uniform(1)));
         sections.push(Section::from_paragraph(panel, area.width));
-        if show_raw {
+        if show_source {
             sections.push(Section::from_paragraph(
-                Paragraph::new(Line::from(Span::styled("--- raw ---", styles::Text::dim()))),
+                Paragraph::new(Line::from(Span::styled(
+                    "--- native source ---",
+                    styles::Text::dim(),
+                ))),
                 area.width,
             ));
         }
     }
-    if show_raw {
+    if show_source {
         sections.push(Section::from_paragraph(
             Paragraph::new(state.highlighter.highlight(&entry.yaml, "yaml"))
                 .wrap(Wrap { trim: false }),
@@ -1845,7 +1848,7 @@ fn draw_options(frame: &mut Frame, view: &ViewOptions) {
         Line::raw(""),
         Line::raw("Additional info:"),
         Line::raw(""),
-        option_line('d', view.details, false, "Entry details"),
+        option_line('s', view.source, false, "Native source"),
         option_line('n', view.turns, false, "Turns"),
     ];
     let hint = hint::dialog_line(&[("Enter", "close")]);
@@ -2326,7 +2329,7 @@ mod tests {
             user: false,
             tools: false,
             all_entries: true,
-            details: false,
+            source: false,
             turns: false,
         };
         for label in [
@@ -2356,7 +2359,7 @@ mod tests {
         let text = screen(&terminal);
         assert!(text.contains("a [x] Assistant messages"), "{text}");
         assert!(text.contains("t [ ] Tool calls"), "{text}");
-        assert!(text.contains("d [ ] Entry details"), "{text}");
+        assert!(text.contains("s [ ] Native source"), "{text}");
         assert!(text.contains("Enter close"), "{text}");
         assert!(!text.contains("q/Enter"), "{text}");
         // Two spaces inside the border, and option rows are not indented
@@ -2442,11 +2445,11 @@ mod tests {
 
         state.toggle_all_entries();
         assert!(state.view.all_entries);
-        state.toggle_details();
-        assert!(state.view.details);
+        state.toggle_source();
+        assert!(state.view.source);
         assert!(
             state.view.all_entries,
-            "details is independent of membership"
+            "source is independent of membership"
         );
     }
 

@@ -220,7 +220,7 @@ pub struct SessionViewArgs {
     ///   e, entries    all entries, including system and bookkeeping
     ///
     /// Content and extras:
-    ///   d, details    raw entry detail in content pane
+    ///   s, source     native source in content pane
     ///   n, turns      turn markers in outline
     ///
     /// A leading "!" turns an option off, as in "!user"
