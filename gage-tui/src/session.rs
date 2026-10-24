@@ -136,15 +136,16 @@ impl Backend {
             sql_str(session_id)
         );
         let batches = self.ctx.sql(&sql).await?.collect().await?;
-        let value = batches
-            .iter()
-            .find(|b| b.num_rows() > 0)
-            .map(|b| first_row_as_value(b))
+        let row = batches.iter().find(|b| b.num_rows() > 0);
+        let value = row
+            .map(first_row_as_value)
             .transpose()?
             .unwrap_or(Value::Null);
+        let pending = row.is_some_and(is_pending_publish);
         Ok(Session {
             id: session_id.to_string(),
             value,
+            pending,
         })
     }
 
@@ -485,6 +486,17 @@ fn target_lines(target: &str) -> Result<(Option<u32>, Option<u32>), Box<dyn Erro
 }
 
 /// The row's non-system columns as a JSON object, for the YAML pane.
+/// Whether the session row's first entry is a pending publish working
+/// tree: its `locator` is the staging directory, where a stored
+/// session's is `git:<commit>`. A row without a locator is not pending.
+fn is_pending_publish(batch: &RecordBatch) -> bool {
+    let Ok(idx) = batch.schema().index_of("locator") else {
+        return false;
+    };
+    let locators = column::<StringArray>(batch, idx);
+    locators.is_valid(0) && !locators.value(0).starts_with("git:")
+}
+
 fn first_row_as_value(batch: &RecordBatch) -> Result<Value, Box<dyn Error>> {
     let keep: Vec<usize> = batch
         .schema()
@@ -633,6 +645,7 @@ pub(crate) mod tests {
         let origin = doc.session.value["origin"].as_str().unwrap();
         assert!(origin.ends_with(&f.native_id), "{origin}");
         assert!(doc.session.value.get("locator").is_none());
+        assert!(!doc.session.pending);
         assert!(doc.notes.is_empty());
 
         let note = backend
@@ -706,5 +719,34 @@ pub(crate) mod tests {
         assert_eq!(recent[0].id, f.native_id);
         // The driver shows a project it cannot resolve by its stored name
         assert_eq!(recent[0].project, "-w-proj");
+    }
+
+    /// A pending publish row locates its staging directory; a stored
+    /// row locates a commit; a row without a locator is not pending.
+    #[test]
+    fn pending_publish_is_told_by_the_locator() {
+        use datafusion::arrow::datatypes::{DataType, Field, Schema};
+        let with = |locator: &str| {
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("id", DataType::Utf8, false),
+                Field::new("locator", DataType::Utf8, false),
+            ]));
+            RecordBatch::try_new(
+                schema,
+                vec![
+                    Arc::new(StringArray::from(vec!["s1"])),
+                    Arc::new(StringArray::from(vec![locator])),
+                ],
+            )
+            .unwrap()
+        };
+        assert!(is_pending_publish(&with("/home/u/.gage/publish/s1")));
+        assert!(!is_pending_publish(&with("git:0123abcd")));
+        let without = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new("id", DataType::Utf8, false)])),
+            vec![Arc::new(StringArray::from(vec!["s1"]))],
+        )
+        .unwrap();
+        assert!(!is_pending_publish(&without));
     }
 }

@@ -3789,6 +3789,7 @@ mod tests {
             session: Session {
                 id: "s1".into(),
                 value: serde_json::json!({}),
+                pending: false,
             },
             entries: Vec::new(),
             notes: Vec::new(),

@@ -95,6 +95,9 @@ impl Note {
 pub struct Session {
     pub id: String,
     pub value: Value,
+    /// A pending publish working tree rather than a stored object; a
+    /// note cannot target it
+    pub pending: bool,
 }
 
 impl Session {

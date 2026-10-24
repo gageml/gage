@@ -334,7 +334,7 @@ pub(crate) fn handle_key(
             }
             return Ok(KeyOutcome::Consumed);
         }
-        Dialog::NotesUnavailable => {
+        Dialog::NotesUnavailable(_) => {
             if matches!(key.code, KeyCode::Enter | KeyCode::Char('q') | KeyCode::Esc) {
                 state.dialog = Dialog::None;
             }
@@ -442,7 +442,7 @@ pub(crate) fn handle_key(
             if state.notes_writable {
                 state.begin_add_note();
             } else {
-                state.dialog = Dialog::NotesUnavailable;
+                state.dialog = Dialog::NotesUnavailable(state.notes_notice);
             }
             KeyOutcome::Consumed
         }
@@ -564,7 +564,8 @@ enum Dialog {
     /// View-options toggles (`v`)
     Options,
     /// Notice that `n` has nothing to write to over a native source
-    NotesUnavailable,
+    /// Why a note cannot be added here, shown as a notice
+    NotesUnavailable(&'static str),
     /// Go-to-entry field (`0`..`9`): the typed digits and the cursor
     /// offset within them
     GotoEntry {
@@ -575,6 +576,8 @@ enum Dialog {
 
 const NOTES_UNAVAILABLE: &str = "Notes cannot be added to native sessions. \
 Add the session to the store to write notes for it.";
+
+const PENDING_NOTES_UNAVAILABLE: &str = "Notes cannot be added to pending publish sessions.";
 
 fn new_editor(text: &str) -> TextArea {
     TextArea::new(text)
@@ -598,8 +601,11 @@ pub(crate) struct AppState {
     view: ViewOptions,
     turns: Option<Vec<Option<usize>>>,
     source: DocSource,
-    /// Whether the backend writes notes; gates the note keys
+    /// Whether the backend writes notes for this session; gates the
+    /// note keys
     notes_writable: bool,
+    /// The notice the note key shows when notes are not writable
+    notes_notice: &'static str,
     /// Whether the terminal runs the Kitty keyboard protocol; selects
     /// the newline shortcut the editor hint names
     enhanced_keys: bool,
@@ -621,6 +627,13 @@ impl AppState {
         let mut list_state = ListState::default();
         list_state.select(Some(0));
         let turns = options.turns.then(|| compute_turns(&doc));
+        // A pending publish is not in the store, so no backend writes
+        // notes for it
+        let (notes_writable, notes_notice) = if doc.session.pending {
+            (false, PENDING_NOTES_UNAVAILABLE)
+        } else {
+            (notes_writable, NOTES_UNAVAILABLE)
+        };
         Self {
             doc,
             username: resolve_username(),
@@ -638,6 +651,7 @@ impl AppState {
             turns,
             source,
             notes_writable,
+            notes_notice,
             enhanced_keys: false,
         }
     }
@@ -1782,8 +1796,8 @@ fn draw_dialog(frame: &mut Frame, dialog: &mut Dialog, view: &ViewOptions, enhan
     match dialog {
         Dialog::None => {}
         Dialog::Options => draw_options(frame, view),
-        Dialog::NotesUnavailable => {
-            crate::dialog::draw_wrapped_message(frame, NOTES_UNAVAILABLE, "Enter dismiss")
+        Dialog::NotesUnavailable(notice) => {
+            crate::dialog::draw_wrapped_message(frame, notice, "Enter dismiss")
         }
         Dialog::NoteType { .. } => draw_note_type(frame),
         Dialog::AddNote { editor, title, .. } => draw_editor(frame, title, editor, enhanced_keys),
@@ -1972,6 +1986,7 @@ mod tests {
             session: Session {
                 id: "s1".into(),
                 value: serde_json::json!({}),
+                pending: false,
             },
             entries: Vec::new(),
             notes: Vec::new(),
@@ -2015,6 +2030,7 @@ mod tests {
             session: Session {
                 id: "s1".into(),
                 value: serde_json::json!({}),
+                pending: false,
             },
             entries: (1..=count)
                 .map(|line| Entry {
@@ -2241,7 +2257,7 @@ mod tests {
             press(&mut state, &backend, KeyCode::Char('n')),
             KeyOutcome::Consumed
         );
-        assert!(matches!(state.dialog, Dialog::NotesUnavailable));
+        assert!(matches!(state.dialog, Dialog::NotesUnavailable(_)));
         press(&mut state, &backend, KeyCode::Enter);
         assert!(matches!(state.dialog, Dialog::None));
         assert_eq!(
@@ -2469,6 +2485,34 @@ mod tests {
             .expect("the notice should be on screen");
         assert!(rows[first + 1].contains("to the store"), "{text}");
         assert!(rows.iter().any(|r| r.contains("Enter dismiss")), "{text}");
+    }
+
+    /// A pending publish takes no notes even over the store backend:
+    /// the note key shows the pending notice, and edit and delete do
+    /// nothing.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_pending_publish_refuses_notes_with_its_own_notice() {
+        let backend = test_backend().await;
+        let mut doc = doc_with_entries(1);
+        doc.session.pending = true;
+        let mut state = AppState::new(doc, &ViewOptions::default(), DocSource::Backend, true);
+        press(&mut state, &backend, KeyCode::Char('n'));
+        assert!(
+            matches!(
+                state.dialog,
+                Dialog::NotesUnavailable(PENDING_NOTES_UNAVAILABLE)
+            ),
+            "{:?}",
+            matches!(state.dialog, Dialog::NotesUnavailable(_))
+        );
+        let mut terminal = Terminal::new(TestBackend::new(70, 20)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let text = screen(&terminal);
+        assert!(text.contains("pending publish sessions"), "{text}");
+        press(&mut state, &backend, KeyCode::Enter);
+        assert!(matches!(state.dialog, Dialog::None));
+        press(&mut state, &backend, KeyCode::Char('e'));
+        assert!(matches!(state.dialog, Dialog::None));
     }
 
     /// A doc-only backend for key tests that never read the store

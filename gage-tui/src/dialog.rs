@@ -77,16 +77,15 @@ pub(crate) fn draw_wrapped_options(
     frame.render_widget(para, content);
 }
 
-/// Draw a centered message that wraps to a readable width, with a
-/// key-hint footer below the dialog border.
+/// Draw a centered dialog whose message wraps to a readable width,
+/// left-aligned within the block, with a key-hint footer below the
+/// dialog border.
 pub(crate) fn draw_wrapped_message(frame: &mut Frame, message: &str, hint: &str) {
     let frame_area = frame.area();
     let text_width = (message.width() as u16)
         .min(frame_area.width.saturating_sub(8).clamp(20, 52))
         .max(hint.width() as u16);
-    let para = Paragraph::new(message.to_string())
-        .wrap(Wrap { trim: true })
-        .centered();
+    let para = Paragraph::new(message.to_string()).wrap(Wrap { trim: true });
     let content_height = (para.line_count(text_width) as u16).max(1);
     let content = draw_chrome(frame, None, text_width, content_height, hint);
     let [_, text, _] = Layout::horizontal([
