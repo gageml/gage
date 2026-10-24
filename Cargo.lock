@@ -2509,6 +2509,7 @@ dependencies = [
 name = "gage-publish"
 version = "0.2.0"
 dependencies = [
+ "aho-corasick",
  "gage-claude",
  "gage-core",
  "gage-registry",
@@ -2518,6 +2519,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "toml 0.8.23",
 ]
 
 [[package]]

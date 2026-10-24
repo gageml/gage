@@ -11,9 +11,11 @@ gage-core = { path = "../gage-core" }
 gage-registry = { path = "../gage-registry" }
 gage-session = { path = "../gage-session" }
 gage-store = { path = "../gage-store" }
+aho-corasick = { workspace = true }
 regex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+toml = { workspace = true }
 
 [dev-dependencies]
 gage-claude = { path = "../gage-claude" }
