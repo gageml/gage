@@ -396,17 +396,29 @@ impl<'a> Publisher<'a> {
         let layout = self.publish.layout(id);
         let original = self.original(definition)?;
         let instances = derive::build(definition, session, original.stored()?.as_mut(), &layout)?;
-        derive::update_attrs(&layout, original.staged(&layout)?.as_mut())?;
+        let project_dropped = instances
+            .iter()
+            .any(|i| matches!(&i.kind, InstanceKind::Attr { name } if name == "project"));
+        let project = if project_dropped {
+            None
+        } else {
+            original.record.attrs.project.as_deref()
+        };
+        derive::update_attrs(&layout, original.staged(&layout)?.as_mut(), project)?;
         Ok(instances)
     }
 
-    /// The original's text values, read once per operation.
+    /// The original's text values and `project` attribute, read once
+    /// per operation.
     fn open_original(
         &self,
         definition: &PublishDefinition,
     ) -> Result<derive::SessionText, PublishError> {
         let original = self.original(definition)?;
-        derive::SessionText::read(original.stored()?.as_mut(), &original.descriptor)
+        let mut session =
+            derive::SessionText::read(original.stored()?.as_mut(), &original.descriptor)?;
+        session.project = original.record.attrs.project.clone();
+        Ok(session)
     }
 
     /// The original's record, driver, and descriptor.

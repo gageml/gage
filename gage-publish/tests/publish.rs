@@ -23,6 +23,21 @@ const SESSION: &str = concat!(
     "\n",
 );
 
+/// A session whose working directory, classifier context, tool
+/// result, and prose all carry the machine's paths and host.
+const SYSTEM_SESSION: &str = concat!(
+    r#"{"type":"user","uuid":"u1","timestamp":"2025-01-01T00:00:00Z","cwd":"/home/garrett/proj","gitBranch":"main","message":{"role":"user","content":"Hello"}}"#,
+    "\n",
+    r#"{"type":"assistant","uuid":"a1","timestamp":"2025-01-01T00:00:01Z","message":{"id":"m1","role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls /home/garrett/proj"}}],"usage":{"input_tokens":10,"output_tokens":3}}}"#,
+    "\n",
+    r#"{"type":"user","uuid":"u2","timestamp":"2025-01-01T00:00:02Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"a.txt"}]},"toolUseResult":{"stdout":"/home/garrett/proj/a.txt"}}"#,
+    "\n",
+    r#"{"type":"assistant","uuid":"a2","timestamp":"2025-01-01T00:00:03Z","message":{"id":"m2","role":"assistant","content":[{"type":"text","text":"The file is at /home/garrett/proj/a.txt"}],"usage":{"input_tokens":10,"output_tokens":7}}}"#,
+    "\n",
+    r#"{"type":"api-request","id":"r1","params":{"safeguards":[{"classifier_context":{"user_identity":"garrett","home_dir":"/home/garrett","live_cwd":"/home/garrett/proj","git_state":{"root":"/home/garrett/proj","branch":"main","visibility":{"origin":{"host":"git.corp.example","visibility":"private"}}}}}]}}"#,
+    "\n",
+);
+
 struct Fixture {
     _home: tempfile::TempDir,
     _claude: tempfile::TempDir,
@@ -32,12 +47,16 @@ struct Fixture {
 }
 
 fn fixture() -> Fixture {
+    fixture_with(SESSION)
+}
+
+fn fixture_with(session: &str) -> Fixture {
     let home = tempfile::tempdir().unwrap();
     let claude = tempfile::tempdir().unwrap();
     let native_id = "11111111-2222-3333-4444-555555555555";
     let project_dir = claude.path().join("projects").join("-home-garrett-proj");
     fs::create_dir_all(&project_dir).unwrap();
-    fs::write(project_dir.join(format!("{native_id}.jsonl")), SESSION).unwrap();
+    fs::write(project_dir.join(format!("{native_id}.jsonl")), session).unwrap();
 
     let store_path = home.path().join("store.git");
     gage_store::init(&store_path).unwrap();
@@ -72,11 +91,12 @@ fn staged_lines(root: &std::path::Path, id: &str) -> Vec<String> {
         .collect()
 }
 
+fn staged_attrs(root: &std::path::Path, id: &str) -> Value {
+    serde_json::from_str(&fs::read_to_string(root.join(id).join("attrs.json")).unwrap()).unwrap()
+}
+
 fn staged_summary(root: &std::path::Path, id: &str) -> Value {
-    let attrs: Value =
-        serde_json::from_str(&fs::read_to_string(root.join(id).join("attrs.json")).unwrap())
-            .unwrap();
-    attrs["summary"].clone()
+    staged_attrs(root, id)["summary"].clone()
 }
 
 fn redacted(root: &std::path::Path, id: &str) -> Vec<Value> {
@@ -591,4 +611,162 @@ fn apply_refuses_a_hand_edited_staged_session() {
 
     fs::write(&path, &staged).unwrap();
     publisher.check(&init.id).unwrap();
+}
+
+#[test]
+fn system_filter_replaces_system_values_whole_and_drops_the_project_attribute() {
+    let f = fixture_with(SYSTEM_SESSION);
+    assert_eq!(
+        f.original.attrs.project.as_deref(),
+        Some("-home-garrett-proj")
+    );
+    let publisher = Publisher::with_root(&f.store, &f.publish_root);
+    let filters = [
+        "system".parse::<FilterSpec>().unwrap(),
+        "pii".parse::<FilterSpec>().unwrap(),
+    ];
+    let init = publisher.init(&f.original, &filters).unwrap();
+
+    let definition = publisher.definition(&init.id).unwrap();
+    let system: Vec<_> = definition
+        .redactions
+        .iter()
+        .filter(|r| r.author == "filter:system")
+        .collect();
+    // cwd, home_dir, live_cwd, root, host, and the project attribute
+    assert_eq!(system.len(), 6, "{system:#?}");
+    assert!(system.iter().all(|r| r.instances == 1), "{system:#?}");
+    assert!(
+        system
+            .iter()
+            .any(|r| r.kind.kind_name() == "attr" && r.rule.as_deref() == Some("attr")),
+        "{system:#?}"
+    );
+
+    let lines = staged_lines(&f.publish_root, &init.id);
+    assert!(lines[0].contains(r#""cwd":"[REDACTED]""#), "{}", lines[0]);
+    assert!(lines[0].contains(r#""gitBranch":"main""#), "{}", lines[0]);
+    for field in ["home_dir", "live_cwd", "root", "host", "user_identity"] {
+        assert!(
+            lines[4].contains(&format!(r#""{field}":"[REDACTED]""#)),
+            "{field}: {}",
+            lines[4]
+        );
+    }
+    assert!(lines[4].contains(r#""branch":"main""#), "{}", lines[4]);
+    // The pii literal still reaches the path's copies in prose and in
+    // the atomic tool result
+    assert!(
+        lines[3].contains("at [REDACTED]/proj/a.txt"),
+        "{}",
+        lines[3]
+    );
+    assert!(
+        lines[2].contains(r#""stdout":"[REDACTED]""#),
+        "{}",
+        lines[2]
+    );
+
+    let records = redacted(&f.publish_root, &init.id);
+    assert_eq!(
+        records[0],
+        serde_json::json!(["attr", "project", "system", "filter:system"]),
+        "{records:#?}"
+    );
+    let on_cwd: Vec<&Value> = records
+        .iter()
+        .filter(|r| r[1] == 1 && r[2] == "/cwd")
+        .collect();
+    assert_eq!(on_cwd.len(), 1, "{records:#?}");
+    assert_eq!(on_cwd[0][0], "value");
+    assert_eq!(on_cwd[0][4], "filter:system");
+    // Every system field on line 5 is replaced whole; the username,
+    // which is not one, is a pii span
+    let spans_on_5: Vec<&Value> = records
+        .iter()
+        .filter(|r| r[0] == "span" && r[1] == 5)
+        .collect();
+    assert_eq!(spans_on_5.len(), 1, "{records:#?}");
+    assert!(
+        spans_on_5[0][2]
+            .as_str()
+            .unwrap()
+            .ends_with("/user_identity"),
+        "{records:#?}"
+    );
+
+    let attrs = staged_attrs(&f.publish_root, &init.id);
+    assert!(attrs.get("project").is_none(), "{attrs}");
+
+    publisher.filter_remove(&init.id, "system").unwrap();
+    let attrs = staged_attrs(&f.publish_root, &init.id);
+    assert_eq!(attrs["project"], "-home-garrett-proj");
+    let lines = staged_lines(&f.publish_root, &init.id);
+    assert!(
+        lines[0].contains(r#""cwd":"[REDACTED]/proj""#),
+        "{}",
+        lines[0]
+    );
+    let records = redacted(&f.publish_root, &init.id);
+    assert!(!records.iter().any(|r| r[0] == "attr"), "{records:#?}");
+}
+
+#[test]
+fn a_value_replaced_whole_is_recorded_once_and_hides_the_spans_inside_it() {
+    let f = fixture();
+    let publisher = Publisher::with_root(&f.store, &f.publish_root);
+    let init = publisher.init(&f.original, &[]).unwrap();
+    let key = "sk-ant-api03-PtYgjmUhBel31iEl2hpChYgCfrL1spNxnyVmihA-2O76UMFxFkM-R5Kjp1vRt_1fjORS-6ilI8ihN5KXSc7Tvo-hBKqFYAA";
+    let command = "/message/content/0/input/command";
+
+    let applied = publisher
+        .redact(
+            &init.id,
+            &[
+                RedactionInput::parse_text(key, "secret", true).unwrap(),
+                RedactionInput::parse_text("api03", "secret", true).unwrap(),
+            ],
+            "user:test",
+        )
+        .unwrap();
+    // The key: a span on line 2 and the whole command on line 3. The
+    // substring: its span on line 2 only, since the command is already
+    // replaced whole
+    assert_eq!(applied[0].instances, 2, "{applied:#?}");
+    assert_eq!(applied[1].instances, 1, "{applied:#?}");
+
+    let records = redacted(&f.publish_root, &init.id);
+    let on_command: Vec<&Value> = records.iter().filter(|r| r[2] == command).collect();
+    assert_eq!(on_command.len(), 1, "{records:#?}");
+    assert_eq!(on_command[0][0], "value");
+    let spans: Vec<&Value> = records
+        .iter()
+        .filter(|r| r[0] == "span" && r[1] == 2)
+        .collect();
+    assert_eq!(
+        spans.len(),
+        2,
+        "overlapping spans are two records: {records:#?}"
+    );
+    let lines = staged_lines(&f.publish_root, &init.id);
+    assert!(
+        lines[1].contains("Use key [REDACTED] for alice@example.com"),
+        "one marker for the merged range: {}",
+        lines[1]
+    );
+    assert_eq!(lines[1].matches("[REDACTED]").count(), 1, "{}", lines[1]);
+
+    // A literal found only inside a value already replaced whole
+    // changes nothing, and is reported as such
+    let err = publisher
+        .redact(
+            &init.id,
+            &[RedactionInput::parse_text("echo", "secret", true).unwrap()],
+            "user:test",
+        )
+        .unwrap_err();
+    assert!(
+        matches!(err, PublishError::NoMatch(ref m) if m.contains("echo")),
+        "{err}"
+    );
 }

@@ -3,7 +3,8 @@
 //! patterns are the gitleaks rule set, vendored as `filters/gitleaks.toml`
 //! under the MIT license beside it. A filter's typed-sensitive paths are
 //! content-format knowledge and come from the driver's text descriptor,
-//! not from here.
+//! not from here; the attributes it leaves out are store knowledge and
+//! are named here.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -22,6 +23,9 @@ pub struct Filter {
     pub description: &'static str,
     /// The instruction prose for the agent
     pub instructions: &'static str,
+    /// The attributes of `attrs.json` the filter leaves out of the
+    /// published session
+    pub attrs: &'static [&'static str],
     patterns: Vec<Pattern>,
     /// The keyword prefilter: a pattern with keywords runs only on text
     /// containing one of them.
@@ -512,6 +516,7 @@ static FILTERS: LazyLock<Vec<Filter>> = LazyLock::new(|| {
             reason: "pii",
             description: "Remove personally identifiable information",
             instructions: include_str!("../filters/pii.md"),
+            attrs: &[],
             patterns: vec![
                 Pattern::new("email", r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"),
                 Pattern::new(
@@ -530,6 +535,7 @@ static FILTERS: LazyLock<Vec<Filter>> = LazyLock::new(|| {
             reason: "secret",
             description: "Remove passwords, API keys, and other secrets",
             instructions: include_str!("../filters/secret.md"),
+            attrs: &[],
             keywords: Keywords::new(&secret),
             patterns: secret,
         },
@@ -538,6 +544,16 @@ static FILTERS: LazyLock<Vec<Filter>> = LazyLock::new(|| {
             reason: "language",
             description: "Remove profanity and other language unfit for a public record",
             instructions: include_str!("../filters/language.md"),
+            attrs: &[],
+            patterns: Vec::new(),
+            keywords: None,
+        },
+        Filter {
+            name: "system",
+            reason: "system",
+            description: "Remove paths, hosts, and OS versions of the machine the session ran on",
+            instructions: include_str!("../filters/system.md"),
+            attrs: &["project"],
             patterns: Vec::new(),
             keywords: None,
         },

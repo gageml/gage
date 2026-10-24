@@ -137,6 +137,26 @@
     "pii": {
       "literal": ["$..user_identity", "$..home_dir"],
       "value": ["$.attachment.context.userEmail"]
+    },
+    "system": {
+      "value": [
+        "$.cwd",
+        "$..live_cwd",
+        "$..home_dir",
+        "$..git_state.cwd",
+        "$..git_state.root",
+        "$..trusted_directories.primary.path",
+        "$..trusted_directories.primary.resolved[*]",
+        "$..rule_roots.*",
+        "$..visibility..host",
+        "$..visibility..remote",
+        "$..push_remote",
+        "$.attachment.snapshot.workingDirectory",
+        "$.attachment.snapshot.scratchpadDirectory",
+        "$.attachment.snapshot.additionalWorkingDirectories[*]",
+        "$.attachment.snapshot.osVersion",
+        "$.snapshot.trackedFileBackups.*.realParentDir"
+      ]
     }
   }
 }

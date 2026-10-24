@@ -8,12 +8,13 @@ use std::fmt;
 use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
+use serde_json_path::JsonPath;
 
 use crate::PublishError;
 
 /// The filters with a built-in definition. Any other filter text is
 /// an instruction to the agent.
-pub const NAMED_FILTERS: &[&str] = &["pii", "language", "secret"];
+pub const NAMED_FILTERS: &[&str] = &["pii", "language", "secret", "system"];
 
 /// A reason code a redaction may carry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,6 +48,10 @@ pub const REASONS: &[Reason] = &[
     Reason {
         code: "secret",
         description: "A credential or key (password, API key, token)",
+    },
+    Reason {
+        code: "system",
+        description: "Information about the machine or network the session ran on (path, host, OS version)",
     },
     Reason {
         code: "confidential",
@@ -180,12 +185,11 @@ pub enum RedactionKind {
         #[serde(default = "mark_default")]
         mark: bool,
     },
-    /// Replace the whole text value at `pointer` of `line`
-    Value {
-        line: u32,
-        pointer: String,
-        reason: String,
-    },
+    /// Replace whole every text value the JSONPath `path` selects, in
+    /// every entry
+    Path { path: String, reason: String },
+    /// Leave the attribute `name` out of the published `attrs.json`
+    Attr { name: String, reason: String },
 }
 
 fn mark_default() -> bool {
@@ -198,7 +202,8 @@ impl RedactionKind {
             RedactionKind::Lines { reason, .. }
             | RedactionKind::Text { reason, .. }
             | RedactionKind::Span { reason, .. }
-            | RedactionKind::Value { reason, .. } => reason,
+            | RedactionKind::Path { reason, .. }
+            | RedactionKind::Attr { reason, .. } => reason,
         }
     }
 
@@ -208,7 +213,8 @@ impl RedactionKind {
             RedactionKind::Lines { .. } => "lines",
             RedactionKind::Text { .. } => "text",
             RedactionKind::Span { .. } => "span",
-            RedactionKind::Value { .. } => "value",
+            RedactionKind::Path { .. } => "path",
+            RedactionKind::Attr { .. } => "attr",
         }
     }
 
@@ -230,7 +236,8 @@ impl RedactionKind {
                 "{line} {pointer} {literal}{}",
                 if *mark { "" } else { " (no mark)" }
             ),
-            RedactionKind::Value { line, pointer, .. } => format!("{line} {pointer}"),
+            RedactionKind::Path { path, .. } => path.clone(),
+            RedactionKind::Attr { name, .. } => name.clone(),
         }
     }
 }
@@ -352,8 +359,8 @@ impl PublishDefinition {
 
     /// Check a definition as read from disk, which may have been
     /// edited by hand: every reason is a known code, every literal is
-    /// non-empty, every line range is ordered, and ids are unique and
-    /// below `next_id`.
+    /// non-empty, every path is JSONPath, every line range is ordered,
+    /// and ids are unique and below `next_id`.
     pub fn validate(&self) -> Result<(), PublishError> {
         self.original()?;
         let mut seen = std::collections::HashSet::new();
@@ -376,6 +383,9 @@ impl PublishDefinition {
                     if literal.is_empty() =>
                 {
                     return Err(at("literal is empty".into()));
+                }
+                RedactionKind::Path { path, .. } => {
+                    JsonPath::parse(path).map_err(|e| at(format!("path {path:?}: {e}")))?;
                 }
                 _ => {}
             }
@@ -600,9 +610,8 @@ mod tests {
         let second = d.push(
             "filter:pii",
             Some("email".into()),
-            RedactionKind::Value {
-                line: 3,
-                pointer: "/x".into(),
+            RedactionKind::Path {
+                path: "$.x".into(),
                 reason: "pii".into(),
             },
         );

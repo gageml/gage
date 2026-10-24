@@ -327,7 +327,7 @@ pub struct ApplyArgs {
 /// filter argument is.
 const FILTER_HELP: &str = "A filter name, or an instruction to an LLM describing what to \
 remove. An instruction contains a space and may be given as @PATH to read it from a file. \
-Filter names are \"pii\", \"language\", and \"secret\".";
+Filter names are \"pii\", \"language\", \"secret\", and \"system\".";
 
 /// The `filter` group declares the `--source` and `--stored` override
 /// itself: none of its commands takes them, so the group capturing a

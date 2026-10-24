@@ -110,12 +110,12 @@ impl PublishDirLayout {
 pub struct RedactedRecord {
     pub kind: RedactedKind,
     /// The original line, 1-based; the first dropped line of a `Line`
-    /// record.
+    /// record. An `Attr` record touches no line and carries 0.
     pub line: u32,
     /// The last dropped line of a `Line` record, inclusive.
     pub line_end: Option<u32>,
     /// JSON Pointer to the text value a `Span` or `Value` record
-    /// touches.
+    /// touches; the attribute name of an `Attr` record.
     pub property: Option<String>,
     /// Zero-based UTF-8 byte offsets of a `Span` record, `span_end`
     /// inclusive.
@@ -134,6 +134,8 @@ pub enum RedactedKind {
     Span,
     /// A whole text value was replaced by the marker.
     Value,
+    /// An attribute of `attrs.json` was left out.
+    Attr,
 }
 
 impl RedactedKind {
@@ -142,6 +144,7 @@ impl RedactedKind {
             RedactedKind::Line => "line",
             RedactedKind::Span => "span",
             RedactedKind::Value => "value",
+            RedactedKind::Attr => "attr",
         }
     }
 }
@@ -149,7 +152,8 @@ impl RedactedKind {
 /// Decode the `redacted.json` text: a JSON array of typed arrays,
 /// `["line", line, line_end, reason, author]`,
 /// `["span", line, property, span_start, span_end, reason, author]`,
-/// and `["value", line, property, reason, author]`.
+/// `["value", line, property, reason, author]`, and
+/// `["attr", name, reason, author]`.
 pub fn parse_redacted(bytes: &[u8]) -> Result<Vec<RedactedRecord>, StoreError> {
     let value: Value = serde_json::from_slice(bytes)
         .map_err(|e| StoreError::Parse(format!("{REDACTED_FILE}: {e}")))?;
@@ -222,6 +226,18 @@ fn parse_redacted_record(record: &Value) -> Result<RedactedRecord, String> {
             text(3)?,
             text(4)?,
         ),
+        "attr" => {
+            return Ok(RedactedRecord {
+                kind: RedactedKind::Attr,
+                line: 0,
+                line_end: None,
+                property: Some(text(1)?),
+                span_start: None,
+                span_end: None,
+                reason: text(2)?,
+                author: text(3)?,
+            });
+        }
         other => return Err(format!("unknown kind {other:?}")),
     };
     Ok(RedactedRecord {
@@ -753,7 +769,9 @@ mod tests {
             "\n",
             r#"  ["span", 5, "/message/content", 4, 23, "pii", "filter:pii"],"#,
             "\n",
-            r#"  ["value", 7, "/toolUseResult/stdout", "secret", "filter:secret"]"#,
+            r#"  ["value", 7, "/toolUseResult/stdout", "secret", "filter:secret"],"#,
+            "\n",
+            r#"  ["attr", "project", "system", "filter:system"]"#,
             "\n]\n",
         );
         let records = parse_redacted(text.as_bytes()).unwrap();
@@ -789,6 +807,16 @@ mod tests {
                     span_end: None,
                     reason: "secret".into(),
                     author: "filter:secret".into(),
+                },
+                RedactedRecord {
+                    kind: RedactedKind::Attr,
+                    line: 0,
+                    line_end: None,
+                    property: Some("project".into()),
+                    span_start: None,
+                    span_end: None,
+                    reason: "system".into(),
+                    author: "filter:system".into(),
                 },
             ]
         );

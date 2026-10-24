@@ -2,13 +2,14 @@
 //! the expansion of a definition's redactions to instances over them,
 //! and the write of the staged content and `redacted.json`.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 
 use gage_session::{Derivation, EntryJson, StoredSession, TextDescriptor, TextValue, edit_strings};
 use gage_store::{DirContentSink, PublishDirLayout, SummaryAttrs};
 use regex::{Regex, RegexBuilder};
 use serde_json::{Value, json};
+use serde_json_path::JsonPath;
 
 use crate::definition::{PublishDefinition, Redaction, RedactionInput, RedactionKind};
 use crate::filter::Filter;
@@ -24,6 +25,8 @@ pub struct EntryText {
 /// The original session's entries and text values, read once.
 pub struct SessionText {
     pub entries: Vec<EntryText>,
+    /// The original's `project` attribute, when the caller supplies it
+    pub project: Option<String>,
     descriptor: TextDescriptor,
 }
 
@@ -42,12 +45,21 @@ impl SessionText {
         }
         Ok(Self {
             entries,
+            project: None,
             descriptor: descriptor.clone(),
         })
     }
 
     fn entry(&self, line: u32) -> Option<&EntryText> {
         self.entries.iter().find(|e| e.line == line)
+    }
+
+    /// Whether the original carries the attribute `name`.
+    fn has_attr(&self, name: &str) -> bool {
+        match name {
+            "project" => self.project.is_some(),
+            _ => false,
+        }
     }
 }
 
@@ -81,6 +93,10 @@ pub enum InstanceKind {
         line: u32,
         pointer: String,
     },
+    /// The attribute `name` is left out of `attrs.json`
+    Attr {
+        name: String,
+    },
 }
 
 impl Instance {
@@ -100,21 +116,27 @@ impl Instance {
             InstanceKind::Value { line, pointer } => {
                 json!(["value", line, pointer, self.reason, self.author])
             }
+            InstanceKind::Attr { name } => json!(["attr", name, self.reason, self.author]),
         }
     }
 
+    /// The line the instance is on; 0 for an attribute, which is on
+    /// none.
     fn line(&self) -> u32 {
         match &self.kind {
             InstanceKind::Line { line, .. }
             | InstanceKind::Span { line, .. }
             | InstanceKind::Value { line, .. } => *line,
+            InstanceKind::Attr { .. } => 0,
         }
     }
 
     /// The order instances are recorded in: by line, then pointer,
-    /// then offset, with a dropped line before anything on it.
+    /// then offset, with an attribute first and a dropped line before
+    /// anything on it.
     fn order(&self) -> (u32, &str, usize) {
         match &self.kind {
+            InstanceKind::Attr { name } => (0, name, 0),
             InstanceKind::Line { line, .. } => (*line, "", 0),
             InstanceKind::Value { line, pointer } => (*line, pointer, 0),
             InstanceKind::Span {
@@ -231,9 +253,10 @@ pub fn run_filters(
             continue;
         };
         // One text redaction per distinct literal; the first rule to
-        // find it is the one recorded
+        // find it is the one recorded. One path redaction per typed
+        // value path that selects something
         let mut literals: BTreeMap<String, String> = BTreeMap::new();
-        let mut values: Vec<(u32, String, String)> = Vec::new();
+        let mut paths: BTreeSet<String> = BTreeSet::new();
         for entry in &session.entries {
             for value in &entry.values {
                 for (rule, literal) in filter.matches(&value.text) {
@@ -251,9 +274,7 @@ pub fn run_filters(
                     .entry(literal)
                     .or_insert_with(|| "typed".to_string());
             }
-            for pointer in found.values {
-                values.push((entry.line, pointer, "typed".to_string()));
-            }
+            paths.extend(found.values.into_iter().map(|hit| hit.path));
         }
         let mut candidates: Vec<(String, RedactionKind)> = literals
             .into_iter()
@@ -268,16 +289,30 @@ pub fn run_filters(
                 )
             })
             .collect();
-        candidates.extend(values.into_iter().map(|(line, pointer, rule)| {
+        candidates.extend(paths.into_iter().map(|path| {
             (
-                rule,
-                RedactionKind::Value {
-                    line,
-                    pointer,
+                "typed".to_string(),
+                RedactionKind::Path {
+                    path,
                     reason: filter.reason.to_string(),
                 },
             )
         }));
+        candidates.extend(
+            filter
+                .attrs
+                .iter()
+                .filter(|name| session.has_attr(name))
+                .map(|name| {
+                    (
+                        "attr".to_string(),
+                        RedactionKind::Attr {
+                            name: name.to_string(),
+                            reason: filter.reason.to_string(),
+                        },
+                    )
+                }),
+        );
         for (rule, kind) in candidates {
             if definition.is_suppressed(&author, &kind) {
                 continue;
@@ -291,7 +326,7 @@ pub fn run_filters(
 /// Expand every redaction of `definition` to instances over `session`,
 /// write the staged content through `stored` and `redacted.json`
 /// into `layout`, and record each redaction's instance count. Returns
-/// the instances.
+/// the instances. The staged `attrs.json` is the caller's to update.
 pub fn build(
     definition: &mut PublishDefinition,
     session: &SessionText,
@@ -299,10 +334,7 @@ pub fn build(
     layout: &PublishDirLayout,
 ) -> Result<Vec<Instance>, PublishError> {
     let dropped = dropped_lines(definition);
-    let mut instances = Vec::new();
-    for redaction in &definition.redactions {
-        expand(redaction, session, &dropped, &mut instances);
-    }
+    let mut instances = expand_all(&definition.redactions, session, &dropped)?;
     for redaction in &mut definition.redactions {
         redaction.instances = instances
             .iter()
@@ -430,102 +462,195 @@ pub fn dropped_lines(definition: &PublishDefinition) -> BTreeSet<u32> {
     dropped
 }
 
-/// The instances of one redaction. Text instances inside a dropped
-/// line are not recorded, since the line is not in the derived
-/// session.
-fn expand(
-    redaction: &Redaction,
+/// Expand `redactions` in order of precedence: dropped lines and
+/// attributes, then whole values, then spans. A match inside a
+/// dropped line or a whole value records nothing, and a whole value is
+/// recorded once however many redactions select it, so the record
+/// holds only what changed the derived session.
+fn expand_all(
+    redactions: &[Redaction],
     session: &SessionText,
     dropped: &BTreeSet<u32>,
-    out: &mut Vec<Instance>,
-) {
-    let instance = |kind: InstanceKind| Instance {
+) -> Result<Vec<Instance>, PublishError> {
+    let mut expansion = Expansion {
+        session,
+        dropped,
+        whole: HashSet::new(),
+        out: Vec::new(),
+    };
+    for redaction in redactions.iter().filter(|r| precedence(&r.kind) == 0) {
+        expansion.expand(redaction);
+    }
+    expansion.expand_paths(redactions)?;
+    for redaction in redactions.iter().filter(|r| precedence(&r.kind) == 2) {
+        expansion.expand(redaction);
+    }
+    Ok(expansion.out)
+}
+
+/// The pass a redaction kind is expanded in.
+fn precedence(kind: &RedactionKind) -> u8 {
+    match kind {
+        RedactionKind::Lines { .. } | RedactionKind::Attr { .. } => 0,
+        RedactionKind::Path { .. } => 1,
+        RedactionKind::Text { .. } | RedactionKind::Span { .. } => 2,
+    }
+}
+
+fn instance_of(redaction: &Redaction, kind: InstanceKind) -> Instance {
+    Instance {
         redaction: redaction.id,
         reason: redaction.kind.reason().to_string(),
         author: redaction.author.clone(),
         kind,
-    };
-    match &redaction.kind {
-        RedactionKind::Lines { line, line_end, .. } => out.push(instance(InstanceKind::Line {
-            line: *line,
-            line_end: *line_end,
-        })),
-        RedactionKind::Text { literal, mark, .. } => {
-            let regex = literal_regex(literal);
-            for entry in &session.entries {
-                if dropped.contains(&entry.line) {
-                    continue;
-                }
-                for value in &entry.values {
-                    out.extend(
-                        matches_in(&regex, value, entry.line, *mark)
-                            .into_iter()
-                            .map(&instance),
-                    );
-                }
-            }
-        }
-        RedactionKind::Span {
-            line,
-            pointer,
-            literal,
-            mark,
-            ..
-        } => {
-            if dropped.contains(line) {
-                return;
-            }
-            let regex = literal_regex(literal);
-            if let Some(value) = session
-                .entry(*line)
-                .and_then(|e| e.values.iter().find(|v| v.pointer == *pointer))
-            {
-                out.extend(
-                    matches_in(&regex, value, *line, *mark)
-                        .into_iter()
-                        .map(&instance),
-                );
-            }
-        }
-        RedactionKind::Value { line, pointer, .. } => {
-            if dropped.contains(line) {
-                return;
-            }
-            if session
-                .entry(*line)
-                .is_some_and(|e| e.values.iter().any(|v| v.pointer == *pointer))
-            {
-                out.push(instance(InstanceKind::Value {
-                    line: *line,
-                    pointer: pointer.clone(),
-                }));
-            }
-        }
     }
 }
 
-/// The instances a literal produces in one value: one `Value` when the
-/// value is atomic and matches, else one `Span` per match.
-fn matches_in(regex: &Regex, value: &TextValue, line: u32, mark: bool) -> Vec<InstanceKind> {
-    let mut found = regex.find_iter(&value.text).peekable();
-    if found.peek().is_none() {
-        return Vec::new();
+struct Expansion<'a> {
+    session: &'a SessionText,
+    dropped: &'a BTreeSet<u32>,
+    /// The `(line, pointer)` of every value replaced whole so far
+    whole: HashSet<(u32, &'a str)>,
+    out: Vec<Instance>,
+}
+
+impl<'a> Expansion<'a> {
+    /// Expand the path redactions of `redactions`: each entry is parsed
+    /// once and every path is evaluated against it.
+    fn expand_paths(&mut self, redactions: &[Redaction]) -> Result<(), PublishError> {
+        let paths = redactions
+            .iter()
+            .filter_map(|r| match &r.kind {
+                RedactionKind::Path { path, .. } => Some(
+                    JsonPath::parse(path)
+                        .map(|compiled| (r, compiled))
+                        .map_err(|e| {
+                            PublishError::Input(format!("redaction {}: path {path:?}: {e}", r.id))
+                        }),
+                ),
+                _ => None,
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if paths.is_empty() {
+            return Ok(());
+        }
+        for entry in &self.session.entries {
+            if self.dropped.contains(&entry.line) {
+                continue;
+            }
+            let parsed: Value = serde_json::from_str(&entry.json)?;
+            for (redaction, path) in &paths {
+                let pointers: Vec<String> = path
+                    .query_located(&parsed)
+                    .iter()
+                    .filter(|n| n.node().is_string())
+                    .map(|n| n.location().to_json_pointer())
+                    .collect();
+                for pointer in pointers {
+                    if let Some(value) = self.value_at(entry.line, &pointer) {
+                        self.replace_whole(entry.line, value, &|k| instance_of(redaction, k));
+                    }
+                }
+            }
+        }
+        Ok(())
     }
-    if value.atomic {
-        return vec![InstanceKind::Value {
-            line,
-            pointer: value.pointer.clone(),
-        }];
+
+    fn expand(&mut self, redaction: &Redaction) {
+        let instance = |kind: InstanceKind| instance_of(redaction, kind);
+        match &redaction.kind {
+            RedactionKind::Lines { line, line_end, .. } => {
+                self.out.push(instance(InstanceKind::Line {
+                    line: *line,
+                    line_end: *line_end,
+                }));
+            }
+            RedactionKind::Attr { name, .. } => {
+                if self.session.has_attr(name) {
+                    self.out
+                        .push(instance(InstanceKind::Attr { name: name.clone() }));
+                }
+            }
+            RedactionKind::Path { .. } => {}
+            RedactionKind::Text { literal, mark, .. } => {
+                let regex = literal_regex(literal);
+                for entry in &self.session.entries {
+                    if self.dropped.contains(&entry.line) {
+                        continue;
+                    }
+                    for value in &entry.values {
+                        self.matches_in(&regex, value, entry.line, *mark, &instance);
+                    }
+                }
+            }
+            RedactionKind::Span {
+                line,
+                pointer,
+                literal,
+                mark,
+                ..
+            } => {
+                if self.dropped.contains(line) {
+                    return;
+                }
+                let regex = literal_regex(literal);
+                if let Some(value) = self.value_at(*line, pointer) {
+                    self.matches_in(&regex, value, *line, *mark, &instance);
+                }
+            }
+        }
     }
-    found
-        .map(|m| InstanceKind::Span {
-            line,
-            pointer: value.pointer.clone(),
-            start: m.start(),
-            end: m.end() - 1,
-            mark,
-        })
-        .collect()
+
+    fn value_at(&self, line: u32, pointer: &str) -> Option<&'a TextValue> {
+        self.session
+            .entry(line)
+            .and_then(|e| e.values.iter().find(|v| v.pointer == pointer))
+    }
+
+    /// Record `value` as replaced whole, once.
+    fn replace_whole(
+        &mut self,
+        line: u32,
+        value: &'a TextValue,
+        instance: &dyn Fn(InstanceKind) -> Instance,
+    ) {
+        if self.whole.insert((line, &value.pointer)) {
+            self.out.push(instance(InstanceKind::Value {
+                line,
+                pointer: value.pointer.clone(),
+            }));
+        }
+    }
+
+    /// The instances a literal produces in one value: nothing when the
+    /// value is already replaced whole, one `Value` when the value is
+    /// atomic and matches, else one `Span` per match.
+    fn matches_in(
+        &mut self,
+        regex: &Regex,
+        value: &'a TextValue,
+        line: u32,
+        mark: bool,
+        instance: &dyn Fn(InstanceKind) -> Instance,
+    ) {
+        let mut found = regex.find_iter(&value.text).peekable();
+        if found.peek().is_none() || self.whole.contains(&(line, value.pointer.as_str())) {
+            return;
+        }
+        if value.atomic {
+            self.replace_whole(line, value, instance);
+            return;
+        }
+        self.out.extend(found.map(|m| {
+            instance(InstanceKind::Span {
+                line,
+                pointer: value.pointer.clone(),
+                start: m.start(),
+                end: m.end() - 1,
+                mark,
+            })
+        }));
+    }
 }
 
 /// The `(pointer, new text)` edits of one entry from the instances on
@@ -553,7 +678,7 @@ fn line_edits(
                 .entry(pointer)
                 .or_default()
                 .push((*start, *end, *mark)),
-            InstanceKind::Line { .. } => {}
+            InstanceKind::Line { .. } | InstanceKind::Attr { .. } => {}
         }
     }
     let mut edits = Vec::new();
@@ -615,14 +740,16 @@ fn apply_span(text: &str, start: usize, end: usize, mark: bool) -> String {
     format!("{before}{after}")
 }
 
-/// Rewrite `size` and the driver summary in the staged `attrs.json`
-/// from the content written. `staged` reads the staged content, not
-/// the original. The title is kept from the original: the driver
-/// takes it from the first prompt, and dropping that line does not
-/// retitle the publication.
+/// Rewrite `size`, `project`, and the driver summary in the staged
+/// `attrs.json` from the content written. `staged` reads the staged
+/// content, not the original. `project` is the original's unless a
+/// redaction leaves it out. The title is kept from the original: the
+/// driver takes it from the first prompt, and dropping that line does
+/// not retitle the publication.
 pub fn update_attrs(
     layout: &PublishDirLayout,
     staged: &mut dyn StoredSession,
+    project: Option<&str>,
 ) -> Result<(), PublishError> {
     let size = dir_size(&layout.files_dir())?;
     let mut attrs: Value = serde_json::from_slice(&fs::read(layout.attrs_file())?)?;
@@ -634,6 +761,10 @@ pub fn update_attrs(
     summary.title = title;
     if let Some(object) = attrs.as_object_mut() {
         object.insert("size".to_string(), json!(size));
+        match project {
+            Some(project) => object.insert("project".to_string(), json!(project)),
+            None => object.remove("project"),
+        };
         object.insert("summary".to_string(), serde_json::to_value(&summary)?);
     }
     let mut bytes = serde_json::to_vec(&attrs)?;

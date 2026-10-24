@@ -1,8 +1,8 @@
 //! The Claude driver's text descriptor: which fields of a transcript
 //! line are identifiers, timestamps, digests, signatures, or
 //! enumerations rather than text, which blocks are atomic, and which
-//! fields a named filter treats as sensitive by type. The `text_block` table and the publish
-//! redaction engine read it.
+//! fields a named filter treats as sensitive by type. The `text_block`
+//! table and the publish redaction engine read it.
 //! `schema/claude-jsonl-1/text_descriptor.json` holds the pattern
 //! lists beside the content schemas of the same format.
 
@@ -53,7 +53,11 @@ mod tests {
     use std::path::Path;
 
     use super::*;
-    use gage_session::TextValue;
+    use gage_session::{FilterValues, TextValue};
+
+    fn pointers(found: &FilterValues) -> Vec<String> {
+        found.values.iter().map(|h| h.pointer.clone()).collect()
+    }
 
     const SAMPLE: &str = include_str!("../schema/claude-jsonl-1/sample.jsonl");
 
@@ -202,6 +206,69 @@ mod tests {
         assert_eq!(found.literals, ["garrett", "/home/garrett"]);
         let attachment = r#"{"type":"attachment","attachment":{"context":{"userEmail":"The user's email address is g@x.y"}}}"#;
         let found = text_descriptor().filter_values("pii", attachment).unwrap();
-        assert_eq!(found.values, ["/attachment/context/userEmail"]);
+        assert_eq!(pointers(&found), ["/attachment/context/userEmail"]);
+        assert_eq!(found.values[0].path, "$.attachment.context.userEmail");
+    }
+
+    /// The `system` filter names every field that holds a path, a
+    /// host, or an OS version, wherever the classifier context nests it.
+    #[test]
+    fn system_filter_paths_select_paths_hosts_and_the_os_version() {
+        let descriptor = text_descriptor();
+        let user = r#"{"type":"user","cwd":"/home/garrett/proj","gitBranch":"main","message":{"role":"user","content":"hi"}}"#;
+        let found = descriptor.filter_values("system", user).unwrap();
+        assert_eq!(pointers(&found), ["/cwd"]);
+        assert_eq!(found.values[0].path, "$.cwd");
+        let request = r#"{"type":"api-request","params":{"safeguards":[{"classifier_context":{"user_identity":"garrett","home_dir":"/home/garrett","live_cwd":"/home/garrett/proj","rule_roots":{"userSettings":"/home/garrett/.claude"},"trusted_directories":{"primary":{"path":"/home/garrett/proj","resolved":["/home/garrett/proj"]}},"git_state":{"cwd":"/home/garrett/proj","root":"/home/garrett/proj","branch":"main","visibility":{"push_remote":"origin","origin":{"remote":"git@git.example:a/b.git","host":"git.example","visibility":"private"},"remotes":[{"name":"origin","remote":"git@git.example:a/b.git","host":"git.example","visibility":"private"}]}},"prior_turn_context":[{"context":{"live_cwd":"/home/garrett/proj"}}]}}]}}"#;
+        let found = descriptor.filter_values("system", request).unwrap();
+        let context = "/params/safeguards/0/classifier_context";
+        let expected: Vec<String> = [
+            "/live_cwd",
+            "/prior_turn_context/0/context/live_cwd",
+            "/home_dir",
+            "/git_state/cwd",
+            "/git_state/root",
+            "/trusted_directories/primary/path",
+            "/trusted_directories/primary/resolved/0",
+            "/rule_roots/userSettings",
+            "/git_state/visibility/origin/host",
+            "/git_state/visibility/remotes/0/host",
+            "/git_state/visibility/origin/remote",
+            "/git_state/visibility/remotes/0/remote",
+            "/git_state/visibility/push_remote",
+        ]
+        .iter()
+        .map(|p| format!("{context}{p}"))
+        .collect();
+        let mut found_sorted = pointers(&found);
+        found_sorted.sort();
+        let mut expected_sorted = expected.clone();
+        expected_sorted.sort();
+        assert_eq!(found_sorted, expected_sorted, "{found:#?}");
+        assert!(!found.values.iter().any(|h| h.pointer.ends_with("/branch")));
+        assert!(
+            !found
+                .values
+                .iter()
+                .any(|h| h.pointer.ends_with("/user_identity"))
+        );
+
+        let snapshot = r#"{"type":"attachment","attachment":{"type":"environment_snapshot","snapshot":{"workingDirectory":"/home/garrett/proj","scratchpadDirectory":"/tmp/s","additionalWorkingDirectories":["/home/garrett/other"],"platform":"linux","osVersion":"Linux 6.17.0-1032-oem","shell":"bash"}}}"#;
+        let found = descriptor.filter_values("system", snapshot).unwrap();
+        assert_eq!(
+            pointers(&found),
+            [
+                "/attachment/snapshot/workingDirectory",
+                "/attachment/snapshot/scratchpadDirectory",
+                "/attachment/snapshot/additionalWorkingDirectories/0",
+                "/attachment/snapshot/osVersion",
+            ]
+        );
+        let backups = r#"{"type":"file-history-snapshot","snapshot":{"trackedFileBackups":{"src/a.rs":{"realParentDir":"/home/garrett/proj/src","backupFileName":"abc@v1"}}}}"#;
+        let found = descriptor.filter_values("system", backups).unwrap();
+        assert_eq!(
+            pointers(&found),
+            ["/snapshot/trackedFileBackups/src~1a.rs/realParentDir"]
+        );
     }
 }

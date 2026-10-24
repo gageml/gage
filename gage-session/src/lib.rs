@@ -38,7 +38,7 @@ pub use json_edit::{EditError, edit_strings};
 pub use status::{AuthInfo, DriverStatus, Field, HarnessInfo, InstallInfo};
 pub use system_col::{SYSTEM_META_KEY, is_system, system};
 pub use text_block::{
-    DescriptorError, FilterValues, TextBlock, TextBlockBatch, TextDescriptor, TextValue,
+    DescriptorError, FilterValues, TextBlock, TextBlockBatch, TextDescriptor, TextValue, ValueHit,
     text_block_batch, text_block_schema, text_blocks,
 };
 pub use tool_use::{ToolUse, ToolUseBatch, tool_use_batch, tool_use_schema};

@@ -227,15 +227,14 @@ impl PathSet {
 
 /// Compile JSONPath patterns, naming the one that fails.
 fn compile(patterns: &[&str]) -> std::result::Result<Vec<JsonPath>, DescriptorError> {
-    patterns
-        .iter()
-        .map(|p| {
-            JsonPath::parse(p).map_err(|e| DescriptorError {
-                pattern: p.to_string(),
-                message: e.to_string(),
-            })
-        })
-        .collect()
+    patterns.iter().map(|p| compile_one(p)).collect()
+}
+
+fn compile_one(pattern: &str) -> std::result::Result<JsonPath, DescriptorError> {
+    JsonPath::parse(pattern).map_err(|e| DescriptorError {
+        pattern: pattern.to_string(),
+        message: e.to_string(),
+    })
 }
 
 /// Whether `key` equals `prefix` or continues it at a segment boundary.
@@ -302,8 +301,8 @@ struct FilterPaths {
     name: String,
     /// Fields whose value is itself the sensitive literal
     literal: Vec<JsonPath>,
-    /// Fields whose whole value is replaced
-    value: Vec<JsonPath>,
+    /// Fields whose whole value is replaced, each with its pattern text
+    value: Vec<(String, JsonPath)>,
 }
 
 /// What a filter's typed-sensitive paths select in one entry.
@@ -311,9 +310,17 @@ struct FilterPaths {
 pub struct FilterValues {
     /// The string values at the filter's `literal` paths
     pub literals: Vec<String>,
-    /// The JSON Pointers of the string values at the filter's `value`
-    /// paths
-    pub values: Vec<String>,
+    /// The string values at the filter's `value` paths
+    pub values: Vec<ValueHit>,
+}
+
+/// One string value a filter's `value` path selects.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValueHit {
+    /// The pattern that selected it
+    pub path: String,
+    /// JSON Pointer (RFC 6901) of the value from the entry root
+    pub pointer: String,
 }
 
 /// A text value of one entry with its classification.
@@ -361,7 +368,10 @@ impl TextDescriptor {
         self.filters.push(FilterPaths {
             name: name.to_string(),
             literal: compile(literal)?,
-            value: compile(value)?,
+            value: value
+                .iter()
+                .map(|p| compile_one(p).map(|c| (p.to_string(), c)))
+                .collect::<std::result::Result<_, _>>()?,
         });
         Ok(self)
     }
@@ -395,11 +405,14 @@ impl TextDescriptor {
         let values = paths
             .value
             .iter()
-            .flat_map(|p| {
+            .flat_map(|(path, p)| {
                 p.query_located(&entry)
                     .iter()
                     .filter(|n| n.node().is_string())
-                    .map(|n| n.location().to_json_pointer())
+                    .map(|n| ValueHit {
+                        path: path.clone(),
+                        pointer: n.location().to_json_pointer(),
+                    })
                     .collect::<Vec<_>>()
             })
             .collect();
@@ -603,7 +616,13 @@ mod tests {
         let line = r#"{"context":{"email":"The user is a@b.c"},"params":{"classifier":{"user_identity":"garrett"}},"n":{"user_identity":5}}"#;
         let found = descriptor.filter_values("pii", line).unwrap();
         assert_eq!(found.literals, ["garrett"]);
-        assert_eq!(found.values, ["/context/email"]);
+        assert_eq!(
+            found.values,
+            [ValueHit {
+                path: "$.context.email".into(),
+                pointer: "/context/email".into(),
+            }]
+        );
         assert_eq!(
             descriptor.filter_values("secret", line).unwrap(),
             FilterValues::default()
