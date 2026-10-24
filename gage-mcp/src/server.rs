@@ -11,6 +11,7 @@ use rmcp::service::RequestContext;
 use rmcp::{RoleServer, ServerHandler};
 
 use crate::service::ToolsConfig;
+use crate::tool::MAX_DESCRIPTION_BYTES;
 
 pub struct GageServer {
     tool_router: ToolRouter<Self>,
@@ -66,3 +67,36 @@ impl ServerHandler for GageServer {
 }
 
 const INSTRUCTIONS: &str = include_str!("../config/server-instructions.md");
+const _: () = assert!(
+    INSTRUCTIONS.len() <= MAX_DESCRIPTION_BYTES,
+    "server instructions exceed Claude Code's 4096-byte cap",
+);
+
+#[cfg(test)]
+mod tests {
+    use super::INSTRUCTIONS;
+    use crate::tools::{
+        issue_assign, issue_comment, issue_pending_resolve, issue_update, issue_write, issues_free,
+        note_write, query,
+    };
+
+    #[test]
+    fn instructions_name_every_tool() {
+        let names = [
+            query::NAME,
+            issue_write::NAME,
+            note_write::NAME,
+            issue_update::NAME,
+            issue_assign::NAME,
+            issues_free::NAME,
+            issue_comment::NAME,
+            issue_pending_resolve::NAME,
+        ];
+        for name in names {
+            assert!(
+                INSTRUCTIONS.contains(&format!("`{name}`")),
+                "server instructions do not name {name}"
+            );
+        }
+    }
+}
