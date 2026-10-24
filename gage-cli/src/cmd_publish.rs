@@ -355,7 +355,7 @@ pub enum FilterCommand {
     /// earlier stays suppressed if filter is added again.
     Remove(FilterRemoveArgs),
 
-    /// Run named filters of a pending publish again
+    /// Run named filters of a pending publish
     ///
     /// Filter's earlier redactions are replaced by what its rules find
     /// now.
