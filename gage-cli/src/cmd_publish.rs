@@ -1,7 +1,8 @@
 //! `gage session publish`: the pending-publish life cycle commands.
 //!
 //! `init` stages a publish of a session; `redact`, `status`, `undo`,
-//! `refresh`, the `filter` commands, `abort`, and `apply` follow. The source session is resolved
+//! `refresh`, the `filter` commands, `abort`, and `apply` follow.
+//! `apply` is the only command that writes the store. The source session is resolved
 //! through the session command's `--source` and `--stored`, the way
 //! `gage scan` resolves sessions: a `--stored` session is used as is,
 //! and a native session is added to the store first so it has an
@@ -20,7 +21,10 @@ use gage_publish::{
     RedactionInput,
 };
 use gage_session::{Driver, NativeSession, SourceOptions};
-use gage_store::{PendingPublish, PublishStore, SESSION_TYPE, SessionRecord, SessionStore, Store};
+use gage_store::{
+    PendingPublish, PublishStore, SESSION_TYPE, SessionRecord, SessionStore, Store, StoreError,
+    TagStore,
+};
 use tabled::{
     Table,
     settings::{
@@ -32,6 +36,7 @@ use tabled::{
 
 use crate::author::resolve_author;
 use crate::cmd_note::value_cell;
+use crate::cmd_tag::TAG_HELP;
 use crate::dialog::{self, DialogError};
 use crate::error::CliError;
 use crate::human::{count, format_elapsed_ms};
@@ -121,6 +126,13 @@ pub enum PublishCommand {
     ///
     /// Deletes staged publish. Nothing was written to store.
     Abort(AbortArgs),
+
+    /// Publish a pending publish
+    ///
+    /// Checks that staged session is original with removals only, adds
+    /// it to store as a new session, and deletes staged publish. This
+    /// is the only publish command that writes to store.
+    Apply(ApplyArgs),
 }
 
 #[derive(Args)]
@@ -284,6 +296,33 @@ pub struct AbortArgs {
     no_source: NoSource,
 }
 
+#[derive(Args)]
+pub struct ApplyArgs {
+    /// Pending publish session to publish (ID or prefix)
+    #[arg(value_name = "SESSION")]
+    session: String,
+
+    /// Tag published session
+    #[arg(
+        short,
+        long,
+        value_name = "NAME",
+        long_help = format!("Tag published session\n\n{TAG_HELP}")
+    )]
+    tag: Option<String>,
+
+    /// Move tag if it exists
+    #[arg(long, requires = "tag")]
+    force_tag: bool,
+
+    /// Skip confirmation prompt
+    #[arg(short, long)]
+    yes: bool,
+
+    #[command(flatten)]
+    no_source: NoSource,
+}
+
 /// The paragraph `init --filter` and `filter add` share on what a
 /// filter argument is.
 const FILTER_HELP: &str = "A filter name, or an instruction to an LLM describing what to \
@@ -430,6 +469,10 @@ pub async fn run(args: PublishArgs) -> Result<(), CliError> {
         PublishCommand::Abort(args) => {
             args.no_source.reject("gage session publish abort")?;
             abort(args)
+        }
+        PublishCommand::Apply(args) => {
+            args.no_source.reject("gage session publish apply")?;
+            apply(args)
         }
     }
 }
@@ -1155,6 +1198,77 @@ fn abort(args: AbortArgs) -> Result<(), CliError> {
             .abort(&pending.id)
             .map_err(|e| DialogError::Other(e.into()))?;
         Ok(format!("Aborted publish {}", short_uuid(&pending.id)).into())
+    })
+}
+
+/// Publish a pending publish after confirmation. The staged session is
+/// checked and the tag's availability confirmed before the dialog
+/// opens, so a refusal leaves the store untouched and shows no prompt.
+fn apply(args: ApplyArgs) -> Result<(), CliError> {
+    let fail = |e: String| CliError::message(format!("gage session publish apply: {e}"));
+    let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
+    let publisher = Publisher::new(&store);
+    let pending = publisher
+        .store()
+        .get(&args.session)
+        .map_err(|e| fail(e.to_string()))?;
+    let definition = publisher
+        .definition(&pending.id)
+        .map_err(|e| fail(e.to_string()))?;
+    publisher
+        .check(&pending.id)
+        .map_err(|e| fail(e.to_string()))?;
+    let tags = TagStore::from(&store);
+    if let Some(name) = &args.tag {
+        tags.check_available(name, args.force_tag)
+            .map_err(|e| match e {
+                StoreError::TagExists { .. } => fail(format!("{e} (use --force-tag to move it)")),
+                e => fail(e.to_string()),
+            })?;
+    }
+    let instances: usize = definition.redactions.iter().map(|r| r.instances).sum();
+
+    dialog::run("Apply publish", || {
+        dialog::step_value("Session", short_uuid(&pending.id))?;
+        dialog::step_value("Origin", &pending.attrs.origin)?;
+        dialog::step_value(
+            "Definition",
+            format!(
+                "{}, {}, {}",
+                count(definition.filters.len(), "filter"),
+                count(definition.redactions.len(), "redaction"),
+                count(instances, "instance")
+            ),
+        )?;
+        if let Some(name) = &args.tag {
+            dialog::step_value("Tag", name)?;
+        }
+        if !args.yes {
+            let confirmed = cli::confirm("Continue?").initial_value(true).interact()?;
+            if !confirmed {
+                return Err(DialogError::Canceled);
+            }
+        }
+        publisher
+            .apply(&pending.id)
+            .map_err(|e| DialogError::Failed(e.to_string()))?;
+        if let Some(name) = &args.tag {
+            let added = tags
+                .add(name, &pending.id, args.force_tag)
+                .map_err(|e| DialogError::Failed(e.to_string()))?;
+            match added.previous_id {
+                Some(previous) => cli::log::info(format!(
+                    "Moved tag {name} from {} to session {}",
+                    short_uuid(&previous),
+                    short_uuid(&pending.id)
+                ))?,
+                None => cli::log::info(format!(
+                    "Tagged session {} as {name}",
+                    short_uuid(&pending.id)
+                ))?,
+            }
+        }
+        Ok(format!("Published session {}", short_uuid(&pending.id)).into())
     })
 }
 

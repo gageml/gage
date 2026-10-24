@@ -10,8 +10,9 @@
 //! `publish/<session id>.publish.json` is the publish definition: the
 //! instructions the staged session is derived from, which may hold
 //! anything and is never committed. The session enters the store only
-//! on apply; abort deletes the directory and the definition and
-//! writes nothing.
+//! on apply, which commits the staged directory as it stands and then
+//! deletes it with the definition; abort deletes both and writes
+//! nothing.
 
 use std::ffi::OsStr;
 use std::fs;
@@ -22,7 +23,9 @@ use std::time::UNIX_EPOCH;
 use gage_core::uuid::new_uuid;
 
 use crate::index::IdMatch;
-use crate::session::{FILES_TREE, OBJECT_TYPE, SessionAttrsRecord};
+use crate::object::{ObjectTree, object_ref};
+use crate::scan::import_opaque_tree;
+use crate::session::{FILES_TREE, OBJECT_TYPE, OBJECT_VERSION, SessionAttrsRecord};
 use crate::{SessionRecord, SessionStore, Store, StoreError};
 
 const PUBLISH_DIR: &str = "publish";
@@ -218,11 +221,61 @@ impl<'a> PublishStore<'a> {
         }
     }
 
+    /// Commit the staged directory of the pending publish `id` as a
+    /// new session object, as it stands: `attrs.json` as the attrs,
+    /// `redacted.json` as a root blob, `files.d` as the content
+    /// subtree. The object's ref must not exist. The staging
+    /// directory and the definition are deleted afterward. Returns the
+    /// commit SHA. Nothing in the staged content is checked here; the
+    /// publish engine validates before it calls.
+    pub fn apply(&self, id: &str) -> Result<String, StoreError> {
+        let layout = self.layout(id);
+        if !layout.root().is_dir() {
+            return Err(StoreError::ObjectNotFound(id.to_string()));
+        }
+        if self.store.rev_parse(&object_ref(id))?.is_some() {
+            return Err(StoreError::ObjectExists(id.to_string()));
+        }
+        let read = |path: &Path| fs::read(path).map_err(StoreError::ReadContent);
+        let attrs: serde_json::Value = serde_json::from_slice(&read(&layout.attrs_file())?)
+            .map_err(|e| StoreError::Parse(format!("publish attrs {id}: {e}")))?;
+        let origin = attrs
+            .get("origin")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| StoreError::Parse(format!("publish attrs {id}: no origin")))?
+            .to_string();
+        let redacted = read(&layout.redacted_file())?;
+        let files_tree =
+            import_opaque_tree(self.store.path(), &layout.files_dir())?.ok_or_else(|| {
+                StoreError::Parse(format!(
+                    "publish {id}: no {} directory",
+                    layout.files_dir().display()
+                ))
+            })?;
+
+        let mut tree = ObjectTree {
+            attrs: Some(attrs),
+            ..ObjectTree::default()
+        };
+        tree.blobs.insert(REDACTED_FILE.to_string(), redacted);
+        tree.subtrees.insert(FILES_TREE.to_string(), files_tree);
+        let message = format!("session publish: {origin}");
+        let commit_sha = self
+            .store
+            .create(OBJECT_TYPE, OBJECT_VERSION, id, &tree, &message)?;
+        self.remove_staging(id)?;
+        Ok(commit_sha)
+    }
+
     /// Delete the staging directory and the definition of the pending
     /// publish `id`. Nothing was written to the store, so nothing in
     /// the store changes. An unknown id is `ObjectNotFound`; a
     /// definition already deleted by hand is not an error.
     pub fn abort(&self, id: &str) -> Result<(), StoreError> {
+        self.remove_staging(id)
+    }
+
+    fn remove_staging(&self, id: &str) -> Result<(), StoreError> {
         let root = self.root.join(id);
         match fs::remove_dir_all(&root) {
             Ok(()) => {}
@@ -430,6 +483,123 @@ mod tests {
             matches!(ambiguous, StoreError::AmbiguousId(_, ref c) if c.len() == 2),
             "{ambiguous}"
         );
+    }
+
+    /// `apply` commits the staged directory as it stands, with
+    /// `redacted.json` as a root blob beside the session's usual
+    /// entries, and deletes the staging directory and the definition.
+    /// A second apply is `ObjectNotFound`.
+    #[test]
+    fn apply_commits_the_staged_directory_and_removes_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let mut session = crate::session::tests::fake("s1", &[("session.jsonl", "hello\nworld\n")]);
+        let outcome = SessionStore::from(&store)
+            .add(&crate::session::tests::FakeDriver, &mut session)
+            .unwrap();
+        let original = SessionStore::from(&store)
+            .at_commit(&outcome.commit_sha)
+            .unwrap();
+        let publish_dir = tmp.path().join("publish");
+        let publish = PublishStore::with_root(&store, &publish_dir);
+        let init = publish.init(&original).unwrap();
+        let layout = publish.layout(&init.id);
+        fs::write(layout.files_dir().join("session.jsonl"), "hello\n").unwrap();
+        fs::write(
+            layout.redacted_file(),
+            "[\n  [\"line\",2,2,\"scope\",\"user:test\"]\n]\n",
+        )
+        .unwrap();
+        fs::write(publish.definition_file(&init.id), b"{}\n").unwrap();
+        let staged_attrs = fs::read_to_string(layout.attrs_file()).unwrap();
+
+        let commit = publish.apply(&init.id).unwrap();
+
+        let ref_path = crate::object::object_ref(&init.id);
+        let listing = crate::git::run(crate::git::git_in(
+            store.path(),
+            ["ls-tree", "--name-only", &ref_path],
+        ))
+        .unwrap();
+        assert_eq!(
+            listing.lines().collect::<Vec<_>>(),
+            vec![
+                "attrs.json",
+                "created",
+                "files.d",
+                "id",
+                "modified",
+                "redacted.json",
+                "type"
+            ]
+        );
+        let cat = |path: &str| {
+            crate::git::run(crate::git::git_in(
+                store.path(),
+                ["cat-file", "-p", &format!("{ref_path}:{path}")],
+            ))
+            .unwrap()
+        };
+        assert_eq!(cat("type"), "gage::session 1\n");
+        assert_eq!(cat("attrs.json"), staged_attrs);
+        assert_eq!(
+            cat("redacted.json"),
+            "[\n  [\"line\",2,2,\"scope\",\"user:test\"]\n]\n"
+        );
+        assert_eq!(cat("files.d/session.jsonl"), "hello\n");
+
+        let published = SessionStore::from(&store).at_commit(&commit).unwrap();
+        assert_eq!(published.id, init.id);
+        assert_eq!(published.attrs.origin, init.origin);
+        assert_eq!(SessionStore::from(&store).iter().unwrap().count(), 2);
+        assert!(!publish_dir.join(&init.id).exists());
+        assert!(!publish.definition_file(&init.id).exists());
+        assert!(publish.list().unwrap().is_empty());
+
+        let again = publish.apply(&init.id).unwrap_err();
+        assert!(matches!(again, StoreError::ObjectNotFound(ref id) if *id == init.id));
+    }
+
+    /// `apply` refuses when the object's ref already exists and leaves
+    /// the staging directory in place.
+    #[test]
+    fn apply_refuses_an_existing_object() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let mut session = crate::session::tests::fake("s1", &[("session.jsonl", "a\n")]);
+        let outcome = SessionStore::from(&store)
+            .add(&crate::session::tests::FakeDriver, &mut session)
+            .unwrap();
+        let original = SessionStore::from(&store)
+            .at_commit(&outcome.commit_sha)
+            .unwrap();
+        let publish_dir = tmp.path().join("publish");
+        let publish = PublishStore::with_root(&store, &publish_dir);
+        let init = publish.init(&original).unwrap();
+        // Stage a second publish under the id of the first, as a copy
+        // of its directory, after the first is applied
+        let twin = publish_dir.join("twin");
+        copy_dir(&publish_dir.join(&init.id), &twin);
+        publish.apply(&init.id).unwrap();
+        fs::rename(&twin, publish_dir.join(&init.id)).unwrap();
+
+        let exists = publish.apply(&init.id).unwrap_err();
+        assert!(matches!(exists, StoreError::ObjectExists(ref id) if *id == init.id));
+        assert!(publish_dir.join(&init.id).is_dir());
+        assert_eq!(SessionStore::from(&store).iter().unwrap().count(), 2);
+    }
+
+    fn copy_dir(from: &Path, to: &Path) {
+        fs::create_dir_all(to).unwrap();
+        for entry in fs::read_dir(from).unwrap() {
+            let entry = entry.unwrap();
+            let dest = to.join(entry.file_name());
+            if entry.path().is_dir() {
+                copy_dir(&entry.path(), &dest);
+            } else {
+                fs::copy(entry.path(), dest).unwrap();
+            }
+        }
     }
 
     /// `abort` deletes the staging directory and the definition and

@@ -969,7 +969,10 @@ fn import_scanners_tree(
 
 /// Import a directory as an opaque tree: every file beneath it, at its
 /// relative path, bytes preserved. `None` when the directory is absent.
-fn import_opaque_tree(store_path: &Path, dir: &Path) -> Result<Option<String>, StoreError> {
+pub(crate) fn import_opaque_tree(
+    store_path: &Path,
+    dir: &Path,
+) -> Result<Option<String>, StoreError> {
     if !dir.is_dir() {
         return Ok(None);
     }

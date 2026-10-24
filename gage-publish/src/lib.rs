@@ -49,6 +49,9 @@ pub enum PublishError {
     NoMatch(String),
     /// No driver is registered under the name the original records
     NoDriver(String),
+    /// The staged content is not a removal-only derivation of the
+    /// original, so `apply` refuses to commit it
+    Refused(String),
 }
 
 impl fmt::Display for PublishError {
@@ -59,7 +62,9 @@ impl fmt::Display for PublishError {
             PublishError::Io(e) => write!(f, "{e}"),
             PublishError::Json(e) => write!(f, "{e}"),
             PublishError::Edit(e) => write!(f, "{e}"),
-            PublishError::Input(m) | PublishError::NoMatch(m) => write!(f, "{m}"),
+            PublishError::Input(m) | PublishError::NoMatch(m) | PublishError::Refused(m) => {
+                write!(f, "{m}")
+            }
             PublishError::NoDriver(name) => write!(f, "no driver named {name:?} is registered"),
         }
     }
@@ -311,6 +316,29 @@ impl<'a> Publisher<'a> {
         definition.validate()?;
         self.build(id, &mut definition)?;
         Ok(definition)
+    }
+
+    /// Check that the staged session of the pending publish `id` is a
+    /// removal-only derivation of the original: every staged line is an
+    /// original line the definition does not drop, and every staged
+    /// text value is its original with substrings removed or replaced
+    /// by the marker. Reads only.
+    pub fn check(&self, id: &str) -> Result<(), PublishError> {
+        let definition = self.definition(id)?;
+        let original = self.original(&definition)?;
+        let layout = self.publish.layout(id);
+        let source = derive::SessionText::read(original.stored()?.as_mut(), &original.descriptor)?;
+        let staged =
+            derive::SessionText::read(original.staged(&layout)?.as_mut(), &original.descriptor)?;
+        derive::check_removal_only(&source, &staged, &derive::dropped_lines(&definition))
+    }
+
+    /// Publish the pending publish `id`: check it, commit the staged
+    /// directory as a new session object, and delete the staging
+    /// directory and the definition. Returns the new object's commit.
+    pub fn apply(&self, id: &str) -> Result<String, PublishError> {
+        self.check(id)?;
+        Ok(self.publish.apply(id)?)
     }
 
     /// The definition of the pending publish `id`.

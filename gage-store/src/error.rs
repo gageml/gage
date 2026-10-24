@@ -49,6 +49,8 @@ pub enum StoreError {
     ObjectDeleted(String),
     /// Resurrection refused because the object's current commit is live
     ObjectLive(String),
+    /// Creation refused because the object's ref already exists
+    ObjectExists(String),
     /// A tree entry name or session file path failed validation
     InvalidPath { path: String, reason: String },
     /// The object exists but is not of the type the operation requires
@@ -168,6 +170,7 @@ impl fmt::Display for StoreError {
             }
             StoreError::ObjectDeleted(id) => write!(f, "object is deleted: {id}"),
             StoreError::ObjectLive(id) => write!(f, "object is not deleted: {id}"),
+            StoreError::ObjectExists(id) => write!(f, "object already exists: {id}"),
             StoreError::InvalidPath { path, reason } => {
                 write!(f, "invalid path {path:?}: {reason}")
             }
@@ -262,6 +265,7 @@ impl std::error::Error for StoreError {
             | StoreError::AmbiguousId(..)
             | StoreError::ObjectDeleted(_)
             | StoreError::ObjectLive(_)
+            | StoreError::ObjectExists(_)
             | StoreError::InvalidPath { .. }
             | StoreError::WrongType { .. }
             | StoreError::ObjectVersion { .. }

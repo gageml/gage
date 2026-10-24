@@ -511,3 +511,84 @@ fn refresh_reapplies_a_hand_edited_definition() {
     assert!(err.to_string().contains("bogus"), "{err}");
     assert!(staged_lines(&f.publish_root, &init.id)[0].contains("/home/[REDACTED]/proj"));
 }
+
+/// `apply` commits the staged session as a new session object with the
+/// redacted content and `origin`, and clears the staging directory and
+/// the definition.
+#[test]
+fn apply_commits_the_derived_session_and_clears_the_staging() {
+    let f = fixture();
+    let publisher = Publisher::with_root(&f.store, &f.publish_root);
+    let filters = [
+        "pii".parse::<FilterSpec>().unwrap(),
+        "secret".parse::<FilterSpec>().unwrap(),
+    ];
+    let init = publisher.init(&f.original, &filters).unwrap();
+    publisher
+        .redact(
+            &init.id,
+            &[RedactionInput::parse_lines("5", "scope").unwrap()],
+            "user:test",
+        )
+        .unwrap();
+
+    let commit = publisher.apply(&init.id).unwrap();
+
+    let sessions = SessionStore::from(&f.store);
+    let published = sessions.at_commit(&commit).unwrap();
+    assert_eq!(published.id, init.id);
+    assert_eq!(published.attrs.origin, init.origin);
+    assert_eq!(sessions.iter().unwrap().count(), 2);
+    let mut text = String::new();
+    sessions
+        .content(&commit)
+        .open("session.jsonl")
+        .unwrap()
+        .read_to_string(&mut text)
+        .unwrap();
+    assert_eq!(text.lines().count(), 4, "line 5 was dropped");
+    assert!(text.contains("[REDACTED]"), "{text}");
+    assert!(!text.contains("sk-ant-api03"), "{text}");
+    assert!(!text.contains("alice@example.com"), "{text}");
+
+    assert!(!f.publish_root.join(&init.id).exists());
+    assert!(!publisher.store().definition_file(&init.id).exists());
+    assert!(publisher.store().list().unwrap().is_empty());
+}
+
+/// `apply` refuses a staged session edited by hand: added text, a
+/// removed entry, or a change outside the text values. Nothing is
+/// committed and the staging directory stays.
+#[test]
+fn apply_refuses_a_hand_edited_staged_session() {
+    let f = fixture();
+    let publisher = Publisher::with_root(&f.store, &f.publish_root);
+    let init = publisher.init(&f.original, &[]).unwrap();
+    let path = f
+        .publish_root
+        .join(&init.id)
+        .join("files.d")
+        .join("session.jsonl");
+    let staged = fs::read_to_string(&path).unwrap();
+
+    let refused = |edited: String, expect: &str| {
+        fs::write(&path, edited).unwrap();
+        let err = publisher.apply(&init.id).unwrap_err();
+        assert!(matches!(err, PublishError::Refused(_)), "{err}");
+        assert!(err.to_string().contains(expect), "{err}");
+        assert_eq!(SessionStore::from(&f.store).iter().unwrap().count(), 1);
+        assert!(f.publish_root.join(&init.id).is_dir());
+    };
+    refused(staged.replace("Hello, what", "Hello there, what"), "line 1");
+    refused(
+        staged.lines().skip(1).map(|l| format!("{l}\n")).collect(),
+        "entries staged",
+    );
+    refused(
+        staged.replace("\"uuid\":\"a1\"", "\"uuid\":\"a9\""),
+        "outside its text values",
+    );
+
+    fs::write(&path, &staged).unwrap();
+    publisher.check(&init.id).unwrap();
+}

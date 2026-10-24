@@ -341,8 +341,86 @@ pub fn build(
     Ok(instances)
 }
 
+/// Check that `staged` is a removal-only derivation of `original`
+/// under `dropped`: the staged entries are the original's undropped
+/// entries in order, each with the same JSON apart from its text
+/// values, and each text value is the original's with substrings
+/// removed or replaced by the marker. An error names the original line
+/// and, for a value, its pointer.
+pub fn check_removal_only(
+    original: &SessionText,
+    staged: &SessionText,
+    dropped: &BTreeSet<u32>,
+) -> Result<(), PublishError> {
+    let refuse =
+        |m: String| PublishError::Refused(format!("staged session is not removal-only: {m}"));
+    let kept: Vec<&EntryText> = original
+        .entries
+        .iter()
+        .filter(|e| !dropped.contains(&e.line))
+        .collect();
+    if kept.len() != staged.entries.len() {
+        return Err(refuse(format!(
+            "{} entries staged, {} expected from the original",
+            staged.entries.len(),
+            kept.len()
+        )));
+    }
+    for (source, derived) in kept.iter().zip(&staged.entries) {
+        let at = |m: String| refuse(format!("line {}: {m}", source.line));
+        let expected_line =
+            source.line - dropped.iter().filter(|&&d| d < source.line).count() as u32;
+        if derived.line != expected_line {
+            return Err(at(format!(
+                "staged at line {}, expected line {expected_line}",
+                derived.line
+            )));
+        }
+        for value in &derived.values {
+            let Some(source_value) = source.values.iter().find(|v| v.pointer == value.pointer)
+            else {
+                return Err(at(format!("{} has no original value", value.pointer)));
+            };
+            if !is_removal_only(&source_value.text, &value.text) {
+                return Err(at(format!(
+                    "{} is not the original value with removals",
+                    value.pointer
+                )));
+            }
+        }
+        let pointers: Vec<&str> = source.values.iter().map(|v| v.pointer.as_str()).collect();
+        if blank_values(&source.json, &pointers)? != blank_values(&derived.json, &pointers)? {
+            return Err(at("entry differs outside its text values".to_string()));
+        }
+    }
+    Ok(())
+}
+
+/// Whether `derived` is `original` with zero or more substrings removed
+/// or replaced by the marker: with the markers taken out, `derived` is
+/// a subsequence of `original`.
+fn is_removal_only(original: &str, derived: &str) -> bool {
+    let mut rest = original.chars();
+    derived
+        .split(MARKER)
+        .flat_map(str::chars)
+        .all(|c| rest.by_ref().any(|o| o == c))
+}
+
+/// The entry `json` with the string at each of `pointers` set to the
+/// empty string, as a value, for comparison outside the text values.
+fn blank_values(json: &str, pointers: &[&str]) -> Result<Value, PublishError> {
+    let mut value: Value = serde_json::from_str(json)?;
+    for pointer in pointers {
+        if let Some(slot) = value.pointer_mut(pointer) {
+            *slot = Value::String(String::new());
+        }
+    }
+    Ok(value)
+}
+
 /// Every line a `Lines` redaction drops.
-fn dropped_lines(definition: &PublishDefinition) -> BTreeSet<u32> {
+pub fn dropped_lines(definition: &PublishDefinition) -> BTreeSet<u32> {
     let mut dropped = BTreeSet::new();
     for r in &definition.redactions {
         if let RedactionKind::Lines { line, line_end, .. } = &r.kind {
@@ -581,6 +659,20 @@ fn dir_size(dir: &std::path::Path) -> Result<u64, PublishError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn removal_only_accepts_removals_and_markers_and_rejects_additions() {
+        assert!(is_removal_only("abc def ghi", "abc def ghi"));
+        assert!(is_removal_only("abc def ghi", "abc ghi"));
+        assert!(is_removal_only("abc def ghi", "abc [REDACTED] ghi"));
+        assert!(is_removal_only("abc def ghi", "[REDACTED]"));
+        assert!(is_removal_only("abc def ghi", ""));
+        assert!(is_removal_only("aXbXc", "[REDACTED]b[REDACTED]"));
+        assert!(!is_removal_only("abc def ghi", "abc def ghi!"));
+        assert!(!is_removal_only("abc def ghi", "ghi abc"));
+        assert!(!is_removal_only("abc", "abcabc"));
+        assert!(!is_removal_only("abc def", "abc [REDACTED] def x"));
+    }
 
     #[test]
     fn removal_takes_one_bounding_space_and_marking_keeps_both() {
