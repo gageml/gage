@@ -496,36 +496,55 @@ fn list() -> Result<(), CliError> {
     peers.extend(pending.iter().map(|p| p.id.clone()));
     let highlighter = IdHighlighter::new(peers);
 
-    let header: Vec<String> = ["Id", "Origin", "Title", "Modified"]
+    let header: Vec<String> = ["Id", "Origin", "Title", "Redactions", "Modified"]
         .iter()
         .map(|s| s.to_string())
         .collect();
-    let rows = pending_rows(pending, &highlighter);
+    let publisher = Publisher::new(&store);
+    let rows = pending_rows(pending, &highlighter, |id| redaction_count(&publisher, id))
+        .map_err(|e| fail(e.to_string()))?;
     let table = Table::from_iter(std::iter::once(header).chain(rows))
         .with(Style::rounded())
         .modify(Rows::first(), style::tty(Color::FG_BRIGHT_YELLOW))
-        .modify(Columns::new(2..4).not(Rows::first()), style::dim())
+        .modify(Columns::one(3), Alignment::right())
+        .modify(Columns::one(2).not(Rows::first()), style::dim())
+        .modify(Columns::one(4).not(Rows::first()), style::dim())
         .to_string();
     println!("{table}");
     Ok(())
 }
 
 /// One row per pending publish, newest first: the highlighted short
-/// id, the `origin` and title from `attrs.json`, and the age of the
-/// working tree.
-fn pending_rows(mut pending: Vec<PendingPublish>, highlighter: &IdHighlighter) -> Vec<Vec<String>> {
+/// id, the `origin` and title from `attrs.json`, the redaction count
+/// `redactions` gives for the id, and the age of the working tree.
+fn pending_rows(
+    mut pending: Vec<PendingPublish>,
+    highlighter: &IdHighlighter,
+    redactions: impl Fn(&str) -> Result<String, PublishError>,
+) -> Result<Vec<Vec<String>>, PublishError> {
     pending.sort_by_key(|p| Reverse(p.modified_ms));
     pending
         .iter()
         .map(|p| {
-            vec![
+            Ok(vec![
                 highlighter.short(&p.id),
                 origin_cell(&p.attrs.origin, highlighter),
                 p.attrs.summary.title.clone().unwrap_or_default(),
+                redactions(&p.id)?,
                 format_elapsed_ms(p.modified_ms),
-            ]
+            ])
         })
         .collect()
+}
+
+/// The redaction count of the pending publish `id` from its
+/// definition, or no count when the definition was deleted.
+fn redaction_count(publisher: &Publisher<'_>, id: &str) -> Result<String, PublishError> {
+    match publisher.definition(id) {
+        Ok(definition) => Ok(definition.redactions.len().to_string()),
+        Err(PublishError::Store(StoreError::ObjectNotFound(_))) => Ok(String::new()),
+        Err(e) => Err(e),
+    }
 }
 
 /// A derived origin, `session:<id>@<commit>`, as the highlighted short
@@ -1371,9 +1390,9 @@ mod tests {
     }
 
     /// Rows come newest first and carry the short id, the origin, the
-    /// title, and the age.
+    /// title, the redaction count, and the age.
     #[test]
-    fn pending_rows_are_newest_first_with_id_origin_and_age() {
+    fn pending_rows_are_newest_first_with_id_origin_count_and_age() {
         let now = now_ms();
         let orig1 = "cccccccc-0000-4000-8000-000000000003";
         let orig2 = "dddddddd-0000-4000-8000-000000000004";
@@ -1396,7 +1415,14 @@ mod tests {
             orig2.to_string(),
         ]);
 
-        let rows = pending_rows(vec![older.clone(), newer.clone()], &highlighter);
+        let rows = pending_rows(vec![older.clone(), newer.clone()], &highlighter, |id| {
+            Ok(if id == newer.id {
+                "3".to_string()
+            } else {
+                String::new()
+            })
+        })
+        .unwrap();
 
         assert_eq!(rows.len(), 2);
         let plain = |cell: &str| console::strip_ansi_codes(cell).into_owned();
@@ -1406,14 +1432,16 @@ mod tests {
             format!("{} fedcba98", short_uuid(orig2))
         );
         assert_eq!(rows[0][2], "Fix the duck");
-        assert_eq!(rows[0][3], "5s ago");
+        assert_eq!(rows[0][3], "3");
+        assert_eq!(rows[0][4], "5s ago");
         assert_eq!(plain(&rows[1][0]), short_uuid(&older.id));
         assert_eq!(
             plain(&rows[1][1]),
             format!("{} 01234567", short_uuid(orig1))
         );
         assert_eq!(rows[1][2], "");
-        assert_eq!(rows[1][3], "1h ago");
+        assert_eq!(rows[1][3], "", "a deleted definition shows no count");
+        assert_eq!(rows[1][4], "1h ago");
     }
 
     /// An origin that is not a derived `session:<id>@<commit>` value is
