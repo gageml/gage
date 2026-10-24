@@ -3792,6 +3792,7 @@ mod tests {
                 pending: false,
             },
             entries: Vec::new(),
+            turns: Vec::new(),
             notes: Vec::new(),
         };
         let view = app::AppState::new(doc, &ViewOptions::default(), app::DocSource::Backend, false);

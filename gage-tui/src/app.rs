@@ -599,7 +599,6 @@ pub(crate) struct AppState {
     highlighter: Highlighter,
     dialog: Dialog,
     view: ViewOptions,
-    turns: Option<Vec<Option<usize>>>,
     source: DocSource,
     /// Whether the backend writes notes for this session; gates the
     /// note keys
@@ -626,7 +625,6 @@ impl AppState {
         );
         let mut list_state = ListState::default();
         list_state.select(Some(0));
-        let turns = options.turns.then(|| compute_turns(&doc));
         // A pending publish is not in the store, so no backend writes
         // notes for it
         let (notes_writable, notes_notice) = if doc.session.pending {
@@ -648,7 +646,6 @@ impl AppState {
             highlighter: Highlighter::new(),
             dialog: Dialog::None,
             view: options.clone(),
-            turns,
             source,
             notes_writable,
             notes_notice,
@@ -872,9 +869,6 @@ impl AppState {
             }),
         }
         .map_err(|e| io::Error::other(e.to_string()))?;
-        if self.turns.is_some() {
-            self.turns = Some(compute_turns(&doc));
-        }
         let (session_note_ids, entry_note_ids) = note_projection(&doc);
         let hidden = entry_hidden(&doc, &self.view);
         self.doc = doc;
@@ -972,18 +966,11 @@ impl AppState {
 
     fn toggle_turns(&mut self) {
         self.view.turns = !self.view.turns;
-        self.turns = match self.turns.take() {
-            Some(_) => None,
-            None => Some(compute_turns(&self.doc)),
-        };
     }
 
     /// Swap in a different session's document, resetting the UI to the
     /// top of the new session.
     fn replace_doc(&mut self, doc: Document) {
-        if self.turns.is_some() {
-            self.turns = Some(compute_turns(&doc));
-        }
         let (session_note_ids, entry_note_ids) = note_projection(&doc);
         let hidden = entry_hidden(&doc, &self.view);
         self.doc = doc;
@@ -1430,12 +1417,13 @@ fn draw_outline(frame: &mut Frame, state: &mut AppState, area: Rect) {
     }
 
     let selected = state.list_state.selected();
+    let turns = state.view.turns.then_some(state.doc.turns.as_slice());
     let items: Vec<ListItem> = state
         .outline
         .rows()
         .iter()
         .enumerate()
-        .map(|(i, row)| row_to_item(row, &state.doc, Some(i) == selected, state.turns.as_deref()))
+        .map(|(i, row)| row_to_item(row, &state.doc, Some(i) == selected, turns))
         .collect();
 
     let title = if state.view.all_entries {
@@ -1894,14 +1882,6 @@ fn draw_confirm(frame: &mut Frame, message: &str) {
     crate::dialog::draw_wrapped_message(frame, message, "y / n");
 }
 
-fn compute_turns(doc: &Document) -> Vec<Option<usize>> {
-    let mut counter = crate::format::TurnCounter::new();
-    doc.entries
-        .iter()
-        .map(|e| counter.observe(&e.value))
-        .collect()
-}
-
 fn scrollbar(active: bool) -> Scrollbar<'static> {
     Scrollbar::new(ScrollbarOrientation::VerticalRight)
         .begin_symbol(Some("↑"))
@@ -1992,6 +1972,7 @@ mod tests {
                 pending: false,
             },
             entries: Vec::new(),
+            turns: Vec::new(),
             notes: Vec::new(),
         };
         let mut state = AppState::new(doc, &ViewOptions::default(), DocSource::Backend, false);
@@ -2044,6 +2025,7 @@ mod tests {
                     value: serde_json::json!({"type": "user"}),
                 })
                 .collect(),
+            turns: Vec::new(),
             notes: Vec::new(),
         }
     }

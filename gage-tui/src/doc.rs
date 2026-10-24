@@ -11,6 +11,10 @@ use serde_json::Value;
 pub struct Document {
     pub session: Session,
     pub entries: Vec<Entry>,
+    /// The turn of each entry, aligned with `entries`: the assistant
+    /// rows of one API response share a turn, numbered in order of
+    /// first appearance; every other row has none
+    pub turns: Vec<Option<usize>>,
     pub notes: Vec<Note>,
 }
 

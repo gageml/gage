@@ -7,12 +7,13 @@
 //! table functions. Notes target stored sessions, so only the store
 //! backend reads or writes them.
 
+use std::collections::HashMap;
 use std::error::Error;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use datafusion::arrow::array::{
-    Array, Int64Array, RecordBatch, StringArray, TimestampMillisecondArray,
+    Array, Int64Array, RecordBatch, StringArray, TimestampMillisecondArray, UInt64Array,
 };
 use datafusion::arrow::json::ArrayWriter;
 use datafusion::prelude::SessionContext;
@@ -116,6 +117,7 @@ impl Backend {
             format::require_supported(session_id, content_format);
         }
         let entries = self.load_entries(session_id).await?;
+        let turns = self.load_turns(session_id, &entries).await?;
         let notes = match self.kind {
             Kind::Native { .. } => Vec::new(),
             Kind::Stored { .. } => self.load_notes(session_id).await?,
@@ -123,6 +125,7 @@ impl Backend {
         Ok(Document {
             session,
             entries,
+            turns,
             notes,
         })
     }
@@ -193,6 +196,44 @@ impl Backend {
             }
         }
         Ok(entries)
+    }
+
+    /// The turn of every entry, aligned with `entries`. A turn is one
+    /// API response: the assistant rows that share a response id,
+    /// numbered by the line their response first appears on. A row of
+    /// another type, or an assistant row without a response id, has
+    /// none.
+    async fn load_turns(
+        &self,
+        session_id: &str,
+        entries: &[Entry],
+    ) -> Result<Vec<Option<usize>>, Box<dyn Error>> {
+        let id = sql_str(session_id);
+        let sql = format!(
+            "WITH a AS (SELECT line, json_extract(raw, '$.message.id') AS mid \
+                        FROM {} WHERE session_id = '{id}' AND type = 'assistant'), \
+                  f AS (SELECT mid, MIN(line) AS first_line FROM a \
+                        WHERE mid IS NOT NULL GROUP BY mid), \
+                  t AS (SELECT mid, DENSE_RANK() OVER (ORDER BY first_line) AS turn FROM f) \
+             SELECT a.line, t.turn FROM a JOIN t ON a.mid = t.mid",
+            self.entry_rel(),
+        );
+        let batches = self.ctx.sql(&sql).await?.collect().await?;
+        let mut by_line: HashMap<u32, usize> = HashMap::new();
+        for batch in &batches {
+            let lines = column::<Int64Array>(batch, 0);
+            let turns = column::<UInt64Array>(batch, 1);
+            for i in 0..batch.num_rows() {
+                by_line.insert(
+                    u32::try_from(lines.value(i))?,
+                    usize::try_from(turns.value(i))?,
+                );
+            }
+        }
+        Ok(entries
+            .iter()
+            .map(|e| by_line.get(&e.line).copied())
+            .collect())
     }
 
     /// The notes targeting the session, oldest first. The target URL
@@ -580,20 +621,21 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn fixture() -> Fixture {
+        fixture_with_content(concat!(
+            r#"{"type":"user","uuid":"u1","timestamp":"2025-01-01T00:00:00Z","cwd":"/w/proj","message":{"role":"user","content":"hello there"}}"#,
+            "\n",
+            r#"{"type":"assistant","uuid":"a1","timestamp":"2025-01-01T00:00:01Z","message":{"role":"assistant","model":"claude-x","content":[{"type":"text","text":"hi"}]}}"#,
+            "\n",
+        ))
+    }
+
+    /// The fixture over a session whose JSONL is `content`.
+    pub(crate) fn fixture_with_content(content: &str) -> Fixture {
         let claude_root = tempfile::tempdir().unwrap();
         let native_id = "11111111-2222-3333-4444-555555555555";
         let project_dir = claude_root.path().join("projects").join("-w-proj");
         std::fs::create_dir_all(&project_dir).unwrap();
-        std::fs::write(
-            project_dir.join(format!("{native_id}.jsonl")),
-            concat!(
-                r#"{"type":"user","uuid":"u1","timestamp":"2025-01-01T00:00:00Z","cwd":"/w/proj","message":{"role":"user","content":"hello there"}}"#,
-                "\n",
-                r#"{"type":"assistant","uuid":"a1","timestamp":"2025-01-01T00:00:01Z","message":{"role":"assistant","model":"claude-x","content":[{"type":"text","text":"hi"}]}}"#,
-                "\n",
-            ),
-        )
-        .unwrap();
+        std::fs::write(project_dir.join(format!("{native_id}.jsonl")), content).unwrap();
         let store_root = tempfile::tempdir().unwrap();
         let path = store_root.path().join("store.git");
         gage_store::init(&path).unwrap();
@@ -618,6 +660,41 @@ pub(crate) mod tests {
             cache_root,
             _dirs: (claude_root, store_root),
         }
+    }
+
+    /// Turns number the assistant rows by API response: the rows of one
+    /// response share a turn, and a row without a response id has none.
+    /// The stored and native backends agree.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn turns_group_assistant_rows_by_response_id() {
+        let f = fixture_with_content(concat!(
+            r#"{"type":"user","uuid":"u1","timestamp":"2025-01-01T00:00:00Z","cwd":"/w/proj","message":{"role":"user","content":"one"}}"#,
+            "\n",
+            r#"{"type":"assistant","uuid":"a1","timestamp":"2025-01-01T00:00:01Z","message":{"id":"msg_1","role":"assistant","model":"claude-x","content":[{"type":"text","text":"a"}]}}"#,
+            "\n",
+            r#"{"type":"assistant","uuid":"a2","timestamp":"2025-01-01T00:00:02Z","message":{"id":"msg_1","role":"assistant","model":"claude-x","content":[{"type":"text","text":"b"}]}}"#,
+            "\n",
+            r#"{"type":"user","uuid":"u2","timestamp":"2025-01-01T00:00:03Z","message":{"role":"user","content":"two"}}"#,
+            "\n",
+            r#"{"type":"assistant","uuid":"a3","timestamp":"2025-01-01T00:00:04Z","message":{"id":"msg_2","role":"assistant","model":"claude-x","content":[{"type":"text","text":"c"}]}}"#,
+            "\n",
+            r#"{"type":"assistant","uuid":"a4","timestamp":"2025-01-01T00:00:05Z","message":{"role":"assistant","model":"claude-x","content":[{"type":"text","text":"d"}]}}"#,
+            "\n",
+        ));
+        let expected = vec![None, Some(1), Some(1), None, Some(2), None];
+
+        let stored = Backend::stored(f.store).await;
+        let doc = stored.load(&f.session_id).await.unwrap();
+        assert_eq!(doc.entries.len(), 6);
+        assert_eq!(doc.turns, expected);
+
+        let native = Backend::native(&f.spec)
+            .cache_root(&f.cache_root)
+            .open()
+            .await
+            .unwrap();
+        let doc = native.load(&f.native_id).await.unwrap();
+        assert_eq!(doc.turns, expected);
     }
 
     #[test]
