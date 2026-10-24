@@ -1098,6 +1098,37 @@ mod tests {
         assert_eq!(version, INDEX_SCHEMA_VERSION);
     }
 
+    /// A listing joins `object` to `ref` on `tip_sha`; the index on
+    /// that column keeps the join from scanning `ref` per object.
+    #[test]
+    fn listing_join_searches_ref_by_tip_sha() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (path, _fsck) = init_repo(tmp.path());
+        note(&Store::open(&path).unwrap(), "a");
+
+        let conn =
+            rusqlite::Connection::open(tmp.path().join("cache/object-index.sqlite")).unwrap();
+        let mut stmt = conn
+            .prepare(
+                "EXPLAIN QUERY PLAN SELECT o.id FROM ref r JOIN object o ON o.sha = r.tip_sha \
+                 WHERE o.type = 'gage::note' AND o.deleted IS NULL ORDER BY o.modified DESC",
+            )
+            .unwrap();
+        let plan: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(
+            plan.iter().any(|step| step.contains("ref_tip_sha")),
+            "{plan:?}"
+        );
+        assert!(
+            !plan.iter().any(|step| step.starts_with("SCAN r")),
+            "{plan:?}"
+        );
+    }
+
     #[test]
     fn datasets_and_notes_select_independently() {
         let tmp = tempfile::tempdir().unwrap();

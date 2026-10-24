@@ -32,7 +32,7 @@ use crate::object::{LinkFile, Object};
 /// changes: the `attr` rows are extracted at write time, so a list
 /// change reaches existing objects only through a rebuild. A mismatch
 /// discards the file and rebuilds from an empty ref table.
-pub const INDEX_SCHEMA_VERSION: u32 = 4;
+pub const INDEX_SCHEMA_VERSION: u32 = 5;
 
 /// Every type's `INDEXED_ATTRS` on one line, kept beside the version
 /// the lists are bound to. A test compares it to the live lists, so a
@@ -43,6 +43,9 @@ pub(crate) const INDEXED_ATTRS_SNAPSHOT: &str = "attachment=name,key;dataset=;is
 const SCHEMA: &str = "
 CREATE TABLE meta (schema_version INTEGER NOT NULL);
 CREATE TABLE ref (id TEXT PRIMARY KEY, tip_sha TEXT NOT NULL);
+-- Every listing joins object to ref on tip_sha. Without this index
+-- SQLite scans ref once per object: 85 ms for 1750 sessions, 1 ms with it.
+CREATE INDEX ref_tip_sha ON ref (tip_sha);
 CREATE TABLE object (
     sha TEXT PRIMARY KEY,
     id TEXT NOT NULL,
