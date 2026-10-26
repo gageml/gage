@@ -1812,9 +1812,6 @@ struct EntrySnap {
 
 fn draw_entry(frame: &mut Frame, state: &mut AppState, entry: &EntrySnap, area: Rect) {
     let mut sections: Vec<Section> = Vec::new();
-    // Filtered view hides the native source behind the rendered body;
-    // entries with none keep it, or the pane would be blank
-    let show_source = state.view.source || entry.body.is_none();
     if let Some(body) = &entry.body {
         let lines = match body {
             EntryBody::Text(text) => markdown::render(text),
@@ -1839,7 +1836,7 @@ fn draw_entry(frame: &mut Frame, state: &mut AppState, entry: &EntrySnap, area: 
             area.width,
         ));
     }
-    if entry.body.is_some() && show_source {
+    if state.view.source {
         sections.push(Section::from_paragraph(
             Paragraph::new(Line::from(Span::styled(
                 "--- native source ---",
@@ -1847,8 +1844,6 @@ fn draw_entry(frame: &mut Frame, state: &mut AppState, entry: &EntrySnap, area: 
             ))),
             area.width,
         ));
-    }
-    if show_source {
         sections.push(Section::from_paragraph(
             Paragraph::new(state.highlighter.highlight(&entry.yaml, "yaml"))
                 .wrap(Wrap { trim: false }),
@@ -2373,6 +2368,46 @@ mod tests {
             assert!(text.contains(expected), "line {line}:\n{text}");
             assert!(!text.contains("native source"), "line {line}:\n{text}");
         }
+    }
+
+    /// An entry with no rendering shows nothing until the source option
+    /// is on; then it shows the same header and YAML every entry does.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_entry_without_a_body_is_blank_until_the_source_is_shown() {
+        let mut doc = doc_with_entries(1);
+        doc.entries[0].entry_type = "system".into();
+        doc.entries[0].message_subtype = None;
+        doc.entries[0].value =
+            serde_json::json!({"type": "system", "subtype": "stop_hook_summary"});
+        let backend = test_backend().await;
+        let view = ViewOptions {
+            all_entries: true,
+            ..ViewOptions::default()
+        };
+        let mut state = AppState::new(doc, &view, DocSource::Backend, false);
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        state.select_line(1);
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let text = screen(&terminal);
+        assert!(!text.contains("native source"), "{text}");
+        assert!(!text.contains("stop_hook_summary"), "{text}");
+
+        press(&mut state, &backend, KeyCode::Char('v'));
+        press(&mut state, &backend, KeyCode::Char('s'));
+        press(&mut state, &backend, KeyCode::Enter);
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let text = screen(&terminal);
+        let rows: Vec<&str> = text.lines().collect();
+        let header = rows
+            .iter()
+            .position(|r| r.contains("--- native source ---"))
+            .unwrap_or_else(|| panic!("{text}"));
+        assert!(
+            rows[header + 1..]
+                .iter()
+                .any(|r| r.contains("subtype: stop_hook_summary")),
+            "{text}"
+        );
     }
 
     /// A tool call row shows each call's tool and input from the
