@@ -104,10 +104,9 @@ pub enum PublishCommand {
 }
 
 #[derive(Args)]
-#[command(override_usage = "gage publish init [OPTIONS] <SESSION>")]
 pub struct InitArgs {
     /// Session to publish (tag, ID, or prefix)
-    #[arg(value_name = "SESSION", required_unless_present = "list_filters")]
+    #[arg(value_name = "SESSION", required = true)]
     session: Option<String>,
 
     /// Session source
@@ -138,17 +137,14 @@ pub struct InitArgs {
     yes: bool,
 
     /// Show available named filters and exit
-    ///
-    /// Like --help, prints the list and exits whatever else is given.
-    #[arg(long)]
+    #[arg(long, exclusive = true)]
     list_filters: bool,
 }
 
 #[derive(Args)]
-#[command(override_usage = "gage publish redact [OPTIONS] <SESSION>")]
 pub struct RedactArgs {
     /// Pending publish session to redact (ID or prefix)
-    #[arg(value_name = "SESSION", required_unless_present = "list_reasons")]
+    #[arg(value_name = "SESSION", required = true)]
     session: Option<String>,
 
     /// Reason for every redaction given (default scope)
@@ -191,9 +187,7 @@ pub struct RedactArgs {
     yes: bool,
 
     /// Show reason codes and exit
-    ///
-    /// Like --help, prints the list and exits whatever else is given.
-    #[arg(long)]
+    #[arg(long, exclusive = true)]
     list_reasons: bool,
 }
 
@@ -307,16 +301,15 @@ pub enum FilterCommand {
 }
 
 #[derive(Args)]
-#[command(override_usage = "gage publish filter add [OPTIONS] <SESSION> <FILTER>")]
 pub struct FilterAddArgs {
     /// Pending publish session to change (ID or prefix)
-    #[arg(value_name = "SESSION", required_unless_present = "list_filters")]
+    #[arg(value_name = "SESSION", required = true)]
     session: Option<String>,
 
     /// Filter to add
     #[arg(
         value_name = "FILTER",
-        required_unless_present = "list_filters",
+        required = true,
         long_help = format!("Filter to add\n\n{FILTER_HELP}")
     )]
     filter: Option<String>,
@@ -326,9 +319,7 @@ pub struct FilterAddArgs {
     yes: bool,
 
     /// Show available named filters and exit
-    ///
-    /// Like --help, prints the list and exits whatever else is given.
-    #[arg(long)]
+    #[arg(long, exclusive = true)]
     list_filters: bool,
 }
 
@@ -1321,10 +1312,8 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("a similar value exists: 'secret'"), "{text}");
-        // The positional is optional under --list-filters, and clap
-        // displays an argument by its own required-ness
         let text = rendered("gage publish filter add", "FILTER");
-        assert!(text.contains("for '[FILTER]'"), "{text}");
+        assert!(text.contains("for '<FILTER>'"), "{text}");
         assert!(parse_filter("gage publish init", "--filter", "pii").is_ok());
         assert!(parse_filter("gage publish init", "--filter", "Remove every duck").is_ok());
     }
@@ -1337,6 +1326,14 @@ mod tests {
         Cli::try_parse_from(["gage", "publish", "list"]).unwrap();
         Cli::try_parse_from(["gage", "publish", "init", "--stored", "abc"]).unwrap();
         Cli::try_parse_from(["gage", "publish", "status", "abc"]).unwrap();
+        // A list flag stands alone: the positionals it bypasses are
+        // required otherwise
+        Cli::try_parse_from(["gage", "publish", "init", "--list-filters"]).unwrap();
+        Cli::try_parse_from(["gage", "publish", "filter", "add", "--list-filters"]).unwrap();
+        Cli::try_parse_from(["gage", "publish", "redact", "--list-reasons"]).unwrap();
+        assert!(Cli::try_parse_from(["gage", "publish", "init"]).is_err());
+        assert!(Cli::try_parse_from(["gage", "publish", "filter", "add", "abc"]).is_err());
+        assert!(Cli::try_parse_from(["gage", "publish", "init", "abc", "--list-filters"]).is_err());
         assert!(Cli::try_parse_from(["gage", "session", "publish", "list"]).is_err());
         assert!(Cli::try_parse_from(["gage", "publish", "status", "--stored", "abc"]).is_err());
     }
