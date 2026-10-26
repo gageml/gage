@@ -15,9 +15,14 @@ use serde_json::json;
 
 use crate::PublishError;
 
-/// The filters with a built-in definition. Any other filter text is
-/// an instruction to the agent.
-pub const NAMED_FILTERS: &[&str] = &["pii", "language", "secret", "system"];
+/// The filters with a built-in definition, in listing order.
+pub const NAMED_FILTERS: &[&str] = &["pii", "language", "secret", "system", "harness", "custom"];
+
+/// Whether the filter `name` has no instructions of its own and takes
+/// its prompt as the whole instruction.
+pub fn requires_prompt(name: &str) -> bool {
+    name == "custom"
+}
 
 /// A reason code a redaction may carry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,61 +85,74 @@ pub const REASONS: &[Reason] = &[
         code: "statute",
         description: "Content a statute exempts from disclosure",
     },
+    Reason {
+        code: "harness",
+        description: "Harness bookkeeping that is no part of the conversation",
+    },
+    Reason {
+        code: "custom",
+        description: "Content the publish's own instructions remove",
+    },
 ];
 
-/// One filter of a publish: a named filter, or an instruction to the
-/// agent describing what to remove.
+/// One filter of a publish: a named filter, with the prompt that adds
+/// to its instructions or, for a filter that requires one, is its
+/// instructions.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FilterSpec {
-    Named(String),
-    Prompt(String),
+pub struct FilterSpec {
+    pub name: String,
+    pub prompt: Option<String>,
 }
 
 impl FilterSpec {
-    /// The filter's name when it is a named filter.
-    pub fn name(&self) -> Option<&str> {
-        match self {
-            FilterSpec::Named(name) => Some(name),
-            FilterSpec::Prompt(_) => None,
+    /// The filter `name` under `prompt`. A name outside
+    /// [`NAMED_FILTERS`] is an error, and so is a filter that requires
+    /// a prompt without one.
+    pub fn new(name: &str, prompt: Option<String>) -> Result<Self, PublishError> {
+        if !NAMED_FILTERS.contains(&name) {
+            return Err(PublishError::Input(format!(
+                "unknown filter {name:?}; filters are {}",
+                NAMED_FILTERS.join(", ")
+            )));
         }
+        if requires_prompt(name) && prompt.is_none() {
+            return Err(PublishError::Input(format!(
+                "filter {name} requires a prompt"
+            )));
+        }
+        Ok(Self {
+            name: name.to_string(),
+            prompt,
+        })
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
     }
 }
 
 impl FromStr for FilterSpec {
     type Err = PublishError;
 
-    /// A text with whitespace is an instruction. Anything else is a
-    /// name, and a name outside [`NAMED_FILTERS`] is an error.
+    /// A bare filter name, with no prompt.
     fn from_str(text: &str) -> Result<Self, Self::Err> {
-        if text.contains(char::is_whitespace) {
-            return Ok(FilterSpec::Prompt(text.to_string()));
-        }
-        if NAMED_FILTERS.contains(&text) {
-            return Ok(FilterSpec::Named(text.to_string()));
-        }
-        Err(PublishError::Input(format!(
-            "unknown filter {text:?}; filters are {}",
-            NAMED_FILTERS.join(", ")
-        )))
+        Self::new(text, None)
     }
 }
 
 impl fmt::Display for FilterSpec {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            FilterSpec::Named(name) => f.write_str(name),
-            FilterSpec::Prompt(prompt) => f.write_str(prompt),
-        }
+        f.write_str(&self.name)
     }
 }
 
-/// A filter as the definition records it: a name, an instruction, or
-/// a name with a prompt that supplements the filter's own
-/// instructions. A bare name is written as a string.
+/// A filter as the definition records it: a name, with the prompt
+/// that adds to its instructions or is its instructions. A filter
+/// without a prompt is written as a bare string.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(from = "FilterRepr", into = "FilterRepr")]
 pub struct FilterEntry {
-    pub name: Option<String>,
+    pub name: String,
     pub prompt: Option<String>,
 }
 
@@ -143,8 +161,7 @@ pub struct FilterEntry {
 enum FilterRepr {
     Name(String),
     Full {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        name: Option<String>,
+        name: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         prompt: Option<String>,
     },
@@ -153,10 +170,7 @@ enum FilterRepr {
 impl From<FilterRepr> for FilterEntry {
     fn from(repr: FilterRepr) -> Self {
         match repr {
-            FilterRepr::Name(name) => FilterEntry {
-                name: Some(name),
-                prompt: None,
-            },
+            FilterRepr::Name(name) => FilterEntry { name, prompt: None },
             FilterRepr::Full { name, prompt } => FilterEntry { name, prompt },
         }
     }
@@ -164,33 +178,34 @@ impl From<FilterRepr> for FilterEntry {
 
 impl From<FilterEntry> for FilterRepr {
     fn from(entry: FilterEntry) -> Self {
-        match (entry.name, entry.prompt) {
-            (Some(name), None) => FilterRepr::Name(name),
-            (name, prompt) => FilterRepr::Full { name, prompt },
+        match entry.prompt {
+            None => FilterRepr::Name(entry.name),
+            prompt => FilterRepr::Full {
+                name: entry.name,
+                prompt,
+            },
         }
     }
 }
 
 impl FilterEntry {
     pub fn new(spec: &FilterSpec) -> Self {
-        match spec {
-            FilterSpec::Named(name) => FilterEntry {
-                name: Some(name.clone()),
-                prompt: None,
-            },
-            FilterSpec::Prompt(prompt) => FilterEntry {
-                name: None,
-                prompt: Some(prompt.clone()),
-            },
+        FilterEntry {
+            name: spec.name.clone(),
+            prompt: spec.prompt.clone(),
         }
     }
 
     pub fn spec(&self) -> FilterSpec {
-        match (&self.name, &self.prompt) {
-            (Some(name), _) => FilterSpec::Named(name.clone()),
-            (None, Some(prompt)) => FilterSpec::Prompt(prompt.clone()),
-            (None, None) => FilterSpec::Prompt(String::new()),
+        FilterSpec {
+            name: self.name.clone(),
+            prompt: self.prompt.clone(),
         }
+    }
+
+    /// The author the filter's redactions carry, `filter:<name>`.
+    pub fn author(&self) -> String {
+        format!("filter:{}", self.name)
     }
 }
 
@@ -317,38 +332,18 @@ impl PublishDefinition {
         }
     }
 
-    /// The names of the named filters on the list, in list order.
+    /// The names of the filters on the list, in list order.
     pub fn named_filters(&self) -> Vec<String> {
-        self.filters.iter().filter_map(|f| f.name.clone()).collect()
+        self.filters.iter().map(|f| f.name.clone()).collect()
     }
 
-    /// The filter `selector` denotes, with its index: the named filter
-    /// with that name, else the one prompt that starts with `selector`.
-    pub fn find_filter(&self, selector: &str) -> Result<(usize, &FilterEntry), PublishError> {
-        if let Some(found) = self
-            .filters
+    /// The filter named `name`, with its index.
+    pub fn find_filter(&self, name: &str) -> Result<(usize, &FilterEntry), PublishError> {
+        self.filters
             .iter()
             .enumerate()
-            .find(|(_, f)| f.name.as_deref() == Some(selector))
-        {
-            return Ok(found);
-        }
-        let prompts: Vec<(usize, &FilterEntry)> = self
-            .filters
-            .iter()
-            .enumerate()
-            .filter(|(_, f)| f.prompt.as_deref().is_some_and(|p| p.starts_with(selector)))
-            .collect();
-        match prompts.as_slice() {
-            [found] => Ok(*found),
-            [] => Err(PublishError::Input(format!(
-                "no filter named {selector:?} and no instruction starts with it"
-            ))),
-            _ => Err(PublishError::Input(format!(
-                "{selector:?} is a prefix of {} instructions",
-                prompts.len()
-            ))),
-        }
+            .find(|(_, f)| f.name == name)
+            .ok_or_else(|| PublishError::Input(format!("no filter named {name:?} is on the list")))
     }
 
     /// Append a text redaction under the next id and return its id.
@@ -387,22 +382,19 @@ impl PublishDefinition {
     }
 
     /// Check a definition as read from disk, which may have been
-    /// edited by hand: every named filter is known, every reason is a
-    /// known code, every literal is non-empty, every segment has
-    /// ordered 1-based ranges, and ids are unique and below their
-    /// counters.
+    /// edited by hand: every filter is known and on the list once, a
+    /// filter that requires a prompt has one, every reason is a known
+    /// code, every literal is non-empty, every segment has ordered
+    /// 1-based ranges, and ids are unique and below their counters.
     pub fn validate(&self) -> Result<(), PublishError> {
+        let mut names = HashSet::new();
         for f in &self.filters {
-            match (&f.name, &f.prompt) {
-                (Some(name), _) if !NAMED_FILTERS.contains(&name.as_str()) => {
-                    return Err(PublishError::Input(format!("unknown filter {name:?}")));
-                }
-                (None, None) => {
-                    return Err(PublishError::Input(
-                        "a filter has neither a name nor a prompt".into(),
-                    ));
-                }
-                _ => {}
+            FilterSpec::new(&f.name, f.prompt.clone())?;
+            if !names.insert(f.name.as_str()) {
+                return Err(PublishError::Input(format!(
+                    "filter {} is on the list more than once",
+                    f.name
+                )));
             }
         }
         let mut seen = HashSet::new();
@@ -539,6 +531,26 @@ mod tests {
         assert!(RedactionInput::parse_text("x", "nope", true).is_err());
     }
 
+    /// A bare name parses, a name outside the list and a custom filter
+    /// without a prompt are errors, and any filter takes a prompt.
+    #[test]
+    fn filter_spec_takes_a_known_name_and_an_optional_prompt() {
+        assert_eq!(
+            "pii".parse::<FilterSpec>().unwrap(),
+            FilterSpec {
+                name: "pii".into(),
+                prompt: None
+            }
+        );
+        let bad = "piii".parse::<FilterSpec>().unwrap_err();
+        assert!(bad.to_string().contains("piii"), "{bad}");
+        let custom = "custom".parse::<FilterSpec>().unwrap_err();
+        assert!(custom.to_string().contains("requires a prompt"), "{custom}");
+        let with = FilterSpec::new("system", Some("Watch for hosts.".into())).unwrap();
+        assert_eq!(with.to_string(), "system");
+        assert!(requires_prompt("custom") && !requires_prompt("system"));
+    }
+
     #[test]
     fn every_reason_has_a_description() {
         for r in REASONS {
@@ -553,10 +565,12 @@ mod tests {
     /// back equal.
     #[test]
     fn definition_writes_one_entry_per_line_and_round_trips() {
-        let mut d =
-            PublishDefinition::new(&["pii".parse().unwrap(), "Ducks only".parse().unwrap()]);
+        let mut d = PublishDefinition::new(&[
+            "pii".parse().unwrap(),
+            FilterSpec::new("custom", Some("Ducks only".into())).unwrap(),
+        ]);
         d.filters.push(FilterEntry {
-            name: Some("system".into()),
+            name: "system".into(),
             prompt: Some("Watch for hosts.".into()),
         });
         let first = d.push_text("abc", "secret", "user:g", true);
@@ -574,7 +588,7 @@ mod tests {
                 "{\n",
                 "  \"filters\": [\n",
                 "    \"pii\",\n",
-                "    {\"prompt\":\"Ducks only\"},\n",
+                "    {\"name\":\"custom\",\"prompt\":\"Ducks only\"},\n",
                 "    {\"name\":\"system\",\"prompt\":\"Watch for hosts.\"}\n",
                 "  ],\n",
                 "  \"segments\": [\n",
@@ -596,9 +610,11 @@ mod tests {
         assert_eq!(back, d);
         assert_eq!(
             back.filters[1].spec(),
-            FilterSpec::Prompt("Ducks only".into())
+            FilterSpec::new("custom", Some("Ducks only".into())).unwrap()
         );
-        assert_eq!(back.named_filters(), ["pii", "system"]);
+        assert_eq!(back.named_filters(), ["pii", "custom", "system"]);
+        assert_eq!(back.find_filter("custom").unwrap().0, 1);
+        assert!(back.find_filter("secret").is_err());
         assert!(back.is_allowed("HUNTER2"));
         assert!(!back.is_allowed("hunter"));
         assert_eq!(
@@ -620,7 +636,11 @@ mod tests {
             assert!(err.contains(expect), "{err}");
         };
         check(r#"{"filters": ["nope"]}"#, "unknown filter");
-        check(r#"{"filters": [{}]}"#, "neither a name nor a prompt");
+        check(r#"{"filters": ["custom"]}"#, "requires a prompt");
+        check(
+            r#"{"filters": ["pii", {"name": "pii", "prompt": "x"}]}"#,
+            "more than once",
+        );
         check(
             r#"{"filters": [], "text": [[1, "", "pii", "u", true]], "next_text_id": 2}"#,
             "redaction 1: literal is empty",

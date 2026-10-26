@@ -299,8 +299,13 @@ struct FilterPaths {
     name: String,
     /// Fields whose value is itself the sensitive literal
     literal: Vec<JsonPath>,
-    /// Fields whose whole value is replaced, each with its pattern text
+    /// Fields whose whole value is left out, each with its pattern text
     value: Vec<(String, JsonPath)>,
+    /// Selectors over the entry; one that selects anything marks the
+    /// whole entry as the filter's to leave out. A selector tests the
+    /// entry's own fields through the root, as in
+    /// `$[?$.type == 'progress']`.
+    entries: Vec<JsonPath>,
 }
 
 /// What a filter's typed-sensitive paths select in one entry.
@@ -310,6 +315,8 @@ pub struct FilterValues {
     pub literals: Vec<String>,
     /// The string values at the filter's `value` paths
     pub values: Vec<ValueHit>,
+    /// Whether one of the filter's entry selectors selected the entry
+    pub dropped: bool,
 }
 
 /// One string value a filter's `value` path selects.
@@ -359,6 +366,7 @@ impl TextDescriptor {
         name: &str,
         literal: &[&str],
         value: &[&str],
+        entries: &[&str],
     ) -> std::result::Result<Self, DescriptorError> {
         self.filters.push(FilterPaths {
             name: name.to_string(),
@@ -367,6 +375,7 @@ impl TextDescriptor {
                 .iter()
                 .map(|p| compile_one(p).map(|c| (p.to_string(), c)))
                 .collect::<std::result::Result<_, _>>()?,
+            entries: compile(entries)?,
         });
         Ok(self)
     }
@@ -411,7 +420,12 @@ impl TextDescriptor {
                     .collect::<Vec<_>>()
             })
             .collect();
-        Ok(FilterValues { literals, values })
+        let dropped = paths.entries.iter().any(|p| !p.query(&entry).is_empty());
+        Ok(FilterValues {
+            literals,
+            values,
+            dropped,
+        })
     }
 
     /// The text values of one entry, in document order. `json` is the
@@ -593,7 +607,7 @@ mod tests {
     #[test]
     fn filter_values_select_literals_and_whole_values() {
         let descriptor = descriptor()
-            .with_filter("pii", &["$..user_identity"], &["$.context.email"])
+            .with_filter("pii", &["$..user_identity"], &["$.context.email"], &[])
             .unwrap();
         let line = r#"{"context":{"email":"The user is a@b.c"},"params":{"classifier":{"user_identity":"garrett"}},"n":{"user_identity":5}}"#;
         let found = descriptor.filter_values("pii", line).unwrap();
@@ -610,6 +624,35 @@ mod tests {
             FilterValues::default()
         );
         assert_eq!(descriptor.filter_names().collect::<Vec<_>>(), ["pii"]);
+    }
+
+    /// An entry selector tests the entry's own fields through the root
+    /// and marks the whole entry; a missing field compares as unequal.
+    #[test]
+    fn entry_selectors_mark_the_entry_through_the_root() {
+        let descriptor = descriptor()
+            .with_filter(
+                "harness",
+                &[],
+                &[],
+                &[
+                    "$[?$.type == 'progress']",
+                    "$[?$.type == 'system' && $.subtype != 'informational']",
+                ],
+            )
+            .unwrap();
+        let dropped = |line: &str| descriptor.filter_values("harness", line).unwrap().dropped;
+        assert!(dropped(r#"{"type":"progress","data":{}}"#));
+        assert!(dropped(r#"{"type":"system","subtype":"turn_duration"}"#));
+        assert!(dropped(r#"{"type":"system","content":"no subtype"}"#));
+        assert!(!dropped(r#"{"type":"system","subtype":"informational"}"#));
+        assert!(!dropped(r#"{"type":"user","message":{"content":"hi"}}"#));
+        assert!(
+            !descriptor
+                .filter_values("pii", r#"{"type":"progress"}"#)
+                .unwrap()
+                .dropped
+        );
     }
 
     /// A safe pattern covers the subtree under the node it selects, and

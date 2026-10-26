@@ -1,8 +1,9 @@
 //! The Claude driver's text descriptor: which fields of a transcript
 //! line are identifiers, timestamps, digests, signatures, or
-//! enumerations rather than text, and which fields a named filter
-//! treats as sensitive by type. The `text_block` table and the
-//! publish redaction engine read it.
+//! enumerations rather than text, which fields a named filter treats
+//! as sensitive by type, and which entries the harness wrote for its
+//! own bookkeeping. The `text_block` table and the publish redaction
+//! engine read it.
 //! `schema/claude-jsonl-1/text_descriptor.json` holds the pattern
 //! lists beside the content schemas of the same format.
 
@@ -26,6 +27,8 @@ struct FilterLists {
     literal: Vec<String>,
     #[serde(default)]
     value: Vec<String>,
+    #[serde(default)]
+    entries: Vec<String>,
 }
 
 pub(crate) fn text_descriptor() -> TextDescriptor {
@@ -38,7 +41,12 @@ pub(crate) fn text_descriptor() -> TextDescriptor {
         TextDescriptor::new(&strs(&lists.safe)).expect("descriptor patterns should be JSONPath");
     for (name, paths) in &lists.filters {
         descriptor = descriptor
-            .with_filter(name, &strs(&paths.literal), &strs(&paths.value))
+            .with_filter(
+                name,
+                &strs(&paths.literal),
+                &strs(&paths.value),
+                &strs(&paths.entries),
+            )
             .expect("descriptor filter patterns should be JSONPath");
     }
     descriptor
@@ -52,6 +60,7 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+    use crate::entry::{SYSTEM_MESSAGE_SUBTYPES, message_subtype};
     use gage_session::{FilterValues, TextValue};
 
     fn pointers(found: &FilterValues) -> Vec<String> {
@@ -199,6 +208,51 @@ mod tests {
         let text = fs::read_to_string(Path::new(&path)).unwrap();
         let failures = check_safe_shapes(&text);
         assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    /// The `harness` filter leaves out every entry that is not a user
+    /// prompt, an assistant message, or a system entry the message
+    /// table promotes, and leaves out a user entry the harness injected
+    /// as meta. The selectors agree with the entry classifier on the
+    /// sample transcript and on one entry of each shape.
+    #[test]
+    fn harness_filter_leaves_out_every_entry_that_is_not_conversation() {
+        let descriptor = text_descriptor();
+        let dropped = |line: &str| descriptor.filter_values("harness", line).unwrap().dropped;
+        let conversation = |line: &str| {
+            let entry: serde_json::Value = serde_json::from_str(line).unwrap();
+            let ty = entry["type"].as_str().unwrap_or_default();
+            let meta = entry["isMeta"].as_bool() == Some(true);
+            match ty {
+                "user" => !meta,
+                "assistant" => true,
+                "system" => message_subtype(&entry).is_some(),
+                _ => false,
+            }
+        };
+        for line in SAMPLE.lines().filter(|l| !l.trim().is_empty()) {
+            assert_eq!(dropped(line), !conversation(line), "{line}");
+        }
+        let shapes = [
+            r#"{"type":"user","message":{"role":"user","content":"hi"}}"#,
+            r#"{"type":"user","isMeta":true,"message":{"role":"user","content":"<meta>"}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}"#,
+            r#"{"type":"system","subtype":"turn_duration","durationMs":5}"#,
+            r#"{"type":"system","subtype":"informational","content":"note"}"#,
+            r#"{"type":"system","content":"no subtype"}"#,
+            r#"{"type":"attachment","attachment":{"type":"skill_listing"}}"#,
+            r#"{"type":"progress","data":{}}"#,
+            r#"{"type":"file-history-snapshot","snapshot":{}}"#,
+            r#"{"type":"api-request","params":{}}"#,
+            r#"{"type":"mode","mode":"normal"}"#,
+        ];
+        for line in shapes {
+            assert_eq!(dropped(line), !conversation(line), "{line}");
+        }
+        for subtype in SYSTEM_MESSAGE_SUBTYPES {
+            let line = format!(r#"{{"type":"system","subtype":"{subtype}","content":"x"}}"#);
+            assert!(!dropped(&line), "{line}");
+        }
     }
 
     #[test]

@@ -247,9 +247,9 @@ pub struct ApplyArgs {
 
 /// The paragraph `init --filter` and `filter add` share on what a
 /// filter argument is.
-const FILTER_HELP: &str = "A filter name, or an instruction to an LLM describing what to \
-remove. An instruction contains a space and may be given as @PATH to read it from a file. \
-Filter names are \"pii\", \"language\", \"secret\", and \"system\".";
+const FILTER_HELP: &str = "A filter name; see --list-filters. Filter names are \"pii\", \
+\"language\", \"secret\", \"system\", \"harness\", and \"custom\". \"custom\" takes --prompt as \
+its whole instruction, so it is added with filter add.";
 
 /// The `filter` group declares the `--source` and `--stored` override
 /// itself: none of its commands takes them, so the group capturing a
@@ -298,6 +298,14 @@ pub struct FilterAddArgs {
     )]
     filter: Option<String>,
 
+    /// Instructions for filter
+    ///
+    /// Read from a file as @PATH. Required for "custom", whose prompt
+    /// is its whole instruction; for any other filter it adds to
+    /// filter's own instructions.
+    #[arg(short, long, value_name = "TEXT")]
+    prompt: Option<String>,
+
     /// Skip confirmation prompt
     #[arg(short, long)]
     yes: bool,
@@ -315,8 +323,7 @@ pub struct FilterRemoveArgs {
 
     /// Filter to remove
     ///
-    /// A filter name, else a prefix of one instruction on the list. A
-    /// prefix of more than one instruction is an error.
+    /// A filter name on the list.
     #[arg(value_name = "FILTER")]
     filter: String,
 
@@ -468,7 +475,7 @@ fn init(args: InitArgs) -> Result<(), CliError> {
     let filters = args
         .filter
         .iter()
-        .map(|text| parse_filter("gage publish init", "--filter", text))
+        .map(|name| parse_filter("gage publish init", "--filter", name, None))
         .collect::<Result<Vec<_>, _>>()?;
     let original = resolve_original(&store, source.as_deref(), stored, session)?;
 
@@ -551,26 +558,31 @@ fn filter_rows() -> Vec<Vec<String>> {
 
 /// The filter `text` denotes, with `@PATH` read as a file. An unknown
 /// name is an error naming `command` and `option`.
-/// A filter argument: a named filter, or an instruction read through
+/// A filter argument: a filter name, with the prompt read through
 /// `@PATH`. A name outside the named filters is a usage error in
 /// clap's layout, since the argument accepts any text and the names
-/// are checked here.
-fn parse_filter(command: &str, option: &str, text: &str) -> Result<FilterSpec, CliError> {
-    let text = text_value(command, option, text)
-        .map_err(|e| CliError::message(format!("{command}: {e}")))?;
-    let text = text.trim_end();
-    match text.parse() {
-        Ok(spec) => Ok(spec),
-        // The one parse error is a name outside the named filters; the
-        // usage error states the same fact in clap's layout
-        Err(PublishError::Input(_)) => Err(CliError::invalid_value(
+/// are checked here; a filter that requires a prompt and has none is
+/// a plain error.
+fn parse_filter(
+    command: &str,
+    option: &str,
+    name: &str,
+    prompt: Option<&str>,
+) -> Result<FilterSpec, CliError> {
+    if !NAMED_FILTERS.contains(&name) {
+        return Err(CliError::invalid_value(
             command,
             option,
-            text,
+            name,
             NAMED_FILTERS,
-        )),
-        Err(e) => Err(CliError::message(format!("{command}: {option}: {e}"))),
+        ));
     }
+    let prompt = prompt
+        .map(|p| text_value(command, "--prompt", p))
+        .transpose()
+        .map_err(|e| CliError::message(format!("{command}: {e}")))?;
+    FilterSpec::new(name, prompt.map(|p| p.trim_end().to_string()))
+        .map_err(|e| CliError::message(format!("{command}: {e}")))
 }
 
 /// The `Filters` step of the dialog: one line per filter, or `none`.
@@ -589,7 +601,7 @@ fn report_filter_redactions(publisher: &Publisher<'_>, id: &str) -> Result<(), P
     let by_filter: Vec<(String, usize, usize)> = definition
         .filters
         .iter()
-        .filter_map(|f| f.spec().name().map(String::from))
+        .map(|f| f.name.clone())
         .map(|name| {
             let author = format!("filter:{name}");
             let mine: Vec<&TextEntry> = definition
@@ -931,7 +943,7 @@ fn filter_add(args: FilterAddArgs) -> Result<(), CliError> {
     let (Some(session), Some(filter)) = (args.session.as_deref(), args.filter.as_deref()) else {
         return Err(fail("SESSION and FILTER are required".into()));
     };
-    let filter = parse_filter(command, "FILTER", filter)?;
+    let filter = parse_filter(command, "FILTER", filter, args.prompt.as_deref())?;
     let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
     let publisher = Publisher::new(&store);
     let pending = publisher
@@ -974,11 +986,11 @@ fn filter_remove(args: FilterRemoveArgs) -> Result<(), CliError> {
         .find_filter(&args.filter)
         .map_err(|e| fail(e.to_string()))?;
     let target = filter_cell(entry);
-    let author = filter_author(entry);
+    let author = entry.author();
     let redactions = definition
         .text
         .iter()
-        .filter(|t| Some(t.author.as_str()) == author.as_deref())
+        .filter(|t| t.author == author)
         .count();
 
     dialog::run("Remove publish filter", || {
@@ -1059,22 +1071,22 @@ fn filter_list(args: FilterListArgs) -> Result<(), CliError> {
         println!("No filters");
         return Ok(());
     }
-    let header: Vec<String> = ["Filter", "Type", "Redactions"]
+    let header: Vec<String> = ["Filter", "Prompt", "Redactions"]
         .iter()
         .map(|s| s.to_string())
         .collect();
     let rows = definition.filters.iter().map(|f| {
-        let author = filter_author(f);
+        let author = f.author();
         let redactions = definition
             .text
             .iter()
-            .filter(|t| Some(t.author.as_str()) == author.as_deref())
+            .filter(|t| t.author == author)
             .count();
-        let kind = match author {
-            Some(_) => "name",
-            None => "instruction",
-        };
-        vec![filter_cell(f), kind.to_string(), redactions.to_string()]
+        vec![
+            filter_cell(f),
+            f.prompt.clone().unwrap_or_default(),
+            redactions.to_string(),
+        ]
     });
     let term_width = console::Term::stdout().size().1 as usize;
     let table = Table::from_iter(std::iter::once(header).chain(rows))
@@ -1096,11 +1108,6 @@ fn filter_list(args: FilterListArgs) -> Result<(), CliError> {
 /// flattened and cut.
 fn filter_cell(filter: &FilterEntry) -> String {
     value_cell(&filter.spec().to_string())
-}
-
-/// The author a named filter's redactions carry, `filter:<name>`.
-fn filter_author(filter: &FilterEntry) -> Option<String> {
-    filter.name.as_ref().map(|name| format!("filter:{name}"))
 }
 
 /// Delete a pending publish after confirmation. The id is resolved
@@ -1289,29 +1296,42 @@ mod tests {
     /// names, and the nearest one; an instruction is not a name.
     #[test]
     fn unknown_filter_name_is_a_usage_error_in_claps_layout() {
-        let rendered = |command: &str, option: &str| match parse_filter(command, option, "secrets")
-        {
-            Err(CliError::Usage(e)) => {
-                assert_eq!(e.exit_code(), 2);
-                e.render().to_string()
-            }
-            Err(_) => panic!("not a usage error"),
-            Ok(f) => panic!("{f} parsed"),
-        };
+        let rendered =
+            |command: &str, option: &str| match parse_filter(command, option, "secrets", None) {
+                Err(CliError::Usage(e)) => {
+                    assert_eq!(e.exit_code(), 2);
+                    e.render().to_string()
+                }
+                Err(_) => panic!("not a usage error"),
+                Ok(f) => panic!("{f} parsed"),
+            };
         let text = rendered("gage publish init", "--filter");
         assert!(
             text.contains("invalid value 'secrets' for '--filter <FILTER>'"),
             "{text}"
         );
         assert!(
-            text.contains("[possible values: pii, language, secret, system]"),
+            text.contains("[possible values: pii, language, secret, system, harness, custom]"),
             "{text}"
         );
         assert!(text.contains("a similar value exists: 'secret'"), "{text}");
         let text = rendered("gage publish filter add", "FILTER");
         assert!(text.contains("for '<FILTER>'"), "{text}");
-        assert!(parse_filter("gage publish init", "--filter", "pii").is_ok());
-        assert!(parse_filter("gage publish init", "--filter", "Remove every duck").is_ok());
+        assert!(parse_filter("gage publish init", "--filter", "pii", None).is_ok());
+        let custom = parse_filter("gage publish filter add", "FILTER", "custom", None);
+        assert!(
+            matches!(custom, Err(CliError::Exit { message: Some(ref m), .. }) if m.contains("requires a prompt")),
+            "custom without a prompt is a plain error"
+        );
+        assert!(
+            parse_filter(
+                "gage publish filter add",
+                "FILTER",
+                "custom",
+                Some("Remove every duck")
+            )
+            .is_ok()
+        );
     }
 
     /// The publish commands live under `gage publish`, not `gage

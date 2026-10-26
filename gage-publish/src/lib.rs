@@ -29,7 +29,7 @@ use gage_store::{
 
 pub use definition::{
     Allow, FilterEntry, FilterSpec, NAMED_FILTERS, PublishDefinition, REASONS, Reason,
-    RedactionInput, Segment, TextEntry,
+    RedactionInput, Segment, TextEntry, requires_prompt,
 };
 pub use derive::{Applied, Built, Instance, InstanceKind};
 pub use filter::{Filter, Pattern};
@@ -144,22 +144,16 @@ impl<'a> Publisher<'a> {
     }
 
     /// Start a publish of `original` under `filters`: stage the
-    /// directory, run every named filter, write the definition, and
-    /// build the staged session. A filter given twice is an error.
+    /// directory, run every filter, write the definition, and build
+    /// the staged session. A filter given twice is an error.
     pub fn init(
         &self,
         original: &SessionRecord,
         filters: &[FilterSpec],
     ) -> Result<PublishInit, PublishError> {
-        for (i, filter) in filters.iter().enumerate() {
-            if filters.iter().skip(i + 1).any(|other| other == filter) {
-                return Err(PublishError::Input(format!(
-                    "filter {filter} is given more than once"
-                )));
-            }
-        }
-        let init = self.publish.init(original)?;
         let mut definition = PublishDefinition::new(filters);
+        definition.validate()?;
+        let init = self.publish.init(original)?;
         let session = self.open_original(&init.id)?;
         let names = definition.named_filters();
         derive::run_filters(&mut definition, &session, &names)?;
@@ -168,42 +162,42 @@ impl<'a> Publisher<'a> {
         Ok(init)
     }
 
-    /// Add `filter` to the pending publish `id`, run it when it is
-    /// named, and rebuild. A filter already on the list is an error.
+    /// Add `filter` to the pending publish `id`, run it, and rebuild.
+    /// A filter already on the list is an error.
     pub fn filter_add(
         &self,
         id: &str,
         filter: &FilterSpec,
     ) -> Result<PublishDefinition, PublishError> {
         let mut definition = self.definition(id)?;
-        if definition.filters.iter().any(|f| f.spec() == *filter) {
+        if definition.filters.iter().any(|f| f.name == filter.name) {
             return Err(PublishError::Input(format!(
                 "filter {filter} is already on the list"
             )));
         }
         definition.filters.push(FilterEntry::new(filter));
+        definition.validate()?;
         let session = self.open_original(id)?;
-        if let Some(name) = filter.name() {
-            derive::run_filters(&mut definition, &session, &[name.to_string()])?;
-        }
+        derive::run_filters(
+            &mut definition,
+            &session,
+            std::slice::from_ref(&filter.name),
+        )?;
         self.build(id, &definition, &session)?;
         self.write_definition(id, &definition)?;
         Ok(definition)
     }
 
-    /// Remove the filter `selector` denotes from the pending publish
-    /// `id` with its text redactions, and rebuild. `selector` is a
-    /// filter name, else a prefix of one instruction. The allow list
-    /// stays, so adding the filter back does not record a literal that
-    /// was removed. Returns the removed filter.
-    pub fn filter_remove(&self, id: &str, selector: &str) -> Result<FilterEntry, PublishError> {
+    /// Remove the filter `name` from the pending publish `id` with its
+    /// text redactions, and rebuild. The allow list stays, so adding
+    /// the filter back does not record a literal that was removed.
+    /// Returns the removed filter.
+    pub fn filter_remove(&self, id: &str, name: &str) -> Result<FilterEntry, PublishError> {
         let mut definition = self.definition(id)?;
-        let (index, _) = definition.find_filter(selector)?;
+        let (index, _) = definition.find_filter(name)?;
         let removed = definition.filters.remove(index);
-        if let Some(name) = &removed.name {
-            let author = format!("filter:{name}");
-            definition.text.retain(|t| t.author != author);
-        }
+        let author = removed.author();
+        definition.text.retain(|t| t.author != author);
         let session = self.open_original(id)?;
         self.build(id, &definition, &session)?;
         self.write_definition(id, &definition)?;

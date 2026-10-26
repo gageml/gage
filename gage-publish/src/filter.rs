@@ -21,7 +21,8 @@ pub struct Filter {
     pub reason: &'static str,
     /// One line on what the filter removes, for a listing
     pub description: &'static str,
-    /// The instruction prose for the agent
+    /// The instruction prose for the agent. A filter that requires a
+    /// prompt has prose on how the prompt is read
     pub instructions: &'static str,
     /// The attributes of `attrs.json` the filter leaves out of the
     /// published session
@@ -554,6 +555,24 @@ static FILTERS: LazyLock<Vec<Filter>> = LazyLock::new(|| {
             description: "Remove paths, hosts, and OS versions",
             instructions: include_str!("../filters/system.md"),
             attrs: &["project"],
+            patterns: Vec::new(),
+            keywords: None,
+        },
+        Filter {
+            name: "harness",
+            reason: "harness",
+            description: "Leave out entries the harness wrote for its own bookkeeping",
+            instructions: include_str!("../filters/harness.md"),
+            attrs: &[],
+            patterns: Vec::new(),
+            keywords: None,
+        },
+        Filter {
+            name: "custom",
+            reason: "custom",
+            description: "Remove what a prompt of your own describes",
+            instructions: include_str!("../filters/custom.md"),
+            attrs: &[],
             patterns: Vec::new(),
             keywords: None,
         },

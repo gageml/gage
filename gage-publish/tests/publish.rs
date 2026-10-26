@@ -245,21 +245,80 @@ fn redact_applies_text_everywhere_and_rejects_a_miss() {
     assert_eq!(publisher.definition(&init.id).unwrap().text.len(), 2);
 }
 
-/// A filter argument with whitespace is an instruction, anything else
-/// is a name, and a name outside the built-in set is an error.
+/// A filter is a name, and `custom` takes its prompt as its whole
+/// instruction: `init` refuses it without one.
 #[test]
-fn filter_spec_parses_names_and_instructions() {
+fn custom_requires_a_prompt_and_any_filter_takes_one() {
+    let f = fixture();
+    let publisher = Publisher::with_root(&f.store, &f.publish_root);
+    let bare = FilterSpec {
+        name: "custom".into(),
+        prompt: None,
+    };
+    let err = publisher.init(&f.original, &[bare]).unwrap_err();
+    assert!(err.to_string().contains("requires a prompt"), "{err}");
+    assert!(publisher.store().list().unwrap().is_empty());
+
+    let custom = FilterSpec::new("custom", Some("Remove every duck.".into())).unwrap();
+    let pii = FilterSpec::new("pii", Some("Watch for street addresses.".into())).unwrap();
+    let init = publisher.init(&f.original, &[custom, pii]).unwrap();
+    let definition = publisher.definition(&init.id).unwrap();
+    assert_eq!(definition.filters[0].name, "custom");
     assert_eq!(
-        "pii".parse::<FilterSpec>().unwrap(),
-        FilterSpec::Named("pii".to_string())
+        definition.filters[0].prompt.as_deref(),
+        Some("Remove every duck.")
     );
     assert_eq!(
-        "remove the customer names".parse::<FilterSpec>().unwrap(),
-        FilterSpec::Prompt("remove the customer names".to_string())
+        definition.filters[1].prompt.as_deref(),
+        Some("Watch for street addresses.")
     );
-    let bad = "piii".parse::<FilterSpec>().unwrap_err();
-    assert!(matches!(bad, PublishError::Input(_)), "{bad}");
-    assert!(bad.to_string().contains("piii"), "{bad}");
+    let text = fs::read_to_string(publisher.store().definition_file(&init.id)).unwrap();
+    assert!(
+        text.contains(r#"{"name":"custom","prompt":"Remove every duck."}"#),
+        "{text}"
+    );
+    let removed = publisher.filter_remove(&init.id, "custom").unwrap();
+    assert_eq!(removed.name, "custom");
+    let none = publisher.filter_remove(&init.id, "secret").unwrap_err();
+    assert!(matches!(none, PublishError::Input(_)), "{none}");
+    assert_eq!(publisher.definition(&init.id).unwrap().filters.len(), 1);
+}
+
+/// The `harness` filter leaves out the entries the harness wrote for
+/// itself: the API request on line 5 goes, with one line record under
+/// the filter, and a literal found only there is a miss.
+#[test]
+fn harness_filter_leaves_out_bookkeeping_entries() {
+    let f = fixture();
+    let publisher = Publisher::with_root(&f.store, &f.publish_root);
+    let init = publisher
+        .init(&f.original, &["harness".parse::<FilterSpec>().unwrap()])
+        .unwrap();
+    let lines = staged_lines(&f.publish_root, &init.id);
+    assert_eq!(lines.len(), 4, "{lines:#?}");
+    assert!(
+        !lines.iter().any(|l| l.contains("api-request")),
+        "{lines:#?}"
+    );
+    let records = filtered(&f.publish_root, &init.id);
+    let dropped: Vec<(u32, Option<u32>, &str, &str)> = records
+        .iter()
+        .filter(|r| r.kind == FilteredKind::Line)
+        .map(|r| (r.line, r.line_end, r.reason.as_str(), r.author.as_str()))
+        .collect();
+    assert_eq!(dropped, [(5, Some(5), "harness", "filter:harness")]);
+    let summary = staged_summary(&f.publish_root, &init.id);
+    assert_eq!(summary["line_count"], 4, "{summary}");
+    publisher.check(&init.id).unwrap();
+
+    let err = publisher
+        .redact(
+            &init.id,
+            &[RedactionInput::parse_text("home_dir", "system", true).unwrap()],
+            "user:test",
+        )
+        .unwrap_err();
+    assert!(matches!(err, PublishError::NoMatch(_)), "{err}");
 }
 
 /// `init` rejects a filter given twice.
@@ -312,7 +371,7 @@ fn filter_add_and_remove_change_one_filters_redactions() {
     assert_eq!(publisher.definition(&init.id).unwrap().filters.len(), 2);
 
     let removed = publisher.filter_remove(&init.id, "secret").unwrap();
-    assert_eq!(removed.name.as_deref(), Some("secret"));
+    assert_eq!(removed.name, "secret");
     let definition = publisher.definition(&init.id).unwrap();
     let left = authors(&definition);
     assert!(left.contains(&"user:test".to_string()), "{left:?}");
@@ -335,41 +394,6 @@ fn filter_add_and_remove_change_one_filters_redactions() {
         "the user's redaction stays: {}",
         lines[0]
     );
-}
-
-/// `filter_remove` matches a name first, then the one instruction the
-/// selector is a prefix of; no match and an ambiguous prefix are
-/// errors that change nothing.
-#[test]
-fn filter_remove_selects_by_name_then_by_instruction_prefix() {
-    let f = fixture();
-    let publisher = Publisher::with_root(&f.store, &f.publish_root);
-    let filters = [
-        "pii".parse::<FilterSpec>().unwrap(),
-        "remove customer names".parse::<FilterSpec>().unwrap(),
-        "remove internal hostnames".parse::<FilterSpec>().unwrap(),
-    ];
-    let init = publisher.init(&f.original, &filters).unwrap();
-
-    let ambiguous = publisher.filter_remove(&init.id, "remove").unwrap_err();
-    assert!(matches!(ambiguous, PublishError::Input(_)), "{ambiguous}");
-    let none = publisher.filter_remove(&init.id, "secret").unwrap_err();
-    assert!(matches!(none, PublishError::Input(_)), "{none}");
-    assert_eq!(publisher.definition(&init.id).unwrap().filters.len(), 3);
-
-    let removed = publisher
-        .filter_remove(&init.id, "remove customer")
-        .unwrap();
-    assert_eq!(removed.prompt.as_deref(), Some("remove customer names"));
-    let removed = publisher.filter_remove(&init.id, "pii").unwrap();
-    assert_eq!(removed.name.as_deref(), Some("pii"));
-    let definition = publisher.definition(&init.id).unwrap();
-    assert_eq!(definition.filters.len(), 1);
-    assert_eq!(
-        definition.filters[0].prompt.as_deref(),
-        Some("remove internal hostnames")
-    );
-    assert!(definition.text.is_empty(), "{definition:#?}");
 }
 
 /// `filter_run` re-runs one named filter, or every named filter, under

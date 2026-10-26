@@ -6,7 +6,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 
 use gage_session::{
-    Derivation, EntryJson, StoredSession, TextDescriptor, TextValue, delete_values, edit_strings,
+    Derivation, EntryJson, FilterValues, StoredSession, TextDescriptor, TextValue, delete_values,
+    edit_strings,
 };
 use gage_store::{
     DirContentSink, FilteredKind, FilteredRecord, PublishDirLayout, SummaryAttrs, format_filtered,
@@ -51,6 +52,10 @@ impl SessionText {
             project: None,
             descriptor: descriptor.clone(),
         })
+    }
+
+    fn entry(&self, line: u32) -> Option<&EntryText> {
+        self.entries.iter().find(|e| e.line == line)
     }
 
     /// Whether the original carries the attribute `name`.
@@ -413,30 +418,63 @@ struct Expanded {
 }
 
 /// Expand `definition` over `session` in order of precedence: the
-/// lines outside every segment, then the attributes and values the
-/// named filters leave out, then the spans of the text redactions. A
-/// match inside a dropped line or a left-out value records nothing,
-/// and a value is left out once however many paths select it, so the
-/// record holds only what changed the derived session.
+/// entries the named filters leave out, then the lines outside every
+/// segment, then the attributes and values the named filters leave
+/// out, then the spans of the text redactions. A match inside a
+/// dropped line or a left-out value records nothing, and a value is
+/// left out once however many paths select it, so the record holds
+/// only what changed the derived session.
 fn expand(definition: &PublishDefinition, session: &SessionText) -> Result<Expanded, PublishError> {
+    let filters: Vec<&Filter> = definition
+        .named_filters()
+        .iter()
+        .filter_map(|name| Filter::named(name))
+        .collect();
     let mut instances = Vec::new();
-    for (line, line_end, author) in segment_gaps(&definition.segments, session.last_line()) {
-        instances.push(Instance {
-            entry: None,
-            reason: "scope".to_string(),
-            author,
-            kind: InstanceKind::Line { line, line_end },
-        });
+    let mut dropped = BTreeSet::new();
+    // What each filter's typed paths select in each entry, read once
+    let mut found: Vec<Vec<(u32, FilterValues)>> = Vec::with_capacity(filters.len());
+    for filter in &filters {
+        let mut mine = Vec::with_capacity(session.entries.len());
+        let mut lines = BTreeSet::new();
+        for entry in &session.entries {
+            let values = session
+                .descriptor
+                .filter_values(filter.name, &entry.json)
+                .map_err(|e| PublishError::Input(format!("line {}: {e}", entry.line)))?;
+            if values.dropped {
+                lines.insert(entry.line);
+            }
+            mine.push((entry.line, values));
+        }
+        for (line, line_end) in runs(lines.iter().copied()) {
+            instances.push(Instance {
+                entry: None,
+                reason: filter.reason.to_string(),
+                author: format!("filter:{}", filter.name),
+                kind: InstanceKind::Line { line, line_end },
+            });
+        }
+        dropped.extend(lines);
+        found.push(mine);
     }
-    let dropped = dropped_of(&instances);
+    for (line, line_end, author) in segment_gaps(&definition.segments, session.last_line()) {
+        let outside = (line..=line_end).filter(|l| !dropped.contains(l));
+        for (line, line_end) in runs(outside) {
+            instances.push(Instance {
+                entry: None,
+                reason: "scope".to_string(),
+                author: author.clone(),
+                kind: InstanceKind::Line { line, line_end },
+            });
+        }
+    }
+    dropped = dropped_of(&instances);
 
     let mut deleted: HashSet<(u32, String)> = HashSet::new();
     let mut rules = Vec::new();
-    for name in definition.named_filters() {
-        let Some(filter) = Filter::named(&name) else {
-            continue;
-        };
-        let author = format!("filter:{name}");
+    for (filter, mine) in filters.iter().zip(found) {
+        let author = format!("filter:{}", filter.name);
         let instance = |kind| Instance {
             entry: None,
             reason: filter.reason.to_string(),
@@ -451,22 +489,21 @@ fn expand(definition: &PublishDefinition, session: &SessionText) -> Result<Expan
             }
         }
         let mut paths: BTreeSet<String> = BTreeSet::new();
-        for entry in &session.entries {
-            if dropped.contains(&entry.line) {
+        for (line, values) in mine {
+            if dropped.contains(&line) {
                 continue;
             }
-            let found = session
-                .descriptor
-                .filter_values(&name, &entry.json)
-                .map_err(|e| PublishError::Input(format!("line {}: {e}", entry.line)))?;
-            for hit in found.values {
+            let Some(entry) = session.entry(line) else {
+                continue;
+            };
+            for hit in values.values {
                 if !entry.values.iter().any(|v| v.pointer == hit.pointer) {
                     continue;
                 }
                 paths.insert(hit.path);
-                if deleted.insert((entry.line, hit.pointer.clone())) {
+                if deleted.insert((line, hit.pointer.clone())) {
                     instances.push(instance(InstanceKind::Value {
-                        line: entry.line,
+                        line,
                         pointer: hit.pointer,
                     }));
                 }
@@ -503,6 +540,18 @@ fn expand(definition: &PublishDefinition, session: &SessionText) -> Result<Expan
         }
     }
     Ok(Expanded { instances, rules })
+}
+
+/// The runs of consecutive lines in `lines`, which come in order.
+fn runs(lines: impl IntoIterator<Item = u32>) -> Vec<(u32, u32)> {
+    let mut runs: Vec<(u32, u32)> = Vec::new();
+    for line in lines {
+        match runs.last_mut() {
+            Some(last) if line == last.1 + 1 => last.1 = line,
+            _ => runs.push((line, line)),
+        }
+    }
+    runs
 }
 
 /// The span `start..=end` of `value` on `line` as `text` redacts it.
@@ -849,6 +898,12 @@ mod tests {
         assert!(whole.is_empty(), "{whole:?}");
         let past = segment_gaps(&[segment(1, &[(1, 20)], "a")], 12);
         assert!(past.is_empty(), "{past:?}");
+    }
+
+    #[test]
+    fn runs_group_consecutive_lines() {
+        assert_eq!(runs([1, 2, 3, 5, 7, 8]), [(1, 3), (5, 5), (7, 8)]);
+        assert!(runs([]).is_empty());
     }
 
     #[test]
