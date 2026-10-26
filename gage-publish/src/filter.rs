@@ -551,7 +551,7 @@ static FILTERS: LazyLock<Vec<Filter>> = LazyLock::new(|| {
         Filter {
             name: "system",
             reason: "system",
-            description: "Remove paths, hosts, and OS versions of the machine the session ran on",
+            description: "Remove paths, hosts, and OS versions",
             instructions: include_str!("../filters/system.md"),
             attrs: &["project"],
             patterns: Vec::new(),
