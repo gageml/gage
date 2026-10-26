@@ -118,16 +118,18 @@ fn init_runs_the_named_filters_and_records_their_instances() {
     let definition = publisher.definition(&init.id).unwrap();
     let by_author = |author: &str| {
         definition
-            .redactions
+            .text
             .iter()
-            .filter(|r| r.author == author)
+            .filter(|t| t.author == author)
             .count()
     };
     // pii: the email pattern, plus the username and home_dir typed literals
     assert_eq!(by_author("filter:pii"), 3, "{definition:#?}");
     // secret: one key, found by pattern in two places
     assert_eq!(by_author("filter:secret"), 1, "{definition:#?}");
-    assert!(definition.redactions.iter().all(|r| r.instances > 0));
+    let counts = publisher.instances(&init.id).unwrap();
+    assert_eq!(counts.len(), 4);
+    assert!(counts.values().all(|n| *n > 0), "{counts:?}");
 
     let lines = staged_lines(&f.publish_root, &init.id);
     assert_eq!(lines.len(), 5);
@@ -229,8 +231,8 @@ fn redact_applies_text_everywhere_and_rejects_a_miss() {
     assert_eq!(span("/message/content"), (16, 16));
 
     let definition = publisher.definition(&init.id).unwrap();
-    assert_eq!(definition.redactions.len(), 2);
-    assert_eq!(definition.next_id, 3);
+    assert_eq!(definition.text.len(), 2);
+    assert_eq!(definition.next_text_id, 3);
 
     let miss = publisher
         .redact(
@@ -240,7 +242,7 @@ fn redact_applies_text_everywhere_and_rejects_a_miss() {
         )
         .unwrap_err();
     assert!(matches!(miss, PublishError::NoMatch(_)), "{miss}");
-    assert_eq!(publisher.definition(&init.id).unwrap().redactions.len(), 2);
+    assert_eq!(publisher.definition(&init.id).unwrap().text.len(), 2);
 }
 
 /// A filter argument with whitespace is an instruction, anything else
@@ -295,7 +297,7 @@ fn filter_add_and_remove_change_one_filters_redactions() {
         .filter_add(&init.id, &"pii".parse::<FilterSpec>().unwrap())
         .unwrap();
     let authors = |d: &gage_publish::PublishDefinition| -> Vec<String> {
-        d.redactions.iter().map(|r| r.author.clone()).collect()
+        d.text.iter().map(|t| t.author.clone()).collect()
     };
     let added = authors(&definition);
     assert!(added.contains(&"user:test".to_string()), "{added:?}");
@@ -367,7 +369,7 @@ fn filter_remove_selects_by_name_then_by_instruction_prefix() {
         definition.filters[0].prompt.as_deref(),
         Some("remove internal hostnames")
     );
-    assert!(definition.redactions.is_empty(), "{definition:#?}");
+    assert!(definition.text.is_empty(), "{definition:#?}");
 }
 
 /// `filter_run` re-runs one named filter, or every named filter, under
@@ -389,27 +391,27 @@ fn filter_run_reruns_one_or_every_named_filter() {
     assert!(matches!(missing, PublishError::Input(_)), "{missing}");
 
     let one = publisher.filter_run(&init.id, Some("secret")).unwrap();
-    assert_eq!(one.redactions.len(), before.redactions.len());
+    assert_eq!(one.text.len(), before.text.len());
     let pii_ids = |d: &gage_publish::PublishDefinition| -> Vec<u64> {
-        d.redactions
+        d.text
             .iter()
-            .filter(|r| r.author == "filter:pii")
-            .map(|r| r.id)
+            .filter(|t| t.author == "filter:pii")
+            .map(|t| t.id)
             .collect()
     };
     assert_eq!(pii_ids(&one), pii_ids(&before), "pii did not run");
     assert!(
-        one.redactions.iter().any(|r| r.author == "filter:secret"),
+        one.text.iter().any(|t| t.author == "filter:secret"),
         "{one:#?}"
     );
     assert_eq!(
-        one.next_id,
-        before.next_id + 1,
+        one.next_text_id,
+        before.next_text_id + 1,
         "the re-run key took a new id"
     );
 
     let all = publisher.filter_run(&init.id, None).unwrap();
-    assert_eq!(all.redactions.len(), before.redactions.len());
+    assert_eq!(all.text.len(), before.text.len());
     assert_ne!(pii_ids(&all), pii_ids(&before), "pii ran this time");
 }
 
@@ -445,9 +447,9 @@ fn the_staged_summary_keeps_the_original_title() {
 }
 
 /// `undo` removes redactions by id and rebuilds; an unknown id changes
-/// nothing; a filter's undone redaction is suppressed on re-run.
+/// nothing; a filter's removed literal is allowed on re-run.
 #[test]
-fn undo_removes_redactions_and_suppresses_a_filters() {
+fn undo_removes_redactions_and_allows_a_filters_literal() {
     let f = fixture();
     let publisher = Publisher::with_root(&f.store, &f.publish_root);
     let init = publisher
@@ -466,69 +468,113 @@ fn undo_removes_redactions_and_suppresses_a_filters() {
     };
     assert!(cwd(&f.publish_root));
 
-    let miss = publisher.undo(&init.id, &[applied[0].id, 99]).unwrap_err();
+    let miss = publisher
+        .undo(&init.id, &[applied[0].id, 99], "user:test")
+        .unwrap_err();
     assert!(miss.to_string().contains("99"), "{miss}");
     assert!(cwd(&f.publish_root), "nothing changed");
 
-    let removed = publisher.undo(&init.id, &[applied[0].id]).unwrap();
+    let removed = publisher
+        .undo(&init.id, &[applied[0].id], "user:test")
+        .unwrap();
     assert_eq!(removed.len(), 1);
+    assert_eq!(removed[0].literal, "garrett");
     assert!(!cwd(&f.publish_root), "the username is back");
     let definition = publisher.definition(&init.id).unwrap();
     assert!(
-        definition.suppressions.is_empty(),
-        "a user's undo leaves no suppression"
+        definition.allow.is_empty(),
+        "a user's own literal is not allowed: {definition:#?}"
     );
-    assert_eq!(definition.next_id, applied[0].id + 1, "ids are not reused");
+    assert_eq!(
+        definition.next_text_id,
+        applied[0].id + 1,
+        "ids are not reused"
+    );
 
-    let secret_id = definition
-        .redactions
+    let key = definition
+        .text
         .iter()
-        .find(|r| r.author == "filter:secret")
+        .find(|t| t.author == "filter:secret")
         .unwrap()
-        .id;
-    publisher.undo(&init.id, &[secret_id]).unwrap();
+        .clone();
+    publisher.undo(&init.id, &[key.id], "user:test").unwrap();
     let definition = publisher.definition(&init.id).unwrap();
-    assert_eq!(definition.suppressions.len(), 1);
+    assert_eq!(definition.allow.len(), 1, "{definition:#?}");
+    assert_eq!(definition.allow[0].literal, key.literal);
+    assert_eq!(definition.allow[0].author, "user:test");
     assert!(staged_lines(&f.publish_root, &init.id)[1].contains("sk-ant-api03"));
 
     let rerun = publisher.filter_run(&init.id, Some("secret")).unwrap();
     assert!(
-        !rerun.redactions.iter().any(|r| r.author == "filter:secret"),
-        "the suppressed key is not restored: {rerun:#?}"
+        !rerun.text.iter().any(|t| t.author == "filter:secret"),
+        "the allowed key is not recorded again: {rerun:#?}"
     );
     assert!(staged_lines(&f.publish_root, &init.id)[1].contains("sk-ant-api03"));
 }
 
-/// `refresh` re-applies a definition edited by hand and rejects an
-/// invalid one without touching the staged session.
+/// `refresh` re-applies a definition edited by hand: a text redaction
+/// takes effect, a segment drops every line outside it and the staged
+/// summary follows, and an invalid definition is rejected without
+/// touching the staged session.
 #[test]
 fn refresh_reapplies_a_hand_edited_definition() {
     let f = fixture();
     let publisher = Publisher::with_root(&f.store, &f.publish_root);
     let init = publisher.init(&f.original, &[]).unwrap();
     let path = publisher.store().definition_file(&init.id);
+    let before = staged_summary(&f.publish_root, &init.id);
+    assert_eq!(before["line_count"], 5, "{before}");
+    assert_eq!(before["output_tokens"], 10, "{before}");
 
     let mut json: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-    json["redactions"]
-        .as_array_mut()
-        .unwrap()
-        .push(serde_json::json!({
-            "id": 1, "author": "user:hand", "type": "text", "reason": "pii", "literal": "garrett"
-        }));
-    json["next_id"] = serde_json::json!(2);
+    json["text"] = serde_json::json!([[1, "garrett", "pii", "user:hand", true]]);
+    json["next_text_id"] = serde_json::json!(2);
     fs::write(&path, serde_json::to_string_pretty(&json).unwrap()).unwrap();
 
-    let rebuilt = publisher.refresh(&init.id).unwrap();
-    assert_eq!(rebuilt.redactions.len(), 1);
-    assert_eq!(rebuilt.redactions[0].instances, 3, "{rebuilt:#?}");
+    let instances = publisher.refresh(&init.id).unwrap();
+    assert_eq!(instances, 3);
     assert!(staged_lines(&f.publish_root, &init.id)[0].contains("/home/[REDACTED]/proj"));
 
-    json["redactions"][0]["reason"] = serde_json::json!("bogus");
+    // A segment keeps lines 2-3 and drops the rest, with a line record
+    // per run attributed to the segment's author
+    json["segments"] = serde_json::json!([[1, "The reply", [[2, 3]], "session:hand"]]);
+    json["next_segment_id"] = serde_json::json!(2);
+    fs::write(&path, serde_json::to_string_pretty(&json).unwrap()).unwrap();
+    let instances = publisher.refresh(&init.id).unwrap();
+    assert_eq!(instances, 0, "the username is only on dropped lines");
+    let lines = staged_lines(&f.publish_root, &init.id);
+    assert_eq!(lines.len(), 2, "{lines:#?}");
+    assert!(lines[0].contains(r#""uuid":"a1""#), "{}", lines[0]);
+    assert!(lines[1].contains(r#""uuid":"a2""#), "{}", lines[1]);
+    let records = filtered(&f.publish_root, &init.id);
+    let dropped: Vec<(u32, Option<u32>, &str, &str)> = records
+        .iter()
+        .filter(|r| r.kind == FilteredKind::Line)
+        .map(|r| (r.line, r.line_end, r.reason.as_str(), r.author.as_str()))
+        .collect();
+    assert_eq!(
+        dropped,
+        [
+            (1, Some(1), "scope", "session:hand"),
+            (4, Some(5), "scope", "session:hand"),
+        ]
+    );
+    let after = staged_summary(&f.publish_root, &init.id);
+    assert_eq!(after["line_count"], 2, "{after}");
+    assert_eq!(after["output_tokens"], 10, "{after}");
+    assert!(
+        after["message_count"].as_u64().unwrap() < before["message_count"].as_u64().unwrap(),
+        "{before} -> {after}"
+    );
+    assert_eq!(after["title"], before["title"], "{after}");
+    publisher.check(&init.id).unwrap();
+
+    json["text"][0][2] = serde_json::json!("bogus");
     fs::write(&path, serde_json::to_string_pretty(&json).unwrap()).unwrap();
     let err = publisher.refresh(&init.id).unwrap_err();
     assert!(err.to_string().contains("redaction 1"), "{err}");
     assert!(err.to_string().contains("bogus"), "{err}");
-    assert!(staged_lines(&f.publish_root, &init.id)[0].contains("/home/[REDACTED]/proj"));
+    assert_eq!(staged_lines(&f.publish_root, &init.id).len(), 2);
 }
 
 /// `apply` commits the staged session as a new session object with the
@@ -631,20 +677,12 @@ fn system_filter_leaves_out_system_values_and_drops_the_project_attribute() {
     ];
     let init = publisher.init(&f.original, &filters).unwrap();
 
+    // The system filter has no patterns and no literal paths: what it
+    // leaves out is derived at build time, not recorded as text
     let definition = publisher.definition(&init.id).unwrap();
-    let system: Vec<_> = definition
-        .redactions
-        .iter()
-        .filter(|r| r.author == "filter:system")
-        .collect();
-    // cwd, home_dir, live_cwd, root, host, and the project attribute
-    assert_eq!(system.len(), 6, "{system:#?}");
-    assert!(system.iter().all(|r| r.instances == 1), "{system:#?}");
     assert!(
-        system
-            .iter()
-            .any(|r| r.kind.kind_name() == "attr" && r.rule.as_deref() == Some("attr")),
-        "{system:#?}"
+        definition.text.iter().all(|t| t.author == "filter:pii"),
+        "{definition:#?}"
     );
 
     let lines = staged_lines(&f.publish_root, &init.id);

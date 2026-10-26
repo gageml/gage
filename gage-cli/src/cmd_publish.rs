@@ -17,8 +17,8 @@ use cliclack as cli;
 use gage_core::style::IdHighlighter;
 use gage_core::uuid::short_uuid;
 use gage_publish::{
-    Filter, FilterEntry, FilterSpec, NAMED_FILTERS, PublishDefinition, PublishError, Publisher,
-    REASONS, RedactionInput,
+    Filter, FilterEntry, FilterSpec, NAMED_FILTERS, PublishError, Publisher, REASONS,
+    RedactionInput, TextEntry,
 };
 use gage_session::{Driver, NativeSession, SourceOptions};
 use gage_store::{
@@ -69,14 +69,14 @@ pub enum PublishCommand {
     /// every text value of session at once.
     Redact(RedactArgs),
 
-    /// Show filters and redactions of a pending publish
+    /// Show filters, segments, and redactions of a pending publish
     Status(StatusArgs),
 
-    /// Remove redactions from a pending publish
+    /// Remove text redactions from a pending publish
     ///
     /// Each ID is one listed by status. Staged session is rebuilt from
-    /// original with remaining redactions. A named filter's redaction,
-    /// once removed, is not restored when filter runs again.
+    /// original with remaining redactions. A literal a named filter
+    /// found is allowed once removed: filter does not record it again.
     Undo(UndoArgs),
 
     /// Rebuild a pending publish from its definition
@@ -270,8 +270,8 @@ pub enum FilterCommand {
 
     /// Remove a filter from a pending publish
     ///
-    /// Filter's redactions are removed with it. A redaction undone
-    /// earlier stays suppressed if filter is added again.
+    /// Filter's redactions are removed with it. A literal allowed
+    /// earlier stays allowed if filter is added again.
     Remove(FilterRemoveArgs),
 
     /// Run named filters of a pending publish
@@ -430,7 +430,7 @@ fn pending_rows(
 /// definition, or no count when the definition was deleted.
 fn redaction_count(publisher: &Publisher<'_>, id: &str) -> Result<String, PublishError> {
     match publisher.definition(id) {
-        Ok(definition) => Ok(definition.redactions.len().to_string()),
+        Ok(definition) => Ok(definition.text.len().to_string()),
         Err(PublishError::Store(StoreError::ObjectNotFound(_))) => Ok(String::new()),
         Err(e) => Err(e),
     }
@@ -509,10 +509,8 @@ fn init(args: InitArgs) -> Result<(), CliError> {
         let outcome = publisher
             .init(&record, &filters)
             .map_err(|e| DialogError::Failed(e.to_string()))?;
-        let definition = publisher
-            .definition(&outcome.id)
+        report_filter_redactions(&publisher, &outcome.id)
             .map_err(|e| DialogError::Failed(e.to_string()))?;
-        report_filter_redactions(&definition)?;
         Ok(format!("Staged publish {}", short_uuid(&outcome.id)).into())
     })
 }
@@ -583,20 +581,26 @@ fn filters_step(filters: &[FilterSpec]) -> io::Result<()> {
     dialog::step_list("Filters", filters.iter().map(|f| f.to_string()))
 }
 
-/// Report what the named filters' deterministic rules redacted.
-fn report_filter_redactions(definition: &PublishDefinition) -> io::Result<()> {
+/// Report what the named filters found: the text redactions each
+/// recorded and the spans they produce.
+fn report_filter_redactions(publisher: &Publisher<'_>, id: &str) -> Result<(), PublishError> {
+    let definition = publisher.definition(id)?;
+    let counts = publisher.instances(id)?;
     let by_filter: Vec<(String, usize, usize)> = definition
         .filters
         .iter()
         .filter_map(|f| f.spec().name().map(String::from))
         .map(|name| {
             let author = format!("filter:{name}");
-            let mine: Vec<_> = definition
-                .redactions
+            let mine: Vec<&TextEntry> = definition
+                .text
                 .iter()
-                .filter(|r| r.author == author)
+                .filter(|t| t.author == author)
                 .collect();
-            let instances = mine.iter().map(|r| r.instances).sum();
+            let instances = mine
+                .iter()
+                .map(|t| counts.get(&t.id).copied().unwrap_or(0))
+                .sum();
             (name, mine.len(), instances)
         })
         .collect();
@@ -612,7 +616,8 @@ fn report_filter_redactions(definition: &PublishDefinition) -> io::Result<()> {
                 count(instances, "instance")
             )
         }),
-    )
+    )?;
+    Ok(())
 }
 
 /// Add redactions to a pending publish after confirmation. Every spec
@@ -658,10 +663,11 @@ fn redact(args: RedactArgs) -> Result<(), CliError> {
             "Applied",
             applied.iter().map(|a| {
                 format!(
-                    "{} {} {} ({})",
+                    "{} {:?} ({}{}, {})",
                     a.id,
-                    a.kind,
-                    a.detail,
+                    a.literal,
+                    a.reason,
+                    no_mark(a.mark),
                     count(a.instances, "instance")
                 )
             }),
@@ -718,7 +724,8 @@ fn no_mark(mark: bool) -> &'static str {
     if mark { "" } else { ", no mark" }
 }
 
-/// Show the filters and redactions of a pending publish.
+/// Show the filters, segments, and text redactions of a pending
+/// publish, with the spans each redaction produces.
 fn status(args: StatusArgs) -> Result<(), CliError> {
     let fail = |e: String| CliError::message(format!("gage publish status: {e}"));
     let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
@@ -730,14 +737,13 @@ fn status(args: StatusArgs) -> Result<(), CliError> {
     let definition = publisher
         .definition(&pending.id)
         .map_err(|e| fail(e.to_string()))?;
+    let counts = publisher
+        .instances(&pending.id)
+        .map_err(|e| fail(e.to_string()))?;
 
     println!("Session: {}", short_uuid(&pending.id));
-    println!("Origin:  {}", definition.origin);
-    let filters: Vec<String> = definition
-        .filters
-        .iter()
-        .map(|f| f.spec().to_string())
-        .collect();
+    println!("Origin:  {}", pending.attrs.origin);
+    let filters: Vec<String> = definition.filters.iter().map(filter_cell).collect();
     println!(
         "Filters: {}",
         if filters.is_empty() {
@@ -746,32 +752,71 @@ fn status(args: StatusArgs) -> Result<(), CliError> {
             filters.join(", ")
         }
     );
-    if definition.redactions.is_empty() {
+    if !definition.segments.is_empty() {
+        let header: Vec<String> = ["Id", "Author", "Lines", "Description"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let rows = definition.segments.iter().map(|s| {
+            let lines: Vec<String> = s
+                .lines
+                .iter()
+                .map(|(start, end)| {
+                    if start == end {
+                        start.to_string()
+                    } else {
+                        format!("{start}-{end}")
+                    }
+                })
+                .collect();
+            vec![
+                s.id.to_string(),
+                s.author.clone(),
+                lines.join(","),
+                s.description.clone(),
+            ]
+        });
+        println!("{}", records_table(header, rows));
+    }
+    if !definition.allow.is_empty() {
+        let allowed: Vec<String> = definition
+            .allow
+            .iter()
+            .map(|a| format!("{:?} ({})", a.literal, a.author))
+            .collect();
+        println!("Allowed: {}", allowed.join(", "));
+    }
+    if definition.text.is_empty() {
         println!("No redactions");
         return Ok(());
     }
-    let header: Vec<String> = ["Id", "Author", "Type", "Reason", "Detail", "Instances"]
+    let header: Vec<String> = ["Id", "Author", "Reason", "Text", "Instances"]
         .iter()
         .map(|s| s.to_string())
         .collect();
-    let rows = definition.redactions.iter().map(|r| {
+    let rows = definition.text.iter().map(|t| {
         vec![
-            r.id.to_string(),
-            r.author.clone(),
-            r.kind.kind_name().to_string(),
-            r.kind.reason().to_string(),
-            r.kind.detail(),
-            r.instances.to_string(),
+            t.id.to_string(),
+            t.author.clone(),
+            t.reason.clone(),
+            format!("{}{}", t.literal, no_mark(t.mark)),
+            counts.get(&t.id).copied().unwrap_or(0).to_string(),
         ]
     });
-    let table = Table::from_iter(std::iter::once(header).chain(rows))
+    println!("{}", records_table(header, rows));
+    Ok(())
+}
+
+/// A status table: the header highlighted, the id column plain, the
+/// other columns dimmed, and the last column right-aligned.
+fn records_table(header: Vec<String>, rows: impl Iterator<Item = Vec<String>>) -> String {
+    let width = header.len();
+    Table::from_iter(std::iter::once(header).chain(rows))
         .with(Style::rounded())
         .modify(Rows::first(), style::tty(Color::FG_BRIGHT_YELLOW))
-        .modify(Columns::one(5), Alignment::right())
-        .modify(Columns::new(1..4).not(Rows::first()), style::dim())
-        .to_string();
-    println!("{table}");
-    Ok(())
+        .modify(Columns::one(width - 1), Alignment::right())
+        .modify(Columns::new(1..width - 1).not(Rows::first()), style::dim())
+        .to_string()
 }
 
 /// Remove redactions after confirmation. Every id is checked against
@@ -789,31 +834,34 @@ fn undo(args: UndoArgs) -> Result<(), CliError> {
         .map_err(|e| fail(e.to_string()))?;
     let mut targets = Vec::new();
     for id in &args.ids {
-        let r = definition
-            .redactions
+        let t = definition
+            .text
             .iter()
-            .find(|r| r.id == *id)
+            .find(|t| t.id == *id)
             .ok_or_else(|| fail(format!("no redaction with id {id}")))?;
-        targets.push(r.clone());
+        targets.push(t.clone());
     }
+    let author = resolve_author(None);
 
     dialog::run("Undo redactions", || {
         dialog::step_value("Session", short_uuid(&pending.id))?;
         dialog::step_list(
             "Redactions",
-            targets.iter().map(|r| {
+            targets.iter().map(|t| {
                 format!(
-                    "{} {} {} ({}, {})",
-                    r.id,
-                    r.kind.kind_name(),
-                    r.kind.detail(),
-                    r.kind.reason(),
-                    r.author
+                    "{} {:?} ({}{}, {})",
+                    t.id,
+                    t.literal,
+                    t.reason,
+                    no_mark(t.mark),
+                    t.author
                 )
             }),
         )?;
-        if targets.iter().any(|r| r.author.starts_with("filter:")) {
-            cli::log::remark("A filter's redaction stays removed when the filter runs again")?;
+        if targets.iter().any(|t| t.author.starts_with("filter:")) {
+            cli::log::remark(
+                "A filter's literal is allowed once removed: the filter does not record it again",
+            )?;
         }
         if !args.yes {
             let confirmed = cli::confirm("Continue?").initial_value(true).interact()?;
@@ -822,7 +870,7 @@ fn undo(args: UndoArgs) -> Result<(), CliError> {
             }
         }
         let removed = publisher
-            .undo(&pending.id, &args.ids)
+            .undo(&pending.id, &args.ids, &author)
             .map_err(|e| DialogError::Failed(e.to_string()))?;
         Ok(format!("Removed {}", count(removed.len(), "redaction")).into())
     })
@@ -847,9 +895,10 @@ fn refresh(args: RefreshArgs) -> Result<(), CliError> {
         dialog::step_value(
             "Definition",
             format!(
-                "{}, {}",
+                "{}, {}, {}",
                 count(definition.filters.len(), "filter"),
-                count(definition.redactions.len(), "redaction")
+                count(definition.segments.len(), "segment"),
+                count(definition.text.len(), "redaction")
             ),
         )?;
         if !args.yes {
@@ -858,10 +907,9 @@ fn refresh(args: RefreshArgs) -> Result<(), CliError> {
                 return Err(DialogError::Canceled);
             }
         }
-        let rebuilt = publisher
+        let instances = publisher
             .refresh(&pending.id)
             .map_err(|e| DialogError::Failed(e.to_string()))?;
-        let instances: usize = rebuilt.redactions.iter().map(|r| r.instances).sum();
         Ok(format!(
             "Refreshed publish {}, {}",
             short_uuid(&pending.id),
@@ -900,10 +948,11 @@ fn filter_add(args: FilterAddArgs) -> Result<(), CliError> {
                 return Err(DialogError::Canceled);
             }
         }
-        let definition = publisher
+        publisher
             .filter_add(&pending.id, &filter)
             .map_err(|e| DialogError::Failed(e.to_string()))?;
-        report_filter_redactions(&definition)?;
+        report_filter_redactions(&publisher, &pending.id)
+            .map_err(|e| DialogError::Failed(e.to_string()))?;
         Ok(format!("Added filter {}", value_cell(&filter.to_string())).into())
     })
 }
@@ -927,9 +976,9 @@ fn filter_remove(args: FilterRemoveArgs) -> Result<(), CliError> {
     let target = filter_cell(entry);
     let author = filter_author(entry);
     let redactions = definition
-        .redactions
+        .text
         .iter()
-        .filter(|r| Some(r.author.as_str()) == author.as_deref())
+        .filter(|t| Some(t.author.as_str()) == author.as_deref())
         .count();
 
     dialog::run("Remove publish filter", || {
@@ -984,10 +1033,11 @@ fn filter_run(args: FilterRunArgs) -> Result<(), CliError> {
                 return Err(DialogError::Canceled);
             }
         }
-        let definition = publisher
+        publisher
             .filter_run(&pending.id, args.name.as_deref())
             .map_err(|e| DialogError::Failed(e.to_string()))?;
-        report_filter_redactions(&definition)?;
+        report_filter_redactions(&publisher, &pending.id)
+            .map_err(|e| DialogError::Failed(e.to_string()))?;
         Ok(format!("Ran {}", count(names.len(), "filter")).into())
     })
 }
@@ -1016,9 +1066,9 @@ fn filter_list(args: FilterListArgs) -> Result<(), CliError> {
     let rows = definition.filters.iter().map(|f| {
         let author = filter_author(f);
         let redactions = definition
-            .redactions
+            .text
             .iter()
-            .filter(|r| Some(r.author.as_str()) == author.as_deref())
+            .filter(|t| Some(t.author.as_str()) == author.as_deref())
             .count();
         let kind = match author {
             Some(_) => "name",
@@ -1105,7 +1155,11 @@ fn apply(args: ApplyArgs) -> Result<(), CliError> {
                 e => fail(e.to_string()),
             })?;
     }
-    let instances: usize = definition.redactions.iter().map(|r| r.instances).sum();
+    let instances: usize = publisher
+        .instances(&pending.id)
+        .map_err(|e| fail(e.to_string()))?
+        .values()
+        .sum();
 
     dialog::run("Apply publish", || {
         dialog::step_value("Session", short_uuid(&pending.id))?;
@@ -1113,9 +1167,10 @@ fn apply(args: ApplyArgs) -> Result<(), CliError> {
         dialog::step_value(
             "Definition",
             format!(
-                "{}, {}, {}",
+                "{}, {}, {}, {}",
                 count(definition.filters.len(), "filter"),
-                count(definition.redactions.len(), "redaction"),
+                count(definition.segments.len(), "segment"),
+                count(definition.text.len(), "redaction"),
                 count(instances, "instance")
             ),
         )?;

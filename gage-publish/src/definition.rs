@@ -1,14 +1,17 @@
 //! The publish definition, `publish/<id>.publish.json`: what the
-//! staged session is derived from. The filters, every redaction
-//! instruction with its author, and the suppressions. It may hold the
-//! redacted literals, because it is instructions and is never
-//! committed.
+//! staged session is derived from. The filters with their prompts,
+//! the segments, every text redaction with its author, the literals
+//! a filter may not record again, and the counters ids come from. It
+//! may hold the redacted literals, because it is instructions and is
+//! never committed. The original the staged session derives from is
+//! named by the staged `attrs.json`, not here.
 
+use std::collections::HashSet;
 use std::fmt;
 use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
-use serde_json_path::JsonPath;
+use serde_json::json;
 
 use crate::PublishError;
 
@@ -125,13 +128,47 @@ impl fmt::Display for FilterSpec {
     }
 }
 
-/// A filter as the definition records it.
+/// A filter as the definition records it: a name, an instruction, or
+/// a name with a prompt that supplements the filter's own
+/// instructions. A bare name is written as a string.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "FilterRepr", into = "FilterRepr")]
 pub struct FilterEntry {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum FilterRepr {
+    Name(String),
+    Full {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prompt: Option<String>,
+    },
+}
+
+impl From<FilterRepr> for FilterEntry {
+    fn from(repr: FilterRepr) -> Self {
+        match repr {
+            FilterRepr::Name(name) => FilterEntry {
+                name: Some(name),
+                prompt: None,
+            },
+            FilterRepr::Full { name, prompt } => FilterEntry { name, prompt },
+        }
+    }
+}
+
+impl From<FilterEntry> for FilterRepr {
+    fn from(entry: FilterEntry) -> Self {
+        match (entry.name, entry.prompt) {
+            (Some(name), None) => FilterRepr::Name(name),
+            (name, prompt) => FilterRepr::Full { name, prompt },
+        }
+    }
 }
 
 impl FilterEntry {
@@ -157,101 +194,111 @@ impl FilterEntry {
     }
 }
 
-/// What one redaction instruction does.
+/// A segment: lines of the original the publication keeps, under the
+/// description its author gave. When a definition has any segment,
+/// every line outside every segment is dropped.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "lowercase")]
-pub enum RedactionKind {
-    /// Redact `literal` wherever it appears in the session. `mark`
-    /// puts the marker in its place; otherwise the span is removed
-    Text {
-        reason: String,
-        literal: String,
-        #[serde(default = "mark_default")]
-        mark: bool,
-    },
-    /// Leave out every value the JSONPath `path` selects, in every
-    /// entry
-    Path { path: String, reason: String },
-    /// Leave the attribute `name` out of the published `attrs.json`
-    Attr { name: String, reason: String },
-}
-
-fn mark_default() -> bool {
-    true
-}
-
-impl RedactionKind {
-    pub fn reason(&self) -> &str {
-        match self {
-            RedactionKind::Text { reason, .. }
-            | RedactionKind::Path { reason, .. }
-            | RedactionKind::Attr { reason, .. } => reason,
-        }
-    }
-
-    /// The kind's name as `status` shows it.
-    pub fn kind_name(&self) -> &'static str {
-        match self {
-            RedactionKind::Text { .. } => "text",
-            RedactionKind::Path { .. } => "path",
-            RedactionKind::Attr { .. } => "attr",
-        }
-    }
-
-    /// What the redaction targets, as `status` shows it.
-    pub fn detail(&self) -> String {
-        match self {
-            RedactionKind::Text { literal, mark, .. } => {
-                format!("{literal}{}", if *mark { "" } else { " (no mark)" })
-            }
-            RedactionKind::Path { path, .. } => path.clone(),
-            RedactionKind::Attr { name, .. } => name.clone(),
-        }
-    }
-}
-
-/// One redaction instruction of the definition.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Redaction {
+#[serde(from = "SegmentRepr", into = "SegmentRepr")]
+pub struct Segment {
     pub id: u64,
+    pub description: String,
+    /// Inclusive 1-based line ranges
+    pub lines: Vec<(u32, u32)>,
+    pub author: String,
+}
+
+type SegmentRepr = (u64, String, Vec<(u32, u32)>, String);
+
+impl From<SegmentRepr> for Segment {
+    fn from((id, description, lines, author): SegmentRepr) -> Self {
+        Segment {
+            id,
+            description,
+            lines,
+            author,
+        }
+    }
+}
+
+impl From<Segment> for SegmentRepr {
+    fn from(s: Segment) -> Self {
+        (s.id, s.description, s.lines, s.author)
+    }
+}
+
+/// One text redaction: `literal` is redacted wherever it appears in a
+/// text value, replaced by the marker when `mark` is set and removed
+/// otherwise.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "TextRepr", into = "TextRepr")]
+pub struct TextEntry {
+    pub id: u64,
+    pub literal: String,
+    pub reason: String,
     /// `user:<name>`, `session:<id>`, or `filter:<name>`
     pub author: String,
-    /// For a filter's redaction, the rule that produced it: a pattern
-    /// name or a typed path
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rule: Option<String>,
-    /// How many instances the last build recorded for it
-    #[serde(default)]
-    pub instances: usize,
-    #[serde(flatten)]
-    pub kind: RedactionKind,
+    pub mark: bool,
 }
 
-/// A filter's redaction that `undo` removed and a re-run of the
-/// filter must not restore: the filter, the rule, and the redaction
-/// it produced.
+type TextRepr = (u64, String, String, String, bool);
+
+impl From<TextRepr> for TextEntry {
+    fn from((id, literal, reason, author, mark): TextRepr) -> Self {
+        TextEntry {
+            id,
+            literal,
+            reason,
+            author,
+            mark,
+        }
+    }
+}
+
+impl From<TextEntry> for TextRepr {
+    fn from(t: TextEntry) -> Self {
+        (t.id, t.literal, t.reason, t.author, t.mark)
+    }
+}
+
+/// A literal a filter found that `author` removed. A filter run does
+/// not record it again.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Suppression {
+#[serde(from = "AllowRepr", into = "AllowRepr")]
+pub struct Allow {
+    pub literal: String,
     pub author: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rule: Option<String>,
-    #[serde(flatten)]
-    pub kind: RedactionKind,
+}
+
+type AllowRepr = (String, String);
+
+impl From<AllowRepr> for Allow {
+    fn from((literal, author): AllowRepr) -> Self {
+        Allow { literal, author }
+    }
+}
+
+impl From<Allow> for AllowRepr {
+    fn from(a: Allow) -> Self {
+        (a.literal, a.author)
+    }
 }
 
 /// The definition of one pending publish.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PublishDefinition {
-    /// The original, `session:<id>@<commit>`
-    pub origin: String,
     pub filters: Vec<FilterEntry>,
     #[serde(default)]
-    pub redactions: Vec<Redaction>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub suppressions: Vec<Suppression>,
-    /// The id the next redaction takes
+    pub segments: Vec<Segment>,
+    #[serde(default)]
+    pub text: Vec<TextEntry>,
+    #[serde(default)]
+    pub allow: Vec<Allow>,
+    /// The id the next segment takes
     #[serde(default = "first_id")]
-    pub next_id: u64,
+    pub next_segment_id: u64,
+    /// The id the next text redaction takes
+    #[serde(default = "first_id")]
+    pub next_text_id: u64,
 }
 
 fn first_id() -> u64 {
@@ -259,13 +306,14 @@ fn first_id() -> u64 {
 }
 
 impl PublishDefinition {
-    pub fn new(origin: &str, filters: &[FilterSpec]) -> Self {
+    pub fn new(filters: &[FilterSpec]) -> Self {
         Self {
-            origin: origin.to_string(),
             filters: filters.iter().map(FilterEntry::new).collect(),
-            redactions: Vec::new(),
-            suppressions: Vec::new(),
-            next_id: 1,
+            segments: Vec::new(),
+            text: Vec::new(),
+            allow: Vec::new(),
+            next_segment_id: 1,
+            next_text_id: 1,
         }
     }
 
@@ -303,68 +351,131 @@ impl PublishDefinition {
         }
     }
 
-    /// Append a redaction under the next id and return its id.
-    pub fn push(&mut self, author: &str, rule: Option<String>, kind: RedactionKind) -> u64 {
-        let id = self.next_id;
-        self.next_id += 1;
-        self.redactions.push(Redaction {
+    /// Append a text redaction under the next id and return its id.
+    pub fn push_text(&mut self, literal: &str, reason: &str, author: &str, mark: bool) -> u64 {
+        let id = self.next_text_id;
+        self.next_text_id += 1;
+        self.text.push(TextEntry {
             id,
+            literal: literal.to_string(),
+            reason: reason.to_string(),
             author: author.to_string(),
-            rule,
-            instances: 0,
-            kind,
+            mark,
         });
         id
     }
 
-    /// Whether a filter's candidate redaction was undone before and
-    /// must not be recorded again.
-    pub fn is_suppressed(&self, author: &str, kind: &RedactionKind) -> bool {
-        self.suppressions
+    /// Append a segment under the next id and return its id.
+    pub fn push_segment(&mut self, description: &str, lines: &[(u32, u32)], author: &str) -> u64 {
+        let id = self.next_segment_id;
+        self.next_segment_id += 1;
+        self.segments.push(Segment {
+            id,
+            description: description.to_string(),
+            lines: lines.to_vec(),
+            author: author.to_string(),
+        });
+        id
+    }
+
+    /// Whether a filter may not record `literal`: it was removed
+    /// before. Literals match the way redaction does, without case.
+    pub fn is_allowed(&self, literal: &str) -> bool {
+        self.allow
             .iter()
-            .any(|s| s.author == author && s.kind == *kind)
+            .any(|a| a.literal.eq_ignore_ascii_case(literal))
     }
 
     /// Check a definition as read from disk, which may have been
-    /// edited by hand: every reason is a known code, every literal is
-    /// non-empty, every path is JSONPath, and ids are unique and below
-    /// `next_id`.
+    /// edited by hand: every named filter is known, every reason is a
+    /// known code, every literal is non-empty, every segment has
+    /// ordered 1-based ranges, and ids are unique and below their
+    /// counters.
     pub fn validate(&self) -> Result<(), PublishError> {
-        self.original()?;
-        let mut seen = std::collections::HashSet::new();
-        for r in &self.redactions {
-            let at = |why: String| PublishError::Input(format!("redaction {}: {why}", r.id));
-            if !seen.insert(r.id) {
-                return Err(at("id is not unique".to_string()));
-            }
-            if r.id >= self.next_id {
-                return Err(at(format!("id is not below next_id {}", self.next_id)));
-            }
-            check_reason(r.kind.reason()).map_err(|e| at(e.to_string()))?;
-            match &r.kind {
-                RedactionKind::Text { literal, .. } if literal.is_empty() => {
-                    return Err(at("literal is empty".into()));
+        for f in &self.filters {
+            match (&f.name, &f.prompt) {
+                (Some(name), _) if !NAMED_FILTERS.contains(&name.as_str()) => {
+                    return Err(PublishError::Input(format!("unknown filter {name:?}")));
                 }
-                RedactionKind::Path { path, .. } => {
-                    JsonPath::parse(path).map_err(|e| at(format!("path {path:?}: {e}")))?;
+                (None, None) => {
+                    return Err(PublishError::Input(
+                        "a filter has neither a name nor a prompt".into(),
+                    ));
                 }
                 _ => {}
             }
         }
+        let mut seen = HashSet::new();
+        for s in &self.segments {
+            let at = |why: String| PublishError::Input(format!("segment {}: {why}", s.id));
+            if !seen.insert(s.id) {
+                return Err(at("id is not unique".into()));
+            }
+            if s.id >= self.next_segment_id {
+                return Err(at(format!(
+                    "id is not below next_segment_id {}",
+                    self.next_segment_id
+                )));
+            }
+            if s.lines.is_empty() {
+                return Err(at("no lines".into()));
+            }
+            if s.lines
+                .iter()
+                .any(|(start, end)| *start == 0 || end < start)
+            {
+                return Err(at(
+                    "lines are 1-based and a range's end is not before its start".into(),
+                ));
+            }
+        }
+        let mut seen = HashSet::new();
+        for t in &self.text {
+            let at = |why: String| PublishError::Input(format!("redaction {}: {why}", t.id));
+            if !seen.insert(t.id) {
+                return Err(at("id is not unique".into()));
+            }
+            if t.id >= self.next_text_id {
+                return Err(at(format!(
+                    "id is not below next_text_id {}",
+                    self.next_text_id
+                )));
+            }
+            if t.literal.is_empty() {
+                return Err(at("literal is empty".into()));
+            }
+            check_reason(&t.reason).map_err(|e| at(e.to_string()))?;
+        }
         Ok(())
     }
 
-    /// The `(id, commit)` of the original the `origin` names.
-    pub fn original(&self) -> Result<(&str, &str), PublishError> {
-        self.origin
-            .strip_prefix("session:")
-            .and_then(|rest| rest.split_once('@'))
-            .ok_or_else(|| {
-                PublishError::Input(format!(
-                    "origin {:?} is not session:<id>@<commit>",
-                    self.origin
-                ))
-            })
+    /// The definition as the sidecar holds it: one filter, segment,
+    /// redaction, or allowed literal per line, so the file reads and
+    /// edits by hand.
+    pub fn to_json_text(&self) -> String {
+        fn list<T: Serialize>(out: &mut String, key: &str, items: &[T]) {
+            out.push_str(&format!("  \"{key}\": ["));
+            for (i, item) in items.iter().enumerate() {
+                out.push_str("\n    ");
+                out.push_str(&json!(item).to_string());
+                if i + 1 < items.len() {
+                    out.push(',');
+                } else {
+                    out.push_str("\n  ");
+                }
+            }
+            out.push_str("],\n");
+        }
+        let mut out = String::from("{\n");
+        list(&mut out, "filters", &self.filters);
+        list(&mut out, "segments", &self.segments);
+        list(&mut out, "text", &self.text);
+        list(&mut out, "allow", &self.allow);
+        out.push_str(&format!(
+            "  \"next_segment_id\": {},\n  \"next_text_id\": {}\n}}\n",
+            self.next_segment_id, self.next_text_id
+        ));
+        out
     }
 }
 
@@ -437,40 +548,102 @@ mod tests {
         assert!(Reason::find("nope").is_none());
     }
 
+    /// The sidecar holds one filter, segment, redaction, or allowed
+    /// literal per line, a bare filter name as a string, and reads
+    /// back equal.
     #[test]
-    fn definition_round_trips_and_numbers_redactions() {
-        let mut d = PublishDefinition::new(
-            "session:abc@def",
-            &["pii".parse().unwrap(), "Ducks only".parse().unwrap()],
+    fn definition_writes_one_entry_per_line_and_round_trips() {
+        let mut d =
+            PublishDefinition::new(&["pii".parse().unwrap(), "Ducks only".parse().unwrap()]);
+        d.filters.push(FilterEntry {
+            name: Some("system".into()),
+            prompt: Some("Watch for hosts.".into()),
+        });
+        let first = d.push_text("abc", "secret", "user:g", true);
+        let second = d.push_text("Sam", "pii", "filter:pii", false);
+        let segment = d.push_segment("The reply", &[(100, 125), (130, 130)], "session:s");
+        d.allow.push(Allow {
+            literal: "hunter2".into(),
+            author: "user:g".into(),
+        });
+        assert_eq!((first, second, segment), (1, 2, 1));
+        let text = d.to_json_text();
+        assert_eq!(
+            text,
+            concat!(
+                "{\n",
+                "  \"filters\": [\n",
+                "    \"pii\",\n",
+                "    {\"prompt\":\"Ducks only\"},\n",
+                "    {\"name\":\"system\",\"prompt\":\"Watch for hosts.\"}\n",
+                "  ],\n",
+                "  \"segments\": [\n",
+                "    [1,\"The reply\",[[100,125],[130,130]],\"session:s\"]\n",
+                "  ],\n",
+                "  \"text\": [\n",
+                "    [1,\"abc\",\"secret\",\"user:g\",true],\n",
+                "    [2,\"Sam\",\"pii\",\"filter:pii\",false]\n",
+                "  ],\n",
+                "  \"allow\": [\n",
+                "    [\"hunter2\",\"user:g\"]\n",
+                "  ],\n",
+                "  \"next_segment_id\": 2,\n",
+                "  \"next_text_id\": 3\n",
+                "}\n",
+            )
         );
-        assert_eq!(d.original().unwrap(), ("abc", "def"));
-        let first = d.push(
-            "user:g",
-            None,
-            RedactionKind::Text {
-                reason: "secret".into(),
-                literal: "abc".into(),
-                mark: true,
-            },
-        );
-        let second = d.push(
-            "filter:pii",
-            Some("email".into()),
-            RedactionKind::Path {
-                path: "$.x".into(),
-                reason: "pii".into(),
-            },
-        );
-        assert_eq!((first, second), (1, 2));
-        let text = serde_json::to_string_pretty(&d).unwrap();
-        assert!(text.contains("\"type\": \"text\""), "{text}");
-        assert!(text.contains("\"name\": \"pii\""), "{text}");
-        assert!(text.contains("\"prompt\": \"Ducks only\""), "{text}");
         let back: PublishDefinition = serde_json::from_str(&text).unwrap();
         assert_eq!(back, d);
         assert_eq!(
             back.filters[1].spec(),
             FilterSpec::Prompt("Ducks only".into())
+        );
+        assert_eq!(back.named_filters(), ["pii", "system"]);
+        assert!(back.is_allowed("HUNTER2"));
+        assert!(!back.is_allowed("hunter"));
+        assert_eq!(
+            PublishDefinition::new(&[]).to_json_text(),
+            "{\n  \"filters\": [],\n  \"segments\": [],\n  \"text\": [],\n  \"allow\": [],\n  \"next_segment_id\": 1,\n  \"next_text_id\": 1\n}\n"
+        );
+    }
+
+    /// A missing list or counter reads as empty or 1, and the checks
+    /// name the entry that is wrong.
+    #[test]
+    fn validate_names_the_bad_entry() {
+        let d: PublishDefinition = serde_json::from_str(r#"{"filters": ["pii"]}"#).unwrap();
+        assert_eq!(d, PublishDefinition::new(&["pii".parse().unwrap()]));
+        d.validate().unwrap();
+        let check = |json: &str, expect: &str| {
+            let d: PublishDefinition = serde_json::from_str(json).unwrap();
+            let err = d.validate().unwrap_err().to_string();
+            assert!(err.contains(expect), "{err}");
+        };
+        check(r#"{"filters": ["nope"]}"#, "unknown filter");
+        check(r#"{"filters": [{}]}"#, "neither a name nor a prompt");
+        check(
+            r#"{"filters": [], "text": [[1, "", "pii", "u", true]], "next_text_id": 2}"#,
+            "redaction 1: literal is empty",
+        );
+        check(
+            r#"{"filters": [], "text": [[1, "x", "nope", "u", true]], "next_text_id": 2}"#,
+            "redaction 1: unknown reason",
+        );
+        check(
+            r#"{"filters": [], "text": [[1, "x", "pii", "u", true]]}"#,
+            "not below next_text_id",
+        );
+        check(
+            r#"{"filters": [], "text": [[1, "x", "pii", "u", true], [1, "y", "pii", "u", true]], "next_text_id": 3}"#,
+            "not unique",
+        );
+        check(
+            r#"{"filters": [], "segments": [[1, "d", [[5, 2]], "u"]], "next_segment_id": 2}"#,
+            "segment 1: lines are 1-based",
+        );
+        check(
+            r#"{"filters": [], "segments": [[1, "d", [], "u"]], "next_segment_id": 2}"#,
+            "segment 1: no lines",
         );
     }
 }
