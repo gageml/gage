@@ -38,9 +38,9 @@ Tables:
   paths written, null when unknown
 - text_block (session_id, line, seq, text) - each text value of an entry in
   document order; ids, timestamps, and enumerations are left out
-- redacted (session_id, kind, line, line_end, property, span_start, span_end,
-  reason, author) - a publish's changes to its original, by original line;
-  `kind` is line, span, or value
+- filtered (session_id, kind, line, line_end, ref, span_start, span_end,
+  reason, author) - rules a publish applied to its original; `kind` is
+  line, value, text, or attr
 - note (id, name, author, value, text, metadata, target, scan, work_id,
   created, modified) - `name` is the note kind
 - session_note (session_id, note_id, lines) - notes on a session, with the

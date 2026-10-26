@@ -23,7 +23,7 @@ use crate::content::GitContentSource;
 use crate::dataset::{DatasetMembers, DatasetStore};
 use crate::index::{ObjectQuery, Order, SelectedTip};
 use crate::object::{EditOutcome, Object, ObjectTree, object_ref, require_type};
-use crate::publish::{REDACTED_FILE, RedactedRecord, parse_redacted};
+use crate::publish::{FILTERED_FILE, FilteredRecord, parse_filtered};
 use crate::writer::{TreeInput, is_dot_git, mktree, write_blob_stream};
 use crate::{Store, StoreError};
 
@@ -446,13 +446,13 @@ impl<'a> SessionStore<'a> {
         decode(object)
     }
 
-    /// The `redacted.json` records of the session version at
-    /// `commit_sha`: what its publish changed in the original. A
+    /// The `filtered.json` records of the session version at
+    /// `commit_sha`: what its publish applied to the original. A
     /// session that is not a publish has none.
-    pub fn redacted(&self, commit_sha: &str) -> Result<Vec<RedactedRecord>, StoreError> {
+    pub fn filtered(&self, commit_sha: &str) -> Result<Vec<FilteredRecord>, StoreError> {
         let object = self.store.read_object(commit_sha)?;
-        match object.tree.blobs.get(REDACTED_FILE) {
-            Some(bytes) => parse_redacted(bytes),
+        match object.tree.blobs.get(FILTERED_FILE) {
+            Some(bytes) => parse_filtered(bytes),
             None => Ok(Vec::new()),
         }
     }

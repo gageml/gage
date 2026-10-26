@@ -12,9 +12,9 @@
 //! sessions: the core resolves the session set and plans every read
 //! ([`scope`]), and the driver that wrote each session deserializes
 //! its bytes into normalized rows the core turns into batches
-//! ([`rows`], [`stored_rows`]). `redacted` is the records of a
-//! published session's `redacted.json`, over the same session set
-//! ([`redacted`]).
+//! ([`rows`], [`stored_rows`]). `filtered` is the records of a
+//! published session's `filtered.json`, over the same session set
+//! ([`filtered`]).
 //! `note` is one row per live note object, from
 //! [`gage_store::StoredNoteTable`]. `issue` is one row per live issue
 //! object and `issue_event` one row per change entry across them.
@@ -40,12 +40,12 @@
 
 mod age;
 mod blame;
+pub mod filtered;
 mod json;
 mod native;
 mod patch;
 mod print_format;
 mod project;
-pub mod redacted;
 mod repl;
 pub mod rows;
 pub mod scope;
@@ -204,8 +204,8 @@ impl ContextBuilder {
                 )),
             ),
             (
-                "redacted",
-                Arc::new(StoredRowsTable::new(RowKind::Redacted, sessions)),
+                "filtered",
+                Arc::new(StoredRowsTable::new(RowKind::Filtered, sessions)),
             ),
             ("note", Arc::new(StoredNoteTable::new(Arc::clone(&store)))),
             ("dataset", dataset_table(Arc::clone(&store))),
@@ -267,7 +267,7 @@ impl ContextBuilder {
 
 /// Register one scan's tables: `session` at the members' linked
 /// versions, `entry`, `message`, `tool_use`, `text_block`, and
-/// `redacted` over them, and every other table from the scan source.
+/// `filtered` over them, and every other table from the scan source.
 fn build_scan_scope(
     ctx: SessionContext,
     store: Arc<Mutex<Store>>,
@@ -320,8 +320,8 @@ fn build_scan_scope(
             )),
         ),
         (
-            "redacted",
-            Arc::new(StoredRowsTable::new(RowKind::Redacted, sessions)),
+            "filtered",
+            Arc::new(StoredRowsTable::new(RowKind::Filtered, sessions)),
         ),
     ];
     tables.extend(scan_scope_tables(&store, scope.source()));
@@ -1160,12 +1160,12 @@ mod tests {
         assert_eq!(filtered, ["plan", "done"]);
     }
 
-    /// `redacted` reads a published session's `redacted.json`: one
+    /// `filtered` reads a published session's `filtered.json`: one
     /// row per record with the record's fields in the table's columns,
     /// under the scope's session filter and the `line` filter. The
     /// original session has no rows.
     #[tokio::test]
-    async fn redacted_reads_a_published_sessions_records() {
+    async fn filtered_reads_a_published_sessions_records() {
         let (tmp, store) = open_store();
         let claude_root = tempfile::tempdir().unwrap();
         let native_id = "11111111-2222-3333-4444-888888888888";
@@ -1210,13 +1210,13 @@ mod tests {
                 .collect();
             std::fs::write(&staged, format!("{}\n{}\n", lines[0], lines[2])).unwrap();
             std::fs::write(
-                layout.redacted_file(),
+                layout.filtered_file(),
                 concat!(
-                    "[\n",
-                    r#"  ["span", 1, "/message/content", 6, 10, "pii", "filter:pii"],"#,
+                    "{\n",
+                    r#"  "lines": [[2, "scope", "user:t"]],"#,
                     "\n",
-                    r#"  ["line", 2, 2, "scope", "user:t"]"#,
-                    "\n]\n",
+                    r#"  "text": [[1, "/message/content", 6, 16, "pii", "filter:pii"]]"#,
+                    "\n}\n",
                 ),
             )
             .unwrap();
@@ -1232,30 +1232,30 @@ mod tests {
             &ctx,
             "SELECT kind || ' ' || CAST(line AS VARCHAR) \
                  || ' ' || COALESCE(CAST(line_end AS VARCHAR), '-') \
-                 || ' ' || COALESCE(property, '-') \
+                 || ' ' || COALESCE(ref, '-') \
                  || ' ' || COALESCE(CAST(span_start AS VARCHAR), '-') \
                  || ' ' || COALESCE(CAST(span_end AS VARCHAR), '-') \
                  || ' ' || reason || ' ' || author \
-             FROM redacted ORDER BY line, kind",
+             FROM filtered ORDER BY line, kind",
         )
         .await;
         assert_eq!(
             rows,
             [
-                "span 1 - /message/content 6 10 pii filter:pii",
+                "text 1 - /message/content 6 16 pii filter:pii",
                 "line 2 2 - - - scope user:t",
             ]
         );
 
         let by_session = strings(
             &ctx,
-            &format!("SELECT kind FROM redacted WHERE session_id = '{published_id}' AND line = 2"),
+            &format!("SELECT kind FROM filtered WHERE session_id = '{published_id}' AND line = 2"),
         )
         .await;
         assert_eq!(by_session, ["line"]);
         let none = strings(
             &ctx,
-            &format!("SELECT kind FROM redacted WHERE session_id = '{original_id}'"),
+            &format!("SELECT kind FROM filtered WHERE session_id = '{original_id}'"),
         )
         .await;
         assert!(none.is_empty(), "{none:?}");

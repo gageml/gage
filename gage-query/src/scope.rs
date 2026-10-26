@@ -97,7 +97,7 @@ impl ScanScope {
     }
 }
 
-use crate::redacted::redacted_batch;
+use crate::filtered::filtered_batch;
 use crate::rows::{RowCache, derive_batch};
 
 /// One stored session version selected for a scan
@@ -336,30 +336,30 @@ impl SessionSet {
         Ok(batch)
     }
 
-    /// The `redacted` batch of `session`: the records of its
-    /// `redacted.json`, from the working tree of a pending publish or
+    /// The `filtered` batch of `session`: the records of its
+    /// `filtered.json`, from the working tree of a pending publish or
     /// the blob of a commit, cached as [`rows`] caches the derived
     /// batch.
     ///
     /// [`rows`]: SessionSet::rows
-    pub(crate) fn redacted(
+    pub(crate) fn filtered(
         &self,
         session: &StoredSessionRef,
         cache: &RowCache,
     ) -> Result<Arc<RecordBatch>> {
-        if let Some(batch) = cache.get_redacted(&session.commit) {
+        if let Some(batch) = cache.get_filtered(&session.commit) {
             return Ok(batch);
         }
         let records = match &session.root {
-            Some(root) => PublishDirLayout::new(root).read_redacted(),
+            Some(root) => PublishDirLayout::new(root).read_filtered(),
             None => {
                 let store = self.lock();
-                SessionStore::from(&*store).redacted(&session.commit)
+                SessionStore::from(&*store).filtered(&session.commit)
             }
         }
         .map_err(external)?;
-        let batch = Arc::new(redacted_batch(&session.id, &records)?);
-        cache.insert_redacted(&session.commit, Arc::clone(&batch));
+        let batch = Arc::new(filtered_batch(&session.id, &records)?);
+        cache.insert_filtered(&session.commit, Arc::clone(&batch));
         Ok(batch)
     }
 

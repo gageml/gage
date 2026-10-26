@@ -5,7 +5,7 @@
 //! plus a `yaml()` serializer. The two follow the same pattern so the body
 //! pane renders them through the same highlighter path.
 
-use gage_store::{NoteValue, RedactedKind};
+use gage_store::{FilteredKind, NoteValue};
 use serde_json::Value;
 
 pub struct Document {
@@ -19,20 +19,20 @@ pub struct Document {
     /// yields them, which is the order of the calls in the session
     pub tool_uses: Vec<ToolUse>,
     pub notes: Vec<Note>,
-    /// The records of a published session's `redacted.json`, in
+    /// The records of a published session's `filtered.json`, in
     /// original line order; empty for a session that is not a publish
     pub redactions: Vec<Redaction>,
 }
 
-/// One record of a published session's `redacted.json`. Its lines
+/// One record of a published session's `filtered.json`. Its lines
 /// are the original session's; [`Document::original_line`] maps an
 /// entry of the derived session back to them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Redaction {
-    pub kind: RedactedKind,
+    pub kind: FilteredKind,
     pub line: u32,
     pub line_end: Option<u32>,
-    pub property: Option<String>,
+    pub reference: Option<String>,
     pub span_start: Option<u64>,
     pub span_end: Option<u64>,
     pub reason: String,
@@ -43,8 +43,8 @@ impl Redaction {
     /// The original lines a `Line` record dropped, inclusive.
     fn dropped_lines(&self) -> Option<(u32, u32)> {
         match self.kind {
-            RedactedKind::Line => Some((self.line, self.line_end.unwrap_or(self.line))),
-            RedactedKind::Span | RedactedKind::Value | RedactedKind::Attr => None,
+            FilteredKind::Line => Some((self.line, self.line_end.unwrap_or(self.line))),
+            FilteredKind::Value | FilteredKind::Text | FilteredKind::Attr => None,
         }
     }
 }
@@ -115,15 +115,14 @@ impl Document {
         Some(line + shift)
     }
 
-    /// The `Span` and `Value` records on entry `index`, in record
-    /// order.
+    /// The `Text` records on entry `index`, in record order.
     pub fn entry_redactions(&self, index: usize) -> Vec<&Redaction> {
         let Some(line) = self.original_line(index) else {
             return Vec::new();
         };
         self.redactions
             .iter()
-            .filter(|r| r.kind != RedactedKind::Line && r.line == line)
+            .filter(|r| r.kind == FilteredKind::Text && r.line == line)
             .collect()
     }
 
@@ -329,14 +328,14 @@ mod tests {
 
     use super::*;
 
-    fn redaction(kind: RedactedKind, line: u32, line_end: Option<u32>) -> Redaction {
+    fn redaction(kind: FilteredKind, line: u32, line_end: Option<u32>) -> Redaction {
         Redaction {
             kind,
             line,
             line_end,
-            property: (kind != RedactedKind::Line).then(|| "/message/content".to_string()),
-            span_start: (kind == RedactedKind::Span).then_some(0),
-            span_end: (kind == RedactedKind::Span).then_some(3),
+            reference: (kind != FilteredKind::Line).then(|| "/message/content".to_string()),
+            span_start: (kind == FilteredKind::Text).then_some(0),
+            span_end: (kind == FilteredKind::Text).then_some(10),
             reason: "pii".to_string(),
             author: "filter:pii".to_string(),
         }
@@ -366,12 +365,14 @@ mod tests {
             tool_uses: Vec::new(),
             notes: Vec::new(),
             redactions: vec![
-                redaction(RedactedKind::Span, 1, None),
-                redaction(RedactedKind::Line, 2, Some(3)),
-                redaction(RedactedKind::Line, 3, Some(3)),
-                redaction(RedactedKind::Value, 5, None),
-                redaction(RedactedKind::Line, 6, None),
-                redaction(RedactedKind::Line, 9, Some(10)),
+                redaction(FilteredKind::Text, 1, None),
+                redaction(FilteredKind::Line, 2, Some(3)),
+                redaction(FilteredKind::Line, 3, Some(3)),
+                redaction(FilteredKind::Text, 5, None),
+                redaction(FilteredKind::Line, 6, None),
+                redaction(FilteredKind::Line, 9, Some(10)),
+                redaction(FilteredKind::Value, 0, None),
+                redaction(FilteredKind::Attr, 0, None),
             ],
         }
     }
@@ -400,17 +401,18 @@ mod tests {
         assert_eq!(doc.original_line(5), None);
     }
 
-    /// Text records are matched to entries by original line, and a
-    /// run lists every line record that touches it.
+    /// Text records are matched to entries by original line, a value
+    /// or attr rule is on no entry, and a run lists every line record
+    /// that touches it.
     #[test]
     fn records_are_found_by_original_line() {
         let doc = derived();
-        let kinds = |index: usize| -> Vec<RedactedKind> {
+        let kinds = |index: usize| -> Vec<FilteredKind> {
             doc.entry_redactions(index).iter().map(|r| r.kind).collect()
         };
-        assert_eq!(kinds(0), [RedactedKind::Span]);
+        assert_eq!(kinds(0), [FilteredKind::Text]);
         assert_eq!(kinds(1), []);
-        assert_eq!(kinds(2), [RedactedKind::Value]);
+        assert_eq!(kinds(2), [FilteredKind::Text]);
         let first_run = &doc.dropped()[0];
         let lines: Vec<(u32, Option<u32>)> = doc
             .dropped_redactions(first_run)

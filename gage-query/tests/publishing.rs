@@ -1,6 +1,6 @@
 //! `GAGE_SHOW_PUBLISHING=1` includes a pending publish working tree in
 //! the `session`, `entry`, `message`, `tool_use`, `text_block`, and
-//! `redacted` tables, and a rebuilt working tree is re-read by the
+//! `filtered` tables, and a rebuilt working tree is re-read by the
 //! same context. The test
 //! runs in its own process, so its environment mutation does not race
 //! the library tests.
@@ -105,13 +105,13 @@ async fn pending_publish_appears_in_row_tables_under_env() {
     .await;
     assert_eq!(tools, ["Bash"], "tool_use");
 
-    // A rebuild rewrites the staged content and `redacted.json` in
+    // A rebuild rewrites the staged content and `filtered.json` in
     // place. The row cache keys a pending session by its working tree's
     // modified time, so the same context serves the new content on the
     // next query, which is what the session view's reload relies on.
     let empty = strings(
         &ctx,
-        &format!("SELECT kind FROM redacted WHERE session_id = '{id}'"),
+        &format!("SELECT kind FROM filtered WHERE session_id = '{id}'"),
     )
     .await;
     assert!(
@@ -125,14 +125,14 @@ async fn pending_publish_appears_in_row_tables_under_env() {
         .replace("hello there", "hello [REDACTED]");
     std::fs::write(&staged, rewritten).unwrap();
     std::fs::write(
-        layout.redacted_file(),
-        r#"[["span", 1, "/message/content", 6, 10, "pii", "filter:pii"]]"#,
+        layout.filtered_file(),
+        r#"{"text": [[1, "/message/content", 6, 16, "pii", "filter:pii"]]}"#,
     )
     .unwrap();
     let later = std::time::SystemTime::now() + std::time::Duration::from_secs(90);
     std::fs::File::options()
         .write(true)
-        .open(layout.redacted_file())
+        .open(layout.filtered_file())
         .unwrap()
         .set_modified(later)
         .unwrap();
@@ -157,13 +157,13 @@ async fn pending_publish_appears_in_row_tables_under_env() {
     let records = strings(
         &ctx,
         &format!(
-            "SELECT kind || ' ' || property || ' ' || reason FROM redacted WHERE session_id = '{id}'"
+            "SELECT kind || ' ' || ref || ' ' || reason FROM filtered WHERE session_id = '{id}'"
         ),
     )
     .await;
     assert_eq!(
         records,
-        ["span /message/content pii"],
+        ["text /message/content pii"],
         "rebuilt records are re-read"
     );
 

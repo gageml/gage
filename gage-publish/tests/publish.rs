@@ -1,13 +1,15 @@
 //! The publish engine over a Claude session added to a temporary
 //! store: filters at init, text and span redactions, and the staged
-//! content and `redacted.json` they produce.
+//! content and `filtered.json` they produce.
 
 use std::fs;
 
 use gage_publish::{FilterSpec, PublishError, Publisher, RedactionInput};
 use gage_registry::driver::DriverRegistry;
 use gage_session::SourceOptions;
-use gage_store::{SessionRecord, SessionStore, Store};
+use gage_store::{
+    FilteredKind, FilteredRecord, SessionRecord, SessionStore, Store, parse_filtered,
+};
 use serde_json::Value;
 
 const SESSION: &str = concat!(
@@ -99,8 +101,8 @@ fn staged_summary(root: &std::path::Path, id: &str) -> Value {
     staged_attrs(root, id)["summary"].clone()
 }
 
-fn redacted(root: &std::path::Path, id: &str) -> Vec<Value> {
-    serde_json::from_str(&fs::read_to_string(root.join(id).join("redacted.json")).unwrap()).unwrap()
+fn filtered(root: &std::path::Path, id: &str) -> Vec<FilteredRecord> {
+    parse_filtered(&fs::read(root.join(id).join("filtered.json")).unwrap()).unwrap()
 }
 
 #[test]
@@ -158,20 +160,21 @@ fn init_runs_the_named_filters_and_records_their_instances() {
         lines[0]
     );
 
-    let records = redacted(&f.publish_root, &init.id);
+    let records = filtered(&f.publish_root, &init.id);
     assert!(
         records
             .iter()
-            .any(|r| r[0] == "span" && r[6] == "filter:pii"),
+            .any(|r| r.kind == FilteredKind::Text && r.author == "filter:pii"),
         "{records:#?}"
     );
+    // The command is an atomic value replaced whole: the marker from
+    // offset 0 of the published value
     assert!(
-        records
-            .iter()
-            .any(|r| r[0] == "value" && r[2] == "/message/content/0/input/command"),
+        records.iter().any(|r| r.kind == FilteredKind::Text
+            && r.reference.as_deref() == Some("/message/content/0/input/command")
+            && (r.span_start, r.span_end) == (Some(0), Some(10))),
         "{records:#?}"
     );
-    assert!(records.iter().all(|r| r.as_array().unwrap().len() >= 5));
 }
 
 #[test]
@@ -215,18 +218,25 @@ fn redact_applies_lines_text_and_spans_and_rejects_a_miss() {
         lines[0]
     );
 
-    let records = redacted(&f.publish_root, &init.id);
+    let records = filtered(&f.publish_root, &init.id);
     assert!(
         records
             .iter()
-            .any(|r| r[0] == "line" && r[1] == 5 && r[3] == "opaque"),
+            .any(|r| r.kind == FilteredKind::Line && r.line == 5 && r.reason == "opaque"),
         "{records:#?}"
     );
-    assert!(
-        records
+    assert!(records.iter().all(|r| r.author == "user:test"));
+    // Span offsets are positions in the published value: the marker in
+    // the cwd, and an empty span where "fucking " was removed
+    let span = |pointer: &str| {
+        let r = records
             .iter()
-            .all(|r| r.as_array().unwrap().last().unwrap() == "user:test")
-    );
+            .find(|r| r.line == 1 && r.reference.as_deref() == Some(pointer))
+            .unwrap_or_else(|| panic!("no record at {pointer}: {records:#?}"));
+        (r.span_start.unwrap(), r.span_end.unwrap())
+    };
+    assert_eq!(span("/cwd"), (6, 16));
+    assert_eq!(span("/message/content"), (16, 16));
 
     let definition = publisher.definition(&init.id).unwrap();
     assert_eq!(definition.redactions.len(), 3);
@@ -667,29 +677,40 @@ fn system_filter_replaces_system_values_whole_and_drops_the_project_attribute() 
         lines[2]
     );
 
-    let records = redacted(&f.publish_root, &init.id);
-    assert_eq!(
-        records[0],
-        serde_json::json!(["attr", "project", "system", "filter:system"]),
-        "{records:#?}"
-    );
-    let on_cwd: Vec<&Value> = records
+    let records = filtered(&f.publish_root, &init.id);
+    let attrs: Vec<&FilteredRecord> = records
         .iter()
-        .filter(|r| r[1] == 1 && r[2] == "/cwd")
+        .filter(|r| r.kind == FilteredKind::Attr)
+        .collect();
+    assert_eq!(attrs.len(), 1, "{records:#?}");
+    assert_eq!(attrs[0].reference.as_deref(), Some("project"));
+    assert_eq!(
+        (attrs[0].reason.as_str(), attrs[0].author.as_str()),
+        ("system", "filter:system")
+    );
+    let on_cwd: Vec<&FilteredRecord> = records
+        .iter()
+        .filter(|r| r.line == 1 && r.reference.as_deref() == Some("/cwd"))
         .collect();
     assert_eq!(on_cwd.len(), 1, "{records:#?}");
-    assert_eq!(on_cwd[0][0], "value");
-    assert_eq!(on_cwd[0][4], "filter:system");
-    // Every system field on line 5 is replaced whole; the username,
-    // which is not one, is a pii span
-    let spans_on_5: Vec<&Value> = records
+    assert_eq!(on_cwd[0].kind, FilteredKind::Text);
+    assert_eq!(
+        (on_cwd[0].span_start, on_cwd[0].span_end),
+        (Some(0), Some(10)),
+        "replaced whole: the marker is the published value"
+    );
+    assert_eq!(on_cwd[0].author, "filter:system");
+    // Every system field on line 5 is replaced whole by the system
+    // filter; the username, which is not one, is a pii span
+    let pii_on_5: Vec<&FilteredRecord> = records
         .iter()
-        .filter(|r| r[0] == "span" && r[1] == 5)
+        .filter(|r| r.line == 5 && r.author == "filter:pii")
         .collect();
-    assert_eq!(spans_on_5.len(), 1, "{records:#?}");
+    assert_eq!(pii_on_5.len(), 1, "{records:#?}");
     assert!(
-        spans_on_5[0][2]
-            .as_str()
+        pii_on_5[0]
+            .reference
+            .as_deref()
             .unwrap()
             .ends_with("/user_identity"),
         "{records:#?}"
@@ -707,8 +728,11 @@ fn system_filter_replaces_system_values_whole_and_drops_the_project_attribute() 
         "{}",
         lines[0]
     );
-    let records = redacted(&f.publish_root, &init.id);
-    assert!(!records.iter().any(|r| r[0] == "attr"), "{records:#?}");
+    let records = filtered(&f.publish_root, &init.id);
+    assert!(
+        !records.iter().any(|r| r.kind == FilteredKind::Attr),
+        "{records:#?}"
+    );
 }
 
 #[test]
@@ -735,18 +759,33 @@ fn a_value_replaced_whole_is_recorded_once_and_hides_the_spans_inside_it() {
     assert_eq!(applied[0].instances, 2, "{applied:#?}");
     assert_eq!(applied[1].instances, 1, "{applied:#?}");
 
-    let records = redacted(&f.publish_root, &init.id);
-    let on_command: Vec<&Value> = records.iter().filter(|r| r[2] == command).collect();
-    assert_eq!(on_command.len(), 1, "{records:#?}");
-    assert_eq!(on_command[0][0], "value");
-    let spans: Vec<&Value> = records
+    let records = filtered(&f.publish_root, &init.id);
+    let on_command: Vec<&FilteredRecord> = records
         .iter()
-        .filter(|r| r[0] == "span" && r[1] == 2)
+        .filter(|r| r.reference.as_deref() == Some(command))
+        .collect();
+    assert_eq!(on_command.len(), 1, "{records:#?}");
+    assert_eq!(
+        (on_command[0].span_start, on_command[0].span_end),
+        (Some(0), Some(10))
+    );
+    let spans: Vec<&FilteredRecord> = records
+        .iter()
+        .filter(|r| r.kind == FilteredKind::Text && r.line == 2)
         .collect();
     assert_eq!(
         spans.len(),
         2,
         "overlapping spans are two records: {records:#?}"
+    );
+    // Both record the one merged marker's position
+    assert_eq!(
+        (spans[0].span_start, spans[0].span_end),
+        (spans[1].span_start, spans[1].span_end)
+    );
+    assert_eq!(
+        spans[0].span_end.unwrap() - spans[0].span_start.unwrap(),
+        10
     );
     let lines = staged_lines(&f.publish_root, &init.id);
     assert!(

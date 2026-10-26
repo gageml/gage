@@ -1,12 +1,14 @@
 //! Derivation of the staged session: the original's text values,
 //! the expansion of a definition's redactions to instances over them,
-//! and the write of the staged content and `redacted.json`.
+//! and the write of the staged content and `filtered.json`.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 
 use gage_session::{Derivation, EntryJson, StoredSession, TextDescriptor, TextValue, edit_strings};
-use gage_store::{DirContentSink, PublishDirLayout, SummaryAttrs};
+use gage_store::{
+    DirContentSink, FilteredKind, FilteredRecord, PublishDirLayout, SummaryAttrs, format_filtered,
+};
 use regex::{Regex, RegexBuilder};
 use serde_json::{Value, json};
 use serde_json_path::JsonPath;
@@ -63,7 +65,7 @@ impl SessionText {
     }
 }
 
-/// One effect of a redaction on the session, as `redacted.json`
+/// One effect of a redaction on the session, as `filtered.json`
 /// records it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Instance {
@@ -83,7 +85,8 @@ pub enum InstanceKind {
     Span {
         line: u32,
         pointer: String,
-        /// Zero-based byte offsets, `end` inclusive
+        /// Zero-based byte offsets in the original value, `end`
+        /// inclusive
         start: usize,
         end: usize,
         /// Whether the marker replaces the span; otherwise it is removed
@@ -100,23 +103,40 @@ pub enum InstanceKind {
 }
 
 impl Instance {
-    /// The `redacted.json` entry.
-    fn record(&self) -> Value {
+    /// The `filtered.json` record. `published` is the span's position
+    /// in the published value, `end` exclusive, for a `Span` instance;
+    /// a value replaced whole is the marker from offset 0.
+    fn record(&self, published: Option<(usize, usize)>) -> FilteredRecord {
+        let record =
+            |kind, line, line_end, reference: Option<&str>, span: Option<(usize, usize)>| {
+                FilteredRecord {
+                    kind,
+                    line,
+                    line_end,
+                    reference: reference.map(String::from),
+                    span_start: span.map(|(start, _)| start as u64),
+                    span_end: span.map(|(_, end)| end as u64),
+                    reason: self.reason.clone(),
+                    author: self.author.clone(),
+                }
+            };
         match &self.kind {
             InstanceKind::Line { line, line_end } => {
-                json!(["line", line, line_end, self.reason, self.author])
+                record(FilteredKind::Line, *line, Some(*line_end), None, None)
             }
-            InstanceKind::Span {
-                line,
-                pointer,
-                start,
-                end,
-                ..
-            } => json!(["span", line, pointer, start, end, self.reason, self.author]),
-            InstanceKind::Value { line, pointer } => {
-                json!(["value", line, pointer, self.reason, self.author])
+            InstanceKind::Span { line, pointer, .. } => {
+                let span =
+                    published.expect("a span instance is on a kept line, which line_edits visits");
+                record(FilteredKind::Text, *line, None, Some(pointer), Some(span))
             }
-            InstanceKind::Attr { name } => json!(["attr", name, self.reason, self.author]),
+            InstanceKind::Value { line, pointer } => record(
+                FilteredKind::Text,
+                *line,
+                None,
+                Some(pointer),
+                Some((0, MARKER.len())),
+            ),
+            InstanceKind::Attr { name } => record(FilteredKind::Attr, 0, None, Some(name), None),
         }
     }
 
@@ -324,7 +344,7 @@ pub fn run_filters(
 }
 
 /// Expand every redaction of `definition` to instances over `session`,
-/// write the staged content through `stored` and `redacted.json`
+/// write the staged content through `stored` and `filtered.json`
 /// into `layout`, and record each redaction's instance count. Returns
 /// the instances. The staged `attrs.json` is the caller's to update.
 pub fn build(
@@ -344,11 +364,12 @@ pub fn build(
     instances.sort_by(|a, b| a.order().cmp(&b.order()));
 
     let mut replaced = BTreeMap::new();
+    let mut published = HashMap::new();
     for entry in &session.entries {
         if dropped.contains(&entry.line) {
             continue;
         }
-        let edits = line_edits(entry, &instances)?;
+        let edits = line_edits(entry, &instances, &mut published)?;
         if !edits.is_empty() {
             let pairs: Vec<(&str, &str)> = edits
                 .iter()
@@ -361,15 +382,12 @@ pub fn build(
     let mut sink = DirContentSink::new(layout.files_dir());
     stored.write_derived(&derivation, &mut sink)?;
 
-    // One instance per line, so the record reads as the design shows it
-    let mut text = String::from("[\n");
-    for (i, instance) in instances.iter().enumerate() {
-        text.push_str("  ");
-        text.push_str(&serde_json::to_string(&instance.record())?);
-        text.push_str(if i + 1 < instances.len() { ",\n" } else { "\n" });
-    }
-    text.push_str("]\n");
-    fs::write(layout.redacted_file(), text)?;
+    let records: Vec<FilteredRecord> = instances
+        .iter()
+        .enumerate()
+        .map(|(i, instance)| instance.record(published.get(&i).copied()))
+        .collect();
+    fs::write(layout.filtered_file(), format_filtered(&records))?;
     Ok(instances)
 }
 
@@ -656,14 +674,22 @@ impl<'a> Expansion<'a> {
 /// The `(pointer, new text)` edits of one entry from the instances on
 /// its line. A value with a `Value` instance becomes the marker; spans
 /// are merged where they overlap, a merged span is marked when any
-/// part of it was, and they are applied from the end.
+/// part of it was, and they are applied in order. Every `Span`
+/// instance on the line records in `published`, by its index in
+/// `instances`, the position of its merged span in the published
+/// value.
 fn line_edits(
     entry: &EntryText,
     instances: &[Instance],
+    published: &mut HashMap<usize, (usize, usize)>,
 ) -> Result<Vec<(String, String)>, PublishError> {
     let mut whole: BTreeSet<&str> = BTreeSet::new();
-    let mut spans: BTreeMap<&str, Vec<(usize, usize, bool)>> = BTreeMap::new();
-    for i in instances.iter().filter(|i| i.line() == entry.line) {
+    let mut spans: BTreeMap<&str, Vec<(usize, usize, bool, usize)>> = BTreeMap::new();
+    for (index, i) in instances
+        .iter()
+        .enumerate()
+        .filter(|(_, i)| i.line() == entry.line)
+    {
         match &i.kind {
             InstanceKind::Value { pointer, .. } => {
                 whole.insert(pointer);
@@ -677,7 +703,7 @@ fn line_edits(
             } => spans
                 .entry(pointer)
                 .or_default()
-                .push((*start, *end, *mark)),
+                .push((*start, *end, *mark, index)),
             InstanceKind::Line { .. } | InstanceKind::Attr { .. } => {}
         }
     }
@@ -687,6 +713,9 @@ fn line_edits(
     }
     for (pointer, mut ranges) in spans {
         if whole.contains(pointer) {
+            for (_, _, _, index) in ranges {
+                published.insert(index, (0, MARKER.len()));
+            }
             continue;
         }
         let value = entry
@@ -696,48 +725,71 @@ fn line_edits(
             .ok_or_else(|| {
                 PublishError::Input(format!("line {}: no value at {pointer}", entry.line))
             })?;
-        ranges.sort_by_key(|(start, _, _)| *start);
+        ranges.sort_by_key(|(start, _, _, _)| *start);
         let mut merged: Vec<(usize, usize, bool)> = Vec::new();
-        for (start, end, mark) in ranges {
+        let mut members: Vec<Vec<usize>> = Vec::new();
+        for (start, end, mark, index) in ranges {
             match merged.last_mut() {
                 Some(last) if start <= last.1 + 1 => {
                     last.1 = last.1.max(end);
                     last.2 |= mark;
+                    members
+                        .last_mut()
+                        .expect("one member list per merged span")
+                        .push(index);
                 }
-                _ => merged.push((start, end, mark)),
+                _ => {
+                    merged.push((start, end, mark));
+                    members.push(vec![index]);
+                }
             }
         }
-        let mut text = value.text.clone();
-        for (start, end, mark) in merged.into_iter().rev() {
-            text = apply_span(&text, start, end, mark);
+        let (text, positions) = apply_spans(&value.text, &merged);
+        for (indexes, position) in members.iter().zip(positions) {
+            for index in indexes {
+                published.insert(*index, position);
+            }
         }
         edits.push((pointer.to_string(), text));
     }
     Ok(edits)
 }
 
-/// `text` with the byte span `start..=end` replaced by the marker, or
-/// removed when `mark` is false. A removal bounded by a space on both
-/// sides also removes the space that follows, so the words around it
-/// keep one space between them.
-fn apply_span(text: &str, start: usize, end: usize, mark: bool) -> String {
-    let mut end = end + 1;
-    let mut start = start;
-    // A span must sit on character boundaries; a literal match always does
-    while !text.is_char_boundary(start) {
-        start -= 1;
+/// `text` with each byte span `start..=end` of `spans`, which are in
+/// order and disjoint, replaced by the marker, or removed when `mark`
+/// is false. Returns the new text and the position of each span in
+/// it, `end` exclusive: the marker, or an empty span where text was
+/// removed. A removal bounded by a space on both sides also removes
+/// the space that follows, so the words around it keep one space
+/// between them.
+fn apply_spans(text: &str, spans: &[(usize, usize, bool)]) -> (String, Vec<(usize, usize)>) {
+    let mut out = String::with_capacity(text.len());
+    let mut positions = Vec::with_capacity(spans.len());
+    let mut cursor = 0;
+    for &(start, end, mark) in spans {
+        let mut end = end + 1;
+        let mut start = start;
+        // A span must sit on character boundaries; a literal match always does
+        while !text.is_char_boundary(start) {
+            start -= 1;
+        }
+        while end < text.len() && !text.is_char_boundary(end) {
+            end += 1;
+        }
+        let start = start.max(cursor);
+        out.push_str(&text[cursor..start]);
+        let at = out.len();
+        if mark {
+            out.push_str(MARKER);
+        }
+        positions.push((at, out.len()));
+        cursor = end.max(start);
+        if !mark && out.ends_with(' ') && text[cursor..].starts_with(' ') {
+            cursor += 1;
+        }
     }
-    while end < text.len() && !text.is_char_boundary(end) {
-        end += 1;
-    }
-    if mark {
-        return format!("{}{MARKER}{}", &text[..start], &text[end..]);
-    }
-    let before = &text[..start];
-    let after = &text[end..];
-    let bounded = before.ends_with(' ') && after.starts_with(' ');
-    let after = if bounded { &after[1..] } else { after };
-    format!("{before}{after}")
+    out.push_str(&text[cursor..]);
+    (out, positions)
 }
 
 /// Rewrite `size`, `project`, and the driver summary in the staged
@@ -789,11 +841,11 @@ fn dir_size(dir: &std::path::Path) -> Result<u64, PublishError> {
 
 #[cfg(test)]
 mod tests {
-    use gage_store::{RedactedKind, parse_redacted};
+    use gage_store::parse_filtered;
 
     use super::*;
 
-    /// Every record the writer produces reads back through the store's
+    /// Every record the engine produces reads back through the store's
     /// parser with the same fields, so the two sides agree on the
     /// record layout.
     #[test]
@@ -804,44 +856,54 @@ mod tests {
             author: "filter:pii".to_string(),
             kind,
         };
-        let instances = [
+        let records = [
+            instance(InstanceKind::Attr {
+                name: "project".to_string(),
+            })
+            .record(None),
             instance(InstanceKind::Line {
                 line: 1,
                 line_end: 4,
-            }),
+            })
+            .record(None),
             instance(InstanceKind::Span {
                 line: 5,
                 pointer: "/message/content".to_string(),
                 start: 4,
                 end: 23,
                 mark: true,
-            }),
+            })
+            .record(Some((4, 14))),
             instance(InstanceKind::Value {
                 line: 7,
                 pointer: "/toolUseResult/stdout".to_string(),
-            }),
+            })
+            .record(None),
         ];
-        let text = serde_json::to_string(&Value::Array(
-            instances.iter().map(Instance::record).collect(),
-        ))
-        .unwrap();
-        let records = parse_redacted(text.as_bytes()).unwrap();
-        assert_eq!(records.len(), 3);
-        assert_eq!(records[0].kind, RedactedKind::Line);
-        assert_eq!((records[0].line, records[0].line_end), (1, Some(4)));
-        assert_eq!(records[1].kind, RedactedKind::Span);
-        assert_eq!(records[1].property.as_deref(), Some("/message/content"));
+        let parsed = parse_filtered(format_filtered(&records).as_bytes()).unwrap();
+        // The parser returns list by list: lines, values, text, attrs
+        assert_eq!(parsed.len(), 4);
+        assert_eq!(parsed[0].kind, FilteredKind::Line);
+        assert_eq!((parsed[0].line, parsed[0].line_end), (1, Some(4)));
+        assert_eq!(parsed[1].kind, FilteredKind::Text);
+        assert_eq!(parsed[1].reference.as_deref(), Some("/message/content"));
         assert_eq!(
-            (records[1].span_start, records[1].span_end),
-            (Some(4), Some(23))
+            (parsed[1].span_start, parsed[1].span_end),
+            (Some(4), Some(14))
         );
-        assert_eq!(records[2].kind, RedactedKind::Value);
+        assert_eq!(parsed[2].kind, FilteredKind::Text);
         assert_eq!(
-            records[2].property.as_deref(),
+            parsed[2].reference.as_deref(),
             Some("/toolUseResult/stdout")
         );
+        assert_eq!(
+            (parsed[2].span_start, parsed[2].span_end),
+            (Some(0), Some(MARKER.len() as u64))
+        );
+        assert_eq!(parsed[3].kind, FilteredKind::Attr);
+        assert_eq!(parsed[3].reference.as_deref(), Some("project"));
         assert!(
-            records
+            parsed
                 .iter()
                 .all(|r| r.reason == "pii" && r.author == "filter:pii")
         );
@@ -864,13 +926,32 @@ mod tests {
     #[test]
     fn removal_takes_one_bounding_space_and_marking_keeps_both() {
         assert_eq!(
-            apply_span("What are you fucking asking me?", 13, 19, false),
-            "What are you asking me?"
+            apply_spans("What are you fucking asking me?", &[(13, 19, false)]),
+            ("What are you asking me?".to_string(), vec![(13, 13)])
         );
         assert_eq!(
-            apply_span("What are you fucking asking me?", 13, 19, true),
-            "What are you [REDACTED] asking me?"
+            apply_spans("What are you fucking asking me?", &[(13, 19, true)]),
+            (
+                "What are you [REDACTED] asking me?".to_string(),
+                vec![(13, 23)]
+            )
         );
-        assert_eq!(apply_span("fucking hell", 0, 6, false), " hell");
+        assert_eq!(
+            apply_spans("fucking hell", &[(0, 6, false)]),
+            (" hell".to_string(), vec![(0, 0)])
+        );
+    }
+
+    /// A span's published position accounts for every span before it
+    /// in the same value: a marker lengthens the text and a removal
+    /// shortens it.
+    #[test]
+    fn published_positions_follow_earlier_spans_in_the_value() {
+        let text = "key AAAA then BBBB then CCCC end";
+        let (out, positions) = apply_spans(text, &[(4, 7, true), (14, 17, false), (24, 27, true)]);
+        assert_eq!(out, "key [REDACTED] then then [REDACTED] end");
+        assert_eq!(positions, [(4, 14), (20, 20), (25, 35)]);
+        assert_eq!(&out[4..14], MARKER);
+        assert_eq!(&out[25..35], MARKER);
     }
 }

@@ -23,7 +23,7 @@ use gage_registry::driver::DriverRegistry;
 use gage_session::Driver;
 use gage_session::is_system;
 use gage_store::url::{self, LineSelection};
-use gage_store::{NoteEdit, NoteFull, NoteInput, NoteStore, NoteValue, RedactedKind, Store};
+use gage_store::{FilteredKind, NoteEdit, NoteFull, NoteInput, NoteStore, NoteValue, Store};
 use ratatui::crossterm::terminal;
 use serde_json::Value;
 
@@ -121,7 +121,7 @@ impl Backend {
         let turns = self.load_turns(session_id, &entries).await?;
         let tool_uses = self.load_tool_uses(session_id).await?;
         // A native session is never a publish, and its context has no
-        // `redacted` relation
+        // `filtered` relation
         let (notes, redactions) = match self.kind {
             Kind::Native { .. } => (Vec::new(), Vec::new()),
             Kind::Stored { .. } => (
@@ -247,12 +247,12 @@ impl Backend {
             .collect())
     }
 
-    /// The records of a stored session's `redacted.json`, in original
+    /// The records of a stored session's `filtered.json`, in original
     /// line order; none for a session that is not a publish.
     async fn load_redactions(&self, session_id: &str) -> Result<Vec<Redaction>, Box<dyn Error>> {
         let sql = format!(
-            "SELECT kind, line, line_end, property, span_start, span_end, reason, author \
-             FROM redacted WHERE session_id = '{}' ORDER BY line, property, span_start",
+            "SELECT kind, line, line_end, ref, span_start, span_end, reason, author \
+             FROM filtered WHERE session_id = '{}' ORDER BY line, ref, span_start",
             sql_str(session_id)
         );
         let batches = self.ctx.sql(&sql).await?.collect().await?;
@@ -261,18 +261,18 @@ impl Backend {
             let kinds = column::<StringArray>(batch, 0);
             let lines = column::<Int64Array>(batch, 1);
             let line_ends = column::<Int64Array>(batch, 2);
-            let properties = column::<StringArray>(batch, 3);
+            let references = column::<StringArray>(batch, 3);
             let span_starts = column::<Int64Array>(batch, 4);
             let span_ends = column::<Int64Array>(batch, 5);
             let reasons = column::<StringArray>(batch, 6);
             let authors = column::<StringArray>(batch, 7);
             for i in 0..batch.num_rows() {
                 let kind = match kinds.value(i) {
-                    "line" => RedactedKind::Line,
-                    "span" => RedactedKind::Span,
-                    "value" => RedactedKind::Value,
-                    "attr" => RedactedKind::Attr,
-                    other => return Err(format!("unknown redacted kind {other:?}").into()),
+                    "line" => FilteredKind::Line,
+                    "value" => FilteredKind::Value,
+                    "text" => FilteredKind::Text,
+                    "attr" => FilteredKind::Attr,
+                    other => return Err(format!("unknown filtered kind {other:?}").into()),
                 };
                 let line_at = |col: &Int64Array| -> Result<Option<u32>, Box<dyn Error>> {
                     Ok(if col.is_valid(i) {
@@ -292,9 +292,9 @@ impl Backend {
                     kind,
                     line: u32::try_from(lines.value(i))?,
                     line_end: line_at(line_ends)?,
-                    property: properties
+                    reference: references
                         .is_valid(i)
-                        .then(|| properties.value(i).to_string()),
+                        .then(|| references.value(i).to_string()),
                     span_start: offset_at(span_starts)?,
                     span_end: offset_at(span_ends)?,
                     reason: reasons.value(i).to_string(),

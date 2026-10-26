@@ -197,7 +197,7 @@ pub fn message_rows(derived: &RecordBatch) -> Result<RecordBatch> {
 
 /// Per-commit batches shared by every row-table scan on one query
 /// context: the derived batch serving `entry` and `message`, the
-/// `tool_use` batch, the `text_block` batch, and the `redacted`
+/// `tool_use` batch, the `text_block` batch, and the `filtered`
 /// batch. Each is read on first use, the first three through the
 /// driver.
 #[derive(Debug, Default)]
@@ -205,7 +205,7 @@ pub struct RowCache {
     derived: Mutex<HashMap<String, Arc<RecordBatch>>>,
     tool_uses: Mutex<HashMap<String, Arc<RecordBatch>>>,
     text_blocks: Mutex<HashMap<String, Arc<RecordBatch>>>,
-    redacted: Mutex<HashMap<String, Arc<RecordBatch>>>,
+    filtered: Mutex<HashMap<String, Arc<RecordBatch>>>,
 }
 
 impl RowCache {
@@ -237,12 +237,12 @@ impl RowCache {
         lock(&self.text_blocks).insert(commit.to_string(), batch);
     }
 
-    pub fn get_redacted(&self, commit: &str) -> Option<Arc<RecordBatch>> {
-        lock(&self.redacted).get(commit).cloned()
+    pub fn get_filtered(&self, commit: &str) -> Option<Arc<RecordBatch>> {
+        lock(&self.filtered).get(commit).cloned()
     }
 
-    pub fn insert_redacted(&self, commit: &str, batch: Arc<RecordBatch>) {
-        lock(&self.redacted).insert(commit.to_string(), batch);
+    pub fn insert_filtered(&self, commit: &str, batch: Arc<RecordBatch>) {
+        lock(&self.filtered).insert(commit.to_string(), batch);
     }
 }
 

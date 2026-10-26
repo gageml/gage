@@ -12,7 +12,7 @@ use std::io;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use gage_store::{NoteValue, RedactedKind};
+use gage_store::{FilteredKind, NoteValue};
 use ratatui::DefaultTerminal;
 use ratatui::Frame;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -1700,19 +1700,19 @@ fn draw_dropped(frame: &mut Frame, doc: &Document, dropped: &Dropped, area: Rect
 }
 
 /// One record as the content pane lists it: where it applied, its
-/// reason, and its author. A span names its property and byte
-/// offsets, a value its property, a line record its lines, and an
-/// attr record its attribute.
+/// reason, and its author. A text record names its pointer and its
+/// byte offsets in the published value, a value record its selector,
+/// a line record its lines, and an attr record its attribute.
 fn redaction_line(r: &Redaction) -> Line<'static> {
-    let property = r.property.clone().unwrap_or_default();
+    let reference = r.reference.clone().unwrap_or_default();
     let location = match r.kind {
-        RedactedKind::Line => format!("lines {}", line_range(r.line, r.line_end.unwrap_or(r.line))),
-        RedactedKind::Span => match (r.span_start, r.span_end) {
-            (Some(start), Some(end)) => format!("{property} {start}-{end}"),
-            _ => property,
+        FilteredKind::Line => format!("lines {}", line_range(r.line, r.line_end.unwrap_or(r.line))),
+        FilteredKind::Text => match (r.span_start, r.span_end) {
+            (Some(start), Some(end)) => format!("{reference} {start}-{end}"),
+            _ => reference,
         },
-        RedactedKind::Value => property,
-        RedactedKind::Attr => format!("attr {property}"),
+        FilteredKind::Value => format!("values {reference}"),
+        FilteredKind::Attr => format!("attr {reference}"),
     };
     Line::from(vec![
         Span::raw(location),
@@ -2150,20 +2150,20 @@ mod tests {
         doc.entries[0].message_text = Some("hello [REDACTED]".into());
         doc.redactions = vec![
             Redaction {
-                kind: RedactedKind::Span,
+                kind: FilteredKind::Text,
                 line: 1,
                 line_end: None,
-                property: Some("/message/content".into()),
+                reference: Some("/message/content".into()),
                 span_start: Some(6),
-                span_end: Some(10),
+                span_end: Some(16),
                 reason: "pii".into(),
                 author: "filter:pii".into(),
             },
             Redaction {
-                kind: RedactedKind::Line,
+                kind: FilteredKind::Line,
                 line: 2,
                 line_end: Some(3),
-                property: None,
+                reference: None,
                 span_start: None,
                 span_end: None,
                 reason: "scope".into(),
@@ -2229,7 +2229,7 @@ mod tests {
         assert!(text.contains("1 user redacted"), "{text}");
         assert!(text.contains("--- redacted ---"), "{text}");
         assert!(
-            text.contains("/message/content 6-10 · pii · filter:pii"),
+            text.contains("/message/content 6-16 · pii · filter:pii"),
             "{text}"
         );
         assert!(text.contains("2-3 redacted"), "{text}");

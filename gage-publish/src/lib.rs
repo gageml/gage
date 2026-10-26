@@ -5,7 +5,7 @@
 //! gage-store stages the directory and knows where the definition file
 //! lives; this crate reads and writes the definition, expands its
 //! redactions to instances over the original's text values, and
-//! writes the staged content and `redacted.json` through the
+//! writes the staged content and `filtered.json` through the
 //! session's driver. Every mutation rebuilds the staged session from
 //! the original plus the full definition.
 
