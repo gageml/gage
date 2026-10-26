@@ -62,7 +62,7 @@ impl ViewOptions {
                 "e" | "entries" => opts.all_entries = on,
                 "s" | "source" => opts.source = on,
                 "n" | "turns" => opts.turns = on,
-                "r" | "redactions" => opts.redactions = on,
+                "r" | "redacted" => opts.redactions = on,
                 other => return Err(UnknownOption(other.to_string())),
             }
         }
@@ -112,7 +112,7 @@ mod tests {
 
     #[test]
     fn comma_list_enables_default_off_options() {
-        let o = ViewOptions::parse("tools,source,turns,entries,redactions").unwrap();
+        let o = ViewOptions::parse("tools,source,turns,entries,redacted").unwrap();
         assert!(o.tools);
         assert!(o.source);
         assert!(o.turns);
@@ -123,7 +123,7 @@ mod tests {
     #[test]
     fn short_and_long_names_are_equivalent() {
         let short = ViewOptions::parse("t,!u,r").unwrap();
-        let long = ViewOptions::parse("tools,!user,redactions").unwrap();
+        let long = ViewOptions::parse("tools,!user,redacted").unwrap();
         assert_eq!(short.tools, long.tools);
         assert_eq!(short.user, long.user);
         assert_eq!(short.redactions, long.redactions);

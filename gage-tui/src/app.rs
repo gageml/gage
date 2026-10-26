@@ -1990,7 +1990,7 @@ fn draw_options(frame: &mut Frame, view: &ViewOptions) {
         Line::raw(""),
         option_line('s', view.source, false, "Native source"),
         option_line('n', view.turns, false, "Turns"),
-        option_line('r', view.redactions, false, "Redactions"),
+        option_line('r', view.redactions, false, "Redacted"),
     ];
     let hint = hint::dialog_line(&[("Enter", "close")]);
     crate::dialog::draw_menu(frame, "View options", lines, hint);
@@ -2208,7 +2208,7 @@ mod tests {
         press(&mut state, &backend, KeyCode::Char('r'));
         assert!(state.view.redactions);
         terminal.draw(|frame| draw(frame, &mut state)).unwrap();
-        assert!(screen(&terminal).contains("r [x] Redactions"));
+        assert!(screen(&terminal).contains("r [x] Redacted"));
         press(&mut state, &backend, KeyCode::Enter);
         assert_eq!(
             outline_labels(&state),
