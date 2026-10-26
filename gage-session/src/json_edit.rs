@@ -1,12 +1,14 @@
-//! Order-preserving edits to the string values of a JSON document.
+//! Order-preserving edits to the values of a JSON document: a string
+//! value replaced, or any value left out.
 //!
 //! `serde_json::Value` sorts object keys, so an edit goes through the
 //! deserializer instead: each container on the path to an edited
 //! value is decoded with its members as raw text, the edited leaf is
-//! replaced, and the container is written back in its original member
-//! order. A sibling off the path is reproduced byte for byte; the
-//! punctuation and whitespace of a container on the path are written
-//! compactly. A document with no edits is returned as given.
+//! replaced or left out, and the container is written back in its
+//! original member order. A sibling off the path is reproduced byte
+//! for byte; the punctuation and whitespace of a container on the
+//! path are written compactly. A document with no edits is returned
+//! as given.
 
 use std::collections::BTreeMap;
 use std::error::Error;
@@ -15,7 +17,7 @@ use std::fmt;
 use serde::de::{Deserialize, Deserializer, MapAccess, Visitor};
 use serde_json::value::RawValue;
 
-/// An edit that names no string value of the document.
+/// An edit that names no value of the document it can apply to.
 #[derive(Debug)]
 pub struct EditError {
     pub pointer: String,
@@ -41,7 +43,27 @@ pub fn edit_strings(json: &str, edits: &[(&str, &str)]) -> Result<String, EditEr
         .map(|(pointer, text)| Edit {
             pointer,
             tokens: tokens(pointer),
-            text,
+            op: Op::Replace(text),
+        })
+        .collect();
+    rewrite(json, &edits)
+}
+
+/// `json` with each value named by a JSON Pointer in `pointers` left
+/// out: an object member goes with its name, and an array element
+/// goes with the elements after it moving up. Every pointer names a
+/// position in the document as given, so pointers into one array do
+/// not shift each other.
+pub fn delete_values(json: &str, pointers: &[&str]) -> Result<String, EditError> {
+    if pointers.is_empty() {
+        return Ok(json.to_string());
+    }
+    let edits: Vec<Edit<'_>> = pointers
+        .iter()
+        .map(|pointer| Edit {
+            pointer,
+            tokens: tokens(pointer),
+            op: Op::Delete,
         })
         .collect();
     rewrite(json, &edits)
@@ -50,7 +72,14 @@ pub fn edit_strings(json: &str, edits: &[(&str, &str)]) -> Result<String, EditEr
 struct Edit<'a> {
     pointer: &'a str,
     tokens: Vec<String>,
-    text: &'a str,
+    op: Op<'a>,
+}
+
+enum Op<'a> {
+    /// Replace the string value with the text
+    Replace(&'a str),
+    /// Leave the value out of its container
+    Delete,
 }
 
 /// The reference tokens of a JSON Pointer, unescaped.
@@ -72,11 +101,17 @@ fn rewrite(raw: &str, edits: &[Edit<'_>]) -> Result<String, EditError> {
         if edits.len() > 1 {
             return Err(error(leaf.pointer, "overlaps another edit"));
         }
+        let Op::Replace(text) = leaf.op else {
+            return Err(error(
+                leaf.pointer,
+                "the document itself cannot be left out",
+            ));
+        };
         let raw: &RawValue = serde_json::from_str(raw).map_err(|e| error(leaf.pointer, e))?;
         if !raw.get().trim_start().starts_with('"') {
             return Err(error(leaf.pointer, "value is not a string"));
         }
-        return serde_json::to_string(leaf.text).map_err(|e| error(leaf.pointer, e));
+        return serde_json::to_string(text).map_err(|e| error(leaf.pointer, e));
     }
     let mut by_member: BTreeMap<&str, Vec<Edit<'_>>> = BTreeMap::new();
     for e in edits {
@@ -87,7 +122,10 @@ fn rewrite(raw: &str, edits: &[Edit<'_>]) -> Result<String, EditError> {
         by_member.entry(head.as_str()).or_default().push(Edit {
             pointer: e.pointer,
             tokens: rest.to_vec(),
-            text: e.text,
+            op: match e.op {
+                Op::Replace(text) => Op::Replace(text),
+                Op::Delete => Op::Delete,
+            },
         });
     }
     let first = edits.first().expect("edits is not empty");
@@ -97,13 +135,19 @@ fn rewrite(raw: &str, edits: &[Edit<'_>]) -> Result<String, EditError> {
                 serde_json::from_str(raw).map_err(|e| error(first.pointer, e))?;
             let mut out = String::with_capacity(raw.len());
             out.push('{');
-            for (i, (key, value)) in object.0.iter().enumerate() {
-                if i > 0 {
+            let mut written = 0;
+            for (key, value) in &object.0 {
+                let inner = by_member.remove(key.as_str());
+                if inner.as_deref().is_some_and(deletes_whole) {
+                    continue;
+                }
+                if written > 0 {
                     out.push(',');
                 }
+                written += 1;
                 out.push_str(&serde_json::to_string(key).map_err(|e| error(first.pointer, e))?);
                 out.push(':');
-                match by_member.remove(key.as_str()) {
+                match inner {
                     Some(inner) => out.push_str(&rewrite(value.get(), &inner)?),
                     None => out.push_str(value.get()),
                 }
@@ -120,12 +164,18 @@ fn rewrite(raw: &str, edits: &[Edit<'_>]) -> Result<String, EditError> {
                 serde_json::from_str(raw).map_err(|e| error(first.pointer, e))?;
             let mut out = String::with_capacity(raw.len());
             out.push('[');
+            let mut written = 0;
             for (i, value) in items.iter().enumerate() {
-                if i > 0 {
+                let index = i.to_string();
+                let inner = by_member.remove(index.as_str());
+                if inner.as_deref().is_some_and(deletes_whole) {
+                    continue;
+                }
+                if written > 0 {
                     out.push(',');
                 }
-                let index = i.to_string();
-                match by_member.remove(index.as_str()) {
+                written += 1;
+                match inner {
                     Some(inner) => out.push_str(&rewrite(value.get(), &inner)?),
                     None => out.push_str(value.get()),
                 }
@@ -139,6 +189,12 @@ fn rewrite(raw: &str, edits: &[Edit<'_>]) -> Result<String, EditError> {
         }
         _ => Err(error(first.pointer, "value is not a container")),
     }
+}
+
+/// Whether `edits`, all relative to one member, is the one edit that
+/// leaves the member out.
+fn deletes_whole(edits: &[Edit<'_>]) -> bool {
+    matches!(edits, [Edit { tokens, op: Op::Delete, .. }] if tokens.is_empty())
 }
 
 fn error(pointer: &str, message: impl fmt::Display) -> EditError {
@@ -200,6 +256,42 @@ mod tests {
     #[test]
     fn no_edits_returns_the_document_as_given() {
         assert_eq!(edit_strings(LINE, &[]).unwrap(), LINE);
+        assert_eq!(delete_values(LINE, &[]).unwrap(), LINE);
+    }
+
+    /// A deleted member goes with its name and its comma, a deleted
+    /// element moves the ones after it up, and pointers into one
+    /// array name positions in the document as given.
+    #[test]
+    fn deletes_leave_out_members_and_elements() {
+        let out = delete_values(LINE, &["/zeta", "/message/content/0", "/n"]).unwrap();
+        assert_eq!(
+            out,
+            r#"{"message":{"content":[{"type":"tool_use","input":{"command":"ls  -la"}}]},"alpha":"a"}"#
+        );
+        let out = delete_values(
+            r#"{"a":["x","y","z"],"b":{"c":1}}"#,
+            &["/a/0", "/a/2", "/b/c"],
+        )
+        .unwrap();
+        assert_eq!(out, r#"{"a":["y"],"b":{}}"#);
+        let last = delete_values(r#"{"a":1,"b":2}"#, &["/b"]).unwrap();
+        assert_eq!(last, r#"{"a":1}"#);
+    }
+
+    /// A delete and a replace under one member apply together, and a
+    /// delete that overlaps a deeper edit or names the document is an
+    /// error.
+    #[test]
+    fn deletes_combine_with_replaces_and_refuse_overlaps() {
+        let replaced = edit_strings(LINE, &[("/alpha", "A")]).unwrap();
+        let out = delete_values(&replaced, &["/zeta"]).unwrap();
+        assert!(out.starts_with(r#"{"message":"#), "{out}");
+        assert!(out.ends_with(r#""alpha":"A"}"#), "{out}");
+        let missing = delete_values(LINE, &["/message/nope"]).unwrap_err();
+        assert!(missing.message.contains("no member"), "{missing}");
+        let root = delete_values(LINE, &[""]).unwrap_err();
+        assert!(root.message.contains("document itself"), "{root}");
     }
 
     #[test]

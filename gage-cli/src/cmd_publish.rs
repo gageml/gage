@@ -63,11 +63,10 @@ pub enum PublishCommand {
     /// List pending publish sessions
     List,
 
-    /// Add redactions to a pending publish
+    /// Add text redactions to a pending publish
     ///
-    /// Every redaction given carries --reason and is applied to staged
-    /// session at once. A text redaction is matched against every text
-    /// value of session; a span redaction applies within one value.
+    /// Every literal given carries --reason and is matched against
+    /// every text value of session at once.
     Redact(RedactArgs),
 
     /// Show filters and redactions of a pending publish
@@ -147,38 +146,23 @@ pub struct RedactArgs {
     #[arg(value_name = "SESSION", required = true)]
     session: Option<String>,
 
-    /// Reason for every redaction given (default scope)
-    ///
-    /// A reason code; see --list-reasons. Required with --text and
-    /// --span; lines dropped without a reason are recorded as "scope".
-    #[arg(short, long, value_name = "REASON")]
-    reason: Option<String>,
-
-    /// Lines to drop (repeatable)
-    ///
-    /// "LINE" or "LINE LINE_END", session entry lines as in entry
-    /// table.
-    #[arg(short, long, value_name = "LINES")]
-    lines: Vec<String>,
-
     /// Text to redact everywhere (repeatable)
     ///
     /// Matched case-insensitively against every text value of session.
-    #[arg(short, long, value_name = "TEXT")]
+    #[arg(short, long, value_name = "TEXT", required = true)]
     text: Vec<String>,
 
-    /// Span to redact within one value (repeatable)
+    /// Reason for every redaction given
     ///
-    /// "LINE SEQ TEXT". LINE and SEQ name a text_block row, and TEXT runs
-    /// to end of value.
-    #[arg(short, long, value_name = "SPAN")]
-    span: Vec<String>,
+    /// A reason code; see --list-reasons.
+    #[arg(short, long, value_name = "REASON", required = true)]
+    reason: Option<String>,
 
     /// Remove redacted text without a marker
     ///
-    /// Applies to every --text and --span redaction given. Without it a
-    /// redacted span is replaced by "[REDACTED]"; with it the span is
-    /// removed and surrounding whitespace is normalized.
+    /// Applies to every --text redaction given. Without it a redacted
+    /// span is replaced by "[REDACTED]"; with it the span is removed
+    /// and surrounding whitespace is normalized.
     #[arg(short = 'n', long)]
     no_mark: bool,
 
@@ -640,41 +624,16 @@ fn redact(args: RedactArgs) -> Result<(), CliError> {
         list_reasons();
         return Ok(());
     }
-    let Some(session) = args.session.as_deref() else {
-        return Err(fail("SESSION is required".into()));
+    let (Some(session), Some(reason)) = (args.session.as_deref(), args.reason.as_deref()) else {
+        return Err(fail("SESSION and --reason are required".into()));
     };
-    // Every spec is parsed before the store is opened. Lines default to
-    // "scope"; text and spans need the caller's reason.
-    let lines_reason = args.reason.as_deref().unwrap_or("scope");
-    let mut inputs = Vec::new();
-    for spec in &args.lines {
-        inputs.push(
-            RedactionInput::parse_lines(spec, lines_reason).map_err(|e| fail(e.to_string()))?,
-        );
-    }
-    if !args.text.is_empty() || !args.span.is_empty() {
-        let reason = args
-            .reason
-            .as_deref()
-            .ok_or_else(|| fail("--reason is required with --text and --span".into()))?;
-        let mark = !args.no_mark;
-        for literal in &args.text {
-            inputs.push(
-                RedactionInput::parse_text(literal, reason, mark)
-                    .map_err(|e| fail(e.to_string()))?,
-            );
-        }
-        for spec in &args.span {
-            inputs.push(
-                RedactionInput::parse_span(spec, reason, mark).map_err(|e| fail(e.to_string()))?,
-            );
-        }
-    }
-    if inputs.is_empty() {
-        return Err(fail(
-            "no redactions given; use --lines, --text, or --span".into(),
-        ));
-    }
+    // Every literal is checked before the store is opened
+    let inputs = args
+        .text
+        .iter()
+        .map(|literal| RedactionInput::parse_text(literal, reason, !args.no_mark))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| fail(e.to_string()))?;
     let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
     let publisher = Publisher::new(&store);
     let pending = publisher
@@ -746,30 +705,12 @@ fn list_reasons() {
 
 /// A redaction input as the dialog lists it, with its reason.
 fn describe_input(input: &RedactionInput) -> String {
-    match input {
-        RedactionInput::Lines {
-            line,
-            line_end,
-            reason,
-        } if line == line_end => format!("lines {line} ({reason})"),
-        RedactionInput::Lines {
-            line,
-            line_end,
-            reason,
-        } => format!("lines {line}-{line_end} ({reason})"),
-        RedactionInput::Text {
-            reason,
-            literal,
-            mark,
-        } => format!("text {literal:?} ({reason}{})", no_mark(*mark)),
-        RedactionInput::Span {
-            line,
-            seq,
-            reason,
-            literal,
-            mark,
-        } => format!("span {line} {seq} {literal:?} ({reason}{})", no_mark(*mark)),
-    }
+    format!(
+        "text {:?} ({}{})",
+        input.literal,
+        input.reason,
+        no_mark(input.mark)
+    )
 }
 
 /// The suffix a dialog line carries for a redaction without a marker.
@@ -1440,16 +1381,12 @@ mod tests {
     #[test]
     fn inputs_are_described_for_the_dialog() {
         assert_eq!(
-            describe_input(&RedactionInput::parse_lines("3", "scope").unwrap()),
-            "lines 3 (scope)"
-        );
-        assert_eq!(
             describe_input(&RedactionInput::parse_text("abc 123", "secret", true).unwrap()),
             "text \"abc 123\" (secret)"
         );
         assert_eq!(
-            describe_input(&RedactionInput::parse_span("1 2 damn", "language", false).unwrap()),
-            "span 1 2 \"damn\" (language, no mark)"
+            describe_input(&RedactionInput::parse_text("damn", "language", false).unwrap()),
+            "text \"damn\" (language, no mark)"
         );
     }
 }

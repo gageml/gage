@@ -5,7 +5,9 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 
-use gage_session::{Derivation, EntryJson, StoredSession, TextDescriptor, TextValue, edit_strings};
+use gage_session::{
+    Derivation, EntryJson, StoredSession, TextDescriptor, TextValue, delete_values, edit_strings,
+};
 use gage_store::{
     DirContentSink, FilteredKind, FilteredRecord, PublishDirLayout, SummaryAttrs, format_filtered,
 };
@@ -78,10 +80,6 @@ pub struct Instance {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InstanceKind {
-    Line {
-        line: u32,
-        line_end: u32,
-    },
     Span {
         line: u32,
         pointer: String,
@@ -92,51 +90,44 @@ pub enum InstanceKind {
         /// Whether the marker replaces the span; otherwise it is removed
         mark: bool,
     },
-    Value {
-        line: u32,
-        pointer: String,
-    },
+    /// The value at `pointer` is left out of the entry
+    Value { line: u32, pointer: String },
     /// The attribute `name` is left out of `attrs.json`
-    Attr {
-        name: String,
-    },
+    Attr { name: String },
 }
 
 impl Instance {
     /// The `filtered.json` record. `published` is the span's position
-    /// in the published value, `end` exclusive, for a `Span` instance;
-    /// a value replaced whole is the marker from offset 0.
-    fn record(&self, published: Option<(usize, usize)>) -> FilteredRecord {
-        let record =
-            |kind, line, line_end, reference: Option<&str>, span: Option<(usize, usize)>| {
-                FilteredRecord {
-                    kind,
-                    line,
-                    line_end,
-                    reference: reference.map(String::from),
-                    span_start: span.map(|(start, _)| start as u64),
-                    span_end: span.map(|(_, end)| end as u64),
+    /// in the published value, `end` exclusive, for a `Span` instance.
+    /// A left-out value has no record of its own: its path redaction
+    /// is recorded once as a value rule.
+    fn record(&self, published: Option<(usize, usize)>) -> Option<FilteredRecord> {
+        match &self.kind {
+            InstanceKind::Span { line, pointer, .. } => {
+                let (start, end) =
+                    published.expect("a span instance is on a kept line, which line_edits visits");
+                Some(FilteredRecord {
+                    kind: FilteredKind::Text,
+                    line: *line,
+                    line_end: None,
+                    reference: Some(pointer.clone()),
+                    span_start: Some(start as u64),
+                    span_end: Some(end as u64),
                     reason: self.reason.clone(),
                     author: self.author.clone(),
-                }
-            };
-        match &self.kind {
-            InstanceKind::Line { line, line_end } => {
-                record(FilteredKind::Line, *line, Some(*line_end), None, None)
+                })
             }
-            InstanceKind::Span { line, pointer, .. } => {
-                let span =
-                    published.expect("a span instance is on a kept line, which line_edits visits");
-                record(FilteredKind::Text, *line, None, Some(pointer), Some(span))
-            }
-            InstanceKind::Value { line, pointer } => record(
-                FilteredKind::Text,
-                *line,
-                None,
-                Some(pointer),
-                Some((0, MARKER.len())),
-            ),
-            InstanceKind::Attr { name } => record(FilteredKind::Attr, 0, None, Some(name), None),
+            InstanceKind::Value { .. } => None,
+            InstanceKind::Attr { name } => Some(FilteredRecord {
+                kind: FilteredKind::Attr,
+                line: 0,
+                line_end: None,
+                reference: Some(name.clone()),
+                span_start: None,
+                span_end: None,
+                reason: self.reason.clone(),
+                author: self.author.clone(),
+            }),
         }
     }
 
@@ -144,20 +135,16 @@ impl Instance {
     /// none.
     fn line(&self) -> u32 {
         match &self.kind {
-            InstanceKind::Line { line, .. }
-            | InstanceKind::Span { line, .. }
-            | InstanceKind::Value { line, .. } => *line,
+            InstanceKind::Span { line, .. } | InstanceKind::Value { line, .. } => *line,
             InstanceKind::Attr { .. } => 0,
         }
     }
 
     /// The order instances are recorded in: by line, then pointer,
-    /// then offset, with an attribute first and a dropped line before
-    /// anything on it.
+    /// then offset, with an attribute first.
     fn order(&self) -> (u32, &str, usize) {
         match &self.kind {
             InstanceKind::Attr { name } => (0, name, 0),
-            InstanceKind::Line { line, .. } => (*line, "", 0),
             InstanceKind::Value { line, pointer } => (*line, pointer, 0),
             InstanceKind::Span {
                 line,
@@ -191,61 +178,14 @@ impl From<&Redaction> for Applied {
     }
 }
 
-/// Resolve the caller's inputs against the session: a span input's
-/// `(line, seq)` becomes the value's JSON Pointer.
-pub fn resolve_inputs(
-    inputs: &[RedactionInput],
-    session: &SessionText,
-) -> Result<Vec<RedactionKind>, PublishError> {
+/// The redaction kinds of the caller's inputs.
+pub fn resolve_inputs(inputs: &[RedactionInput]) -> Vec<RedactionKind> {
     inputs
         .iter()
-        .map(|input| match input {
-            RedactionInput::Lines {
-                line,
-                line_end,
-                reason,
-            } => Ok(RedactionKind::Lines {
-                line: *line,
-                line_end: *line_end,
-                reason: reason.clone(),
-            }),
-            RedactionInput::Text {
-                reason,
-                literal,
-                mark,
-            } => Ok(RedactionKind::Text {
-                reason: reason.clone(),
-                literal: literal.clone(),
-                mark: *mark,
-            }),
-            RedactionInput::Span {
-                line,
-                seq,
-                reason,
-                literal,
-                mark,
-            } => {
-                let value = session
-                    .entry(*line)
-                    .and_then(|e| e.values.get(*seq as usize))
-                    .ok_or_else(|| {
-                        PublishError::NoMatch(format!(
-                            "span {line} {seq}: no text value at that line and seq"
-                        ))
-                    })?;
-                if !literal_regex(literal).is_match(&value.text) {
-                    return Err(PublishError::NoMatch(format!(
-                        "span {line} {seq}: {literal:?} is not in the value"
-                    )));
-                }
-                Ok(RedactionKind::Span {
-                    line: *line,
-                    pointer: value.pointer.clone(),
-                    reason: reason.clone(),
-                    literal: literal.clone(),
-                    mark: *mark,
-                })
-            }
+        .map(|input| RedactionKind::Text {
+            reason: input.reason.clone(),
+            literal: input.literal.clone(),
+            mark: input.mark,
         })
         .collect()
 }
@@ -370,40 +310,57 @@ pub fn build(
             continue;
         }
         let edits = line_edits(entry, &instances, &mut published)?;
-        if !edits.is_empty() {
-            let pairs: Vec<(&str, &str)> = edits
-                .iter()
-                .map(|(p, t)| (p.as_str(), t.as_str()))
-                .collect();
-            replaced.insert(entry.line, edit_strings(&entry.json, &pairs)?);
+        if let Some(json) = edits.apply(&entry.json)? {
+            replaced.insert(entry.line, json);
         }
     }
     let derivation = Derivation { dropped, replaced };
     let mut sink = DirContentSink::new(layout.files_dir());
     stored.write_derived(&derivation, &mut sink)?;
 
-    let records: Vec<FilteredRecord> = instances
-        .iter()
-        .enumerate()
-        .map(|(i, instance)| instance.record(published.get(&i).copied()))
+    // A path redaction is one value rule however many values it
+    // selects; every other record is an instance
+    let rules = definition.redactions.iter().filter_map(|r| match &r.kind {
+        RedactionKind::Path { path, reason } => Some(FilteredRecord {
+            kind: FilteredKind::Value,
+            line: 0,
+            line_end: None,
+            reference: Some(path.clone()),
+            span_start: None,
+            span_end: None,
+            reason: reason.clone(),
+            author: r.author.clone(),
+        }),
+        _ => None,
+    });
+    let records: Vec<FilteredRecord> = rules
+        .chain(
+            instances
+                .iter()
+                .enumerate()
+                .filter_map(|(i, instance)| instance.record(published.get(&i).copied())),
+        )
         .collect();
     fs::write(layout.filtered_file(), format_filtered(&records))?;
     Ok(instances)
 }
 
 /// Check that `staged` is a removal-only derivation of `original`
-/// under `dropped`: the staged entries are the original's undropped
-/// entries in order, each with the same JSON apart from its text
-/// values, and each text value is the original's with substrings
-/// removed or replaced by the marker. An error names the original line
-/// and, for a value, its pointer.
+/// under `definition`: the staged entries are the original's undropped
+/// entries in order, each with the same JSON apart from the values
+/// the definition's path redactions leave out and its text values,
+/// and each text value is the original's with substrings removed or
+/// replaced by the marker. An error names the original line and, for
+/// a value, its pointer.
 pub fn check_removal_only(
+    definition: &PublishDefinition,
     original: &SessionText,
     staged: &SessionText,
-    dropped: &BTreeSet<u32>,
 ) -> Result<(), PublishError> {
     let refuse =
         |m: String| PublishError::Refused(format!("staged session is not removal-only: {m}"));
+    let dropped = dropped_lines(definition);
+    let left_out = expand_all(&definition.redactions, original, &dropped)?;
     let kept: Vec<&EntryText> = original
         .entries
         .iter()
@@ -426,8 +383,25 @@ pub fn check_removal_only(
                 derived.line
             )));
         }
+        // The original with its left-out values gone is what the
+        // staged entry derives from; the pointers of what remains are
+        // the staged entry's
+        let deleted: Vec<&str> = left_out
+            .iter()
+            .filter_map(|i| match &i.kind {
+                InstanceKind::Value { line, pointer } if *line == source.line => {
+                    Some(pointer.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        let expected_json = delete_values(&source.json, &deleted)?;
+        let expected_values = original
+            .descriptor
+            .text_values(&expected_json)
+            .map_err(|e| at(e.to_string()))?;
         for value in &derived.values {
-            let Some(source_value) = source.values.iter().find(|v| v.pointer == value.pointer)
+            let Some(source_value) = expected_values.iter().find(|v| v.pointer == value.pointer)
             else {
                 return Err(at(format!("{} has no original value", value.pointer)));
             };
@@ -438,8 +412,8 @@ pub fn check_removal_only(
                 )));
             }
         }
-        let pointers: Vec<&str> = source.values.iter().map(|v| v.pointer.as_str()).collect();
-        if blank_values(&source.json, &pointers)? != blank_values(&derived.json, &pointers)? {
+        let pointers: Vec<&str> = expected_values.iter().map(|v| v.pointer.as_str()).collect();
+        if blank_values(&expected_json, &pointers)? != blank_values(&derived.json, &pointers)? {
             return Err(at("entry differs outside its text values".to_string()));
         }
     }
@@ -469,22 +443,17 @@ fn blank_values(json: &str, pointers: &[&str]) -> Result<Value, PublishError> {
     Ok(value)
 }
 
-/// Every line a `Lines` redaction drops.
-pub fn dropped_lines(definition: &PublishDefinition) -> BTreeSet<u32> {
-    let mut dropped = BTreeSet::new();
-    for r in &definition.redactions {
-        if let RedactionKind::Lines { line, line_end, .. } = &r.kind {
-            dropped.extend(*line..=*line_end);
-        }
-    }
-    dropped
+/// Every line the definition drops. No redaction kind drops a line;
+/// segments and the harness filter will.
+pub fn dropped_lines(_definition: &PublishDefinition) -> BTreeSet<u32> {
+    BTreeSet::new()
 }
 
-/// Expand `redactions` in order of precedence: dropped lines and
-/// attributes, then whole values, then spans. A match inside a
-/// dropped line or a whole value records nothing, and a whole value is
-/// recorded once however many redactions select it, so the record
-/// holds only what changed the derived session.
+/// Expand `redactions` in order of precedence: attributes and
+/// left-out values, then spans. A match inside a dropped line or a
+/// left-out value records nothing, and a value is left out once
+/// however many paths select it, so the record holds only what
+/// changed the derived session.
 fn expand_all(
     redactions: &[Redaction],
     session: &SessionText,
@@ -493,14 +462,14 @@ fn expand_all(
     let mut expansion = Expansion {
         session,
         dropped,
-        whole: HashSet::new(),
+        deleted: HashSet::new(),
         out: Vec::new(),
     };
     for redaction in redactions.iter().filter(|r| precedence(&r.kind) == 0) {
         expansion.expand(redaction);
     }
     expansion.expand_paths(redactions)?;
-    for redaction in redactions.iter().filter(|r| precedence(&r.kind) == 2) {
+    for redaction in redactions.iter().filter(|r| precedence(&r.kind) == 1) {
         expansion.expand(redaction);
     }
     Ok(expansion.out)
@@ -509,9 +478,8 @@ fn expand_all(
 /// The pass a redaction kind is expanded in.
 fn precedence(kind: &RedactionKind) -> u8 {
     match kind {
-        RedactionKind::Lines { .. } | RedactionKind::Attr { .. } => 0,
-        RedactionKind::Path { .. } => 1,
-        RedactionKind::Text { .. } | RedactionKind::Span { .. } => 2,
+        RedactionKind::Attr { .. } | RedactionKind::Path { .. } => 0,
+        RedactionKind::Text { .. } => 1,
     }
 }
 
@@ -527,8 +495,8 @@ fn instance_of(redaction: &Redaction, kind: InstanceKind) -> Instance {
 struct Expansion<'a> {
     session: &'a SessionText,
     dropped: &'a BTreeSet<u32>,
-    /// The `(line, pointer)` of every value replaced whole so far
-    whole: HashSet<(u32, &'a str)>,
+    /// The `(line, pointer)` of every value left out so far
+    deleted: HashSet<(u32, &'a str)>,
     out: Vec<Instance>,
 }
 
@@ -566,7 +534,7 @@ impl<'a> Expansion<'a> {
                     .collect();
                 for pointer in pointers {
                     if let Some(value) = self.value_at(entry.line, &pointer) {
-                        self.replace_whole(entry.line, value, &|k| instance_of(redaction, k));
+                        self.leave_out(entry.line, value, &|k| instance_of(redaction, k));
                     }
                 }
             }
@@ -577,12 +545,6 @@ impl<'a> Expansion<'a> {
     fn expand(&mut self, redaction: &Redaction) {
         let instance = |kind: InstanceKind| instance_of(redaction, kind);
         match &redaction.kind {
-            RedactionKind::Lines { line, line_end, .. } => {
-                self.out.push(instance(InstanceKind::Line {
-                    line: *line,
-                    line_end: *line_end,
-                }));
-            }
             RedactionKind::Attr { name, .. } => {
                 if self.session.has_attr(name) {
                     self.out
@@ -601,21 +563,6 @@ impl<'a> Expansion<'a> {
                     }
                 }
             }
-            RedactionKind::Span {
-                line,
-                pointer,
-                literal,
-                mark,
-                ..
-            } => {
-                if self.dropped.contains(line) {
-                    return;
-                }
-                let regex = literal_regex(literal);
-                if let Some(value) = self.value_at(*line, pointer) {
-                    self.matches_in(&regex, value, *line, *mark, &instance);
-                }
-            }
         }
     }
 
@@ -625,14 +572,14 @@ impl<'a> Expansion<'a> {
             .and_then(|e| e.values.iter().find(|v| v.pointer == pointer))
     }
 
-    /// Record `value` as replaced whole, once.
-    fn replace_whole(
+    /// Record `value` as left out, once.
+    fn leave_out(
         &mut self,
         line: u32,
         value: &'a TextValue,
         instance: &dyn Fn(InstanceKind) -> Instance,
     ) {
-        if self.whole.insert((line, &value.pointer)) {
+        if self.deleted.insert((line, &value.pointer)) {
             self.out.push(instance(InstanceKind::Value {
                 line,
                 pointer: value.pointer.clone(),
@@ -641,8 +588,7 @@ impl<'a> Expansion<'a> {
     }
 
     /// The instances a literal produces in one value: nothing when the
-    /// value is already replaced whole, one `Value` when the value is
-    /// atomic and matches, else one `Span` per match.
+    /// value is left out, else one `Span` per match.
     fn matches_in(
         &mut self,
         regex: &Regex,
@@ -651,15 +597,10 @@ impl<'a> Expansion<'a> {
         mark: bool,
         instance: &dyn Fn(InstanceKind) -> Instance,
     ) {
-        let mut found = regex.find_iter(&value.text).peekable();
-        if found.peek().is_none() || self.whole.contains(&(line, value.pointer.as_str())) {
+        if self.deleted.contains(&(line, value.pointer.as_str())) {
             return;
         }
-        if value.atomic {
-            self.replace_whole(line, value, instance);
-            return;
-        }
-        self.out.extend(found.map(|m| {
+        self.out.extend(regex.find_iter(&value.text).map(|m| {
             instance(InstanceKind::Span {
                 line,
                 pointer: value.pointer.clone(),
@@ -671,19 +612,44 @@ impl<'a> Expansion<'a> {
     }
 }
 
-/// The `(pointer, new text)` edits of one entry from the instances on
-/// its line. A value with a `Value` instance becomes the marker; spans
-/// are merged where they overlap, a merged span is marked when any
-/// part of it was, and they are applied in order. Every `Span`
-/// instance on the line records in `published`, by its index in
-/// `instances`, the position of its merged span in the published
-/// value.
+/// The edits of one entry: the text values rewritten and the values
+/// left out.
+struct LineEdits {
+    replaced: Vec<(String, String)>,
+    deleted: Vec<String>,
+}
+
+impl LineEdits {
+    /// `json` with the edits applied, or `None` when there are none.
+    /// The replacements go first, so every pointer names a position
+    /// in the entry as written.
+    fn apply(&self, json: &str) -> Result<Option<String>, PublishError> {
+        if self.replaced.is_empty() && self.deleted.is_empty() {
+            return Ok(None);
+        }
+        let pairs: Vec<(&str, &str)> = self
+            .replaced
+            .iter()
+            .map(|(p, t)| (p.as_str(), t.as_str()))
+            .collect();
+        let replaced = edit_strings(json, &pairs)?;
+        let deleted: Vec<&str> = self.deleted.iter().map(String::as_str).collect();
+        Ok(Some(delete_values(&replaced, &deleted)?))
+    }
+}
+
+/// The edits of one entry from the instances on its line. A value
+/// with a `Value` instance is left out; spans are merged where they
+/// overlap, a merged span is marked when any part of it was, and they
+/// are applied in order. Every `Span` instance on the line records in
+/// `published`, by its index in `instances`, the position of its
+/// merged span in the published value.
 fn line_edits(
     entry: &EntryText,
     instances: &[Instance],
     published: &mut HashMap<usize, (usize, usize)>,
-) -> Result<Vec<(String, String)>, PublishError> {
-    let mut whole: BTreeSet<&str> = BTreeSet::new();
+) -> Result<LineEdits, PublishError> {
+    let mut deleted: Vec<String> = Vec::new();
     let mut spans: BTreeMap<&str, Vec<(usize, usize, bool, usize)>> = BTreeMap::new();
     for (index, i) in instances
         .iter()
@@ -691,9 +657,7 @@ fn line_edits(
         .filter(|(_, i)| i.line() == entry.line)
     {
         match &i.kind {
-            InstanceKind::Value { pointer, .. } => {
-                whole.insert(pointer);
-            }
+            InstanceKind::Value { pointer, .. } => deleted.push(pointer.clone()),
             InstanceKind::Span {
                 pointer,
                 start,
@@ -704,20 +668,11 @@ fn line_edits(
                 .entry(pointer)
                 .or_default()
                 .push((*start, *end, *mark, index)),
-            InstanceKind::Line { .. } | InstanceKind::Attr { .. } => {}
+            InstanceKind::Attr { .. } => {}
         }
     }
-    let mut edits = Vec::new();
-    for pointer in &whole {
-        edits.push((pointer.to_string(), MARKER.to_string()));
-    }
+    let mut replaced = Vec::new();
     for (pointer, mut ranges) in spans {
-        if whole.contains(pointer) {
-            for (_, _, _, index) in ranges {
-                published.insert(index, (0, MARKER.len()));
-            }
-            continue;
-        }
         let value = entry
             .values
             .iter()
@@ -750,9 +705,9 @@ fn line_edits(
                 published.insert(*index, position);
             }
         }
-        edits.push((pointer.to_string(), text));
+        replaced.push((pointer.to_string(), text));
     }
-    Ok(edits)
+    Ok(LineEdits { replaced, deleted })
 }
 
 /// `text` with each byte span `start..=end` of `spans`, which are in
@@ -856,16 +811,21 @@ mod tests {
             author: "filter:pii".to_string(),
             kind,
         };
+        // A left-out value has no record of its own
+        assert!(
+            instance(InstanceKind::Value {
+                line: 7,
+                pointer: "/toolUseResult/stdout".to_string(),
+            })
+            .record(None)
+            .is_none()
+        );
         let records = [
             instance(InstanceKind::Attr {
                 name: "project".to_string(),
             })
-            .record(None),
-            instance(InstanceKind::Line {
-                line: 1,
-                line_end: 4,
-            })
-            .record(None),
+            .record(None)
+            .unwrap(),
             instance(InstanceKind::Span {
                 line: 5,
                 pointer: "/message/content".to_string(),
@@ -873,35 +833,20 @@ mod tests {
                 end: 23,
                 mark: true,
             })
-            .record(Some((4, 14))),
-            instance(InstanceKind::Value {
-                line: 7,
-                pointer: "/toolUseResult/stdout".to_string(),
-            })
-            .record(None),
+            .record(Some((4, 14)))
+            .unwrap(),
         ];
         let parsed = parse_filtered(format_filtered(&records).as_bytes()).unwrap();
         // The parser returns list by list: lines, values, text, attrs
-        assert_eq!(parsed.len(), 4);
-        assert_eq!(parsed[0].kind, FilteredKind::Line);
-        assert_eq!((parsed[0].line, parsed[0].line_end), (1, Some(4)));
-        assert_eq!(parsed[1].kind, FilteredKind::Text);
-        assert_eq!(parsed[1].reference.as_deref(), Some("/message/content"));
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].kind, FilteredKind::Text);
+        assert_eq!(parsed[0].reference.as_deref(), Some("/message/content"));
         assert_eq!(
-            (parsed[1].span_start, parsed[1].span_end),
+            (parsed[0].span_start, parsed[0].span_end),
             (Some(4), Some(14))
         );
-        assert_eq!(parsed[2].kind, FilteredKind::Text);
-        assert_eq!(
-            parsed[2].reference.as_deref(),
-            Some("/toolUseResult/stdout")
-        );
-        assert_eq!(
-            (parsed[2].span_start, parsed[2].span_end),
-            (Some(0), Some(MARKER.len() as u64))
-        );
-        assert_eq!(parsed[3].kind, FilteredKind::Attr);
-        assert_eq!(parsed[3].reference.as_deref(), Some("project"));
+        assert_eq!(parsed[1].kind, FilteredKind::Attr);
+        assert_eq!(parsed[1].reference.as_deref(), Some("project"));
         assert!(
             parsed
                 .iter()

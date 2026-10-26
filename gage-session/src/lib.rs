@@ -34,7 +34,7 @@ pub use agent::{
 pub use content_schema::{
     ContentField, ContentSchema, content_schema_batch, content_schema_schema,
 };
-pub use json_edit::{EditError, edit_strings};
+pub use json_edit::{EditError, delete_values, edit_strings};
 pub use status::{AuthInfo, DriverStatus, Field, HarnessInfo, InstallInfo};
 pub use system_col::{SYSTEM_META_KEY, is_system, system};
 pub use text_block::{
@@ -155,10 +155,10 @@ pub trait Driver: Send + Sync {
     }
 
     /// The driver's description of the strings it writes in
-    /// `content_format`: which fields are not text and which subtrees
-    /// are atomic, for the `text_block` table and the publish
-    /// redaction engine. The default is none, for a driver whose
-    /// sessions cannot be published.
+    /// `content_format`: which fields are not text, and which fields
+    /// a named filter treats as sensitive by type, for the `text_block`
+    /// table and the publish redaction engine. The default is none,
+    /// for a driver whose sessions cannot be published.
     fn text_descriptor(&self, _content_format: &str) -> Option<TextDescriptor> {
         None
     }

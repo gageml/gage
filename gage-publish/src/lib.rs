@@ -230,8 +230,8 @@ impl<'a> Publisher<'a> {
     }
 
     /// Add `inputs` to the pending publish `id` as `author` and rebuild.
-    /// Every input is resolved before any is recorded, so one bad input
-    /// leaves the definition unchanged.
+    /// An input that matches nothing is an error, and the definition
+    /// is unchanged.
     pub fn redact(
         &self,
         id: &str,
@@ -240,8 +240,7 @@ impl<'a> Publisher<'a> {
     ) -> Result<Vec<Applied>, PublishError> {
         let mut definition = self.definition(id)?;
         let session = self.open_original(&definition)?;
-        let kinds = derive::resolve_inputs(inputs, &session)?;
-        let ids: Vec<u64> = kinds
+        let ids: Vec<u64> = derive::resolve_inputs(inputs)
             .into_iter()
             .map(|kind| definition.push(author, None, kind))
             .collect();
@@ -320,7 +319,8 @@ impl<'a> Publisher<'a> {
 
     /// Check that the staged session of the pending publish `id` is a
     /// removal-only derivation of the original: every staged line is an
-    /// original line the definition does not drop, and every staged
+    /// original line the definition does not drop, a value is absent
+    /// only where a path redaction leaves it out, and every staged
     /// text value is its original with substrings removed or replaced
     /// by the marker. Reads only.
     pub fn check(&self, id: &str) -> Result<(), PublishError> {
@@ -330,7 +330,7 @@ impl<'a> Publisher<'a> {
         let source = derive::SessionText::read(original.stored()?.as_mut(), &original.descriptor)?;
         let staged =
             derive::SessionText::read(original.staged(&layout)?.as_mut(), &original.descriptor)?;
-        derive::check_removal_only(&source, &staged, &derive::dropped_lines(&definition))
+        derive::check_removal_only(&definition, &source, &staged)
     }
 
     /// Publish the pending publish `id`: check it, commit the staged

@@ -142,9 +142,9 @@ fn init_runs_the_named_filters_and_records_their_instances() {
         "{}",
         lines[1]
     );
-    // The tool_use block is atomic: the whole command value is replaced
+    // The key inside the tool input is a span like any other
     assert!(
-        lines[2].contains(r#""command":"[REDACTED]""#),
+        lines[2].contains(r#""command":"echo [REDACTED]""#),
         "{}",
         lines[2]
     );
@@ -167,18 +167,17 @@ fn init_runs_the_named_filters_and_records_their_instances() {
             .any(|r| r.kind == FilteredKind::Text && r.author == "filter:pii"),
         "{records:#?}"
     );
-    // The command is an atomic value replaced whole: the marker from
-    // offset 0 of the published value
+    // The span in the command sits after "echo " in the published value
     assert!(
         records.iter().any(|r| r.kind == FilteredKind::Text
             && r.reference.as_deref() == Some("/message/content/0/input/command")
-            && (r.span_start, r.span_end) == (Some(0), Some(10))),
+            && (r.span_start, r.span_end) == (Some(5), Some(15))),
         "{records:#?}"
     );
 }
 
 #[test]
-fn redact_applies_lines_text_and_spans_and_rejects_a_miss() {
+fn redact_applies_text_everywhere_and_rejects_a_miss() {
     let f = fixture();
     let publisher = Publisher::with_root(&f.store, &f.publish_root);
     let init = publisher.init(&f.original, &[]).unwrap();
@@ -188,44 +187,35 @@ fn redact_applies_lines_text_and_spans_and_rejects_a_miss() {
         .redact(
             &init.id,
             &[
-                RedactionInput::parse_lines("5", "opaque").unwrap(),
                 RedactionInput::parse_text("garrett", "pii", true).unwrap(),
-                // Line 1's text values in document order: cwd, then
-                // message.content
-                RedactionInput::Span {
-                    line: 1,
-                    seq: 1,
-                    reason: "language".into(),
-                    literal: "fucking".into(),
-                    mark: false,
-                },
+                RedactionInput::parse_text("fucking", "language", false).unwrap(),
             ],
             "user:test",
         )
         .unwrap();
-    assert_eq!(applied.len(), 3);
-    assert_eq!(applied[0].instances, 1);
-    // "garrett" is in cwd on line 1 only; line 5 is dropped
-    assert_eq!(applied[1].instances, 1, "{applied:#?}");
-    assert_eq!(applied[2].instances, 1);
+    assert_eq!(applied.len(), 2);
+    // "garrett" is in cwd on line 1 and in the username and home_dir on
+    // line 5
+    assert_eq!(applied[0].instances, 3, "{applied:#?}");
+    assert_eq!(applied[1].instances, 1);
 
     let lines = staged_lines(&f.publish_root, &init.id);
-    assert_eq!(lines.len(), 4, "line 5 is dropped");
+    assert_eq!(lines.len(), 5);
     assert!(lines[0].contains("what the hell is this?"), "{}", lines[0]);
     assert!(
         lines[0].contains(r#""cwd":"/home/[REDACTED]/proj""#),
         "{}",
         lines[0]
     );
+    assert!(
+        lines[4].contains(r#""home_dir":"/home/[REDACTED]""#),
+        "{}",
+        lines[4]
+    );
 
     let records = filtered(&f.publish_root, &init.id);
-    assert!(
-        records
-            .iter()
-            .any(|r| r.kind == FilteredKind::Line && r.line == 5 && r.reason == "opaque"),
-        "{records:#?}"
-    );
     assert!(records.iter().all(|r| r.author == "user:test"));
+    assert!(records.iter().all(|r| r.kind == FilteredKind::Text));
     // Span offsets are positions in the published value: the marker in
     // the cwd, and an empty span where "fucking " was removed
     let span = |pointer: &str| {
@@ -239,8 +229,8 @@ fn redact_applies_lines_text_and_spans_and_rejects_a_miss() {
     assert_eq!(span("/message/content"), (16, 16));
 
     let definition = publisher.definition(&init.id).unwrap();
-    assert_eq!(definition.redactions.len(), 3);
-    assert_eq!(definition.next_id, 4);
+    assert_eq!(definition.redactions.len(), 2);
+    assert_eq!(definition.next_id, 3);
 
     let miss = publisher
         .redact(
@@ -250,7 +240,7 @@ fn redact_applies_lines_text_and_spans_and_rejects_a_miss() {
         )
         .unwrap_err();
     assert!(matches!(miss, PublishError::NoMatch(_)), "{miss}");
-    assert_eq!(publisher.definition(&init.id).unwrap().redactions.len(), 3);
+    assert_eq!(publisher.definition(&init.id).unwrap().redactions.len(), 2);
 }
 
 /// A filter argument with whitespace is an instruction, anything else
@@ -296,7 +286,7 @@ fn filter_add_and_remove_change_one_filters_redactions() {
     publisher
         .redact(
             &init.id,
-            &[RedactionInput::parse_lines("5", "scope").unwrap()],
+            &[RedactionInput::parse_text("fucking", "language", true).unwrap()],
             "user:test",
         )
         .unwrap();
@@ -338,7 +328,11 @@ fn filter_add_and_remove_change_one_filters_redactions() {
         "the email still is: {}",
         lines[1]
     );
-    assert_eq!(lines.len(), 4, "the user's dropped line stays dropped");
+    assert!(
+        lines[0].contains("what the [REDACTED] hell"),
+        "the user's redaction stays: {}",
+        lines[0]
+    );
 }
 
 /// `filter_remove` matches a name first, then the one instruction the
@@ -419,36 +413,35 @@ fn filter_run_reruns_one_or_every_named_filter() {
     assert_ne!(pii_ids(&all), pii_ids(&before), "pii ran this time");
 }
 
-/// The staged summary follows the staged content: a dropped assistant
-/// entry lowers the line count, the message count, and the token
-/// totals, and the title stays the original's.
+/// The title stays the original's: the driver takes it from the first
+/// prompt, and redacting that prompt does not retitle the publication.
 #[test]
-fn the_staged_summary_follows_the_derived_content() {
+fn the_staged_summary_keeps_the_original_title() {
     let f = fixture();
     let publisher = Publisher::with_root(&f.store, &f.publish_root);
     let init = publisher.init(&f.original, &[]).unwrap();
 
     let before = staged_summary(&f.publish_root, &init.id);
-    assert_eq!(before["line_count"], 5, "{before}");
-    assert_eq!(before["output_tokens"], 10, "{before}");
     let title = before["title"].clone();
-    assert!(title.is_string(), "{before}");
+    assert!(
+        title.as_str().is_some_and(|t| t.contains("Hello")),
+        "{before}"
+    );
 
     publisher
         .redact(
             &init.id,
-            &[RedactionInput::parse_lines("1 2", "scope").unwrap()],
+            &[RedactionInput::parse_text("Hello", "privacy", true).unwrap()],
             "user:test",
         )
         .unwrap();
     let after = staged_summary(&f.publish_root, &init.id);
-    assert_eq!(after["line_count"], 3, "{after}");
-    assert_eq!(after["output_tokens"], 3, "{after}");
-    assert!(
-        after["message_count"].as_u64().unwrap() < before["message_count"].as_u64().unwrap(),
-        "{before} -> {after}"
-    );
     assert_eq!(after["title"], title, "{after}");
+    assert_eq!(after["line_count"], 5, "{after}");
+    assert!(
+        staged_lines(&f.publish_root, &init.id)[0].contains("[REDACTED], what"),
+        "the prompt itself is redacted"
+    );
 }
 
 /// `undo` removes redactions by id and rebuilds; an unknown id changes
@@ -463,27 +456,23 @@ fn undo_removes_redactions_and_suppresses_a_filters() {
     let applied = publisher
         .redact(
             &init.id,
-            &[RedactionInput::parse_lines("5", "scope").unwrap()],
+            &[RedactionInput::parse_text("garrett", "pii", true).unwrap()],
             "user:test",
         )
         .unwrap();
-    assert_eq!(staged_lines(&f.publish_root, &init.id).len(), 4);
+    let cwd = |publish_root: &std::path::Path| {
+        let line = staged_lines(publish_root, &init.id).remove(0);
+        line.contains("/home/[REDACTED]/proj")
+    };
+    assert!(cwd(&f.publish_root));
 
     let miss = publisher.undo(&init.id, &[applied[0].id, 99]).unwrap_err();
     assert!(miss.to_string().contains("99"), "{miss}");
-    assert_eq!(
-        staged_lines(&f.publish_root, &init.id).len(),
-        4,
-        "nothing changed"
-    );
+    assert!(cwd(&f.publish_root), "nothing changed");
 
     let removed = publisher.undo(&init.id, &[applied[0].id]).unwrap();
     assert_eq!(removed.len(), 1);
-    assert_eq!(
-        staged_lines(&f.publish_root, &init.id).len(),
-        5,
-        "line 5 is back"
-    );
+    assert!(!cwd(&f.publish_root), "the username is back");
     let definition = publisher.definition(&init.id).unwrap();
     assert!(
         definition.suppressions.is_empty(),
@@ -557,7 +546,7 @@ fn apply_commits_the_derived_session_and_clears_the_staging() {
     publisher
         .redact(
             &init.id,
-            &[RedactionInput::parse_lines("5", "scope").unwrap()],
+            &[RedactionInput::parse_text("fucking", "language", false).unwrap()],
             "user:test",
         )
         .unwrap();
@@ -576,10 +565,11 @@ fn apply_commits_the_derived_session_and_clears_the_staging() {
         .unwrap()
         .read_to_string(&mut text)
         .unwrap();
-    assert_eq!(text.lines().count(), 4, "line 5 was dropped");
+    assert_eq!(text.lines().count(), 5);
     assert!(text.contains("[REDACTED]"), "{text}");
     assert!(!text.contains("sk-ant-api03"), "{text}");
     assert!(!text.contains("alice@example.com"), "{text}");
+    assert!(!text.contains("fucking"), "{text}");
 
     assert!(!f.publish_root.join(&init.id).exists());
     assert!(!publisher.store().definition_file(&init.id).exists());
@@ -618,13 +608,17 @@ fn apply_refuses_a_hand_edited_staged_session() {
         staged.replace("\"uuid\":\"a1\"", "\"uuid\":\"a9\""),
         "outside its text values",
     );
+    refused(
+        staged.replace("\"cwd\":\"/home/garrett/proj\",", ""),
+        "outside its text values",
+    );
 
     fs::write(&path, &staged).unwrap();
     publisher.check(&init.id).unwrap();
 }
 
 #[test]
-fn system_filter_replaces_system_values_whole_and_drops_the_project_attribute() {
+fn system_filter_leaves_out_system_values_and_drops_the_project_attribute() {
     let f = fixture_with(SYSTEM_SESSION);
     assert_eq!(
         f.original.attrs.project.as_deref(),
@@ -654,27 +648,46 @@ fn system_filter_replaces_system_values_whole_and_drops_the_project_attribute() 
     );
 
     let lines = staged_lines(&f.publish_root, &init.id);
-    assert!(lines[0].contains(r#""cwd":"[REDACTED]""#), "{}", lines[0]);
-    assert!(lines[0].contains(r#""gitBranch":"main""#), "{}", lines[0]);
-    for field in ["home_dir", "live_cwd", "root", "host", "user_identity"] {
+    // A left-out value goes with its name, and the rest of the line is
+    // as written
+    assert!(
+        lines[0].starts_with(
+            r#"{"type":"user","uuid":"u1","timestamp":"2025-01-01T00:00:00Z","gitBranch":"main""#
+        ),
+        "{}",
+        lines[0]
+    );
+    assert!(!lines[0].contains("cwd"), "{}", lines[0]);
+    for field in ["home_dir", "live_cwd", "root", "host"] {
         assert!(
-            lines[4].contains(&format!(r#""{field}":"[REDACTED]""#)),
+            !lines[4].contains(&format!("\"{field}\"")),
             "{field}: {}",
             lines[4]
         );
     }
     assert!(lines[4].contains(r#""branch":"main""#), "{}", lines[4]);
-    // The pii literal still reaches the path's copies in prose and in
-    // the atomic tool result
+    // The username is not a system field; the pii literal redacts it
+    assert!(
+        lines[4].contains(r#""user_identity":"[REDACTED]""#),
+        "{}",
+        lines[4]
+    );
+    // The home directory is a pii literal everywhere it is text: in a
+    // tool input, a tool result, and prose
+    assert!(
+        lines[1].contains(r#""command":"ls [REDACTED]/proj""#),
+        "{}",
+        lines[1]
+    );
+    assert!(
+        lines[2].contains(r#""stdout":"[REDACTED]/proj/a.txt""#),
+        "{}",
+        lines[2]
+    );
     assert!(
         lines[3].contains("at [REDACTED]/proj/a.txt"),
         "{}",
         lines[3]
-    );
-    assert!(
-        lines[2].contains(r#""stdout":"[REDACTED]""#),
-        "{}",
-        lines[2]
     );
 
     let records = filtered(&f.publish_root, &init.id);
@@ -688,20 +701,31 @@ fn system_filter_replaces_system_values_whole_and_drops_the_project_attribute() 
         (attrs[0].reason.as_str(), attrs[0].author.as_str()),
         ("system", "filter:system")
     );
-    let on_cwd: Vec<&FilteredRecord> = records
+    // One value rule per path, on no line, however many values it
+    // selects; no text record is on a left-out value
+    let values: Vec<&FilteredRecord> = records
         .iter()
-        .filter(|r| r.line == 1 && r.reference.as_deref() == Some("/cwd"))
+        .filter(|r| r.kind == FilteredKind::Value)
         .collect();
-    assert_eq!(on_cwd.len(), 1, "{records:#?}");
-    assert_eq!(on_cwd[0].kind, FilteredKind::Text);
-    assert_eq!(
-        (on_cwd[0].span_start, on_cwd[0].span_end),
-        (Some(0), Some(10)),
-        "replaced whole: the marker is the published value"
+    assert_eq!(values.len(), 5, "{records:#?}");
+    assert!(
+        values
+            .iter()
+            .all(|r| r.line == 0 && r.reason == "system" && r.author == "filter:system"),
+        "{records:#?}"
     );
-    assert_eq!(on_cwd[0].author, "filter:system");
-    // Every system field on line 5 is replaced whole by the system
-    // filter; the username, which is not one, is a pii span
+    assert!(
+        values
+            .iter()
+            .any(|r| r.reference.as_deref() == Some("$.cwd")),
+        "{records:#?}"
+    );
+    assert!(
+        !records
+            .iter()
+            .any(|r| r.kind == FilteredKind::Text && r.reference.as_deref() == Some("/cwd")),
+        "{records:#?}"
+    );
     let pii_on_5: Vec<&FilteredRecord> = records
         .iter()
         .filter(|r| r.line == 5 && r.author == "filter:pii")
@@ -719,10 +743,25 @@ fn system_filter_replaces_system_values_whole_and_drops_the_project_attribute() 
     let attrs = staged_attrs(&f.publish_root, &init.id);
     assert!(attrs.get("project").is_none(), "{attrs}");
 
+    // A literal found only inside a left-out value changes nothing,
+    // and is reported as such
+    let err = publisher
+        .redact(
+            &init.id,
+            &[RedactionInput::parse_text("git.corp.example", "system", true).unwrap()],
+            "user:test",
+        )
+        .unwrap_err();
+    assert!(
+        matches!(err, PublishError::NoMatch(ref m) if m.contains("git.corp.example")),
+        "{err}"
+    );
+
     publisher.filter_remove(&init.id, "system").unwrap();
     let attrs = staged_attrs(&f.publish_root, &init.id);
     assert_eq!(attrs["project"], "-home-garrett-proj");
     let lines = staged_lines(&f.publish_root, &init.id);
+    // The cwd is back, with the pii literal redacted inside it
     assert!(
         lines[0].contains(r#""cwd":"[REDACTED]/proj""#),
         "{}",
@@ -730,13 +769,15 @@ fn system_filter_replaces_system_values_whole_and_drops_the_project_attribute() 
     );
     let records = filtered(&f.publish_root, &init.id);
     assert!(
-        !records.iter().any(|r| r.kind == FilteredKind::Attr),
+        !records
+            .iter()
+            .any(|r| r.kind == FilteredKind::Attr || r.kind == FilteredKind::Value),
         "{records:#?}"
     );
 }
 
 #[test]
-fn a_value_replaced_whole_is_recorded_once_and_hides_the_spans_inside_it() {
+fn a_literal_inside_a_tool_input_is_a_span() {
     let f = fixture();
     let publisher = Publisher::with_root(&f.store, &f.publish_root);
     let init = publisher.init(&f.original, &[]).unwrap();
@@ -753,26 +794,19 @@ fn a_value_replaced_whole_is_recorded_once_and_hides_the_spans_inside_it() {
             "user:test",
         )
         .unwrap();
-    // The key: a span on line 2 and the whole command on line 3. The
-    // substring: its span on line 2 only, since the command is already
-    // replaced whole
+    // The key: a span on line 2 and one in the command on line 3. The
+    // substring: a span inside each of them
     assert_eq!(applied[0].instances, 2, "{applied:#?}");
-    assert_eq!(applied[1].instances, 1, "{applied:#?}");
+    assert_eq!(applied[1].instances, 2, "{applied:#?}");
 
     let records = filtered(&f.publish_root, &init.id);
-    let on_command: Vec<&FilteredRecord> = records
-        .iter()
-        .filter(|r| r.reference.as_deref() == Some(command))
-        .collect();
-    assert_eq!(on_command.len(), 1, "{records:#?}");
-    assert_eq!(
-        (on_command[0].span_start, on_command[0].span_end),
-        (Some(0), Some(10))
-    );
-    let spans: Vec<&FilteredRecord> = records
-        .iter()
-        .filter(|r| r.kind == FilteredKind::Text && r.line == 2)
-        .collect();
+    let on_line = |line: u32| -> Vec<&FilteredRecord> {
+        records
+            .iter()
+            .filter(|r| r.kind == FilteredKind::Text && r.line == line)
+            .collect()
+    };
+    let spans = on_line(2);
     assert_eq!(
         spans.len(),
         2,
@@ -787,6 +821,15 @@ fn a_value_replaced_whole_is_recorded_once_and_hides_the_spans_inside_it() {
         spans[0].span_end.unwrap() - spans[0].span_start.unwrap(),
         10
     );
+    let on_command = on_line(3);
+    assert_eq!(on_command.len(), 2, "{records:#?}");
+    assert!(
+        on_command
+            .iter()
+            .all(|r| r.reference.as_deref() == Some(command)
+                && (r.span_start, r.span_end) == (Some(5), Some(15))),
+        "the merged marker sits after \"echo \": {records:#?}"
+    );
     let lines = staged_lines(&f.publish_root, &init.id);
     assert!(
         lines[1].contains("Use key [REDACTED] for alice@example.com"),
@@ -794,18 +837,25 @@ fn a_value_replaced_whole_is_recorded_once_and_hides_the_spans_inside_it() {
         lines[1]
     );
     assert_eq!(lines[1].matches("[REDACTED]").count(), 1, "{}", lines[1]);
+    assert!(
+        lines[2].contains(r#""command":"echo [REDACTED]""#),
+        "{}",
+        lines[2]
+    );
 
-    // A literal found only inside a value already replaced whole
-    // changes nothing, and is reported as such
-    let err = publisher
+    // A literal next to a redacted span is its own marker
+    let applied = publisher
         .redact(
             &init.id,
             &[RedactionInput::parse_text("echo", "secret", true).unwrap()],
             "user:test",
         )
-        .unwrap_err();
+        .unwrap();
+    assert_eq!(applied[0].instances, 1, "{applied:#?}");
+    let lines = staged_lines(&f.publish_root, &init.id);
     assert!(
-        matches!(err, PublishError::NoMatch(ref m) if m.contains("echo")),
-        "{err}"
+        lines[2].contains(r#""command":"[REDACTED] [REDACTED]""#),
+        "{}",
+        lines[2]
     );
 }

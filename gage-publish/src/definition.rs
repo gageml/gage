@@ -161,12 +161,6 @@ impl FilterEntry {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum RedactionKind {
-    /// Drop the lines `line` through `line_end`
-    Lines {
-        line: u32,
-        line_end: u32,
-        reason: String,
-    },
     /// Redact `literal` wherever it appears in the session. `mark`
     /// puts the marker in its place; otherwise the span is removed
     Text {
@@ -175,18 +169,8 @@ pub enum RedactionKind {
         #[serde(default = "mark_default")]
         mark: bool,
     },
-    /// Redact `literal` within the one text value at `pointer` of
-    /// `line`
-    Span {
-        line: u32,
-        pointer: String,
-        reason: String,
-        literal: String,
-        #[serde(default = "mark_default")]
-        mark: bool,
-    },
-    /// Replace whole every text value the JSONPath `path` selects, in
-    /// every entry
+    /// Leave out every value the JSONPath `path` selects, in every
+    /// entry
     Path { path: String, reason: String },
     /// Leave the attribute `name` out of the published `attrs.json`
     Attr { name: String, reason: String },
@@ -199,9 +183,7 @@ fn mark_default() -> bool {
 impl RedactionKind {
     pub fn reason(&self) -> &str {
         match self {
-            RedactionKind::Lines { reason, .. }
-            | RedactionKind::Text { reason, .. }
-            | RedactionKind::Span { reason, .. }
+            RedactionKind::Text { reason, .. }
             | RedactionKind::Path { reason, .. }
             | RedactionKind::Attr { reason, .. } => reason,
         }
@@ -210,9 +192,7 @@ impl RedactionKind {
     /// The kind's name as `status` shows it.
     pub fn kind_name(&self) -> &'static str {
         match self {
-            RedactionKind::Lines { .. } => "lines",
             RedactionKind::Text { .. } => "text",
-            RedactionKind::Span { .. } => "span",
             RedactionKind::Path { .. } => "path",
             RedactionKind::Attr { .. } => "attr",
         }
@@ -221,21 +201,9 @@ impl RedactionKind {
     /// What the redaction targets, as `status` shows it.
     pub fn detail(&self) -> String {
         match self {
-            RedactionKind::Lines { line, line_end, .. } if line == line_end => line.to_string(),
-            RedactionKind::Lines { line, line_end, .. } => format!("{line}-{line_end}"),
             RedactionKind::Text { literal, mark, .. } => {
                 format!("{literal}{}", if *mark { "" } else { " (no mark)" })
             }
-            RedactionKind::Span {
-                line,
-                pointer,
-                literal,
-                mark,
-                ..
-            } => format!(
-                "{line} {pointer} {literal}{}",
-                if *mark { "" } else { " (no mark)" }
-            ),
             RedactionKind::Path { path, .. } => path.clone(),
             RedactionKind::Attr { name, .. } => name.clone(),
         }
@@ -359,8 +327,8 @@ impl PublishDefinition {
 
     /// Check a definition as read from disk, which may have been
     /// edited by hand: every reason is a known code, every literal is
-    /// non-empty, every path is JSONPath, every line range is ordered,
-    /// and ids are unique and below `next_id`.
+    /// non-empty, every path is JSONPath, and ids are unique and below
+    /// `next_id`.
     pub fn validate(&self) -> Result<(), PublishError> {
         self.original()?;
         let mut seen = std::collections::HashSet::new();
@@ -374,14 +342,7 @@ impl PublishDefinition {
             }
             check_reason(r.kind.reason()).map_err(|e| at(e.to_string()))?;
             match &r.kind {
-                RedactionKind::Lines { line, line_end, .. } if *line == 0 || line_end < line => {
-                    return Err(at(
-                        "lines are 1-based and the end is not before the start".into()
-                    ));
-                }
-                RedactionKind::Text { literal, .. } | RedactionKind::Span { literal, .. }
-                    if literal.is_empty() =>
-                {
+                RedactionKind::Text { literal, .. } if literal.is_empty() => {
                     return Err(at("literal is empty".into()));
                 }
                 RedactionKind::Path { path, .. } => {
@@ -407,100 +368,25 @@ impl PublishDefinition {
     }
 }
 
-/// A redaction as the user or agent specifies it, before the engine
-/// resolves it against the session.
+/// A redaction as the user or agent specifies it: a literal redacted
+/// everywhere under `reason`, marked unless `mark` is false.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RedactionInput {
-    Lines {
-        line: u32,
-        line_end: u32,
-        reason: String,
-    },
-    Text {
-        reason: String,
-        literal: String,
-        mark: bool,
-    },
-    /// `seq` names the value within `line` as `text_block` numbers it
-    Span {
-        line: u32,
-        seq: u32,
-        reason: String,
-        literal: String,
-        mark: bool,
-    },
+pub struct RedactionInput {
+    pub reason: String,
+    pub literal: String,
+    pub mark: bool,
 }
 
 impl RedactionInput {
-    /// `<LINE> [<LINE_END>]` under `reason`. A missing end is the line
-    /// itself.
-    pub fn parse_lines(spec: &str, reason: &str) -> Result<Self, PublishError> {
-        let mut parts = spec.split_whitespace();
-        let bad = |why: String| PublishError::Input(format!("lines {spec:?}: {why}"));
-        let shape = || bad("expected <LINE> [<LINE_END>]".to_string());
-        let line: u32 = parts
-            .next()
-            .ok_or_else(shape)?
-            .parse()
-            .map_err(|e| bad(format!("line: {e}")))?;
-        let line_end: u32 = match parts.next() {
-            Some(end) => end.parse().map_err(|e| bad(format!("line end: {e}")))?,
-            None => line,
-        };
-        if parts.next().is_some() {
-            return Err(shape());
-        }
-        if line == 0 || line_end < line {
-            return Err(bad(
-                "lines are 1-based and the end is not before the start".to_string()
-            ));
-        }
-        check_reason(reason)?;
-        Ok(RedactionInput::Lines {
-            line,
-            line_end,
-            reason: reason.to_string(),
-        })
-    }
-
     /// A literal redacted everywhere under `reason`, marked unless
-    /// `mark` is false.
+    /// `mark` is false. An empty literal and an unknown reason are
+    /// errors.
     pub fn parse_text(literal: &str, reason: &str, mark: bool) -> Result<Self, PublishError> {
         if literal.is_empty() {
             return Err(PublishError::Input("text: literal is empty".to_string()));
         }
         check_reason(reason)?;
-        Ok(RedactionInput::Text {
-            reason: reason.to_string(),
-            literal: literal.to_string(),
-            mark,
-        })
-    }
-
-    /// `<LINE> <SEQ> <TEXT>` under `reason`, marked unless `mark` is
-    /// false; the literal runs to the end.
-    pub fn parse_span(spec: &str, reason: &str, mark: bool) -> Result<Self, PublishError> {
-        let bad = |why: String| PublishError::Input(format!("span {spec:?}: {why}"));
-        let shape = || bad("expected <LINE> <SEQ> <TEXT>".to_string());
-        let mut parts = spec.trim_start().splitn(3, ' ');
-        let line: u32 = parts
-            .next()
-            .ok_or_else(shape)?
-            .parse()
-            .map_err(|e| bad(format!("line: {e}")))?;
-        let seq: u32 = parts
-            .next()
-            .ok_or_else(shape)?
-            .parse()
-            .map_err(|e| bad(format!("seq: {e}")))?;
-        let literal = parts.next().ok_or_else(shape)?.trim_start();
-        if literal.is_empty() {
-            return Err(shape());
-        }
-        check_reason(reason)?;
-        Ok(RedactionInput::Span {
-            line,
-            seq,
+        Ok(RedactionInput {
             reason: reason.to_string(),
             literal: literal.to_string(),
             mark,
@@ -528,33 +414,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn lines_spec_defaults_the_end() {
-        assert_eq!(
-            RedactionInput::parse_lines("7", "scope").unwrap(),
-            RedactionInput::Lines {
-                line: 7,
-                line_end: 7,
-                reason: "scope".into()
-            }
-        );
-        assert_eq!(
-            RedactionInput::parse_lines("10 15", "opaque").unwrap(),
-            RedactionInput::Lines {
-                line: 10,
-                line_end: 15,
-                reason: "opaque".into()
-            }
-        );
-        assert!(RedactionInput::parse_lines("15 10", "scope").is_err());
-        assert!(RedactionInput::parse_lines("1 1 scope", "scope").is_err());
-        assert!(RedactionInput::parse_lines("1", "nope").is_err());
-    }
-
-    #[test]
     fn text_takes_any_reason_and_a_non_empty_literal() {
         assert_eq!(
             RedactionInput::parse_text("sk-ant api key", "secret", true).unwrap(),
-            RedactionInput::Text {
+            RedactionInput {
                 reason: "secret".into(),
                 literal: "sk-ant api key".into(),
                 mark: true,
@@ -563,23 +426,6 @@ mod tests {
         assert!(RedactionInput::parse_text("fucking", "language", false).is_ok());
         assert!(RedactionInput::parse_text("", "secret", true).is_err());
         assert!(RedactionInput::parse_text("x", "nope", true).is_err());
-    }
-
-    #[test]
-    fn span_spec_names_the_value_and_the_literal() {
-        assert_eq!(
-            RedactionInput::parse_span("12 0 fucking hell", "language", false).unwrap(),
-            RedactionInput::Span {
-                line: 12,
-                seq: 0,
-                reason: "language".into(),
-                literal: "fucking hell".into(),
-                mark: false,
-            }
-        );
-        assert!(RedactionInput::parse_span("12 0 x", "secret", true).is_ok());
-        assert!(RedactionInput::parse_span("12 x", "language", true).is_err());
-        assert!(RedactionInput::parse_span("12 0", "language", true).is_err());
     }
 
     #[test]

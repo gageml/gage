@@ -125,15 +125,13 @@ pub fn text_blocks(
 }
 
 /// What a driver knows about the strings of one content format: the
-/// fields whose type is not text, the subtrees whose text values are
-/// redacted whole, and per named filter the fields whose type says
-/// their value is sensitive. All are lists of JSONPath (RFC 9535)
-/// patterns. A pattern selects a node and covers every string under
-/// it.
+/// fields whose type is not text, and per named filter the fields
+/// whose type says their value is sensitive. All are lists of JSONPath
+/// (RFC 9535) patterns. A pattern selects a node and covers every
+/// string under it.
 #[derive(Debug, Clone)]
 pub struct TextDescriptor {
     safe: PathSet,
-    atomic: PathSet,
     filters: Vec<FilterPaths>,
 }
 
@@ -323,14 +321,12 @@ pub struct ValueHit {
     pub pointer: String,
 }
 
-/// A text value of one entry with its classification.
+/// A text value of one entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TextValue {
     /// JSON Pointer (RFC 6901) of the value from the entry root
     pub pointer: String,
     pub text: String,
-    /// Within an atomic subtree, so redacted whole on any match
-    pub atomic: bool,
 }
 
 /// A descriptor pattern that is not JSONPath.
@@ -349,11 +345,10 @@ impl fmt::Display for DescriptorError {
 impl Error for DescriptorError {}
 
 impl TextDescriptor {
-    /// Compile the `safe` and `atomic` pattern lists.
-    pub fn new(safe: &[&str], atomic: &[&str]) -> std::result::Result<Self, DescriptorError> {
+    /// Compile the `safe` pattern list.
+    pub fn new(safe: &[&str]) -> std::result::Result<Self, DescriptorError> {
         Ok(Self {
             safe: PathSet::compile(safe)?,
-            atomic: PathSet::compile(atomic)?,
             filters: Vec::new(),
         })
     }
@@ -421,19 +416,18 @@ impl TextDescriptor {
 
     /// The text values of one entry, in document order. `json` is the
     /// entry as the harness wrote it. A string at or under a safe path
-    /// is excluded even inside an atomic subtree. The entry is parsed
-    /// into a `Value` only when an irregular pattern needs it.
+    /// is excluded. The entry is parsed into a `Value` only when an
+    /// irregular pattern needs it.
     pub fn text_values(
         &self,
         json: &str,
     ) -> std::result::Result<Vec<TextValue>, serde_json::Error> {
-        let value: Option<Value> = if self.safe.has_irregular() || self.atomic.has_irregular() {
+        let value: Option<Value> = if self.safe.has_irregular() {
             Some(serde_json::from_str(json)?)
         } else {
             None
         };
         let safe_roots = self.safe.irregular_pointers(value.as_ref());
-        let atomic_roots = self.atomic.irregular_pointers(value.as_ref());
         let mut strings = Vec::new();
         let mut deserializer = serde_json::Deserializer::from_str(json);
         Collect {
@@ -448,12 +442,7 @@ impl TextDescriptor {
                 if self.safe.covers(&pointer, &key, &safe_roots) {
                     return None;
                 }
-                let atomic = self.atomic.covers(&pointer, &key, &atomic_roots);
-                Some(TextValue {
-                    pointer,
-                    text,
-                    atomic,
-                })
+                Some(TextValue { pointer, text })
             })
             .collect())
     }
@@ -558,41 +547,34 @@ mod tests {
     use datafusion::arrow::array::{Array, Int64Array, StringArray};
 
     fn descriptor() -> TextDescriptor {
-        TextDescriptor::new(
-            &[
-                "$.uuid",
-                "$.type",
-                "$.message.content[*].type",
-                "$.message.content[*].id",
-            ],
-            &[
-                "$.message.content[?@.type == 'tool_use']",
-                "$.toolUseResult",
-            ],
-        )
+        TextDescriptor::new(&[
+            "$.uuid",
+            "$.type",
+            "$.message.content[*].type",
+            "$.message.content[*].id",
+        ])
         .unwrap()
     }
 
     /// Strings come out in the order the line was written, not key
-    /// order, with safe fields excluded and atomic state inherited
-    /// from the matched subtree root.
+    /// order, with safe fields excluded.
     #[test]
     fn text_values_follow_document_order_and_the_descriptor() {
         let line = r#"{"zeta":"last key first","uuid":"u1","type":"assistant","message":{"content":[{"type":"text","text":"hi"},{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls"}}]},"toolUseResult":{"stdout":"out"},"alpha":"first key last"}"#;
         let values = descriptor().text_values(line).unwrap();
-        let summary: Vec<(&str, &str, bool)> = values
+        let summary: Vec<(&str, &str)> = values
             .iter()
-            .map(|v| (v.pointer.as_str(), v.text.as_str(), v.atomic))
+            .map(|v| (v.pointer.as_str(), v.text.as_str()))
             .collect();
         assert_eq!(
             summary,
             [
-                ("/zeta", "last key first", false),
-                ("/message/content/0/text", "hi", false),
-                ("/message/content/1/name", "Bash", true),
-                ("/message/content/1/input/command", "ls", true),
-                ("/toolUseResult/stdout", "out", true),
-                ("/alpha", "first key last", false),
+                ("/zeta", "last key first"),
+                ("/message/content/0/text", "hi"),
+                ("/message/content/1/name", "Bash"),
+                ("/message/content/1/input/command", "ls"),
+                ("/toolUseResult/stdout", "out"),
+                ("/alpha", "first key last"),
             ]
         );
     }
@@ -634,14 +616,11 @@ mod tests {
     /// a descendant pattern falls back to JSONPath evaluation.
     #[test]
     fn safe_covers_subtrees_and_irregular_patterns_still_work() {
-        let descriptor = TextDescriptor::new(
-            &[
-                "$.message.usage",
-                "$..git_state.error",
-                "$.permissionDecision.*",
-            ],
-            &[],
-        )
+        let descriptor = TextDescriptor::new(&[
+            "$.message.usage",
+            "$..git_state.error",
+            "$.permissionDecision.*",
+        ])
         .unwrap();
         let line = r#"{"message":{"usage":{"service_tier":"standard","iterations":[{"type":"message"}]},"text":"hi"},"permissionDecision":{"decision":"accept"},"params":{"git_state":{"error":"pending","root":"/w"}}}"#;
         let pointers: Vec<String> = descriptor
@@ -684,7 +663,7 @@ mod tests {
 
     #[test]
     fn a_bad_pattern_is_an_error_naming_it() {
-        let err = TextDescriptor::new(&["$.ok", "$[?"], &[]).unwrap_err();
+        let err = TextDescriptor::new(&["$.ok", "$[?"]).unwrap_err();
         assert_eq!(err.pattern, "$[?");
     }
 

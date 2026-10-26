@@ -127,12 +127,6 @@
     "$.serverClassifierContext.context.git_state.visibility.remotes[*].visibility",
     "$.serverClassifierContext.context.git_state.visibility.visibility_cache[*].visibility"
   ],
-  "atomic": [
-    "$.message.content[?@.type == 'tool_use']",
-    "$.message.content[?@.type == 'tool_result']",
-    "$.toolUseResult",
-    "$.wireToolInputs"
-  ],
   "filters": {
     "pii": {
       "literal": ["$..user_identity", "$..home_dir"],

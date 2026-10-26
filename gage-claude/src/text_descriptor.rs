@@ -1,8 +1,8 @@
 //! The Claude driver's text descriptor: which fields of a transcript
 //! line are identifiers, timestamps, digests, signatures, or
-//! enumerations rather than text, which blocks are atomic, and which
-//! fields a named filter treats as sensitive by type. The `text_block`
-//! table and the publish redaction engine read it.
+//! enumerations rather than text, and which fields a named filter
+//! treats as sensitive by type. The `text_block` table and the
+//! publish redaction engine read it.
 //! `schema/claude-jsonl-1/text_descriptor.json` holds the pattern
 //! lists beside the content schemas of the same format.
 
@@ -16,7 +16,6 @@ const DESCRIPTOR: &str = include_str!("../schema/claude-jsonl-1/text_descriptor.
 #[derive(Deserialize)]
 struct Lists {
     safe: Vec<String>,
-    atomic: Vec<String>,
     #[serde(default)]
     filters: BTreeMap<String, FilterLists>,
 }
@@ -35,8 +34,8 @@ pub(crate) fn text_descriptor() -> TextDescriptor {
     fn strs(v: &[String]) -> Vec<&str> {
         v.iter().map(String::as_str).collect()
     }
-    let mut descriptor = TextDescriptor::new(&strs(&lists.safe), &strs(&lists.atomic))
-        .expect("descriptor patterns should be JSONPath");
+    let mut descriptor =
+        TextDescriptor::new(&strs(&lists.safe)).expect("descriptor patterns should be JSONPath");
     for (name, paths) in &lists.filters {
         descriptor = descriptor
             .with_filter(name, &strs(&paths.literal), &strs(&paths.value))
@@ -115,11 +114,11 @@ mod tests {
         }
     }
 
-    /// A prompt, a thinking block, and the working directory are text
-    /// and not atomic; a tool call's input, a tool result's content,
-    /// and the harness's `toolUseResult` copy are atomic.
+    /// A prompt, a thinking block, the working directory, a tool
+    /// call's input, a tool result's content, and the harness's
+    /// `toolUseResult` copy are all text values.
     #[test]
-    fn sample_values_are_classified() {
+    fn sample_values_are_text() {
         let values = values_of(SAMPLE);
         let find = |line: usize, pointer: &str| -> TextValue {
             values
@@ -131,12 +130,15 @@ mod tests {
         };
         let prompt = find(1, "/message/content");
         assert_eq!(prompt.text, "Count the files");
-        assert!(!prompt.atomic);
-        assert!(!find(1, "/cwd").atomic);
-        assert!(!find(2, "/message/content/0/thinking").atomic);
-        assert!(find(3, "/message/content/0/input/command").atomic);
-        assert!(find(4, "/message/content/0/content").atomic);
-        assert!(find(4, "/toolUseResult/stdout").atomic);
+        for (line, pointer) in [
+            (1, "/cwd"),
+            (2, "/message/content/0/thinking"),
+            (3, "/message/content/0/input/command"),
+            (4, "/message/content/0/content"),
+            (4, "/toolUseResult/stdout"),
+        ] {
+            assert!(!find(line, pointer).text.is_empty());
+        }
     }
 
     /// A value the descriptor excludes as safe is an opaque token: no
@@ -147,7 +149,7 @@ mod tests {
     /// values the real descriptor keeps. A safe pattern that covers
     /// free text fails here.
     fn check_safe_shapes(text: &str) -> Vec<String> {
-        let all = TextDescriptor::new(&[], &[]).unwrap();
+        let all = TextDescriptor::new(&[]).unwrap();
         let real = text_descriptor();
         let opaque = |s: &str| {
             s.chars()
