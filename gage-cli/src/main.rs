@@ -155,6 +155,9 @@ enum Command {
         command: cmd_session::SessionCommand,
     },
 
+    /// Publish a shareable copy of a session
+    Publish(cmd_publish::PublishArgs),
+
     /// Manage datasets
     Dataset {
         #[command(subcommand)]
@@ -353,8 +356,8 @@ async fn main() -> ExitCode {
                     cmd_session::view(source, stored, args).await
                 }
                 cmd_session::SessionCommand::Find(args) => cmd_session::find(args).await,
-                cmd_session::SessionCommand::Publish(args) => cmd_publish::run(args).await,
             },
+            Command::Publish(args) => cmd_publish::run(args).await,
             Command::Dataset { command } => match command {
                 cmd_dataset::DatasetCommand::Add(args) => cmd_dataset::add(args).await,
                 cmd_dataset::DatasetCommand::Refresh(args) => cmd_dataset::refresh(args),

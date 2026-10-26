@@ -97,9 +97,6 @@ pub enum SessionCommand {
     /// "type:assistant" narrow a search. --all shows up to 1000
     /// matches per source
     Find(SessionFindArgs),
-
-    /// Publish a shareable copy of a session
-    Publish(crate::cmd_publish::PublishArgs),
 }
 
 #[derive(Args)]

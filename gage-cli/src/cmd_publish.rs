@@ -1,4 +1,4 @@
-//! `gage session publish`: the pending-publish life cycle commands.
+//! `gage publish`: the pending-publish life cycle commands.
 //!
 //! `init` stages a publish of a session; `redact`, `status`, `undo`,
 //! `refresh`, the `filter` commands, `abort`, and `apply` follow.
@@ -51,38 +51,6 @@ pub struct PublishArgs {
     command: PublishCommand,
 }
 
-/// Overrides of the `gage session` global `--source` and `--stored`
-/// for a publish command that takes neither. The override keeps the
-/// inherited options out of the command's help, the way `find`
-/// declares its own; a value given anyway is rejected. The override
-/// is declared on each leaf command and not on the `publish` group,
-/// because a declaration on the group captures the flags meant for
-/// `init`.
-#[derive(Args)]
-struct NoSource {
-    #[arg(id = "source", long = "source", hide = true)]
-    source: Option<String>,
-
-    #[arg(id = "stored", short = 'S', long = "stored", hide = true)]
-    stored: bool,
-}
-
-impl NoSource {
-    fn reject(&self, command: &str) -> Result<(), CliError> {
-        if self.source.is_some() {
-            return Err(CliError::message(format!(
-                "{command}: --source does not apply; SESSION names a pending publish"
-            )));
-        }
-        if self.stored {
-            return Err(CliError::message(format!(
-                "{command}: --stored does not apply; SESSION names a pending publish"
-            )));
-        }
-        Ok(())
-    }
-}
-
 #[derive(Subcommand)]
 pub enum PublishCommand {
     /// Start a publish of a session
@@ -93,7 +61,7 @@ pub enum PublishCommand {
     Init(InitArgs),
 
     /// List pending publish sessions
-    List(ListArgs),
+    List,
 
     /// Add redactions to a pending publish
     ///
@@ -136,7 +104,7 @@ pub enum PublishCommand {
 }
 
 #[derive(Args)]
-#[command(override_usage = "gage session publish init [OPTIONS] <SESSION>")]
+#[command(override_usage = "gage publish init [OPTIONS] <SESSION>")]
 pub struct InitArgs {
     /// Session to publish (tag, ID, or prefix)
     #[arg(value_name = "SESSION", required_unless_present = "list_filters")]
@@ -177,13 +145,7 @@ pub struct InitArgs {
 }
 
 #[derive(Args)]
-pub struct ListArgs {
-    #[command(flatten)]
-    no_source: NoSource,
-}
-
-#[derive(Args)]
-#[command(override_usage = "gage session publish redact [OPTIONS] <SESSION>")]
+#[command(override_usage = "gage publish redact [OPTIONS] <SESSION>")]
 pub struct RedactArgs {
     /// Pending publish session to redact (ID or prefix)
     #[arg(value_name = "SESSION", required_unless_present = "list_reasons")]
@@ -233,9 +195,6 @@ pub struct RedactArgs {
     /// Like --help, prints the list and exits whatever else is given.
     #[arg(long)]
     list_reasons: bool,
-
-    #[command(flatten)]
-    no_source: NoSource,
 }
 
 #[derive(Args)]
@@ -243,9 +202,6 @@ pub struct StatusArgs {
     /// Pending publish session to show (ID or prefix)
     #[arg(value_name = "SESSION")]
     session: String,
-
-    #[command(flatten)]
-    no_source: NoSource,
 }
 
 #[derive(Args)]
@@ -263,9 +219,6 @@ pub struct UndoArgs {
     /// Skip confirmation prompt
     #[arg(short, long)]
     yes: bool,
-
-    #[command(flatten)]
-    no_source: NoSource,
 }
 
 #[derive(Args)]
@@ -277,9 +230,6 @@ pub struct RefreshArgs {
     /// Skip confirmation prompt
     #[arg(short, long)]
     yes: bool,
-
-    #[command(flatten)]
-    no_source: NoSource,
 }
 
 #[derive(Args)]
@@ -291,9 +241,6 @@ pub struct AbortArgs {
     /// Skip confirmation prompt
     #[arg(short, long)]
     yes: bool,
-
-    #[command(flatten)]
-    no_source: NoSource,
 }
 
 #[derive(Args)]
@@ -318,9 +265,6 @@ pub struct ApplyArgs {
     /// Skip confirmation prompt
     #[arg(short, long)]
     yes: bool,
-
-    #[command(flatten)]
-    no_source: NoSource,
 }
 
 /// The paragraph `init --filter` and `filter add` share on what a
@@ -336,9 +280,6 @@ Filter names are \"pii\", \"language\", \"secret\", and \"system\".";
 pub struct FilterArgs {
     #[command(subcommand)]
     command: FilterCommand,
-
-    #[command(flatten)]
-    no_source: NoSource,
 }
 
 #[derive(Subcommand)]
@@ -366,7 +307,7 @@ pub enum FilterCommand {
 }
 
 #[derive(Args)]
-#[command(override_usage = "gage session publish filter add [OPTIONS] <SESSION> <FILTER>")]
+#[command(override_usage = "gage publish filter add [OPTIONS] <SESSION> <FILTER>")]
 pub struct FilterAddArgs {
     /// Pending publish session to change (ID or prefix)
     #[arg(value_name = "SESSION", required_unless_present = "list_filters")]
@@ -431,49 +372,22 @@ pub struct FilterListArgs {
     session: String,
 }
 
-/// Every publish command declares its own `--source` and `--stored`
-/// in place of the `gage session` globals: `init` takes them to
-/// resolve the original, and the rest reject them.
 pub async fn run(args: PublishArgs) -> Result<(), CliError> {
     match args.command {
         PublishCommand::Init(args) => init(args),
-        PublishCommand::List(args) => {
-            args.no_source.reject("gage session publish list")?;
-            list()
-        }
-        PublishCommand::Redact(args) => {
-            args.no_source.reject("gage session publish redact")?;
-            redact(args)
-        }
-        PublishCommand::Status(args) => {
-            args.no_source.reject("gage session publish status")?;
-            status(args)
-        }
-        PublishCommand::Undo(args) => {
-            args.no_source.reject("gage session publish undo")?;
-            undo(args)
-        }
-        PublishCommand::Refresh(args) => {
-            args.no_source.reject("gage session publish refresh")?;
-            refresh(args)
-        }
-        PublishCommand::Filter(args) => {
-            args.no_source.reject("gage session publish filter")?;
-            match args.command {
-                FilterCommand::Add(args) => filter_add(args),
-                FilterCommand::Remove(args) => filter_remove(args),
-                FilterCommand::Run(args) => filter_run(args),
-                FilterCommand::List(args) => filter_list(args),
-            }
-        }
-        PublishCommand::Abort(args) => {
-            args.no_source.reject("gage session publish abort")?;
-            abort(args)
-        }
-        PublishCommand::Apply(args) => {
-            args.no_source.reject("gage session publish apply")?;
-            apply(args)
-        }
+        PublishCommand::List => list(),
+        PublishCommand::Redact(args) => redact(args),
+        PublishCommand::Status(args) => status(args),
+        PublishCommand::Undo(args) => undo(args),
+        PublishCommand::Refresh(args) => refresh(args),
+        PublishCommand::Filter(args) => match args.command {
+            FilterCommand::Add(args) => filter_add(args),
+            FilterCommand::Remove(args) => filter_remove(args),
+            FilterCommand::Run(args) => filter_run(args),
+            FilterCommand::List(args) => filter_list(args),
+        },
+        PublishCommand::Abort(args) => abort(args),
+        PublishCommand::Apply(args) => apply(args),
     }
 }
 
@@ -481,7 +395,7 @@ pub async fn run(args: PublishArgs) -> Result<(), CliError> {
 /// newest first. Ids are highlighted against the stored sessions plus
 /// the pending set, the peers a pending prefix resolves against.
 fn list() -> Result<(), CliError> {
-    let fail = |e: String| CliError::message(format!("gage session publish list: {e}"));
+    let fail = |e: String| CliError::message(format!("gage publish list: {e}"));
     let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
     let pending = PublishStore::from(&store)
         .list()
@@ -566,7 +480,7 @@ fn origin_cell(origin: &str, highlighter: &IdHighlighter) -> String {
 /// and a native session is added to the store only after the user
 /// confirms.
 fn init(args: InitArgs) -> Result<(), CliError> {
-    let fail = |e: String| CliError::message(format!("gage session publish init: {e}"));
+    let fail = |e: String| CliError::message(format!("gage publish init: {e}"));
     if args.list_filters {
         list_filters();
         return Ok(());
@@ -579,7 +493,7 @@ fn init(args: InitArgs) -> Result<(), CliError> {
     let filters = args
         .filter
         .iter()
-        .map(|text| parse_filter("gage session publish init", "--filter", text))
+        .map(|text| parse_filter("gage publish init", "--filter", text))
         .collect::<Result<Vec<_>, _>>()?;
     let original = resolve_original(&store, source.as_deref(), stored, session)?;
 
@@ -716,7 +630,7 @@ fn report_filter_redactions(definition: &PublishDefinition) -> io::Result<()> {
 /// is parsed before the dialog opens, and every redaction is resolved
 /// against the session before any is recorded.
 fn redact(args: RedactArgs) -> Result<(), CliError> {
-    let fail = |e: String| CliError::message(format!("gage session publish redact: {e}"));
+    let fail = |e: String| CliError::message(format!("gage publish redact: {e}"));
     if args.list_reasons {
         list_reasons();
         return Ok(());
@@ -860,7 +774,7 @@ fn no_mark(mark: bool) -> &'static str {
 
 /// Show the filters and redactions of a pending publish.
 fn status(args: StatusArgs) -> Result<(), CliError> {
-    let fail = |e: String| CliError::message(format!("gage session publish status: {e}"));
+    let fail = |e: String| CliError::message(format!("gage publish status: {e}"));
     let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
     let publisher = Publisher::new(&store);
     let pending = publisher
@@ -917,7 +831,7 @@ fn status(args: StatusArgs) -> Result<(), CliError> {
 /// Remove redactions after confirmation. Every id is checked against
 /// the definition before the dialog opens.
 fn undo(args: UndoArgs) -> Result<(), CliError> {
-    let fail = |e: String| CliError::message(format!("gage session publish undo: {e}"));
+    let fail = |e: String| CliError::message(format!("gage publish undo: {e}"));
     let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
     let publisher = Publisher::new(&store);
     let pending = publisher
@@ -970,7 +884,7 @@ fn undo(args: UndoArgs) -> Result<(), CliError> {
 
 /// Rebuild a pending publish from its definition after confirmation.
 fn refresh(args: RefreshArgs) -> Result<(), CliError> {
-    let fail = |e: String| CliError::message(format!("gage session publish refresh: {e}"));
+    let fail = |e: String| CliError::message(format!("gage publish refresh: {e}"));
     let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
     let publisher = Publisher::new(&store);
     let pending = publisher
@@ -1014,7 +928,7 @@ fn refresh(args: RefreshArgs) -> Result<(), CliError> {
 /// Add a filter after confirmation. The filter is parsed before the
 /// dialog opens, so an unknown name fails without a prompt.
 fn filter_add(args: FilterAddArgs) -> Result<(), CliError> {
-    let command = "gage session publish filter add";
+    let command = "gage publish filter add";
     let fail = |e: String| CliError::message(format!("{command}: {e}"));
     if args.list_filters {
         list_filters();
@@ -1051,7 +965,7 @@ fn filter_add(args: FilterAddArgs) -> Result<(), CliError> {
 /// Remove a filter after confirmation. The selector is resolved
 /// against the definition before the dialog opens.
 fn filter_remove(args: FilterRemoveArgs) -> Result<(), CliError> {
-    let fail = |e: String| CliError::message(format!("gage session publish filter remove: {e}"));
+    let fail = |e: String| CliError::message(format!("gage publish filter remove: {e}"));
     let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
     let publisher = Publisher::new(&store);
     let pending = publisher
@@ -1092,7 +1006,7 @@ fn filter_remove(args: FilterRemoveArgs) -> Result<(), CliError> {
 /// Re-run one named filter, or every named filter, after confirmation.
 /// A name not on the list fails before the dialog opens.
 fn filter_run(args: FilterRunArgs) -> Result<(), CliError> {
-    let fail = |e: String| CliError::message(format!("gage session publish filter run: {e}"));
+    let fail = |e: String| CliError::message(format!("gage publish filter run: {e}"));
     let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
     let publisher = Publisher::new(&store);
     let pending = publisher
@@ -1135,7 +1049,7 @@ fn filter_run(args: FilterRunArgs) -> Result<(), CliError> {
 /// Print the filters of a pending publish as a table: the name or the
 /// instruction on one line, its type, and the redactions it authored.
 fn filter_list(args: FilterListArgs) -> Result<(), CliError> {
-    let fail = |e: String| CliError::message(format!("gage session publish filter list: {e}"));
+    let fail = |e: String| CliError::message(format!("gage publish filter list: {e}"));
     let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
     let publisher = Publisher::new(&store);
     let pending = publisher
@@ -1196,7 +1110,7 @@ fn filter_author(filter: &FilterEntry) -> Option<String> {
 /// Delete a pending publish after confirmation. The id is resolved
 /// before the dialog opens, so a bad argument fails without a prompt.
 fn abort(args: AbortArgs) -> Result<(), CliError> {
-    let fail = |e: String| CliError::message(format!("gage session publish abort: {e}"));
+    let fail = |e: String| CliError::message(format!("gage publish abort: {e}"));
     let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
     let publish = PublishStore::from(&store);
     let pending = publish
@@ -1224,7 +1138,7 @@ fn abort(args: AbortArgs) -> Result<(), CliError> {
 /// checked and the tag's availability confirmed before the dialog
 /// opens, so a refusal leaves the store untouched and shows no prompt.
 fn apply(args: ApplyArgs) -> Result<(), CliError> {
-    let fail = |e: String| CliError::message(format!("gage session publish apply: {e}"));
+    let fail = |e: String| CliError::message(format!("gage publish apply: {e}"));
     let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
     let publisher = Publisher::new(&store);
     let pending = publisher
@@ -1333,7 +1247,7 @@ fn resolve_original(
     stored: bool,
     prefix: &str,
 ) -> Result<Original, CliError> {
-    let fail = |e: String| CliError::message(format!("gage session publish init: {e}"));
+    let fail = |e: String| CliError::message(format!("gage publish init: {e}"));
     if stored {
         return SessionStore::from(store)
             .get(prefix)
@@ -1362,10 +1276,24 @@ fn resolve_original(
 mod tests {
     use std::path::PathBuf;
 
+    use clap::Parser;
     use gage_core::datetime::now_ms;
     use gage_store::{SessionAttrsRecord, SummaryAttrs};
 
     use super::*;
+    use crate::Cli;
+
+    /// The publish commands live under `gage publish`, not `gage
+    /// session`. `init` keeps its own --source and --stored; the other
+    /// commands take neither.
+    #[test]
+    fn publish_is_a_top_level_command() {
+        Cli::try_parse_from(["gage", "publish", "list"]).unwrap();
+        Cli::try_parse_from(["gage", "publish", "init", "--stored", "abc"]).unwrap();
+        Cli::try_parse_from(["gage", "publish", "status", "abc"]).unwrap();
+        assert!(Cli::try_parse_from(["gage", "session", "publish", "list"]).is_err());
+        assert!(Cli::try_parse_from(["gage", "publish", "status", "--stored", "abc"]).is_err());
+    }
 
     fn pending(id: &str, origin: &str, title: Option<&str>, modified_ms: i64) -> PendingPublish {
         PendingPublish {
