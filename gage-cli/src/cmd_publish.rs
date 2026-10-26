@@ -17,8 +17,8 @@ use cliclack as cli;
 use gage_core::style::IdHighlighter;
 use gage_core::uuid::short_uuid;
 use gage_publish::{
-    Filter, FilterEntry, FilterSpec, PublishDefinition, PublishError, Publisher, REASONS,
-    RedactionInput,
+    Filter, FilterEntry, FilterSpec, NAMED_FILTERS, PublishDefinition, PublishError, Publisher,
+    REASONS, RedactionInput,
 };
 use gage_session::{Driver, NativeSession, SourceOptions};
 use gage_store::{
@@ -578,12 +578,26 @@ fn filter_rows() -> Vec<Vec<String>> {
 
 /// The filter `text` denotes, with `@PATH` read as a file. An unknown
 /// name is an error naming `command` and `option`.
+/// A filter argument: a named filter, or an instruction read through
+/// `@PATH`. A name outside the named filters is a usage error in
+/// clap's layout, since the argument accepts any text and the names
+/// are checked here.
 fn parse_filter(command: &str, option: &str, text: &str) -> Result<FilterSpec, CliError> {
-    let fail = |e: String| CliError::message(format!("{command}: {e}"));
-    let text = text_value(command, option, text).map_err(|e| fail(e.to_string()))?;
-    text.trim_end()
-        .parse()
-        .map_err(|e: PublishError| fail(format!("{option}: {e}")))
+    let text = text_value(command, option, text)
+        .map_err(|e| CliError::message(format!("{command}: {e}")))?;
+    let text = text.trim_end();
+    match text.parse() {
+        Ok(spec) => Ok(spec),
+        // The one parse error is a name outside the named filters; the
+        // usage error states the same fact in clap's layout
+        Err(PublishError::Input(_)) => Err(CliError::invalid_value(
+            command,
+            option,
+            text,
+            NAMED_FILTERS,
+        )),
+        Err(e) => Err(CliError::message(format!("{command}: {option}: {e}"))),
+    }
 }
 
 /// The `Filters` step of the dialog: one line per filter, or `none`.
@@ -1283,6 +1297,38 @@ mod tests {
     use super::*;
     use crate::Cli;
 
+    /// An unknown filter name reports as clap reports a value outside
+    /// a known set, naming the argument as its help does, the valid
+    /// names, and the nearest one; an instruction is not a name.
+    #[test]
+    fn unknown_filter_name_is_a_usage_error_in_claps_layout() {
+        let rendered = |command: &str, option: &str| match parse_filter(command, option, "secrets")
+        {
+            Err(CliError::Usage(e)) => {
+                assert_eq!(e.exit_code(), 2);
+                e.render().to_string()
+            }
+            Err(_) => panic!("not a usage error"),
+            Ok(f) => panic!("{f} parsed"),
+        };
+        let text = rendered("gage publish init", "--filter");
+        assert!(
+            text.contains("invalid value 'secrets' for '--filter <FILTER>'"),
+            "{text}"
+        );
+        assert!(
+            text.contains("[possible values: pii, language, secret, system]"),
+            "{text}"
+        );
+        assert!(text.contains("a similar value exists: 'secret'"), "{text}");
+        // The positional is optional under --list-filters, and clap
+        // displays an argument by its own required-ness
+        let text = rendered("gage publish filter add", "FILTER");
+        assert!(text.contains("for '[FILTER]'"), "{text}");
+        assert!(parse_filter("gage publish init", "--filter", "pii").is_ok());
+        assert!(parse_filter("gage publish init", "--filter", "Remove every duck").is_ok());
+    }
+
     /// The publish commands live under `gage publish`, not `gage
     /// session`. `init` keeps its own --source and --stored; the other
     /// commands take neither.
@@ -1388,7 +1434,7 @@ mod tests {
         let rows = filter_rows();
         let mut names: Vec<&str> = rows.iter().map(|r| r[0].as_str()).collect();
         names.sort_unstable();
-        let mut expected = gage_publish::NAMED_FILTERS.to_vec();
+        let mut expected = NAMED_FILTERS.to_vec();
         expected.sort_unstable();
         assert_eq!(names, expected);
         assert!(rows.iter().all(|r| r.len() == 2 && !r[1].is_empty()));

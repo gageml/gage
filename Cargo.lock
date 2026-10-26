@@ -2424,6 +2424,7 @@ dependencies = [
  "pulldown-cmark",
  "rand 0.9.4",
  "serde_json",
+ "strsim",
  "tabled",
  "tempfile",
  "textwrap",

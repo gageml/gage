@@ -417,6 +417,10 @@ fn exit_code(result: Result<(), CliError>) -> ExitCode {
             eprintln!("{e:#}");
             ExitCode::FAILURE
         }
+        Err(CliError::Usage(e)) => {
+            e.print().unwrap();
+            ExitCode::from(u8::try_from(e.exit_code()).expect("clap exit codes are 0 and 2"))
+        }
     }
 }
 
@@ -448,6 +452,7 @@ async fn run_mcp() -> anyhow::Result<()> {
                     message.unwrap_or_else(|| "session source unavailable".to_string())
                 }
                 CliError::Other(err) => format!("{err:#}"),
+                CliError::Usage(err) => err.to_string(),
             };
             tracing::warn!("IssueAssign unavailable: {reason}");
             None

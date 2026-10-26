@@ -365,6 +365,7 @@ mod tests {
             Ok(()) => {}
             Err(CliError::Other(e)) => panic!("{e:#}"),
             Err(CliError::Exit { message, .. }) => panic!("{message:?}"),
+            Err(CliError::Usage(e)) => panic!("{e}"),
         }
         assert!(!root.path().join("summary").join("-c").exists());
         assert!(!root.path().join("text").join("-c").exists());
