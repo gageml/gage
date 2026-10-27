@@ -86,9 +86,11 @@ pub enum PublishCommand {
     /// Manage filters of a pending publish
     Filter(FilterArgs),
 
-    /// Abort a pending publish
+    /// Abort pending publishes
     ///
-    /// Deletes staged publish. Nothing was written to store.
+    /// Deletes each staged publish. Nothing was written to store. Every
+    /// session is resolved before any is deleted, so an unknown or
+    /// ambiguous ID aborts nothing.
     Abort(AbortArgs),
 
     /// Publish a pending publish
@@ -161,11 +163,13 @@ pub enum RedactCommand {
     /// Add text redactions to a pending publish from JSON
     ///
     /// Input is an array of redactions, each an array of text, reason
-    /// code, author, and no-mark flag: [TEXT, REASON, AUTHOR, NO_MARK].
-    /// An author without ":" names a filter of the publish and is
-    /// recorded as "filter:NAME"; an author with ":" is recorded as
-    /// given. Every literal is matched before any is added: one that
-    /// matches nothing is an error, and nothing is added.
+    /// code, author, and no-mark flag, [TEXT, REASON, AUTHOR, NO_MARK],
+    /// or of text, reason code, and no-mark flag, [TEXT, REASON,
+    /// NO_MARK], which takes its author from --author. An author
+    /// without ":" names a filter of the publish and is recorded as
+    /// "filter:NAME"; an author with ":" is recorded as given. Every
+    /// literal is matched before any is added: one that matches nothing
+    /// is an error, and nothing is added.
     Import(RedactImportArgs),
 
     /// Change a text redaction of a pending publish
@@ -242,6 +246,14 @@ pub struct RedactImportArgs {
     /// A JSON file, or "-" to read standard input.
     #[arg(value_name = "PATH")]
     path: PathBuf,
+
+    /// Author of redactions given without one
+    ///
+    /// Required when any redaction has no author of its own. A filter
+    /// name is recorded as "filter:NAME"; a value with ":" is recorded
+    /// as given.
+    #[arg(short, long, value_name = "AUTHOR")]
+    author: Option<String>,
 
     /// Skip confirmation prompt
     #[arg(short, long)]
@@ -448,9 +460,9 @@ pub struct RefreshArgs {
 
 #[derive(Args)]
 pub struct AbortArgs {
-    /// Pending publish session to abort (ID or prefix)
-    #[arg(value_name = "SESSION")]
-    session: String,
+    /// Pending publish sessions to abort (ID or prefix; repeatable)
+    #[arg(value_name = "SESSION", required = true)]
+    session: Vec<String>,
 
     /// Skip confirmation prompt
     #[arg(short, long)]
@@ -528,9 +540,9 @@ pub enum FilterCommand {
     /// List filters of a pending publish
     ///
     /// With --instructions, prints redaction instructions of each
-    /// filter as JSON in place of the table: an object keyed by filter
-    /// name, each holding its instructions, its reasons as an object
-    /// of code to when it applies, and prompt given for it or null.
+    /// filter as markdown in place of the table: a heading naming
+    /// filter, then its instructions with prompt given for it in
+    /// place of its placeholder.
     List(FilterListArgs),
 }
 
@@ -628,7 +640,7 @@ pub struct FilterListArgs {
     #[arg(value_name = "SESSION")]
     session: String,
 
-    /// Print redaction instructions of each filter as JSON
+    /// Print redaction instructions of each filter as markdown
     #[arg(long)]
     instructions: bool,
 }
@@ -758,6 +770,15 @@ fn origin_cell(origin: &str, highlighter: &IdHighlighter) -> String {
     };
     let commit: String = commit.chars().take(8).collect();
     format!("{} {}", highlighter.short(id), console::style(commit).dim())
+}
+
+/// The short id of a session origin's original, or the origin as
+/// given when it is not a session origin.
+fn origin_id(origin: &str) -> String {
+    match parse_session_origin(origin) {
+        Ok((id, _)) => short_uuid(id).to_string(),
+        Err(_) => origin.to_string(),
+    }
 }
 
 /// A session origin for the status table: the full original session
@@ -967,7 +988,7 @@ fn list_reasons() {
         .collect();
     let rows = REASONS
         .iter()
-        .map(|r| vec![r.code.to_string(), r.description.to_string()]);
+        .map(|r| vec![r.code.clone(), r.description.clone()]);
     let term_width = console::Term::stdout().size().1 as usize;
     let table = Table::from_iter(std::iter::once(header).chain(rows))
         .with(Style::rounded())
@@ -1234,7 +1255,7 @@ fn redact_import(args: RedactImportArgs) -> Result<(), CliError> {
     let definition = publisher
         .definition(&pending.id)
         .map_err(|e| fail(e.to_string()))?;
-    let items = import_items(&json, &definition).map_err(fail)?;
+    let items = import_items(&json, args.author.as_deref(), &definition).map_err(fail)?;
 
     dialog::run("Import redactions", || {
         dialog::step_value("Session", short_uuid(&pending.id))?;
@@ -1281,35 +1302,74 @@ fn redact_import(args: RedactImportArgs) -> Result<(), CliError> {
 }
 
 /// The redactions of an import: `json` is an array of
-/// `[text, reason, author, no_mark]`. An author with ":" is kept; one
-/// without names a filter of `definition` and becomes `filter:NAME`.
-/// An error names the item.
+/// `[text, reason, author, no_mark]` or `[text, reason, no_mark]`
+/// rows, the latter authored by `author`, which is required when any
+/// such row is present. An author with ":" is kept; one without names
+/// a filter of `definition` and becomes `filter:NAME`. An error names
+/// the item.
 fn import_items(
     json: &str,
+    author: Option<&str>,
     definition: &PublishDefinition,
 ) -> Result<Vec<(RedactionInput, String)>, String> {
-    let rows: Vec<(String, String, String, bool)> = serde_json::from_str(json)
-        .map_err(|e| format!("expected an array of [TEXT, REASON, AUTHOR, NO_MARK]: {e}"))?;
+    const SHAPE: &str =
+        "expected an array of [TEXT, REASON, AUTHOR, NO_MARK] or [TEXT, REASON, NO_MARK]";
+    let rows: Vec<serde_json::Value> =
+        serde_json::from_str(json).map_err(|e| format!("{SHAPE}: {e}"))?;
     if rows.is_empty() {
         return Err("no redactions".to_string());
     }
+    let default_author = author
+        .map(|a| resolve_import_author(a, definition))
+        .transpose()?;
     rows.iter()
         .enumerate()
-        .map(|(i, (text, reason, author, no_mark))| {
+        .map(|(i, row)| {
             let item = i + 1;
+            let fail = |e: String| format!("redaction {item}: {e}");
+            let (text, reason, author, no_mark) =
+                import_row(row).ok_or_else(|| fail(SHAPE.into()))?;
             let input = RedactionInput::parse_text(text, reason, !no_mark)
-                .map_err(|e| format!("redaction {item}: {e}"))?;
-            let author = if author.contains(':') {
-                author.clone()
-            } else {
-                match definition.find_filter(author) {
-                    Ok(_) => format!("filter:{author}"),
-                    Err(e) => return Err(format!("redaction {item}: {e}")),
-                }
+                .map_err(|e| fail(e.to_string()))?;
+            let author = match author {
+                Some(a) => resolve_import_author(a, definition).map_err(fail)?,
+                None => default_author
+                    .clone()
+                    .ok_or_else(|| fail("no author; give one with --author".to_string()))?,
             };
             Ok((input, author))
         })
         .collect()
+}
+
+/// The fields of one import row: its text, reason, author when it
+/// has one, and no-mark flag. `None` for any other shape.
+fn import_row(row: &serde_json::Value) -> Option<(&str, &str, Option<&str>, bool)> {
+    let items = row.as_array()?;
+    match items.as_slice() {
+        [text, reason, author, no_mark] => Some((
+            text.as_str()?,
+            reason.as_str()?,
+            Some(author.as_str()?),
+            no_mark.as_bool()?,
+        )),
+        [text, reason, no_mark] => {
+            Some((text.as_str()?, reason.as_str()?, None, no_mark.as_bool()?))
+        }
+        _ => None,
+    }
+}
+
+/// `author` as recorded: kept when it has ":", else the filter it
+/// names on `definition` as `filter:NAME`.
+fn resolve_import_author(author: &str, definition: &PublishDefinition) -> Result<String, String> {
+    if author.contains(':') {
+        return Ok(author.to_string());
+    }
+    definition
+        .find_filter(author)
+        .map(|_| format!("filter:{author}"))
+        .map_err(|e| e.to_string())
 }
 
 /// Change a text redaction after confirmation. The id is resolved
@@ -1913,7 +1973,7 @@ fn filter_list(args: FilterListArgs) -> Result<(), CliError> {
         return Ok(());
     }
     if args.instructions {
-        println!("{}", instructions_json(&definition).map_err(fail)?);
+        print!("{}", instructions_markdown(&definition).map_err(fail)?);
         return Ok(());
     }
     let header: Vec<String> = ["Filter", "Prompt", "Redactions"]
@@ -1949,33 +2009,25 @@ fn filter_list(args: FilterListArgs) -> Result<(), CliError> {
     Ok(())
 }
 
-/// The redaction instructions of every filter of `definition` as a
-/// JSON object keyed by filter name: per filter its instruction
-/// prose, its reasons as an object of code to when the code applies,
-/// and the prompt given for it or null.
-fn instructions_json(definition: &PublishDefinition) -> Result<String, String> {
-    let mut filters = serde_json::Map::new();
+/// The redaction instructions of every filter of `definition` as
+/// markdown: per filter a level-three heading with its name in code
+/// font, then its instructions with the prompt given for it in place
+/// of the placeholder. Sections are separated by a blank line.
+fn instructions_markdown(definition: &PublishDefinition) -> Result<String, String> {
+    let mut out = String::new();
     for entry in &definition.filters {
         let filter =
             Filter::named(&entry.name).ok_or_else(|| format!("unknown filter {:?}", entry.name))?;
-        let reasons: serde_json::Map<String, serde_json::Value> = filter
-            .reasons
-            .iter()
-            .map(|&(code, rule)| (code.to_string(), rule.into()))
-            .collect();
-        let mut object = serde_json::Map::new();
-        object.insert("instructions".into(), filter.instructions.trim_end().into());
-        object.insert("reasons".into(), reasons.into());
-        object.insert(
-            "prompt".into(),
-            entry
-                .prompt
-                .as_deref()
-                .map_or(serde_json::Value::Null, Into::into),
-        );
-        filters.insert(filter.name.into(), serde_json::Value::Object(object));
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(&format!(
+            "### `{}`\n\n{}\n",
+            filter.name,
+            filter.instructions_with_prompt(entry.prompt.as_deref())
+        ));
     }
-    serde_json::to_string_pretty(&serde_json::Value::Object(filters)).map_err(|e| e.to_string())
+    Ok(out)
 }
 
 /// A filter as a one-line cell: its name, or its instruction
@@ -1990,24 +2042,38 @@ fn abort(args: AbortArgs) -> Result<(), CliError> {
     let fail = |e: String| CliError::message(format!("gage publish abort: {e}"));
     let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
     let publish = PublishStore::from(&store);
-    let pending = publish
-        .get(&args.session)
-        .map_err(|e| fail(e.to_string()))?;
+    let mut pending: Vec<PendingPublish> = Vec::new();
+    for session in &args.session {
+        let found = publish.get(session).map_err(|e| fail(e.to_string()))?;
+        if !pending.iter().any(|p| p.id == found.id) {
+            pending.push(found);
+        }
+    }
 
     dialog::run("Abort publish", || {
-        dialog::step_value("Session", short_uuid(&pending.id))?;
-        dialog::step_value("Origin", &pending.attrs.origin)?;
-        cli::log::remark("Original session is unaffected")?;
+        dialog::step_list(
+            "Sessions",
+            pending.iter().map(|p| {
+                format!(
+                    "{} (origin {})",
+                    short_uuid(&p.id),
+                    origin_id(&p.attrs.origin)
+                )
+            }),
+        )?;
+        cli::log::remark("Original sessions are unaffected")?;
         if !args.yes {
             let confirmed = cli::confirm("Continue?").initial_value(false).interact()?;
             if !confirmed {
                 return Err(DialogError::Canceled);
             }
         }
-        publish
-            .abort(&pending.id)
-            .map_err(|e| DialogError::Other(e.into()))?;
-        Ok(format!("Aborted publish {}", short_uuid(&pending.id)).into())
+        for p in &pending {
+            publish
+                .abort(&p.id)
+                .map_err(|e| DialogError::Other(e.into()))?;
+        }
+        Ok(format!("Aborted {}", count(pending.len(), "publish")).into())
     })
 }
 
@@ -2288,53 +2354,56 @@ mod tests {
             .is_err()
         );
         assert!(Cli::try_parse_from(["gage", "publish", "status", "--stored", "abc"]).is_err());
+        let cli = Cli::try_parse_from(["gage", "publish", "abort", "abc", "def", "-y"]).unwrap();
+        let Command::Publish(PublishArgs {
+            command: PublishCommand::Abort(args),
+        }) = cli.command
+        else {
+            panic!("expected publish abort");
+        };
+        assert_eq!(args.session, ["abc", "def"]);
+        assert!(Cli::try_parse_from(["gage", "publish", "abort"]).is_err());
     }
 
-    /// The instructions are an object keyed by filter name, each
-    /// holding the prose, the reasons keyed by code, and the prompt or
-    /// null.
+    /// The instructions are one markdown section per filter: a heading
+    /// with the name, then the prose with the prompt at its placeholder.
     #[test]
-    fn instructions_are_keyed_by_filter_with_reasons_and_prompt() {
+    fn instructions_are_markdown_sections_with_the_prompt_in_place() {
         let filters = [
             FilterSpec::new("language", None).unwrap(),
             FilterSpec::new("custom", Some("Remove the project codename".into())).unwrap(),
         ];
         let definition = PublishDefinition::new(&filters);
-        let json: serde_json::Value =
-            serde_json::from_str(&instructions_json(&definition).unwrap()).unwrap();
+        let markdown = instructions_markdown(&definition).unwrap();
         let language = Filter::named("language").unwrap();
         let custom = Filter::named("custom").unwrap();
         assert_eq!(
-            json,
-            serde_json::json!({
-                "language": {
-                    "instructions": language.instructions.trim_end(),
-                    "reasons": {
-                        "language": language.reasons[0].1,
-                        "privacy": language.reasons[1].1,
-                    },
-                    "prompt": null,
-                },
-                "custom": {
-                    "instructions": custom.instructions.trim_end(),
-                    "reasons": {"custom": custom.reasons[0].1},
-                    "prompt": "Remove the project codename",
-                },
-            })
+            markdown,
+            format!(
+                "### `language`\n\n{}\n\n### `custom`\n\n{}\n",
+                language.instructions.trim_end(),
+                custom.instructions_with_prompt(Some("Remove the project codename"))
+            )
         );
-        assert_eq!(language.reasons[1].0, "privacy");
+        assert!(
+            markdown.ends_with("\n\nRemove the project codename\n"),
+            "{markdown}"
+        );
         Cli::try_parse_from(["gage", "publish", "filter", "list", "abc", "--instructions"])
             .unwrap();
     }
 
     /// An import item's author is kept when it has a prefix and becomes
-    /// `filter:NAME` when it names a filter of the publish; anything
-    /// else, a bad shape, or an empty array is an error naming the item.
+    /// `filter:NAME` when it names a filter of the publish; a row
+    /// without an author takes `--author`, resolved the same way, and
+    /// is an error without it. Anything else, a bad shape, or an empty
+    /// array is an error naming the item.
     #[test]
     fn import_items_resolve_authors_and_name_bad_items() {
         let definition = PublishDefinition::new(&[FilterSpec::new("pii", None).unwrap()]);
         let items = import_items(
-            r#"[["garrett", "pii", "pii", false], ["ok", "custom", "user:me", true]]"#,
+            r#"[["garrett", "pii", "pii", false], ["ok", "custom", "user:me", true], ["sam", "pii", false]]"#,
+            Some("session:abc"),
             &definition,
         )
         .unwrap();
@@ -2347,25 +2416,65 @@ mod tests {
             [
                 ("garrett", "pii", true, "filter:pii"),
                 ("ok", "custom", false, "user:me"),
+                ("sam", "pii", true, "session:abc"),
             ]
         );
+        let by_filter =
+            import_items(r#"[["sam", "pii", false]]"#, Some("pii"), &definition).unwrap();
+        assert_eq!(by_filter[0].1, "filter:pii");
+        let no_author = import_items(r#"[["sam", "pii", false]]"#, None, &definition).unwrap_err();
+        assert_eq!(no_author, "redaction 1: no author; give one with --author");
         let unknown =
-            import_items(r#"[["x", "pii", "language", false]]"#, &definition).unwrap_err();
+            import_items(r#"[["x", "pii", "language", false]]"#, None, &definition).unwrap_err();
         assert_eq!(
             unknown,
             "redaction 1: no filter named \"language\" is on the list"
         );
-        let reason = import_items(r#"[["x", "nope", "pii", false]]"#, &definition).unwrap_err();
+        let unknown_default =
+            import_items(r#"[["x", "pii", false]]"#, Some("language"), &definition).unwrap_err();
+        assert_eq!(
+            unknown_default,
+            "no filter named \"language\" is on the list"
+        );
+        let reason =
+            import_items(r#"[["x", "nope", "pii", false]]"#, None, &definition).unwrap_err();
         assert!(
             reason.starts_with("redaction 1: unknown reason"),
             "{reason}"
         );
-        let shape = import_items(r#"[["x", "pii"]]"#, &definition).unwrap_err();
-        assert!(shape.starts_with("expected an array of"), "{shape}");
+        let shape = import_items(r#"[["x", "pii"]]"#, None, &definition).unwrap_err();
+        assert!(
+            shape.starts_with("redaction 1: expected an array of"),
+            "{shape}"
+        );
+        let not_array = import_items(r#"{"x": 1}"#, None, &definition).unwrap_err();
+        assert!(not_array.starts_with("expected an array of"), "{not_array}");
         assert_eq!(
-            import_items("[]", &definition).unwrap_err(),
+            import_items("[]", None, &definition).unwrap_err(),
             "no redactions"
         );
+        let cli = Cli::try_parse_from([
+            "gage",
+            "publish",
+            "redact",
+            "import",
+            "abc",
+            "-",
+            "-a",
+            "session:abc",
+            "-y",
+        ])
+        .unwrap();
+        let Command::Publish(PublishArgs {
+            command:
+                PublishCommand::Redact(RedactArgs {
+                    command: RedactCommand::Import(args),
+                }),
+        }) = cli.command
+        else {
+            panic!("expected publish redact import");
+        };
+        assert_eq!(args.author.as_deref(), Some("session:abc"));
         Cli::try_parse_from(["gage", "publish", "redact", "import", "abc", "-", "-y"]).unwrap();
     }
 
@@ -2463,6 +2572,20 @@ mod tests {
 
     /// An origin that is not a derived `session:<id>@<commit>` value is
     /// shown as stored.
+    #[test]
+    fn origin_id_is_the_short_original_id() {
+        assert_eq!(
+            origin_id(
+                "session:2wytm029kwbtyr94c6f0x2qqke@c5833fed2f11ce62e64ecb93c638d8922d315c67"
+            ),
+            "2wytm029"
+        );
+        assert_eq!(
+            origin_id("claude:/home/u/.claude/abc"),
+            "claude:/home/u/.claude/abc"
+        );
+    }
+
     #[test]
     fn origin_cell_shows_a_native_origin_as_stored() {
         let highlighter = IdHighlighter::new(vec![]);
