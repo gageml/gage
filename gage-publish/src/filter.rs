@@ -641,9 +641,12 @@ mod tests {
         };
         assert_eq!(filter.instructions_with_prompt(Some("x")), "A x B x C");
         let pii = Filter::named("pii").unwrap();
+        let with = pii.instructions_with_prompt(Some("Remove every duck"));
+        assert!(with.ends_with("\n\nRemove every duck"), "{with}");
+        let language = Filter::named("language").unwrap();
         assert_eq!(
-            pii.instructions_with_prompt(Some("ignored")),
-            pii.instructions.trim_end()
+            language.instructions_with_prompt(Some("ignored")),
+            language.instructions.trim_end()
         );
     }
 
