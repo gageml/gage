@@ -288,11 +288,14 @@ fn custom_requires_a_prompt_and_any_filter_takes_one() {
 /// itself: the API request on line 5 goes, with one line record under
 /// the filter, and a literal found only there is a miss.
 #[test]
-fn harness_filter_leaves_out_bookkeeping_entries() {
+fn non_narrative_filter_leaves_out_bookkeeping_entries() {
     let f = fixture();
     let publisher = Publisher::with_root(&f.store, &f.publish_root);
     let init = publisher
-        .init(&f.original, &["harness".parse::<FilterSpec>().unwrap()])
+        .init(
+            &f.original,
+            &["non-narrative".parse::<FilterSpec>().unwrap()],
+        )
         .unwrap();
     let lines = staged_lines(&f.publish_root, &init.id);
     assert_eq!(lines.len(), 4, "{lines:#?}");
@@ -306,7 +309,10 @@ fn harness_filter_leaves_out_bookkeeping_entries() {
         .filter(|r| r.kind == FilteredKind::Line)
         .map(|r| (r.line, r.line_end, r.reason.as_str(), r.author.as_str()))
         .collect();
-    assert_eq!(dropped, [(5, Some(5), "harness", "filter:harness")]);
+    assert_eq!(
+        dropped,
+        [(5, Some(5), "non-narrative", "filter:non-narrative")]
+    );
     let summary = staged_summary(&f.publish_root, &init.id);
     assert_eq!(summary["line_count"], 4, "{summary}");
     publisher.check(&init.id).unwrap();

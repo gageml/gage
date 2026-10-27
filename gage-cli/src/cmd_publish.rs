@@ -440,8 +440,8 @@ pub struct ApplyArgs {
 /// The paragraph `init --filter` and `filter add` share on what a
 /// filter argument is.
 const FILTER_HELP: &str = "A filter name; see --list-filters. Filter names are \"pii\", \
-\"language\", \"secret\", \"system\", \"harness\", and \"custom\". \"custom\" takes --prompt as \
-its whole instruction, so it is added with filter add.";
+\"language\", \"secret\", \"system\", \"non-narrative\", and \"custom\". \"custom\" takes \
+--prompt as its whole instruction, so it is added with filter add.";
 
 /// The `filter` group declares the `--source` and `--stored` override
 /// itself: none of its commands takes them, so the group capturing a
@@ -1945,7 +1945,9 @@ mod tests {
             "{text}"
         );
         assert!(
-            text.contains("[possible values: pii, language, secret, system, harness, custom]"),
+            text.contains(
+                "[possible values: pii, language, secret, system, non-narrative, custom]"
+            ),
             "{text}"
         );
         assert!(text.contains("a similar value exists: 'secret'"), "{text}");

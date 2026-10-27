@@ -16,7 +16,14 @@ use serde_json::json;
 use crate::PublishError;
 
 /// The filters with a built-in definition, in listing order.
-pub const NAMED_FILTERS: &[&str] = &["pii", "language", "secret", "system", "harness", "custom"];
+pub const NAMED_FILTERS: &[&str] = &[
+    "pii",
+    "language",
+    "secret",
+    "system",
+    "non-narrative",
+    "custom",
+];
 
 /// Whether the filter `name` has no instructions of its own and takes
 /// its prompt as the whole instruction.
@@ -86,8 +93,8 @@ pub const REASONS: &[Reason] = &[
         description: "Content a statute exempts from disclosure",
     },
     Reason {
-        code: "harness",
-        description: "Harness bookkeeping that is no part of the conversation",
+        code: "non-narrative",
+        description: "Harness bookkeeping that is no part of the conversation narrative",
     },
     Reason {
         code: "custom",

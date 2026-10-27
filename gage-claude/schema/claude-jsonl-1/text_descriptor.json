@@ -128,7 +128,7 @@
     "$.serverClassifierContext.context.git_state.visibility.visibility_cache[*].visibility"
   ],
   "filters": {
-    "harness": {
+    "non-narrative": {
       "entries": [
         "$[?$.type != 'user' && $.type != 'assistant' && $.type != 'system']",
         "$[?$.type == 'system' && $.subtype != 'api_error' && $.subtype != 'away_summary' && $.subtype != 'compact_boundary' && $.subtype != 'informational' && $.subtype != 'local_command']",

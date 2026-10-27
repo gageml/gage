@@ -559,10 +559,10 @@ static FILTERS: LazyLock<Vec<Filter>> = LazyLock::new(|| {
             keywords: None,
         },
         Filter {
-            name: "harness",
-            reason: "harness",
+            name: "non-narrative",
+            reason: "non-narrative",
             description: "Leave out entries the harness wrote for its own bookkeeping",
-            instructions: include_str!("../filters/harness.md"),
+            instructions: include_str!("../filters/non-narrative.md"),
             attrs: &[],
             patterns: Vec::new(),
             keywords: None,
