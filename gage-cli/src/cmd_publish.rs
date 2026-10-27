@@ -709,7 +709,6 @@ fn origin_status_cell(origin: &str) -> String {
     format!("{} {}", id, console::style(commit).dim())
 }
 
-
 /// Stage a publish after confirmation. The original is resolved
 /// before the dialog opens, so a bad argument fails without a prompt,
 /// and a native session is added to the store only after the user
@@ -947,7 +946,10 @@ fn status(args: StatusArgs) -> Result<(), CliError> {
     let filters: Vec<String> = definition.filters.iter().map(filter_cell).collect();
     let rows = [
         ["Session".to_string(), pending.id.clone()],
-        ["Origin".to_string(), origin_status_cell(&pending.attrs.origin)],
+        [
+            "Origin".to_string(),
+            origin_status_cell(&pending.attrs.origin),
+        ],
         [
             "Filters".to_string(),
             if filters.is_empty() {

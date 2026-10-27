@@ -1,7 +1,7 @@
-//! The `entry`, `message`, `tool_use`, `text_block`, and `filtered`
-//! tables over stored sessions.
+//! The `entry`, `message`, `tool_use`, and `filtered` tables over
+//! stored sessions.
 //!
-//! One provider type serves the five tables; [`RowKind`] selects the
+//! One provider type serves the four tables; [`RowKind`] selects the
 //! shape. A scan resolves the session set through the
 //! [`SessionSet`], then streams one batch per session, reading each
 //! session's rows through its driver on first touch. Filters on
@@ -36,7 +36,7 @@ use gage_session::filter::{self, RowFilter};
 use crate::filtered::filtered_schema;
 use crate::rows::{RowCache, entry_rows, entry_schema, message_rows, message_schema};
 use crate::scope::{SessionSet, StoredSessionRef};
-use gage_session::{text_block_schema, tool_use_schema};
+use gage_session::tool_use_schema;
 
 const SESSION_ID_COL: &str = "session_id";
 
@@ -45,7 +45,6 @@ pub enum RowKind {
     Entry,
     Message,
     ToolUse,
-    TextBlock,
     Filtered,
 }
 
@@ -55,7 +54,6 @@ impl RowKind {
             RowKind::Entry => entry_schema(),
             RowKind::Message => message_schema(),
             RowKind::ToolUse => tool_use_schema(),
-            RowKind::TextBlock => text_block_schema(),
             RowKind::Filtered => filtered_schema(),
         }
     }
@@ -71,7 +69,6 @@ impl RowKind {
             RowKind::Entry => entry_rows(scope.rows(session, cache)?.as_ref()),
             RowKind::Message => message_rows(scope.rows(session, cache)?.as_ref()),
             RowKind::ToolUse => Ok(scope.tool_uses(session, cache)?.as_ref().clone()),
-            RowKind::TextBlock => Ok(scope.text_blocks(session, cache)?.as_ref().clone()),
             RowKind::Filtered => Ok(scope.filtered(session, cache)?.as_ref().clone()),
         }
     }
@@ -80,7 +77,7 @@ impl RowKind {
     /// column 0 of every kind.
     fn line_col(self) -> usize {
         match self {
-            RowKind::Entry | RowKind::Message | RowKind::TextBlock => 1,
+            RowKind::Entry | RowKind::Message => 1,
             RowKind::Filtered => 2,
             RowKind::ToolUse => 3,
         }

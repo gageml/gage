@@ -22,9 +22,7 @@ use datafusion::error::{DataFusionError, Result};
 use datafusion::prelude::Expr;
 use gage_registry::driver::DriverRegistry;
 use gage_session::filter::IdFilter;
-use gage_session::{
-    ContentSource, Driver, StoredSession, TextBlock, text_block_batch, text_blocks, tool_use_batch,
-};
+use gage_session::{ContentSource, Driver, StoredSession, tool_use_batch};
 use gage_store::{
     DirContentSource, Order, PendingPublish, PublishDirLayout, PublishStore, ScanDirLayout,
     ScanSource, SelectedTip, SessionRecord, SessionStore, Store, StoreError, show_publishing,
@@ -295,44 +293,6 @@ impl SessionSet {
         let mut stored = self.read_stored(session)?;
         let batch = Arc::new(tool_use_batch(&session.id, stored.tool_uses())?);
         cache.insert_tool_uses(&session.commit, Arc::clone(&batch));
-        Ok(batch)
-    }
-
-    /// The `text_block` batch of `session`, read and cached as [`rows`]
-    /// reads the derived batch. The driver supplies the descriptor for
-    /// the session's content format; a driver without one cannot
-    /// serve the table.
-    ///
-    /// [`rows`]: SessionSet::rows
-    pub(crate) fn text_blocks(
-        &self,
-        session: &StoredSessionRef,
-        cache: &RowCache,
-    ) -> Result<Arc<RecordBatch>> {
-        if let Some(batch) = cache.get_text_blocks(&session.commit) {
-            return Ok(batch);
-        }
-        let driver = self.driver(&session.driver_name)?;
-        let descriptor = driver
-            .text_descriptor(&session.content_format)
-            .ok_or_else(|| {
-                DataFusionError::Execution(format!(
-                    "driver {:?} describes no text for content format {:?}",
-                    session.driver_name, session.content_format
-                ))
-            })?;
-        let mut stored = self.read_stored(session)?;
-        let rows: Vec<Result<TextBlock, gage_session::DriverError>> = stored
-            .entry_json()
-            .flat_map(
-                |item| match item.and_then(|e| text_blocks(&descriptor, &e)) {
-                    Ok(blocks) => blocks.into_iter().map(Ok).collect::<Vec<_>>(),
-                    Err(e) => vec![Err(e)],
-                },
-            )
-            .collect();
-        let batch = Arc::new(text_block_batch(&session.id, rows)?);
-        cache.insert_text_blocks(&session.commit, Arc::clone(&batch));
         Ok(batch)
     }
 

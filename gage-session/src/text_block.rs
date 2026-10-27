@@ -1,128 +1,16 @@
-//! The `text_block` table shape: one row per text value of a stored
-//! session's entries, in document order within each entry. A driver
-//! yields each entry's native JSON text and a [`TextDescriptor`] that
-//! names the fields whose type is not text; the walk here emits the
-//! rest. [`TextBlockBatch`] builds the table's batch, so every driver
-//! produces one schema.
+//! The text values of a stored session's entries, in document order
+//! within each entry. A driver yields each entry's native JSON text and
+//! a [`TextDescriptor`] that names the fields whose type is not text;
+//! the walk here emits the rest. The publish engine and the candidate
+//! listing read it.
 
 use std::collections::BTreeSet;
 use std::error::Error;
 use std::fmt;
-use std::sync::{Arc, LazyLock};
 
-use datafusion::arrow::array::{Int64Builder, StringBuilder};
-use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
-use datafusion::arrow::error::ArrowError;
-use datafusion::arrow::record_batch::RecordBatch;
-use datafusion::error::{DataFusionError, Result};
 use serde::de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor};
 use serde_json::Value;
 use serde_json_path::JsonPath;
-
-use crate::{DriverError, EntryJson};
-
-/// One text value of one entry.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TextBlock {
-    /// 1-based line of the entry in the session's native content
-    pub line: u32,
-    /// The value's position among the entry's text values in document
-    /// order, from 0
-    pub seq: u32,
-    pub text: String,
-}
-
-static SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
-    Arc::new(Schema::new(vec![
-        Field::new("session_id", DataType::Utf8, false),
-        Field::new("line", DataType::Int64, false),
-        Field::new("seq", DataType::Int64, false),
-        Field::new("text", DataType::Utf8, false),
-    ]))
-});
-
-pub fn text_block_schema() -> SchemaRef {
-    SCHEMA.clone()
-}
-
-/// Accumulates [`TextBlock`] rows into the table's batch.
-pub struct TextBlockBatch {
-    session_ids: StringBuilder,
-    lines: Int64Builder,
-    seqs: Int64Builder,
-    texts: StringBuilder,
-}
-
-impl Default for TextBlockBatch {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl TextBlockBatch {
-    pub fn new() -> Self {
-        Self {
-            session_ids: StringBuilder::new(),
-            lines: Int64Builder::new(),
-            seqs: Int64Builder::new(),
-            texts: StringBuilder::new(),
-        }
-    }
-
-    /// Append one row under `session_id`.
-    pub fn push(&mut self, session_id: &str, t: &TextBlock) {
-        self.session_ids.append_value(session_id);
-        self.lines.append_value(i64::from(t.line));
-        self.seqs.append_value(i64::from(t.seq));
-        self.texts.append_value(&t.text);
-    }
-
-    pub fn finish(mut self) -> std::result::Result<RecordBatch, ArrowError> {
-        RecordBatch::try_new(
-            text_block_schema(),
-            vec![
-                Arc::new(self.session_ids.finish()),
-                Arc::new(self.lines.finish()),
-                Arc::new(self.seqs.finish()),
-                Arc::new(self.texts.finish()),
-            ],
-        )
-    }
-}
-
-/// The `text_block` batch of one session from its rows. `session_id`
-/// is written to every row.
-pub fn text_block_batch(
-    session_id: &str,
-    rows: impl IntoIterator<Item = std::result::Result<TextBlock, DriverError>>,
-) -> Result<RecordBatch> {
-    let mut batch = TextBlockBatch::new();
-    for row in rows {
-        let t = row.map_err(|e| DataFusionError::External(Box::new(e)))?;
-        batch.push(session_id, &t);
-    }
-    Ok(batch.finish()?)
-}
-
-/// The `text_block` rows of one entry: its text values under
-/// `descriptor`, numbered in document order.
-pub fn text_blocks(
-    descriptor: &TextDescriptor,
-    entry: &EntryJson,
-) -> std::result::Result<Vec<TextBlock>, DriverError> {
-    let values = descriptor
-        .text_values(&entry.json)
-        .map_err(|e| DriverError::Other(format!("line {}: {e}", entry.line)))?;
-    Ok(values
-        .into_iter()
-        .enumerate()
-        .map(|(seq, v)| TextBlock {
-            line: entry.line,
-            seq: seq as u32,
-            text: v.text,
-        })
-        .collect())
-}
 
 /// What a driver knows about the strings of one content format: the
 /// fields whose type is not text, and per named filter the fields
@@ -558,7 +446,6 @@ fn escape(key: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use datafusion::arrow::array::{Array, Int64Array, StringArray};
 
     fn descriptor() -> TextDescriptor {
         TextDescriptor::new(&[
@@ -708,81 +595,5 @@ mod tests {
     fn a_bad_pattern_is_an_error_naming_it() {
         let err = TextDescriptor::new(&["$.ok", "$[?"]).unwrap_err();
         assert_eq!(err.pattern, "$[?");
-    }
-
-    #[test]
-    fn text_blocks_number_the_values_of_an_entry() {
-        let entry = EntryJson {
-            line: 7,
-            json: r#"{"uuid":"u","a":"one","b":{"c":"two"}}"#.to_string(),
-        };
-        let rows = text_blocks(&descriptor(), &entry).unwrap();
-        assert_eq!(
-            rows,
-            [
-                TextBlock {
-                    line: 7,
-                    seq: 0,
-                    text: "one".to_string()
-                },
-                TextBlock {
-                    line: 7,
-                    seq: 1,
-                    text: "two".to_string()
-                },
-            ]
-        );
-    }
-
-    #[test]
-    fn an_unparseable_entry_names_its_line() {
-        let entry = EntryJson {
-            line: 3,
-            json: "{not json".to_string(),
-        };
-        let err = text_blocks(&descriptor(), &entry).unwrap_err();
-        assert!(err.to_string().starts_with("line 3:"), "{err}");
-    }
-
-    #[test]
-    fn batch_matches_the_schema() {
-        let rows = [
-            Ok(TextBlock {
-                line: 1,
-                seq: 0,
-                text: "a".to_string(),
-            }),
-            Ok(TextBlock {
-                line: 1,
-                seq: 1,
-                text: "b".to_string(),
-            }),
-        ];
-        let batch = text_block_batch("s1", rows).unwrap();
-        assert_eq!(batch.schema(), text_block_schema());
-        assert_eq!(batch.num_rows(), 2);
-        let seqs = batch
-            .column_by_name("seq")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .unwrap();
-        assert_eq!(seqs.values(), &[0, 1]);
-        let texts = batch
-            .column_by_name("text")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
-        assert_eq!(texts.value(1), "b");
-        assert_eq!(texts.len(), 2);
-    }
-
-    #[test]
-    fn a_driver_error_fails_the_batch() {
-        let err = text_block_batch("s1", [Err(DriverError::Other("bad line".into()))])
-            .err()
-            .unwrap();
-        assert!(err.to_string().contains("bad line"), "{err}");
     }
 }

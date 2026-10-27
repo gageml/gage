@@ -37,10 +37,7 @@ pub use content_schema::{
 pub use json_edit::{EditError, delete_values, edit_strings};
 pub use status::{AuthInfo, DriverStatus, Field, HarnessInfo, InstallInfo};
 pub use system_col::{SYSTEM_META_KEY, is_system, system};
-pub use text_block::{
-    DescriptorError, FilterValues, TextBlock, TextBlockBatch, TextDescriptor, TextValue, ValueHit,
-    text_block_batch, text_block_schema, text_blocks,
-};
+pub use text_block::{DescriptorError, FilterValues, TextDescriptor, TextValue, ValueHit};
 pub use tool_use::{ToolUse, ToolUseBatch, tool_use_batch, tool_use_schema};
 
 /// What a driver opens and how it reads it. `new` names the source as
@@ -156,8 +153,8 @@ pub trait Driver: Send + Sync {
 
     /// The driver's description of the strings it writes in
     /// `content_format`: which fields are not text, and which fields
-    /// a named filter treats as sensitive by type, for the `text_block`
-    /// table and the publish redaction engine. The default is none,
+    /// a named filter treats as sensitive by type, for the publish
+    /// redaction engine. The default is none,
     /// for a driver whose sessions cannot be published.
     fn text_descriptor(&self, _content_format: &str) -> Option<TextDescriptor> {
         None
@@ -456,7 +453,7 @@ pub trait StoredSession {
     /// result.
     fn tool_uses(&mut self) -> Box<dyn Iterator<Item = Result<ToolUse, DriverError>> + '_>;
     /// The native JSON text of each entry, in line order, for the
-    /// `text_block` walk: the same lines `entries` yields rows for, as
+    /// text-value walk: the same lines `entries` yields rows for, as
     /// the harness wrote them, so the walk sees each entry's document
     /// order.
     fn entry_json(&mut self) -> Box<dyn Iterator<Item = Result<EntryJson, DriverError>> + '_>;

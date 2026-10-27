@@ -36,8 +36,6 @@ Tables:
   result_uuid, result_timestamp, output, is_error, input_raw, result_raw,
   files_changed) - one tool call with its result; `files_changed` is the
   paths written, null when unknown
-- text_block (session_id, line, seq, text) - each text value of an entry in
-  document order; ids, timestamps, and enumerations are left out
 - filtered (session_id, kind, line, line_end, ref, span_start, span_end,
   reason, author) - rules a publish applied to its original; `kind` is
   line, value, text, or attr

@@ -1,6 +1,6 @@
 //! `GAGE_SHOW_PUBLISHING=1` includes a pending publish working tree in
-//! the `session`, `entry`, `message`, `tool_use`, `text_block`, and
-//! `filtered` tables, and a rebuilt working tree is re-read by the
+//! the `session`, `entry`, `message`, `tool_use`, and `filtered`
+//! tables, and a rebuilt working tree is re-read by the
 //! same context. The test
 //! runs in its own process, so its environment mutation does not race
 //! the library tests.
@@ -142,17 +142,6 @@ async fn pending_publish_appears_in_row_tables_under_env() {
     )
     .await;
     assert_eq!(reread, ["hello [REDACTED]"], "rebuilt content is re-read");
-
-    let blocks = strings(
-        &ctx,
-        &format!("SELECT text FROM text_block WHERE session_id = '{id}' ORDER BY line, seq"),
-    )
-    .await;
-    assert_eq!(
-        blocks,
-        ["/w/proj", "hello [REDACTED]", "hi", "ls", "out"],
-        "text_block"
-    );
 
     let records = strings(
         &ctx,

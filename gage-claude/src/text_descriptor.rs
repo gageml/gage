@@ -2,8 +2,7 @@
 //! line are identifiers, timestamps, digests, signatures, or
 //! enumerations rather than text, which fields a named filter treats
 //! as sensitive by type, and which entries the harness wrote for its
-//! own bookkeeping. The `text_block` table and the publish redaction
-//! engine read it.
+//! own bookkeeping. The publish redaction engine reads it.
 //! `schema/claude-jsonl-1/text_descriptor.json` holds the pattern
 //! lists beside the content schemas of the same format.
 
