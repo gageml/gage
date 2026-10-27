@@ -227,7 +227,7 @@ text. It returns a JSON encoded list of text to redact in the format:
 
 ```json
 [
-    [text_to_redact, reason_code, filter_name, no_mark_flag],
+    [text_to_redact, reason_code, no_mark_flag],
     ...
 ]
 ```
@@ -235,7 +235,7 @@ text. It returns a JSON encoded list of text to redact in the format:
 Use the return value to add the redacted text to the publish op:
 
 ```shell
-echo 'AGENT_OUTPUT' | gage publish redact import -y ID -
+echo 'AGENT_OUTPUT' | gage publish redact import -y ID --author 'session:<AGENT_SESSION_ID>' -
 ```
 
 ### Step 4. Review the pending session and iterate as needed

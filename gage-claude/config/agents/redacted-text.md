@@ -16,26 +16,14 @@ gage publish filter list ID --instructions
 
 The set of instructions is provided as:
 
-```json
-{
-    [filter_name]: {
-        "instructions": instructions,
-        "reasons": {
-            [code]: rule
-        },
-        "prompt": prompt
-    }
-}
+```md
+### `<name>`
+
+<instructions>
 ```
 
-Use `instructions` as your guide for redaction.
-
-Apply each reason code `rule` to select the reason code for redacted text.
-
-`prompt` is additional information provided by the user, who is publishing the
-session. `prompt` overrides `instructions` only when the override is stated
-explicitly. Otherwise, if there is a conflict between `instructions` and the
-user-specified `prompt`, `instructions` prevails.
+Use `instructions` as your guide for redaction. Each instruction states the
+reason code its redactions take.
 
 Get the candidate text.
 
@@ -50,13 +38,13 @@ Each candidate string is listed as:
 ```
 
 As per the filter instructions, carefully scan the candidate text for strings to
-redact. Note the instruction name and reason codes.
+redact. Note the reason code each instruction gives.
 
 Return a JSON encoded list of lists in the format:
 
 ```json
 [
-    [text_to_redact, reason_code, filter_name, no_mark_flag],
+    [text_to_redact, reason_code, no_mark_flag],
     ...
 ]
 ```
