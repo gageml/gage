@@ -209,20 +209,15 @@ mod tests {
         assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
-    /// The `non-narrative` filter leaves out every entry that is not a user
+    /// The `metadata` filter leaves out every entry that is not a user
     /// prompt, an assistant message, or a system entry the message
     /// table promotes, and leaves out a user entry the harness injected
     /// as meta. The selectors agree with the entry classifier on the
     /// sample transcript and on one entry of each shape.
     #[test]
-    fn non_narrative_filter_leaves_out_every_entry_that_is_not_conversation() {
+    fn metadata_filter_leaves_out_every_entry_that_is_not_conversation() {
         let descriptor = text_descriptor();
-        let dropped = |line: &str| {
-            descriptor
-                .filter_values("non-narrative", line)
-                .unwrap()
-                .dropped
-        };
+        let dropped = |line: &str| descriptor.filter_values("metadata", line).unwrap().dropped;
         let conversation = |line: &str| {
             let entry: serde_json::Value = serde_json::from_str(line).unwrap();
             let ty = entry["type"].as_str().unwrap_or_default();

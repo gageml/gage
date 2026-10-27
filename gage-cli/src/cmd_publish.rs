@@ -500,7 +500,7 @@ pub struct ApplyArgs {
 /// The paragraph `init --filter` and `filter add` share on what a
 /// filter argument is.
 const FILTER_HELP: &str = "A filter name; see --list-filters. Filter names are \"pii\", \
-\"language\", \"secret\", \"system\", \"non-narrative\", and \"custom\". \"custom\" takes \
+\"language\", \"secret\", \"system\", \"metadata\", and \"custom\". \"custom\" takes \
 --prompt as its whole instruction, so it is added with filter add.";
 
 /// The `filter` group declares the `--source` and `--stored` override
@@ -2231,9 +2231,7 @@ mod tests {
             "{text}"
         );
         assert!(
-            text.contains(
-                "[possible values: pii, language, secret, system, non-narrative, custom]"
-            ),
+            text.contains("[possible values: pii, language, secret, system, metadata, custom]"),
             "{text}"
         );
         assert!(text.contains("a similar value exists: 'secret'"), "{text}");

@@ -128,7 +128,20 @@
     "$.serverClassifierContext.context.git_state.visibility.visibility_cache[*].visibility"
   ],
   "filters": {
-    "non-narrative": {
+    "metadata": {
+      "value": [
+        "$.version",
+        "$.entrypoint",
+        "$.userType",
+        "$.slug",
+        "$.permissionMode",
+        "$.effort",
+        "$.requestedModel",
+        "$.thinkingDurationMs",
+        "$.requestId",
+        "$.apiBlockIndex",
+        "$.message.usage"
+      ],
       "entries": [
         "$[?$.type != 'user' && $.type != 'assistant' && $.type != 'system']",
         "$[?$.type == 'system' && $.subtype != 'api_error' && $.subtype != 'away_summary' && $.subtype != 'compact_boundary' && $.subtype != 'informational' && $.subtype != 'local_command']",

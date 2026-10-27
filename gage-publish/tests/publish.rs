@@ -296,13 +296,13 @@ fn custom_requires_a_prompt_and_any_filter_takes_one() {
 /// itself: the API request on line 5 goes, with one line record under
 /// the filter, and a literal found only there is a miss.
 #[test]
-fn non_narrative_filter_leaves_out_bookkeeping_entries() {
+fn metadata_filter_leaves_out_record_keeping_entries_and_descriptive_fields() {
     let f = fixture();
     let publisher = Publisher::with_root(&f.store, &f.publish_root);
     let init = publisher
         .init(
             &f.original,
-            &["non-narrative".parse::<FilterSpec>().unwrap()],
+            &["metadata".parse::<FilterSpec>().unwrap()],
             &[],
             "session:test",
         )
@@ -319,9 +319,26 @@ fn non_narrative_filter_leaves_out_bookkeeping_entries() {
         .filter(|r| r.kind == FilteredKind::Line)
         .map(|r| (r.line, r.line_end, r.reason.as_str(), r.author.as_str()))
         .collect();
-    assert_eq!(
-        dropped,
-        [(5, Some(5), "non-narrative", "filter:non-narrative")]
+    assert_eq!(dropped, [(5, Some(5), "metadata", "filter:metadata")]);
+    // The token usage is a descriptive field and goes; the working
+    // directory is the system filter's and stays
+    assert!(!lines[1].contains("\"usage\""), "{}", lines[1]);
+    assert!(
+        lines[0].contains("\"cwd\":\"/home/garrett/proj\""),
+        "{}",
+        lines[0]
+    );
+    let values: Vec<&str> = records
+        .iter()
+        .filter(|r| r.kind == FilteredKind::Value)
+        .map(|r| r.reference.as_deref().unwrap())
+        .collect();
+    assert!(values.contains(&"$.message.usage"), "{values:?}");
+    assert!(
+        records
+            .iter()
+            .filter(|r| r.kind == FilteredKind::Value)
+            .all(|r| r.reason == "metadata" && r.author == "filter:metadata")
     );
     let summary = staged_summary(&f.publish_root, &init.id);
     assert_eq!(summary["line_count"], 4, "{summary}");

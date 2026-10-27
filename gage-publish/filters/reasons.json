@@ -40,8 +40,8 @@
     "description": "Content a statute exempts from disclosure"
   },
   {
-    "code": "non-narrative",
-    "description": "Harness bookkeeping that is no part of the conversation narrative"
+    "code": "metadata",
+    "description": "Content that describes the run rather than what happened in it"
   },
   {
     "code": "custom",

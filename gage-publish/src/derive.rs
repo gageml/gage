@@ -54,10 +54,6 @@ impl SessionText {
         })
     }
 
-    fn entry(&self, line: u32) -> Option<&EntryText> {
-        self.entries.iter().find(|e| e.line == line)
-    }
-
     /// Whether the original carries the attribute `name`.
     fn has_attr(&self, name: &str) -> bool {
         match name {
@@ -591,13 +587,7 @@ fn expand(definition: &PublishDefinition, session: &SessionText) -> Result<Expan
             if dropped.contains(&line) {
                 continue;
             }
-            let Some(entry) = session.entry(line) else {
-                continue;
-            };
             for hit in values.values {
-                if !entry.values.iter().any(|v| v.pointer == hit.pointer) {
-                    continue;
-                }
                 paths.insert(hit.path);
                 if deleted.insert((line, hit.pointer.clone())) {
                     instances.push(instance(InstanceKind::Value {

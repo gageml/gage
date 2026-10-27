@@ -207,7 +207,7 @@ pub struct FilterValues {
     pub dropped: bool,
 }
 
-/// One string value a filter's `value` path selects.
+/// One value a filter's `value` path selects, of any JSON type.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValueHit {
     /// The pattern that selected it
@@ -300,7 +300,6 @@ impl TextDescriptor {
             .flat_map(|(path, p)| {
                 p.query_located(&entry)
                     .iter()
-                    .filter(|n| n.node().is_string())
                     .map(|n| ValueHit {
                         path: path.clone(),
                         pointer: n.location().to_json_pointer(),
@@ -495,8 +494,10 @@ mod tests {
     fn filter_values_select_literals_and_whole_values() {
         let descriptor = descriptor()
             .with_filter("pii", &["$..user_identity"], &["$.context.email"], &[])
+            .unwrap()
+            .with_filter("metadata", &[], &["$.n", "$.params.n"], &[])
             .unwrap();
-        let line = r#"{"context":{"email":"The user is a@b.c"},"params":{"classifier":{"user_identity":"garrett"}},"n":{"user_identity":5}}"#;
+        let line = r#"{"context":{"email":"The user is a@b.c"},"params":{"classifier":{"user_identity":"garrett"},"n":3},"n":{"user_identity":5}}"#;
         let found = descriptor.filter_values("pii", line).unwrap();
         assert_eq!(found.literals, ["garrett"]);
         assert_eq!(
@@ -506,11 +507,18 @@ mod tests {
                 pointer: "/context/email".into(),
             }]
         );
+        // A value path selects a value of any type: an object and a number
+        let metadata = descriptor.filter_values("metadata", line).unwrap();
+        let pointers: Vec<&str> = metadata.values.iter().map(|v| v.pointer.as_str()).collect();
+        assert_eq!(pointers, ["/n", "/params/n"]);
         assert_eq!(
             descriptor.filter_values("secret", line).unwrap(),
             FilterValues::default()
         );
-        assert_eq!(descriptor.filter_names().collect::<Vec<_>>(), ["pii"]);
+        assert_eq!(
+            descriptor.filter_names().collect::<Vec<_>>(),
+            ["pii", "metadata"]
+        );
     }
 
     /// An entry selector tests the entry's own fields through the root
