@@ -470,10 +470,10 @@ fn the_staged_summary_keeps_the_original_title() {
     );
 }
 
-/// `undo` removes redactions by id and rebuilds; an unknown id changes
-/// nothing; a filter's removed literal is allowed on re-run.
+/// `redact_remove` removes redactions by id and rebuilds; an unknown
+/// id changes nothing; a filter's removed literal is allowed on re-run.
 #[test]
-fn undo_removes_redactions_and_allows_a_filters_literal() {
+fn redact_remove_removes_redactions_and_allows_a_filters_literal() {
     let f = fixture();
     let publisher = Publisher::with_root(&f.store, &f.publish_root);
     let init = publisher
@@ -493,13 +493,13 @@ fn undo_removes_redactions_and_allows_a_filters_literal() {
     assert!(cwd(&f.publish_root));
 
     let miss = publisher
-        .undo(&init.id, &[applied[0].id, 99], "user:test")
+        .redact_remove(&init.id, &[applied[0].id, 99], "user:test")
         .unwrap_err();
     assert!(miss.to_string().contains("99"), "{miss}");
     assert!(cwd(&f.publish_root), "nothing changed");
 
     let removed = publisher
-        .undo(&init.id, &[applied[0].id], "user:test")
+        .redact_remove(&init.id, &[applied[0].id], "user:test")
         .unwrap();
     assert_eq!(removed.len(), 1);
     assert_eq!(removed[0].literal, "garrett");
@@ -521,7 +521,9 @@ fn undo_removes_redactions_and_allows_a_filters_literal() {
         .find(|t| t.author == "filter:secret")
         .unwrap()
         .clone();
-    publisher.undo(&init.id, &[key.id], "user:test").unwrap();
+    publisher
+        .redact_remove(&init.id, &[key.id], "user:test")
+        .unwrap();
     let definition = publisher.definition(&init.id).unwrap();
     assert_eq!(definition.allow.len(), 1, "{definition:#?}");
     assert_eq!(definition.allow[0].literal, key.literal);
@@ -599,6 +601,160 @@ fn refresh_reapplies_a_hand_edited_definition() {
     assert!(err.to_string().contains("redaction 1"), "{err}");
     assert!(err.to_string().contains("bogus"), "{err}");
     assert_eq!(staged_lines(&f.publish_root, &init.id).len(), 2);
+}
+
+/// A segment is added without lines and drops nothing; once it has
+/// lines, every line outside it is dropped; editing and removing it
+/// rebuild; an unknown id is an error.
+#[test]
+fn segments_are_added_edited_and_removed() {
+    let f = fixture();
+    let publisher = Publisher::with_root(&f.store, &f.publish_root);
+    let init = publisher.init(&f.original, &[]).unwrap();
+
+    let id = publisher
+        .segment_add(&init.id, "The reply", &[], "session:s")
+        .unwrap();
+    assert_eq!(id, 1);
+    assert_eq!(staged_lines(&f.publish_root, &init.id).len(), 5);
+
+    let edited = publisher
+        .segment_edit(&init.id, id, None, Some(&[(2, 3)]))
+        .unwrap();
+    assert_eq!(edited.description, "The reply");
+    assert_eq!(edited.lines, [(2, 3)]);
+    assert_eq!(staged_lines(&f.publish_root, &init.id).len(), 2);
+    let records = filtered(&f.publish_root, &init.id);
+    assert_eq!(
+        records
+            .iter()
+            .filter(|r| r.kind == FilteredKind::Line)
+            .count(),
+        2,
+        "{records:#?}"
+    );
+
+    let edited = publisher
+        .segment_edit(&init.id, id, Some("The whole exchange"), Some(&[(1, 5)]))
+        .unwrap();
+    assert_eq!(edited.description, "The whole exchange");
+    assert_eq!(staged_lines(&f.publish_root, &init.id).len(), 5);
+    let missing = publisher.segment_edit(&init.id, 9, None, None).unwrap_err();
+    assert!(matches!(missing, PublishError::Input(_)), "{missing}");
+    let reversed = publisher
+        .segment_edit(&init.id, id, None, Some(&[(4, 2)]))
+        .unwrap_err();
+    assert!(reversed.to_string().contains("segment 1"), "{reversed}");
+
+    let removed = publisher.segment_remove(&init.id, id).unwrap();
+    assert_eq!(removed.id, id);
+    let definition = publisher.definition(&init.id).unwrap();
+    assert!(definition.segments.is_empty());
+    assert_eq!(definition.next_segment_id, 2, "ids are not reused");
+    assert_eq!(staged_lines(&f.publish_root, &init.id).len(), 5);
+}
+
+/// `redact_edit` changes the literal, the reason, or the mark of one
+/// redaction and rebuilds; a literal that matches nothing changes
+/// nothing.
+#[test]
+fn redact_edit_changes_one_redaction() {
+    let f = fixture();
+    let publisher = Publisher::with_root(&f.store, &f.publish_root);
+    let init = publisher.init(&f.original, &[]).unwrap();
+    let applied = publisher
+        .redact(
+            &init.id,
+            &[RedactionInput::parse_text("fucking", "language", true).unwrap()],
+            "user:test",
+        )
+        .unwrap();
+    let id = applied[0].id;
+    assert!(staged_lines(&f.publish_root, &init.id)[0].contains("what the [REDACTED] hell"));
+
+    let edited = publisher
+        .redact_edit(&init.id, id, None, Some("privacy"), Some(false))
+        .unwrap();
+    assert_eq!(
+        (edited.reason.as_str(), edited.mark, edited.instances),
+        ("privacy", false, 1)
+    );
+    assert!(staged_lines(&f.publish_root, &init.id)[0].contains("what the hell is this?"));
+    let definition = publisher.definition(&init.id).unwrap();
+    assert_eq!(definition.text[0].reason, "privacy");
+
+    let edited = publisher
+        .redact_edit(&init.id, id, Some("garrett"), None, None)
+        .unwrap();
+    assert_eq!(edited.instances, 3);
+    let line = staged_lines(&f.publish_root, &init.id).remove(0);
+    assert!(line.contains("the fucking hell"), "{line}");
+    assert!(
+        line.contains(r#""cwd":"/home//proj""#),
+        "removed without a mark: {line}"
+    );
+
+    let miss = publisher
+        .redact_edit(&init.id, id, Some("nothing-like-this"), None, None)
+        .unwrap_err();
+    assert!(matches!(miss, PublishError::NoMatch(_)), "{miss}");
+    assert_eq!(
+        publisher.definition(&init.id).unwrap().text[0].literal,
+        "garrett"
+    );
+    let bad = publisher
+        .redact_edit(&init.id, id, None, Some("bogus"), None)
+        .unwrap_err();
+    assert!(bad.to_string().contains("bogus"), "{bad}");
+    let missing = publisher
+        .redact_edit(&init.id, 9, None, None, None)
+        .unwrap_err();
+    assert!(matches!(missing, PublishError::Input(_)), "{missing}");
+}
+
+/// The candidates are every text value of the kept lines that no
+/// filter leaves out, in document order, each with the spans redacted
+/// in it merged.
+#[test]
+fn candidates_are_the_disclosed_text_values_with_their_spans() {
+    let f = fixture_with(SYSTEM_SESSION);
+    let publisher = Publisher::with_root(&f.store, &f.publish_root);
+    let init = publisher
+        .init(&f.original, &["system".parse::<FilterSpec>().unwrap()])
+        .unwrap();
+    publisher
+        .redact(
+            &init.id,
+            &[RedactionInput::parse_text("/home/garrett", "system", true).unwrap()],
+            "user:test",
+        )
+        .unwrap();
+    publisher
+        .segment_add(&init.id, "The lookup", &[(2, 4)], "user:test")
+        .unwrap();
+
+    let candidates = publisher.candidates(&init.id).unwrap();
+    let keys: Vec<(u32, &str)> = candidates
+        .iter()
+        .map(|c| (c.line, c.pointer.as_str()))
+        .collect();
+    // Lines 1 and 5 are dropped by the segment; the command, the tool
+    // result's content and stdout, and the reply remain
+    assert_eq!(
+        keys,
+        [
+            (2, "/message/content/0/input/command"),
+            (3, "/message/content/0/content"),
+            (3, "/toolUseResult/stdout"),
+            (4, "/message/content/0/text"),
+        ],
+        "{candidates:#?}"
+    );
+    let command = &candidates[0];
+    assert_eq!(command.text, "ls /home/garrett/proj");
+    assert_eq!(command.spans, [(3, 15, true)]);
+    assert!(candidates[1].spans.is_empty(), "{candidates:#?}");
+    assert_eq!(candidates[3].spans, [(15, 27, true)]);
 }
 
 /// `apply` commits the staged session as a new session object with the

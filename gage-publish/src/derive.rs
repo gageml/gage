@@ -278,6 +278,90 @@ pub fn build(
     Ok(Built { instances, counts })
 }
 
+/// A byte span `start..=end` of a text value and whether the marker
+/// replaces it.
+pub type Span = (usize, usize, bool);
+
+/// One text value of the published session as a candidate for
+/// redaction: its original line and pointer, its text as the original
+/// holds it, and the spans the definition redacts in it, merged, as
+/// byte offsets into that text with `end` inclusive.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Candidate {
+    pub line: u32,
+    pub pointer: String,
+    pub text: String,
+    pub spans: Vec<Span>,
+}
+
+/// Every text value the published session discloses, in document
+/// order: the values of the kept lines that no filter leaves out, with
+/// the spans the definition redacts in each. Reads only.
+pub fn candidates(
+    definition: &PublishDefinition,
+    session: &SessionText,
+) -> Result<Vec<Candidate>, PublishError> {
+    let Expanded { instances, .. } = expand(definition, session)?;
+    let dropped = dropped_of(&instances);
+    let mut deleted: HashSet<(u32, &str)> = HashSet::new();
+    let mut spans: HashMap<(u32, &str), Vec<Span>> = HashMap::new();
+    for i in &instances {
+        match &i.kind {
+            InstanceKind::Value { line, pointer } => {
+                deleted.insert((*line, pointer.as_str()));
+            }
+            InstanceKind::Span {
+                line,
+                pointer,
+                start,
+                end,
+                mark,
+            } => spans
+                .entry((*line, pointer.as_str()))
+                .or_default()
+                .push((*start, *end, *mark)),
+            InstanceKind::Line { .. } | InstanceKind::Attr { .. } => {}
+        }
+    }
+    let mut out = Vec::new();
+    for entry in &session.entries {
+        if dropped.contains(&entry.line) {
+            continue;
+        }
+        for value in &entry.values {
+            let key = (entry.line, value.pointer.as_str());
+            if deleted.contains(&key) {
+                continue;
+            }
+            let ranges = spans.remove(&key).unwrap_or_default();
+            out.push(Candidate {
+                line: entry.line,
+                pointer: value.pointer.clone(),
+                text: value.text.clone(),
+                spans: merge_spans(ranges),
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// `ranges` in order with overlapping and adjacent spans merged; a
+/// merged span is marked when any part of it was.
+fn merge_spans(mut ranges: Vec<Span>) -> Vec<Span> {
+    ranges.sort_by_key(|(start, _, _)| *start);
+    let mut merged: Vec<Span> = Vec::new();
+    for (start, end, mark) in ranges {
+        match merged.last_mut() {
+            Some(last) if start <= last.1 + 1 => {
+                last.1 = last.1.max(end);
+                last.2 |= mark;
+            }
+            _ => merged.push((start, end, mark)),
+        }
+    }
+    merged
+}
+
 /// The number of spans each text redaction of `definition` produces
 /// over `session`, by id. Reads only.
 pub fn counts(
@@ -571,17 +655,17 @@ fn span_of(text: &TextEntry, line: u32, pointer: &str, start: usize, end: usize)
 }
 
 /// The runs of lines outside every segment, `(line, line_end,
-/// author)`, when there is at least one segment. A run is attributed
+/// author)`, when at least one segment has lines. A run is attributed
 /// to the segment that follows it, and the run after the last
 /// segment to that segment.
 fn segment_gaps(segments: &[Segment], last_line: u32) -> Vec<(u32, u32, String)> {
-    if segments.is_empty() {
-        return Vec::new();
-    }
     let mut ranges: Vec<(u32, u32, &str)> = segments
         .iter()
         .flat_map(|s| s.lines.iter().map(|&(a, b)| (a, b, s.author.as_str())))
         .collect();
+    if ranges.is_empty() {
+        return Vec::new();
+    }
     ranges.sort_by_key(|&(start, end, _)| (start, end));
     let mut merged: Vec<(u32, u32, &str)> = Vec::new();
     for (start, end, author) in ranges {
@@ -719,7 +803,7 @@ fn line_edits(
 /// removed. A removal bounded by a space on both sides also removes
 /// the space that follows, so the words around it keep one space
 /// between them.
-fn apply_spans(text: &str, spans: &[(usize, usize, bool)]) -> (String, Vec<(usize, usize)>) {
+fn apply_spans(text: &str, spans: &[Span]) -> (String, Vec<(usize, usize)>) {
     let mut out = String::with_capacity(text.len());
     let mut positions = Vec::with_capacity(spans.len());
     let mut cursor = 0;
@@ -898,6 +982,20 @@ mod tests {
         assert!(whole.is_empty(), "{whole:?}");
         let past = segment_gaps(&[segment(1, &[(1, 20)], "a")], 12);
         assert!(past.is_empty(), "{past:?}");
+    }
+
+    #[test]
+    fn spans_merge_where_they_overlap_or_touch() {
+        assert_eq!(
+            merge_spans(vec![
+                (10, 12, false),
+                (0, 3, true),
+                (4, 6, false),
+                (11, 20, true)
+            ]),
+            [(0, 6, true), (10, 20, true)]
+        );
+        assert!(merge_spans(Vec::new()).is_empty());
     }
 
     #[test]

@@ -9,6 +9,7 @@
 //! object id and commit for `origin`.
 
 use std::cmp::Reverse;
+use std::collections::BTreeMap;
 use std::io;
 use std::sync::Arc;
 
@@ -17,10 +18,11 @@ use cliclack as cli;
 use gage_core::style::IdHighlighter;
 use gage_core::uuid::short_uuid;
 use gage_publish::{
-    Filter, FilterEntry, FilterSpec, NAMED_FILTERS, PublishError, Publisher, REASONS,
-    RedactionInput, TextEntry,
+    Candidate, Filter, FilterEntry, FilterSpec, MARKER, NAMED_FILTERS, PublishDefinition,
+    PublishError, Publisher, REASONS, RedactionInput, TextEntry,
 };
 use gage_session::{Driver, NativeSession, SourceOptions};
+use gage_store::url::{LineSelection, parse_session_origin};
 use gage_store::{
     PendingPublish, PublishStore, SESSION_TYPE, SessionRecord, SessionStore, Store, StoreError,
     TagStore,
@@ -63,21 +65,14 @@ pub enum PublishCommand {
     /// List pending publish sessions
     List,
 
-    /// Add text redactions to a pending publish
-    ///
-    /// Every literal given carries --reason and is matched against
-    /// every text value of session at once.
+    /// Manage text redactions of a pending publish
     Redact(RedactArgs),
+
+    /// Manage segments of a pending publish
+    Segment(SegmentArgs),
 
     /// Show filters, segments, and redactions of a pending publish
     Status(StatusArgs),
-
-    /// Remove text redactions from a pending publish
-    ///
-    /// Each ID is one listed by status. Staged session is rebuilt from
-    /// original with remaining redactions. A literal a named filter
-    /// found is allowed once removed: filter does not record it again.
-    Undo(UndoArgs),
 
     /// Rebuild a pending publish from its definition
     ///
@@ -142,27 +137,69 @@ pub struct InitArgs {
 
 #[derive(Args)]
 pub struct RedactArgs {
+    #[command(subcommand)]
+    command: RedactCommand,
+}
+
+#[derive(Subcommand)]
+pub enum RedactCommand {
+    /// Add a text redaction to a pending publish
+    ///
+    /// Literal is matched case-insensitively against every text value
+    /// of session, and a literal that matches nothing is an error.
+    Add(RedactAddArgs),
+
+    /// Change a text redaction of a pending publish
+    ///
+    /// Literal, reason, and mark change only when given.
+    Edit(RedactEditArgs),
+
+    /// Remove text redactions from a pending publish
+    ///
+    /// Staged session is rebuilt from original with remaining
+    /// redactions. A literal a named filter found is allowed once
+    /// removed: filter does not record it again.
+    Remove(RedactRemoveArgs),
+
+    /// List text values of a pending publish open to redaction
+    ///
+    /// One value per line as "LINE POINTER TEXT", with dropped lines
+    /// and left-out values omitted. A value that holds a line break or
+    /// runs past terminal width is listed as "LINE POINTER" with its
+    /// text indented on lines that follow. With --applied, redacted
+    /// text is struck through in yellow and followed by its marker.
+    Candidate(CandidateArgs),
+
+    /// List text redactions of a pending publish
+    ///
+    /// One row per redaction: its ID, the text, the reason, the
+    /// author, and the number of instances. The ID is what redact
+    /// edit and redact remove take.
+    List(RedactListArgs),
+}
+
+#[derive(Args)]
+pub struct RedactAddArgs {
     /// Pending publish session to redact (ID or prefix)
     #[arg(value_name = "SESSION", required = true)]
     session: Option<String>,
 
-    /// Text to redact everywhere (repeatable)
+    /// Text to redact everywhere
     ///
-    /// Matched case-insensitively against every text value of session.
-    #[arg(short, long, value_name = "TEXT", required = true)]
-    text: Vec<String>,
+    /// Read from a file as @PATH.
+    #[arg(value_name = "TEXT", required = true)]
+    text: Option<String>,
 
-    /// Reason for every redaction given
+    /// Reason for redaction (default custom)
     ///
     /// A reason code; see --list-reasons.
-    #[arg(short, long, value_name = "REASON", required = true)]
+    #[arg(short, long, value_name = "REASON")]
     reason: Option<String>,
 
     /// Remove redacted text without a marker
     ///
-    /// Applies to every --text redaction given. Without it a redacted
-    /// span is replaced by "[REDACTED]"; with it the span is removed
-    /// and surrounding whitespace is normalized.
+    /// Without it a redacted span is replaced by "[REDACTED]"; with it
+    /// span is removed and surrounding whitespace is normalized.
     #[arg(short = 'n', long)]
     no_mark: bool,
 
@@ -176,19 +213,49 @@ pub struct RedactArgs {
 }
 
 #[derive(Args)]
-pub struct StatusArgs {
-    /// Pending publish session to show (ID or prefix)
-    #[arg(value_name = "SESSION")]
-    session: String,
-}
-
-#[derive(Args)]
-pub struct UndoArgs {
+pub struct RedactEditArgs {
     /// Pending publish session to change (ID or prefix)
     #[arg(value_name = "SESSION")]
     session: String,
 
-    /// Redaction IDs to remove
+    /// Redaction to change
+    ///
+    /// An ID as status lists it.
+    #[arg(value_name = "ID")]
+    id: u64,
+
+    /// New text to redact everywhere
+    ///
+    /// Read from a file as @PATH.
+    #[arg(value_name = "TEXT")]
+    text: Option<String>,
+
+    /// New reason for redaction
+    ///
+    /// A reason code; see redact add --list-reasons.
+    #[arg(short, long, value_name = "REASON")]
+    reason: Option<String>,
+
+    /// Replace redacted text with a marker
+    #[arg(short, long, conflicts_with = "no_mark")]
+    mark: bool,
+
+    /// Remove redacted text without a marker
+    #[arg(short = 'n', long)]
+    no_mark: bool,
+
+    /// Skip confirmation prompt
+    #[arg(short, long)]
+    yes: bool,
+}
+
+#[derive(Args)]
+pub struct RedactRemoveArgs {
+    /// Pending publish session to change (ID or prefix)
+    #[arg(value_name = "SESSION")]
+    session: String,
+
+    /// Redactions to remove
     ///
     /// IDs as status lists them.
     #[arg(value_name = "ID", required = true)]
@@ -197,6 +264,127 @@ pub struct UndoArgs {
     /// Skip confirmation prompt
     #[arg(short, long)]
     yes: bool,
+}
+
+#[derive(Args)]
+pub struct CandidateArgs {
+    /// Pending publish session to list (ID or prefix)
+    #[arg(value_name = "SESSION")]
+    session: String,
+
+    /// Show redactions applied to text
+    #[arg(long)]
+    applied: bool,
+}
+
+#[derive(Args)]
+pub struct SegmentArgs {
+    #[command(subcommand)]
+    command: SegmentCommand,
+}
+
+#[derive(Subcommand)]
+pub enum SegmentCommand {
+    /// Add a segment to a pending publish
+    ///
+    /// A segment is lines of original session that publication keeps,
+    /// under a description. Once any segment has lines, every line
+    /// outside every segment is dropped. A segment without lines drops
+    /// nothing.
+    Add(SegmentAddArgs),
+
+    /// Change a segment of a pending publish
+    ///
+    /// Lines change only when given.
+    Edit(SegmentEditArgs),
+
+    /// Remove a segment from a pending publish
+    Remove(SegmentRemoveArgs),
+
+    /// List segments of a pending publish
+    ///
+    /// One row per segment: its ID, the author, the lines, and the
+    /// description. The ID is what segment edit and segment remove
+    /// take.
+    List(SegmentListArgs),
+}
+
+#[derive(Args)]
+pub struct SegmentAddArgs {
+    /// Pending publish session to change (ID or prefix)
+    #[arg(value_name = "SESSION")]
+    session: String,
+
+    /// Description of segment
+    ///
+    /// Read from a file as @PATH.
+    #[arg(value_name = "TEXT")]
+    text: String,
+
+    /// Lines segment keeps
+    ///
+    /// Original session lines as "12-20,31": lines or inclusive ranges
+    /// separated by commas.
+    #[arg(short, long, value_name = "LINES")]
+    lines: Option<LineSelection>,
+
+    /// Skip confirmation prompt
+    #[arg(short, long)]
+    yes: bool,
+}
+
+#[derive(Args)]
+pub struct SegmentEditArgs {
+    /// Pending publish session to change (ID or prefix)
+    #[arg(value_name = "SESSION")]
+    session: String,
+
+    /// Segment to change
+    ///
+    /// An ID as status lists it.
+    #[arg(value_name = "ID")]
+    id: u64,
+
+    /// New description of segment
+    ///
+    /// Read from a file as @PATH.
+    #[arg(value_name = "TEXT")]
+    text: String,
+
+    /// Lines segment keeps
+    ///
+    /// Original session lines as "12-20,31": lines or inclusive ranges
+    /// separated by commas.
+    #[arg(short, long, value_name = "LINES")]
+    lines: Option<LineSelection>,
+
+    /// Skip confirmation prompt
+    #[arg(short, long)]
+    yes: bool,
+}
+
+#[derive(Args)]
+pub struct SegmentRemoveArgs {
+    /// Pending publish session to change (ID or prefix)
+    #[arg(value_name = "SESSION")]
+    session: String,
+
+    /// Segment to remove
+    ///
+    /// An ID as status lists it.
+    #[arg(value_name = "ID")]
+    id: u64,
+
+    /// Skip confirmation prompt
+    #[arg(short, long)]
+    yes: bool,
+}
+
+#[derive(Args)]
+pub struct StatusArgs {
+    /// Pending publish session to show (ID or prefix)
+    #[arg(value_name = "SESSION")]
+    session: String,
 }
 
 #[derive(Args)]
@@ -268,6 +456,11 @@ pub enum FilterCommand {
     /// already on the list is an error.
     Add(FilterAddArgs),
 
+    /// Change instructions of a filter on a pending publish
+    ///
+    /// A prompt is instructions, not rules, so nothing is rebuilt.
+    Edit(FilterEditArgs),
+
     /// Remove a filter from a pending publish
     ///
     /// Filter's redactions are removed with it. A literal allowed
@@ -316,6 +509,31 @@ pub struct FilterAddArgs {
 }
 
 #[derive(Args)]
+pub struct FilterEditArgs {
+    /// Pending publish session to change (ID or prefix)
+    #[arg(value_name = "SESSION")]
+    session: String,
+
+    /// Filter to change
+    ///
+    /// A filter name on the list.
+    #[arg(value_name = "FILTER")]
+    filter: String,
+
+    /// Instructions for filter
+    ///
+    /// Read from a file as @PATH. For "custom", prompt is its whole
+    /// instruction; for any other filter it adds to filter's own
+    /// instructions.
+    #[arg(short, long, value_name = "TEXT")]
+    prompt: String,
+
+    /// Skip confirmation prompt
+    #[arg(short, long)]
+    yes: bool,
+}
+
+#[derive(Args)]
 pub struct FilterRemoveArgs {
     /// Pending publish session to change (ID or prefix)
     #[arg(value_name = "SESSION")]
@@ -354,16 +572,42 @@ pub struct FilterListArgs {
     session: String,
 }
 
+#[derive(Args)]
+pub struct RedactListArgs {
+    /// Pending publish session to show (ID or prefix)
+    #[arg(value_name = "SESSION")]
+    session: String,
+}
+
+#[derive(Args)]
+pub struct SegmentListArgs {
+    /// Pending publish session to show (ID or prefix)
+    #[arg(value_name = "SESSION")]
+    session: String,
+}
+
 pub async fn run(args: PublishArgs) -> Result<(), CliError> {
     match args.command {
         PublishCommand::Init(args) => init(args),
         PublishCommand::List => list(),
-        PublishCommand::Redact(args) => redact(args),
+        PublishCommand::Redact(args) => match args.command {
+            RedactCommand::Add(args) => redact_add(args),
+            RedactCommand::Edit(args) => redact_edit(args),
+            RedactCommand::Remove(args) => redact_remove(args),
+            RedactCommand::Candidate(args) => candidate(args),
+            RedactCommand::List(args) => redact_list(args),
+        },
+        PublishCommand::Segment(args) => match args.command {
+            SegmentCommand::Add(args) => segment_add(args),
+            SegmentCommand::Edit(args) => segment_edit(args),
+            SegmentCommand::Remove(args) => segment_remove(args),
+            SegmentCommand::List(args) => segment_list(args),
+        },
         PublishCommand::Status(args) => status(args),
-        PublishCommand::Undo(args) => undo(args),
         PublishCommand::Refresh(args) => refresh(args),
         PublishCommand::Filter(args) => match args.command {
             FilterCommand::Add(args) => filter_add(args),
+            FilterCommand::Edit(args) => filter_edit(args),
             FilterCommand::Remove(args) => filter_remove(args),
             FilterCommand::Run(args) => filter_run(args),
             FilterCommand::List(args) => filter_list(args),
@@ -447,15 +691,24 @@ fn redaction_count(publisher: &Publisher<'_>, id: &str) -> Result<String, Publis
 /// id of the original session, a space, and the first 8 characters of
 /// the commit dimmed. Any other origin is shown as stored.
 fn origin_cell(origin: &str, highlighter: &IdHighlighter) -> String {
-    let Some((id, commit)) = origin
-        .strip_prefix("session:")
-        .and_then(|rest| rest.split_once('@'))
-    else {
+    let Ok((id, commit)) = parse_session_origin(origin) else {
         return origin.to_string();
     };
     let commit: String = commit.chars().take(8).collect();
     format!("{} {}", highlighter.short(id), console::style(commit).dim())
 }
+
+/// A session origin for the status table: the full original session
+/// id, a space, and the first 8 characters of the commit dimmed. Any
+/// other origin is shown as stored.
+fn origin_status_cell(origin: &str) -> String {
+    let Ok((id, commit)) = parse_session_origin(origin) else {
+        return origin.to_string();
+    };
+    let commit: String = commit.chars().take(8).collect();
+    format!("{} {}", id, console::style(commit).dim())
+}
+
 
 /// Stage a publish after confirmation. The original is resolved
 /// before the dialog opens, so a bad argument fails without a prompt,
@@ -632,68 +885,6 @@ fn report_filter_redactions(publisher: &Publisher<'_>, id: &str) -> Result<(), P
     Ok(())
 }
 
-/// Add redactions to a pending publish after confirmation. Every spec
-/// is parsed before the dialog opens, and every redaction is resolved
-/// against the session before any is recorded.
-fn redact(args: RedactArgs) -> Result<(), CliError> {
-    let fail = |e: String| CliError::message(format!("gage publish redact: {e}"));
-    if args.list_reasons {
-        list_reasons();
-        return Ok(());
-    }
-    let (Some(session), Some(reason)) = (args.session.as_deref(), args.reason.as_deref()) else {
-        return Err(fail("SESSION and --reason are required".into()));
-    };
-    // Every literal is checked before the store is opened
-    let inputs = args
-        .text
-        .iter()
-        .map(|literal| RedactionInput::parse_text(literal, reason, !args.no_mark))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| fail(e.to_string()))?;
-    let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
-    let publisher = Publisher::new(&store);
-    let pending = publisher
-        .store()
-        .get(session)
-        .map_err(|e| fail(e.to_string()))?;
-    let author = resolve_author(None);
-
-    dialog::run("Redact publish", || {
-        dialog::step_value("Session", short_uuid(&pending.id))?;
-        dialog::step_list("Redactions", inputs.iter().map(describe_input))?;
-        if !args.yes {
-            let confirmed = cli::confirm("Continue?").initial_value(true).interact()?;
-            if !confirmed {
-                return Err(DialogError::Canceled);
-            }
-        }
-        let applied = publisher
-            .redact(&pending.id, &inputs, &author)
-            .map_err(|e| DialogError::Failed(e.to_string()))?;
-        dialog::step_list(
-            "Applied",
-            applied.iter().map(|a| {
-                format!(
-                    "{} {:?} ({}{}, {})",
-                    a.id,
-                    a.literal,
-                    a.reason,
-                    no_mark(a.mark),
-                    count(a.instances, "instance")
-                )
-            }),
-        )?;
-        let instances: usize = applied.iter().map(|a| a.instances).sum();
-        Ok(format!(
-            "Applied {}, {}",
-            count(applied.len(), "redaction"),
-            count(instances, "instance")
-        )
-        .into())
-    })
-}
-
 /// Print the reason codes as a table.
 fn list_reasons() {
     let header: Vec<String> = ["Reason", "Description"]
@@ -753,42 +944,22 @@ fn status(args: StatusArgs) -> Result<(), CliError> {
         .instances(&pending.id)
         .map_err(|e| fail(e.to_string()))?;
 
-    println!("Session: {}", short_uuid(&pending.id));
-    println!("Origin:  {}", pending.attrs.origin);
     let filters: Vec<String> = definition.filters.iter().map(filter_cell).collect();
-    println!(
-        "Filters: {}",
-        if filters.is_empty() {
-            "none".to_string()
-        } else {
-            filters.join(", ")
-        }
-    );
+    let rows = [
+        ["Session".to_string(), pending.id.clone()],
+        ["Origin".to_string(), origin_status_cell(&pending.attrs.origin)],
+        [
+            "Filters".to_string(),
+            if filters.is_empty() {
+                "none".to_string()
+            } else {
+                filters.join(", ")
+            },
+        ],
+    ];
+    println!("{}", properties_table(rows));
     if !definition.segments.is_empty() {
-        let header: Vec<String> = ["Id", "Author", "Lines", "Description"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        let rows = definition.segments.iter().map(|s| {
-            let lines: Vec<String> = s
-                .lines
-                .iter()
-                .map(|(start, end)| {
-                    if start == end {
-                        start.to_string()
-                    } else {
-                        format!("{start}-{end}")
-                    }
-                })
-                .collect();
-            vec![
-                s.id.to_string(),
-                s.author.clone(),
-                lines.join(","),
-                s.description.clone(),
-            ]
-        });
-        println!("{}", records_table(header, rows));
+        println!("{}", segments_table(&definition));
     }
     if !definition.allow.is_empty() {
         let allowed: Vec<String> = definition
@@ -802,21 +973,97 @@ fn status(args: StatusArgs) -> Result<(), CliError> {
         println!("No redactions");
         return Ok(());
     }
-    let header: Vec<String> = ["Id", "Author", "Reason", "Text", "Instances"]
+    println!("{}", redactions_table(&definition, &counts));
+    Ok(())
+}
+
+/// The segments of a pending publish as a table: id, author, lines,
+/// and description. Assumes at least one segment.
+fn segments_table(definition: &PublishDefinition) -> String {
+    let header: Vec<String> = ["Id", "Author", "Lines", "Description"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let rows = definition.segments.iter().map(|s| {
+        vec![
+            s.id.to_string(),
+            s.author.clone(),
+            lines_cell(&s.lines),
+            s.description.clone(),
+        ]
+    });
+    records_table(header, rows)
+}
+
+/// The text redactions of a pending publish as a table: id, text,
+/// reason, author, and instance count. Assumes at least one redaction.
+fn redactions_table(definition: &PublishDefinition, counts: &BTreeMap<u64, usize>) -> String {
+    let header: Vec<String> = ["Id", "Text", "Reason", "Author", "Instances"]
         .iter()
         .map(|s| s.to_string())
         .collect();
     let rows = definition.text.iter().map(|t| {
         vec![
             t.id.to_string(),
-            t.author.clone(),
-            t.reason.clone(),
             format!("{}{}", t.literal, no_mark(t.mark)),
+            t.reason.clone(),
+            t.author.clone(),
             counts.get(&t.id).copied().unwrap_or(0).to_string(),
         ]
     });
-    println!("{}", records_table(header, rows));
+    records_table(header, rows)
+}
+
+/// List the segments of a pending publish.
+fn segment_list(args: SegmentListArgs) -> Result<(), CliError> {
+    let fail = |e: String| CliError::message(format!("gage publish segment list: {e}"));
+    let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
+    let publisher = Publisher::new(&store);
+    let pending = publisher
+        .store()
+        .get(&args.session)
+        .map_err(|e| fail(e.to_string()))?;
+    let definition = publisher
+        .definition(&pending.id)
+        .map_err(|e| fail(e.to_string()))?;
+    if definition.segments.is_empty() {
+        println!("No segments");
+        return Ok(());
+    }
+    println!("{}", segments_table(&definition));
     Ok(())
+}
+
+/// List the text redactions of a pending publish.
+fn redact_list(args: RedactListArgs) -> Result<(), CliError> {
+    let fail = |e: String| CliError::message(format!("gage publish redact list: {e}"));
+    let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
+    let publisher = Publisher::new(&store);
+    let pending = publisher
+        .store()
+        .get(&args.session)
+        .map_err(|e| fail(e.to_string()))?;
+    let definition = publisher
+        .definition(&pending.id)
+        .map_err(|e| fail(e.to_string()))?;
+    let counts = publisher
+        .instances(&pending.id)
+        .map_err(|e| fail(e.to_string()))?;
+    if definition.text.is_empty() {
+        println!("No redactions");
+        return Ok(());
+    }
+    println!("{}", redactions_table(&definition, &counts));
+    Ok(())
+}
+
+/// A property table: labels down the left column, highlighted as a
+/// heading.
+fn properties_table(rows: impl IntoIterator<Item = [String; 2]>) -> String {
+    Table::from_iter(rows)
+        .with(Style::rounded().horizontals([]))
+        .modify(Columns::first(), style::tty(Color::FG_BRIGHT_YELLOW))
+        .to_string()
 }
 
 /// A status table: the header highlighted, the id column plain, the
@@ -831,10 +1078,135 @@ fn records_table(header: Vec<String>, rows: impl Iterator<Item = Vec<String>>) -
         .to_string()
 }
 
-/// Remove redactions after confirmation. Every id is checked against
-/// the definition before the dialog opens.
-fn undo(args: UndoArgs) -> Result<(), CliError> {
-    let fail = |e: String| CliError::message(format!("gage publish undo: {e}"));
+/// Add a text redaction after confirmation. The literal is checked
+/// before the dialog opens.
+fn redact_add(args: RedactAddArgs) -> Result<(), CliError> {
+    let command = "gage publish redact add";
+    let fail = |e: String| CliError::message(format!("{command}: {e}"));
+    if args.list_reasons {
+        list_reasons();
+        return Ok(());
+    }
+    let (Some(session), Some(text)) = (args.session.as_deref(), args.text.as_deref()) else {
+        return Err(fail("SESSION and TEXT are required".into()));
+    };
+    let text = text_value(command, "TEXT", text).map_err(|e| fail(e.to_string()))?;
+    let reason = args.reason.as_deref().unwrap_or("custom");
+    let input = RedactionInput::parse_text(text.trim_end(), reason, !args.no_mark)
+        .map_err(|e| fail(e.to_string()))?;
+    let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
+    let publisher = Publisher::new(&store);
+    let pending = publisher
+        .store()
+        .get(session)
+        .map_err(|e| fail(e.to_string()))?;
+    let author = resolve_author(None);
+
+    dialog::run("Add redaction", || {
+        dialog::step_value("Session", short_uuid(&pending.id))?;
+        dialog::step_value("Redaction", describe_input(&input))?;
+        if !args.yes {
+            let confirmed = cli::confirm("Continue?").initial_value(true).interact()?;
+            if !confirmed {
+                return Err(DialogError::Canceled);
+            }
+        }
+        let applied = publisher
+            .redact(&pending.id, std::slice::from_ref(&input), &author)
+            .map_err(|e| DialogError::Failed(e.to_string()))?;
+        let applied = applied
+            .into_iter()
+            .next()
+            .expect("one input gives one applied redaction");
+        Ok(format!(
+            "Added redaction {} ({})",
+            applied.id,
+            count(applied.instances, "instance")
+        )
+        .into())
+    })
+}
+
+/// Change a text redaction after confirmation. The id is resolved
+/// before the dialog opens, and a call that changes nothing is an
+/// error.
+fn redact_edit(args: RedactEditArgs) -> Result<(), CliError> {
+    let command = "gage publish redact edit";
+    let fail = |e: String| CliError::message(format!("{command}: {e}"));
+    let text = args
+        .text
+        .as_deref()
+        .map(|t| text_value(command, "TEXT", t))
+        .transpose()
+        .map_err(|e| fail(e.to_string()))?
+        .map(|t| t.trim_end().to_string());
+    let mark = match (args.mark, args.no_mark) {
+        (true, _) => Some(true),
+        (_, true) => Some(false),
+        _ => None,
+    };
+    if text.is_none() && args.reason.is_none() && mark.is_none() {
+        return Err(fail(
+            "nothing to change; give TEXT, --reason, --mark, or --no-mark".into(),
+        ));
+    }
+    let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
+    let publisher = Publisher::new(&store);
+    let pending = publisher
+        .store()
+        .get(&args.session)
+        .map_err(|e| fail(e.to_string()))?;
+    let definition = publisher
+        .definition(&pending.id)
+        .map_err(|e| fail(e.to_string()))?;
+    let target = definition
+        .text
+        .iter()
+        .find(|t| t.id == args.id)
+        .ok_or_else(|| fail(format!("no redaction with id {}", args.id)))?;
+    let mut changes = Vec::new();
+    if let Some(text) = &text {
+        changes.push(format!("text {text:?}"));
+    }
+    if let Some(reason) = &args.reason {
+        changes.push(format!("reason {reason}"));
+    }
+    if let Some(mark) = mark {
+        changes.push(if mark { "mark" } else { "no mark" }.to_string());
+    }
+
+    dialog::run("Edit redaction", || {
+        dialog::step_value("Session", short_uuid(&pending.id))?;
+        dialog::step_value("Redaction", describe_entry(target))?;
+        dialog::step_list("Changes", changes.iter().cloned())?;
+        if !args.yes {
+            let confirmed = cli::confirm("Continue?").initial_value(true).interact()?;
+            if !confirmed {
+                return Err(DialogError::Canceled);
+            }
+        }
+        let applied = publisher
+            .redact_edit(
+                &pending.id,
+                args.id,
+                text.as_deref(),
+                args.reason.as_deref(),
+                mark,
+            )
+            .map_err(|e| DialogError::Failed(e.to_string()))?;
+        Ok(format!(
+            "Changed redaction {} ({})",
+            applied.id,
+            count(applied.instances, "instance")
+        )
+        .into())
+    })
+}
+
+/// Remove text redactions after confirmation. Every id is checked
+/// against the definition before the dialog opens.
+fn redact_remove(args: RedactRemoveArgs) -> Result<(), CliError> {
+    let fail = |e: String| CliError::message(format!("gage publish redact remove: {e}"));
     let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
     let publisher = Publisher::new(&store);
     let pending = publisher
@@ -855,21 +1227,9 @@ fn undo(args: UndoArgs) -> Result<(), CliError> {
     }
     let author = resolve_author(None);
 
-    dialog::run("Undo redactions", || {
+    dialog::run("Remove redactions", || {
         dialog::step_value("Session", short_uuid(&pending.id))?;
-        dialog::step_list(
-            "Redactions",
-            targets.iter().map(|t| {
-                format!(
-                    "{} {:?} ({}{}, {})",
-                    t.id,
-                    t.literal,
-                    t.reason,
-                    no_mark(t.mark),
-                    t.author
-                )
-            }),
-        )?;
+        dialog::step_list("Redactions", targets.iter().map(describe_entry))?;
         if targets.iter().any(|t| t.author.starts_with("filter:")) {
             cli::log::remark(
                 "A filter's literal is allowed once removed: the filter does not record it again",
@@ -882,10 +1242,237 @@ fn undo(args: UndoArgs) -> Result<(), CliError> {
             }
         }
         let removed = publisher
-            .undo(&pending.id, &args.ids, &author)
+            .redact_remove(&pending.id, &args.ids, &author)
             .map_err(|e| DialogError::Failed(e.to_string()))?;
         Ok(format!("Removed {}", count(removed.len(), "redaction")).into())
     })
+}
+
+/// A text redaction as a dialog lists it: its id, literal, reason,
+/// mark, and author.
+fn describe_entry(t: &TextEntry) -> String {
+    format!(
+        "{} {:?} ({}{}, {})",
+        t.id,
+        t.literal,
+        t.reason,
+        no_mark(t.mark),
+        t.author
+    )
+}
+
+/// List the text values open to redaction, one per line where the
+/// value fits, else as a header with the text indented below it.
+fn candidate(args: CandidateArgs) -> Result<(), CliError> {
+    let fail = |e: String| CliError::message(format!("gage publish redact candidate: {e}"));
+    let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
+    let publisher = Publisher::new(&store);
+    let pending = publisher
+        .store()
+        .get(&args.session)
+        .map_err(|e| fail(e.to_string()))?;
+    let candidates = publisher
+        .candidates(&pending.id)
+        .map_err(|e| fail(e.to_string()))?;
+    let width = console::Term::stdout().size().1 as usize;
+    for c in &candidates {
+        let head = format!("{} {}", c.line, c.pointer);
+        let text = if args.applied {
+            applied_text(c)
+        } else {
+            c.text.clone()
+        };
+        let one_line =
+            !c.text.contains('\n') && head.chars().count() + 1 + c.text.chars().count() <= width;
+        let head = console::style(&head).dim();
+        if one_line {
+            println!("{head} {text}");
+        } else {
+            println!("{head}");
+            for line in text.lines() {
+                println!("  {line}");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A candidate's text with each redacted span struck through in
+/// yellow and, where a marker replaces it, the marker in yellow after
+/// it.
+fn applied_text(c: &Candidate) -> String {
+    let slice = |range: std::ops::Range<usize>| {
+        c.text
+            .get(range)
+            .expect("a candidate's spans lie within its text on character boundaries")
+    };
+    let mut out = String::with_capacity(c.text.len());
+    let mut cursor = 0;
+    for &(start, end, mark) in &c.spans {
+        out.push_str(slice(cursor..start));
+        out.push_str(
+            &console::style(slice(start..end + 1))
+                .yellow()
+                .strikethrough()
+                .to_string(),
+        );
+        if mark {
+            out.push_str(&console::style(MARKER).yellow().to_string());
+        }
+        cursor = end + 1;
+    }
+    out.push_str(slice(cursor..c.text.len()));
+    out
+}
+
+/// Add a segment after confirmation.
+fn segment_add(args: SegmentAddArgs) -> Result<(), CliError> {
+    let command = "gage publish segment add";
+    let fail = |e: String| CliError::message(format!("{command}: {e}"));
+    let text = text_value(command, "TEXT", &args.text).map_err(|e| fail(e.to_string()))?;
+    let text = text.trim_end().to_string();
+    let lines = args
+        .lines
+        .as_ref()
+        .map(ranges)
+        .transpose()?
+        .unwrap_or_default();
+    let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
+    let publisher = Publisher::new(&store);
+    let pending = publisher
+        .store()
+        .get(&args.session)
+        .map_err(|e| fail(e.to_string()))?;
+    let author = resolve_author(None);
+
+    dialog::run("Add segment", || {
+        dialog::step_value("Session", short_uuid(&pending.id))?;
+        dialog::step_value("Description", value_cell(&text))?;
+        dialog::step_value("Lines", lines_cell(&lines))?;
+        if !args.yes {
+            let confirmed = cli::confirm("Continue?").initial_value(true).interact()?;
+            if !confirmed {
+                return Err(DialogError::Canceled);
+            }
+        }
+        let id = publisher
+            .segment_add(&pending.id, &text, &lines, &author)
+            .map_err(|e| DialogError::Failed(e.to_string()))?;
+        Ok(format!("Added segment {id}").into())
+    })
+}
+
+/// Change a segment after confirmation. The id is resolved before the
+/// dialog opens.
+fn segment_edit(args: SegmentEditArgs) -> Result<(), CliError> {
+    let command = "gage publish segment edit";
+    let fail = |e: String| CliError::message(format!("{command}: {e}"));
+    let text = text_value(command, "TEXT", &args.text).map_err(|e| fail(e.to_string()))?;
+    let text = text.trim_end().to_string();
+    let lines = args.lines.as_ref().map(ranges).transpose()?;
+    let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
+    let publisher = Publisher::new(&store);
+    let pending = publisher
+        .store()
+        .get(&args.session)
+        .map_err(|e| fail(e.to_string()))?;
+    let definition = publisher
+        .definition(&pending.id)
+        .map_err(|e| fail(e.to_string()))?;
+    let target = definition
+        .segments
+        .iter()
+        .find(|s| s.id == args.id)
+        .ok_or_else(|| fail(format!("no segment with id {}", args.id)))?;
+
+    dialog::run("Edit segment", || {
+        dialog::step_value("Session", short_uuid(&pending.id))?;
+        dialog::step_value(
+            "Segment",
+            format!("{} {}", target.id, value_cell(&target.description)),
+        )?;
+        dialog::step_value("Description", value_cell(&text))?;
+        if let Some(lines) = &lines {
+            dialog::step_value("Lines", lines_cell(lines))?;
+        }
+        if !args.yes {
+            let confirmed = cli::confirm("Continue?").initial_value(true).interact()?;
+            if !confirmed {
+                return Err(DialogError::Canceled);
+            }
+        }
+        let segment = publisher
+            .segment_edit(&pending.id, args.id, Some(&text), lines.as_deref())
+            .map_err(|e| DialogError::Failed(e.to_string()))?;
+        Ok(format!("Changed segment {}", segment.id).into())
+    })
+}
+
+/// Remove a segment after confirmation. The id is resolved before the
+/// dialog opens.
+fn segment_remove(args: SegmentRemoveArgs) -> Result<(), CliError> {
+    let fail = |e: String| CliError::message(format!("gage publish segment remove: {e}"));
+    let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
+    let publisher = Publisher::new(&store);
+    let pending = publisher
+        .store()
+        .get(&args.session)
+        .map_err(|e| fail(e.to_string()))?;
+    let definition = publisher
+        .definition(&pending.id)
+        .map_err(|e| fail(e.to_string()))?;
+    let target = definition
+        .segments
+        .iter()
+        .find(|s| s.id == args.id)
+        .ok_or_else(|| fail(format!("no segment with id {}", args.id)))?;
+
+    dialog::run("Remove segment", || {
+        dialog::step_value("Session", short_uuid(&pending.id))?;
+        dialog::step_value(
+            "Segment",
+            format!("{} {}", target.id, value_cell(&target.description)),
+        )?;
+        dialog::step_value("Lines", lines_cell(&target.lines))?;
+        if !args.yes {
+            let confirmed = cli::confirm("Continue?").initial_value(true).interact()?;
+            if !confirmed {
+                return Err(DialogError::Canceled);
+            }
+        }
+        let segment = publisher
+            .segment_remove(&pending.id, args.id)
+            .map_err(|e| DialogError::Failed(e.to_string()))?;
+        Ok(format!("Removed segment {}", segment.id).into())
+    })
+}
+
+/// The inclusive line ranges of `selection`.
+fn ranges(selection: &LineSelection) -> Result<Vec<(u32, u32)>, CliError> {
+    let line = |n: u64| u32::try_from(n).map_err(|e| CliError::message(format!("line {n}: {e}")));
+    selection
+        .ranges()
+        .iter()
+        .map(|&(start, end)| Ok((line(start)?, line(end)?)))
+        .collect()
+}
+
+/// Line ranges as a dialog shows them, `12-20,31`, or `none`.
+fn lines_cell(lines: &[(u32, u32)]) -> String {
+    if lines.is_empty() {
+        return "none".to_string();
+    }
+    lines
+        .iter()
+        .map(|(start, end)| {
+            if start == end {
+                start.to_string()
+            } else {
+                format!("{start}-{end}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// Rebuild a pending publish from its definition after confirmation.
@@ -966,6 +1553,44 @@ fn filter_add(args: FilterAddArgs) -> Result<(), CliError> {
         report_filter_redactions(&publisher, &pending.id)
             .map_err(|e| DialogError::Failed(e.to_string()))?;
         Ok(format!("Added filter {}", value_cell(&filter.to_string())).into())
+    })
+}
+
+/// Change a filter's prompt after confirmation. The filter is resolved
+/// before the dialog opens.
+fn filter_edit(args: FilterEditArgs) -> Result<(), CliError> {
+    let command = "gage publish filter edit";
+    let fail = |e: String| CliError::message(format!("{command}: {e}"));
+    let prompt = text_value(command, "--prompt", &args.prompt).map_err(|e| fail(e.to_string()))?;
+    let prompt = prompt.trim_end().to_string();
+    let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
+    let publisher = Publisher::new(&store);
+    let pending = publisher
+        .store()
+        .get(&args.session)
+        .map_err(|e| fail(e.to_string()))?;
+    let definition = publisher
+        .definition(&pending.id)
+        .map_err(|e| fail(e.to_string()))?;
+    let (_, entry) = definition
+        .find_filter(&args.filter)
+        .map_err(|e| fail(e.to_string()))?;
+    let target = filter_cell(entry);
+
+    dialog::run("Edit publish filter", || {
+        dialog::step_value("Session", short_uuid(&pending.id))?;
+        dialog::step_value("Filter", &target)?;
+        dialog::step_value("Prompt", value_cell(&prompt))?;
+        if !args.yes {
+            let confirmed = cli::confirm("Continue?").initial_value(true).interact()?;
+            if !confirmed {
+                return Err(DialogError::Canceled);
+            }
+        }
+        publisher
+            .filter_edit(&pending.id, &args.filter, Some(prompt.clone()))
+            .map_err(|e| DialogError::Failed(e.to_string()))?;
+        Ok(format!("Changed filter {target}").into())
     })
 }
 
@@ -1346,11 +1971,50 @@ mod tests {
         // required otherwise
         Cli::try_parse_from(["gage", "publish", "init", "--list-filters"]).unwrap();
         Cli::try_parse_from(["gage", "publish", "filter", "add", "--list-filters"]).unwrap();
-        Cli::try_parse_from(["gage", "publish", "redact", "--list-reasons"]).unwrap();
         assert!(Cli::try_parse_from(["gage", "publish", "init"]).is_err());
         assert!(Cli::try_parse_from(["gage", "publish", "filter", "add", "abc"]).is_err());
         assert!(Cli::try_parse_from(["gage", "publish", "init", "abc", "--list-filters"]).is_err());
         assert!(Cli::try_parse_from(["gage", "session", "publish", "list"]).is_err());
+        for argv in [
+            vec!["gage", "publish", "redact", "add", "abc", "hunter2"],
+            vec!["gage", "publish", "redact", "add", "--list-reasons"],
+            vec![
+                "gage", "publish", "redact", "edit", "abc", "3", "--reason", "pii",
+            ],
+            vec!["gage", "publish", "redact", "remove", "abc", "3", "4"],
+            vec!["gage", "publish", "redact", "candidate", "abc", "--applied"],
+            vec![
+                "gage", "publish", "segment", "add", "abc", "Reply", "--lines", "2-3,9",
+            ],
+            vec!["gage", "publish", "segment", "edit", "abc", "1", "Reply"],
+            vec!["gage", "publish", "segment", "remove", "abc", "1"],
+            vec![
+                "gage", "publish", "filter", "edit", "abc", "pii", "--prompt", "x",
+            ],
+        ] {
+            Cli::try_parse_from(&argv).unwrap_or_else(|e| panic!("{argv:?}: {e}"));
+        }
+        assert!(Cli::try_parse_from(["gage", "publish", "undo", "abc", "1"]).is_err());
+        assert!(Cli::try_parse_from(["gage", "publish", "redact", "add", "abc"]).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "gage",
+                "publish",
+                "redact",
+                "edit",
+                "abc",
+                "3",
+                "--mark",
+                "--no-mark"
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "gage", "publish", "segment", "add", "abc", "x", "--lines", "9-2"
+            ])
+            .is_err()
+        );
         assert!(Cli::try_parse_from(["gage", "publish", "status", "--stored", "abc"]).is_err());
     }
 
@@ -1451,6 +2115,32 @@ mod tests {
         expected.sort_unstable();
         assert_eq!(names, expected);
         assert!(rows.iter().all(|r| r.len() == 2 && !r[1].is_empty()));
+    }
+
+    /// A candidate's text keeps everything outside its spans, and each
+    /// marked span is followed by the marker. Styles are off outside a
+    /// terminal, so the plain text is checked.
+    #[test]
+    fn applied_text_follows_each_marked_span_with_the_marker() {
+        console::set_colors_enabled(false);
+        let c = Candidate {
+            line: 1,
+            pointer: "/message/content".into(),
+            text: "key AAAA then BBBB end".into(),
+            spans: vec![(4, 7, true), (14, 17, false)],
+        };
+        assert_eq!(applied_text(&c), "key AAAA[REDACTED] then BBBB end");
+        let none = Candidate {
+            spans: Vec::new(),
+            ..c
+        };
+        assert_eq!(applied_text(&none), "key AAAA then BBBB end");
+    }
+
+    #[test]
+    fn lines_cells_join_ranges() {
+        assert_eq!(lines_cell(&[]), "none");
+        assert_eq!(lines_cell(&[(2, 3), (9, 9)]), "2-3,9");
     }
 
     #[test]

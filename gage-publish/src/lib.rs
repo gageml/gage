@@ -31,7 +31,7 @@ pub use definition::{
     Allow, FilterEntry, FilterSpec, NAMED_FILTERS, PublishDefinition, REASONS, Reason,
     RedactionInput, Segment, TextEntry, requires_prompt,
 };
-pub use derive::{Applied, Built, Instance, InstanceKind};
+pub use derive::{Applied, Built, Candidate, Instance, InstanceKind, Span};
 pub use filter::{Filter, Pattern};
 
 /// The marker a redacted span or value is replaced with.
@@ -204,6 +204,92 @@ impl<'a> Publisher<'a> {
         Ok(removed)
     }
 
+    /// Set the prompt of the filter `name` on the pending publish `id`.
+    /// A prompt is instructions, not rules, so nothing is rebuilt.
+    /// Returns the filter as it now stands.
+    pub fn filter_edit(
+        &self,
+        id: &str,
+        name: &str,
+        prompt: Option<String>,
+    ) -> Result<FilterEntry, PublishError> {
+        let mut definition = self.definition(id)?;
+        let (index, _) = definition.find_filter(name)?;
+        let entry = definition
+            .filters
+            .get_mut(index)
+            .expect("find_filter returned the index");
+        entry.prompt = prompt;
+        let edited = entry.clone();
+        definition.validate()?;
+        self.write_definition(id, &definition)?;
+        Ok(edited)
+    }
+
+    /// Add a segment to the pending publish `id` as `author` and
+    /// rebuild. Returns its id.
+    pub fn segment_add(
+        &self,
+        id: &str,
+        description: &str,
+        lines: &[(u32, u32)],
+        author: &str,
+    ) -> Result<u64, PublishError> {
+        let mut definition = self.definition(id)?;
+        let segment = definition.push_segment(description, lines, author);
+        definition.validate()?;
+        let session = self.open_original(id)?;
+        self.build(id, &definition, &session)?;
+        self.write_definition(id, &definition)?;
+        Ok(segment)
+    }
+
+    /// Change the description or the lines of segment `segment` of the
+    /// pending publish `id` and rebuild. Returns the segment as it now
+    /// stands.
+    pub fn segment_edit(
+        &self,
+        id: &str,
+        segment: u64,
+        description: Option<&str>,
+        lines: Option<&[(u32, u32)]>,
+    ) -> Result<Segment, PublishError> {
+        let mut definition = self.definition(id)?;
+        let target = definition
+            .segments
+            .iter_mut()
+            .find(|s| s.id == segment)
+            .ok_or_else(|| PublishError::Input(format!("no segment with id {segment}")))?;
+        if let Some(description) = description {
+            target.description = description.to_string();
+        }
+        if let Some(lines) = lines {
+            target.lines = lines.to_vec();
+        }
+        let edited = target.clone();
+        definition.validate()?;
+        let session = self.open_original(id)?;
+        self.build(id, &definition, &session)?;
+        self.write_definition(id, &definition)?;
+        Ok(edited)
+    }
+
+    /// Remove segment `segment` from the pending publish `id` and
+    /// rebuild. Returns the removed segment.
+    pub fn segment_remove(&self, id: &str, segment: u64) -> Result<Segment, PublishError> {
+        let mut definition = self.definition(id)?;
+        let index = definition
+            .segments
+            .iter()
+            .position(|s| s.id == segment)
+            .ok_or_else(|| PublishError::Input(format!("no segment with id {segment}")))?;
+        let removed = definition.segments.remove(index);
+        let session = self.open_original(id)?;
+        self.build(id, &definition, &session)?;
+        self.write_definition(id, &definition)?;
+        Ok(removed)
+    }
+
     /// Re-run the named filter `name`, or every named filter on the
     /// list when `name` is `None`, and rebuild. The filter's earlier
     /// text redactions go, and an allowed literal is not recorded.
@@ -270,12 +356,60 @@ impl<'a> Publisher<'a> {
             .collect())
     }
 
+    /// Change the literal, the reason, or the mark of the text
+    /// redaction `text` of the pending publish `id` and rebuild. A
+    /// literal that matches nothing is an error, and nothing changes.
+    pub fn redact_edit(
+        &self,
+        id: &str,
+        text: u64,
+        literal: Option<&str>,
+        reason: Option<&str>,
+        mark: Option<bool>,
+    ) -> Result<Applied, PublishError> {
+        let mut definition = self.definition(id)?;
+        let target = definition
+            .text
+            .iter_mut()
+            .find(|t| t.id == text)
+            .ok_or_else(|| PublishError::Input(format!("no redaction with id {text}")))?;
+        if let Some(literal) = literal {
+            target.literal = literal.to_string();
+        }
+        if let Some(reason) = reason {
+            target.reason = reason.to_string();
+        }
+        if let Some(mark) = mark {
+            target.mark = mark;
+        }
+        let edited = target.clone();
+        definition.validate()?;
+        let session = self.open_original(id)?;
+        let counts = derive::counts(&definition, &session)?;
+        let instances = counts.get(&text).copied().unwrap_or(0);
+        if instances == 0 {
+            return Err(PublishError::NoMatch(format!(
+                "text {:?} matches nothing in the session",
+                edited.literal
+            )));
+        }
+        self.build(id, &definition, &session)?;
+        self.write_definition(id, &definition)?;
+        Ok(Applied {
+            id: edited.id,
+            literal: edited.literal,
+            reason: edited.reason,
+            mark: edited.mark,
+            instances,
+        })
+    }
+
     /// Remove the text redactions `ids` from the pending publish `id`
     /// as `author` and rebuild. Every id must exist, or nothing
     /// changes. A filter's literal goes on the allow list so a re-run
     /// of the filter does not record it again. Returns the removed
     /// redactions.
-    pub fn undo(
+    pub fn redact_remove(
         &self,
         id: &str,
         ids: &[u64],
@@ -320,6 +454,14 @@ impl<'a> Publisher<'a> {
         let session = self.open_original(id)?;
         let built = self.build(id, &definition, &session)?;
         Ok(built.counts.values().sum())
+    }
+
+    /// Every text value the pending publish `id` discloses, with the
+    /// spans redacted in each. Reads only.
+    pub fn candidates(&self, id: &str) -> Result<Vec<Candidate>, PublishError> {
+        let definition = self.definition(id)?;
+        let session = self.open_original(id)?;
+        derive::candidates(&definition, &session)
     }
 
     /// The number of spans each text redaction of the pending publish

@@ -40,6 +40,17 @@ pub fn parse(url: &str) -> Result<GageUrl<'_>, StoreError> {
     })
 }
 
+/// Split a session origin, `session:<id>@<commit>`, into the original
+/// session id and the commit. This is the inverse of the origin a
+/// publish records. A missing `session:` prefix or `@` separator is
+/// [`StoreError::BadUrl`].
+pub fn parse_session_origin(origin: &str) -> Result<(&str, &str), StoreError> {
+    origin
+        .strip_prefix("session:")
+        .and_then(|rest| rest.split_once('@'))
+        .ok_or_else(|| StoreError::BadUrl(origin.to_string()))
+}
+
 /// Check a line selection fragment: parts joined by `,`, each a
 /// 1-based line or an inclusive `start-end` range with `start <= end`.
 pub fn validate_line_selection(fragment: &str) -> Result<(), StoreError> {

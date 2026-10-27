@@ -210,8 +210,9 @@ impl FilterEntry {
 }
 
 /// A segment: lines of the original the publication keeps, under the
-/// description its author gave. When a definition has any segment,
-/// every line outside every segment is dropped.
+/// description its author gave. When any segment has lines, every
+/// line outside every segment is dropped. A segment without lines is
+/// a description awaiting its cut and drops nothing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(from = "SegmentRepr", into = "SegmentRepr")]
 pub struct Segment {
@@ -408,9 +409,6 @@ impl PublishDefinition {
                     "id is not below next_segment_id {}",
                     self.next_segment_id
                 )));
-            }
-            if s.lines.is_empty() {
-                return Err(at("no lines".into()));
             }
             if s.lines
                 .iter()
@@ -661,9 +659,10 @@ mod tests {
             r#"{"filters": [], "segments": [[1, "d", [[5, 2]], "u"]], "next_segment_id": 2}"#,
             "segment 1: lines are 1-based",
         );
-        check(
+        let pending: PublishDefinition = serde_json::from_str(
             r#"{"filters": [], "segments": [[1, "d", [], "u"]], "next_segment_id": 2}"#,
-            "segment 1: no lines",
-        );
+        )
+        .unwrap();
+        pending.validate().unwrap();
     }
 }
