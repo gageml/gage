@@ -126,6 +126,13 @@ pub struct InitArgs {
     )]
     filter: Vec<String>,
 
+    /// Segment to add (repeatable)
+    ///
+    /// A segment starts without lines and drops nothing until segment
+    /// edit gives it lines.
+    #[arg(short = 'g', long, value_name = "TEXT")]
+    segment: Vec<String>,
+
     /// Skip confirmation prompt
     #[arg(short, long)]
     yes: bool,
@@ -733,7 +740,17 @@ fn init(args: InitArgs) -> Result<(), CliError> {
         .iter()
         .map(|name| parse_filter("gage publish init", "--filter", name, None))
         .collect::<Result<Vec<_>, _>>()?;
+    let segments = args
+        .segment
+        .iter()
+        .map(|text| {
+            text_value("gage publish init", "--segment", text)
+                .map(|t| t.trim_end().to_string())
+                .map_err(|e| fail(e.to_string()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let original = resolve_original(&store, source.as_deref(), stored, session)?;
+    let author = resolve_author(None);
 
     dialog::run("Publish session", || {
         let (line, kind) = match &original {
@@ -761,6 +778,9 @@ fn init(args: InitArgs) -> Result<(), CliError> {
         };
         preview_sessions(&[line], kind, None)?;
         filters_step(&filters)?;
+        if !segments.is_empty() {
+            dialog::step_list("Segments", segments.iter().map(|s| value_cell(s)))?;
+        }
         if !args.yes {
             let confirmed = cli::confirm("Continue?").initial_value(true).interact()?;
             if !confirmed {
@@ -770,7 +790,7 @@ fn init(args: InitArgs) -> Result<(), CliError> {
         let record = original.into_stored(&store).map_err(DialogError::Failed)?;
         let publisher = Publisher::new(&store);
         let outcome = publisher
-            .init(&record, &filters)
+            .init(&record, &filters, &segments, &author)
             .map_err(|e| DialogError::Failed(e.to_string()))?;
         report_filter_redactions(&publisher, &outcome.id)
             .map_err(|e| DialogError::Failed(e.to_string()))?;
@@ -1977,6 +1997,24 @@ mod tests {
     fn publish_is_a_top_level_command() {
         Cli::try_parse_from(["gage", "publish", "list"]).unwrap();
         Cli::try_parse_from(["gage", "publish", "init", "--stored", "abc"]).unwrap();
+        let cli = Cli::try_parse_from([
+            "gage",
+            "publish",
+            "init",
+            "abc",
+            "-g",
+            "The question",
+            "--segment",
+            "The reply",
+        ])
+        .unwrap();
+        let Command::Publish(PublishArgs {
+            command: PublishCommand::Init(args),
+        }) = cli.command
+        else {
+            panic!("expected publish init");
+        };
+        assert_eq!(args.segment, ["The question", "The reply"]);
         Cli::try_parse_from(["gage", "publish", "status", "abc"]).unwrap();
         // A list flag stands alone: the positionals it bypasses are
         // required otherwise

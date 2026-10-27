@@ -113,7 +113,9 @@ fn init_runs_the_named_filters_and_records_their_instances() {
         "pii".parse::<FilterSpec>().unwrap(),
         "secret".parse::<FilterSpec>().unwrap(),
     ];
-    let init = publisher.init(&f.original, &filters).unwrap();
+    let init = publisher
+        .init(&f.original, &filters, &[], "session:test")
+        .unwrap();
 
     let definition = publisher.definition(&init.id).unwrap();
     let by_author = |author: &str| {
@@ -182,7 +184,9 @@ fn init_runs_the_named_filters_and_records_their_instances() {
 fn redact_applies_text_everywhere_and_rejects_a_miss() {
     let f = fixture();
     let publisher = Publisher::with_root(&f.store, &f.publish_root);
-    let init = publisher.init(&f.original, &[]).unwrap();
+    let init = publisher
+        .init(&f.original, &[], &[], "session:test")
+        .unwrap();
     assert_eq!(staged_lines(&f.publish_root, &init.id).len(), 5);
 
     let applied = publisher
@@ -255,13 +259,17 @@ fn custom_requires_a_prompt_and_any_filter_takes_one() {
         name: "custom".into(),
         prompt: None,
     };
-    let err = publisher.init(&f.original, &[bare]).unwrap_err();
+    let err = publisher
+        .init(&f.original, &[bare], &[], "session:test")
+        .unwrap_err();
     assert!(err.to_string().contains("requires a prompt"), "{err}");
     assert!(publisher.store().list().unwrap().is_empty());
 
     let custom = FilterSpec::new("custom", Some("Remove every duck.".into())).unwrap();
     let pii = FilterSpec::new("pii", Some("Watch for street addresses.".into())).unwrap();
-    let init = publisher.init(&f.original, &[custom, pii]).unwrap();
+    let init = publisher
+        .init(&f.original, &[custom, pii], &[], "session:test")
+        .unwrap();
     let definition = publisher.definition(&init.id).unwrap();
     assert_eq!(definition.filters[0].name, "custom");
     assert_eq!(
@@ -295,6 +303,8 @@ fn non_narrative_filter_leaves_out_bookkeeping_entries() {
         .init(
             &f.original,
             &["non-narrative".parse::<FilterSpec>().unwrap()],
+            &[],
+            "session:test",
         )
         .unwrap();
     let lines = staged_lines(&f.publish_root, &init.id);
@@ -334,7 +344,7 @@ fn init_rejects_a_duplicate_filter() {
     let publisher = Publisher::with_root(&f.store, &f.publish_root);
     let pii = "pii".parse::<FilterSpec>().unwrap();
     let dup = publisher
-        .init(&f.original, &[pii.clone(), pii])
+        .init(&f.original, &[pii.clone(), pii], &[], "session:test")
         .unwrap_err();
     assert!(matches!(dup, PublishError::Input(_)), "{dup}");
     assert!(publisher.store().list().unwrap().is_empty());
@@ -348,7 +358,12 @@ fn filter_add_and_remove_change_one_filters_redactions() {
     let f = fixture();
     let publisher = Publisher::with_root(&f.store, &f.publish_root);
     let init = publisher
-        .init(&f.original, &["secret".parse::<FilterSpec>().unwrap()])
+        .init(
+            &f.original,
+            &["secret".parse::<FilterSpec>().unwrap()],
+            &[],
+            "session:test",
+        )
         .unwrap();
     publisher
         .redact(
@@ -412,7 +427,9 @@ fn filter_run_reruns_one_or_every_named_filter() {
         "pii".parse::<FilterSpec>().unwrap(),
         "secret".parse::<FilterSpec>().unwrap(),
     ];
-    let init = publisher.init(&f.original, &filters).unwrap();
+    let init = publisher
+        .init(&f.original, &filters, &[], "session:test")
+        .unwrap();
     let before = publisher.definition(&init.id).unwrap();
 
     let missing = publisher
@@ -451,7 +468,9 @@ fn filter_run_reruns_one_or_every_named_filter() {
 fn the_staged_summary_keeps_the_original_title() {
     let f = fixture();
     let publisher = Publisher::with_root(&f.store, &f.publish_root);
-    let init = publisher.init(&f.original, &[]).unwrap();
+    let init = publisher
+        .init(&f.original, &[], &[], "session:test")
+        .unwrap();
 
     let before = staged_summary(&f.publish_root, &init.id);
     let title = before["title"].clone();
@@ -483,7 +502,12 @@ fn redact_remove_removes_redactions_and_allows_a_filters_literal() {
     let f = fixture();
     let publisher = Publisher::with_root(&f.store, &f.publish_root);
     let init = publisher
-        .init(&f.original, &["secret".parse::<FilterSpec>().unwrap()])
+        .init(
+            &f.original,
+            &["secret".parse::<FilterSpec>().unwrap()],
+            &[],
+            "session:test",
+        )
         .unwrap();
     let applied = publisher
         .redact(
@@ -552,7 +576,9 @@ fn redact_remove_removes_redactions_and_allows_a_filters_literal() {
 fn refresh_reapplies_a_hand_edited_definition() {
     let f = fixture();
     let publisher = Publisher::with_root(&f.store, &f.publish_root);
-    let init = publisher.init(&f.original, &[]).unwrap();
+    let init = publisher
+        .init(&f.original, &[], &[], "session:test")
+        .unwrap();
     let path = publisher.store().definition_file(&init.id);
     let before = staged_summary(&f.publish_root, &init.id);
     assert_eq!(before["line_count"], 5, "{before}");
@@ -616,7 +642,9 @@ fn refresh_reapplies_a_hand_edited_definition() {
 fn segments_are_added_edited_and_removed() {
     let f = fixture();
     let publisher = Publisher::with_root(&f.store, &f.publish_root);
-    let init = publisher.init(&f.original, &[]).unwrap();
+    let init = publisher
+        .init(&f.original, &[], &[], "session:test")
+        .unwrap();
 
     let id = publisher
         .segment_add(&init.id, "The reply", &[], "session:s")
@@ -667,7 +695,9 @@ fn segments_are_added_edited_and_removed() {
 fn redact_edit_changes_one_redaction() {
     let f = fixture();
     let publisher = Publisher::with_root(&f.store, &f.publish_root);
-    let init = publisher.init(&f.original, &[]).unwrap();
+    let init = publisher
+        .init(&f.original, &[], &[], "session:test")
+        .unwrap();
     let applied = publisher
         .redact(
             &init.id,
@@ -726,7 +756,12 @@ fn candidates_are_the_disclosed_text_values_with_their_spans() {
     let f = fixture_with(SYSTEM_SESSION);
     let publisher = Publisher::with_root(&f.store, &f.publish_root);
     let init = publisher
-        .init(&f.original, &["system".parse::<FilterSpec>().unwrap()])
+        .init(
+            &f.original,
+            &["system".parse::<FilterSpec>().unwrap()],
+            &[],
+            "session:test",
+        )
         .unwrap();
     publisher
         .redact(
@@ -774,7 +809,9 @@ fn apply_commits_the_derived_session_and_clears_the_staging() {
         "pii".parse::<FilterSpec>().unwrap(),
         "secret".parse::<FilterSpec>().unwrap(),
     ];
-    let init = publisher.init(&f.original, &filters).unwrap();
+    let init = publisher
+        .init(&f.original, &filters, &[], "session:test")
+        .unwrap();
     publisher
         .redact(
             &init.id,
@@ -816,7 +853,9 @@ fn apply_refuses_a_hand_edited_staged_session() {
     let f = fixture();
     let publisher = Publisher::with_root(&f.store, &f.publish_root);
     let filters = [FilterSpec::new("custom", Some("Remove nothing".into())).unwrap()];
-    let init = publisher.init(&f.original, &filters).unwrap();
+    let init = publisher
+        .init(&f.original, &filters, &[], "session:test")
+        .unwrap();
     let path = f
         .publish_root
         .join(&init.id)
@@ -850,6 +889,42 @@ fn apply_refuses_a_hand_edited_staged_session() {
     publisher.check(&init.id).unwrap();
 }
 
+/// `init` adds a segment per description, without lines, attributed
+/// to the author; the staged session is unchanged until a segment has
+/// lines.
+#[test]
+fn init_adds_segments_by_description() {
+    let f = fixture();
+    let publisher = Publisher::with_root(&f.store, &f.publish_root);
+    let segments = ["The question".to_string(), "The reply".to_string()];
+    let init = publisher
+        .init(&f.original, &[], &segments, "session:s")
+        .unwrap();
+    let definition = publisher.definition(&init.id).unwrap();
+    let added: Vec<(u64, &str, &[(u32, u32)], &str)> = definition
+        .segments
+        .iter()
+        .map(|s| {
+            (
+                s.id,
+                s.description.as_str(),
+                s.lines.as_slice(),
+                s.author.as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        added,
+        [
+            (1, "The question", &[][..], "session:s"),
+            (2, "The reply", &[][..], "session:s"),
+        ]
+    );
+    assert_eq!(definition.next_segment_id, 3);
+    assert_eq!(staged_lines(&f.publish_root, &init.id).len(), 5);
+    assert_eq!(publisher.changes(&init.id).unwrap(), 0);
+}
+
 /// `apply` refuses a definition with no filter and no segment, forced
 /// or not: an unmodified session is pushed directly. A definition
 /// whose filters and segments changed nothing is refused unless
@@ -860,7 +935,9 @@ fn apply_requires_a_filter_or_segment_and_a_change_unless_forced() {
     let publisher = Publisher::with_root(&f.store, &f.publish_root);
     let sessions = SessionStore::from(&f.store);
 
-    let empty = publisher.init(&f.original, &[]).unwrap();
+    let empty = publisher
+        .init(&f.original, &[], &[], "session:test")
+        .unwrap();
     for force in [false, true] {
         let err = publisher.apply(&empty.id, force).unwrap_err();
         assert!(matches!(err, PublishError::Refused(_)), "{err}");
@@ -870,7 +947,9 @@ fn apply_requires_a_filter_or_segment_and_a_change_unless_forced() {
     assert_eq!(sessions.iter().unwrap().count(), 1);
 
     let filters = [FilterSpec::new("custom", Some("Remove nothing".into())).unwrap()];
-    let unchanged = publisher.init(&f.original, &filters).unwrap();
+    let unchanged = publisher
+        .init(&f.original, &filters, &[], "session:test")
+        .unwrap();
     assert_eq!(publisher.changes(&unchanged.id).unwrap(), 0);
     let err = publisher.apply(&unchanged.id, false).unwrap_err();
     assert!(matches!(err, PublishError::Unchanged), "{err}");
@@ -903,7 +982,9 @@ fn system_filter_leaves_out_system_values_and_drops_the_project_attribute() {
         "system".parse::<FilterSpec>().unwrap(),
         "pii".parse::<FilterSpec>().unwrap(),
     ];
-    let init = publisher.init(&f.original, &filters).unwrap();
+    let init = publisher
+        .init(&f.original, &filters, &[], "session:test")
+        .unwrap();
 
     // The system filter has no patterns and no literal paths: what it
     // leaves out is derived at build time, not recorded as text
@@ -1046,7 +1127,9 @@ fn system_filter_leaves_out_system_values_and_drops_the_project_attribute() {
 fn a_literal_inside_a_tool_input_is_a_span() {
     let f = fixture();
     let publisher = Publisher::with_root(&f.store, &f.publish_root);
-    let init = publisher.init(&f.original, &[]).unwrap();
+    let init = publisher
+        .init(&f.original, &[], &[], "session:test")
+        .unwrap();
     let key = "sk-ant-api03-PtYgjmUhBel31iEl2hpChYgCfrL1spNxnyVmihA-2O76UMFxFkM-R5Kjp1vRt_1fjORS-6ilI8ihN5KXSc7Tvo-hBKqFYAA";
     let command = "/message/content/0/input/command";
 

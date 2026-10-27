@@ -148,15 +148,22 @@ impl<'a> Publisher<'a> {
         &self.publish
     }
 
-    /// Start a publish of `original` under `filters`: stage the
+    /// Start a publish of `original` under `filters`, with a segment
+    /// per description in `segments` attributed to `author`: stage the
     /// directory, run every filter, write the definition, and build
-    /// the staged session. A filter given twice is an error.
+    /// the staged session. A segment starts without lines and drops
+    /// nothing until it has them. A filter given twice is an error.
     pub fn init(
         &self,
         original: &SessionRecord,
         filters: &[FilterSpec],
+        segments: &[String],
+        author: &str,
     ) -> Result<PublishInit, PublishError> {
         let mut definition = PublishDefinition::new(filters);
+        for description in segments {
+            definition.push_segment(description, &[], author);
+        }
         definition.validate()?;
         let init = self.publish.init(original)?;
         let session = self.open_original(&init.id)?;
