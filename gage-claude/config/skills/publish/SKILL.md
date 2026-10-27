@@ -1,5 +1,5 @@
 ---
-description: Publish a session
+description: Publish a shareable copy of a session. Use whenever the user asks to publish, share, redact, scrub, sanitize, or export a session, to prepare a session for a shared or public repository, or to remove secrets, personal information, paths, or profanity from a session before sharing it. Drives the gage publish commands from staging through review to apply.
 ---
 
 ## Background
@@ -76,7 +76,7 @@ Common reasons to publish sessions:
 
 A user may have any number of motivations for sharing a session.
 
-To do you job effectively, you should have an understanding of the user's
+To do your job effectively, you should have an understanding of the user's
 motivation.
 
 ### Target audience
@@ -119,23 +119,28 @@ Filters are named.
 
 Gage supports these filters:
 
-`secret`
-: Redact secrets.
-
 `pii`
-: Redact personally identifiable information.
+: Remove personally identifiable information.
+
+`secret`
+: Remove passwords, API keys, and other secrets.
 
 `language`
-: Redact inappropriate language.
+: Remove profanity and other language unfit for a public record.
 
 `system`
-: Omit and redact information that reveals information about a system.
+: Remove paths, hosts, and OS versions.
 
-`non-narrative`
-: Omit information that is not related to a session narrative.
+`metadata`
+: Leave out entries and fields not needed to show what happened: harness
+bookkeeping entries (file snapshots, API request records, attachments, hook and
+skill listings) and run-description fields (version, token usage, request IDs).
 
 `custom`
-: User customized filter.
+: Remove what a prompt of your own describes. Added with
+`gage publish filter add` and `--prompt`, never with `init --filter`.
+
+`gage publish init --list-filters` prints this list.
 
 ### Segments
 
@@ -161,9 +166,9 @@ or _op_.
 1. Initialize the publish op using initial filters and segments if known
 2. Apply segmentation
 3. Identify text to redact
-4. Review the pending session and, if the session is not ready to publish,
-   modify filters and segmentation descriptions as needed and go to step 2
-5. Apply the publish op to finalize published session
+4. Review the pending op and, if the session is not ready to publish, modify
+   filters, segments, and redactions as needed and go to step 2
+5. Apply the publish op to finalize the published session
 
 If the session is interactive, work with the user to understand their
 motivation, target audience, and what's important to keep out of the published
@@ -171,41 +176,65 @@ session.
 
 ## Publish commands
 
-Use `gage publish` commands to perform the steps.
+Use `gage publish` commands to perform the steps. Every command that changes the
+op takes `-y` to skip its confirmation prompt. The ID an op is known by is the
+pending session ID that `init` prints (`SESSION` below). Any prefix of it that is
+unambiguous works.
 
 ### Step 1. Init the op
 
+A native Claude Code session is named by its ID or an ID prefix:
+
 ```shell
-gage publish init -y --filter FILTER_NAME --segment SEGMENT_DESCRIPTION
+gage publish init -y --filter FILTER --segment TEXT SESSION_TO_PUBLISH
 ```
 
-Repeat `--filter` and `--segment` as needed.
+A session already in the Gage store is named by tag, ID, or prefix with `-S`:
 
-This returns the session ID of the pending session (`SESSION` below).
+```shell
+gage publish init -y -S --filter FILTER --segment TEXT SESSION_TO_PUBLISH
+```
 
-Use filters and segment instructions based on your understanding of the user's
+Without `-S`, `init` looks for a native session only and a stored session is
+"no native session matches". `gage session list` lists native sessions and
+`gage session list -S` stored ones.
+
+Repeat `--filter` and `--segment` as needed. A segment given here starts without
+lines and drops nothing until step 2 gives it lines.
+
+The command prints a dialog ending in `Staged publish SESSION`. It also reports,
+per filter, the redactions the filter's deterministic patterns staged at once.
+
+Use filters and segment descriptions based on your understanding of the user's
 motivation, target audience, and express filter and segmentation needs.
 
-This is the starting point of the process. The in the next steps you review the
-public op and decide how to adjust it to meet the user goals.
+This is the starting point of the process. In the next steps you review the
+pending op and decide how to adjust it to meet the user's goals.
 
 ### Step 2. Apply segmentation
 
-If the user wants to segment the session, use the `message` table to identify
-each segments line ranges.
+If the user wants to segment the session, use the `message` table of the Gage
+Query tool to identify each segment's line ranges. A stored session is read
+with its stored ID; a native session with `native_message('')` and its native
+ID.
 
-List each segment.
+List each segment and note its ID:
 
 ```shell
 gage publish segment list SESSION
 ```
 
-Note the ID for each segment.
-
-When you have identified the lines for each segment, add them:
+When you have identified the lines for a segment, set them. The description is
+a required positional and can repeat the current one:
 
 ```shell
-gage publish segment edit -y SESSION ID -l LINES
+gage publish segment edit -y SESSION ID TEXT --lines LINES
+```
+
+A segment can also be added with its lines in one command:
+
+```shell
+gage publish segment add -y SESSION TEXT --lines LINES
 ```
 
 Specify lines as a comma separated list of:
@@ -213,17 +242,19 @@ Specify lines as a comma separated list of:
 - `N` - line number
 - `N-M` - line range from start `N` to end `M` inclusive
 
-Segmentation should be applied _before_ checking text for redaction candidates.
-Segmentation drop unrelated entries altogether including all text.
+Once any segment has lines, every line outside every segment is dropped.
+
+Segmentation is applied _before_ checking text for redaction candidates.
+Segmentation drops unrelated entries altogether, including all their text.
 
 ### Step 3. Identify text to redact
 
-Filters and segments prune the pending session leaving a subset of text to check
-for redactions.
+Filters and segments prune the pending session, leaving a subset of text to
+check for redactions.
 
-Start a `redact-text` sub-agent by passing the session ID. The agent has
-instructions to for getting filter redaction rules and for getting candidate
-text. It returns a JSON encoded list of text to redact in the format:
+Start a `gage:redacted-text` sub-agent with the pending session ID. The agent
+has instructions for getting the filter redaction instructions and the
+candidate text. It returns a JSON encoded list of text to redact in the format:
 
 ```json
 [
@@ -232,62 +263,82 @@ text. It returns a JSON encoded list of text to redact in the format:
 ]
 ```
 
-Use the return value to add the redacted text to the publish op:
+Write the returned JSON to a file in your scratchpad directory and import it:
 
 ```shell
-echo 'AGENT_OUTPUT' | gage publish redact import -y ID --author 'session:<AGENT_SESSION_ID>' -
+gage publish redact import -y SESSION PATH
 ```
 
-### Step 4. Review the pending session and iterate as needed
+The author of the imported redactions is the current Claude Code session, which
+the command reads from `CLAUDE_CODE_SESSION_ID`. Do not pass `--author`.
 
-Perform a final review of the session by reading the candidate text with
-redactions applied:
+Do not read the candidate text yourself. It is the whole text of the pending
+session and is large. The agent reads it so that you do not have to.
+
+### Step 4. Review the pending op and iterate as needed
+
+Review the op's definition, not the session text:
 
 ```shell
-gage publish redact candidate --applied
+gage publish status SESSION
+gage publish redact list SESSION
 ```
 
-Text is shown in session order and can be used to verify that content is limited
-to user-defined segments.
+`redact list` shows one row per redaction: its ID, the text, the reason, the
+author, and the number of instances. Check that every class of content the user
+named is covered, that nothing is redacted that the user wants kept, and that
+the segments are the lines the user chose.
 
-If you identify an error, you must stop and fix it. Consider any changes needed
-to the public op settings and use any of these commands to address remaining
-issues.
+If you identify an error, you must stop and fix it. Use any of these commands:
 
-- `gage publish redact add SESSION TEXT` - redact additional text
-- `gage publish redact remove SESSION TEXT` - remove a redaction
-- `gage publish segment edit SESSION ID --lines LINES` - change segmentation
-  lines
-- `gage publish filter add SESSION NAME` - add an additional filter
-- `gage publish filer remove SESSION NAME` - remove a filter
+- `gage publish redact add -y SESSION TEXT --reason REASON` - redact additional
+  text everywhere it occurs; `--no-mark` removes it without a marker; `TEXT` is
+  matched case-insensitively and must occur in the session; `--reason` defaults
+  to `custom`
+- `gage publish redact remove -y SESSION ID...` - remove redactions by the IDs
+  `redact list` shows
+- `gage publish redact edit -y SESSION ID [TEXT] [--reason REASON] [--mark |
+  --no-mark]` - change a redaction
+- `gage publish segment edit -y SESSION ID TEXT --lines LINES` - change
+  segmentation lines
+- `gage publish filter add -y SESSION NAME` - add a filter; `custom` requires
+  `--prompt TEXT`
+- `gage publish filter remove -y SESSION NAME` - remove a filter and its
+  redactions
 
-If you alter the filters or segments, you must re-run the text redaction in
-step 3. Filters and segments affect what text is dropped.
+If you alter the filters or segments, re-run step 3. Filters and segments
+change what text is dropped and what remains to check.
 
-Calls to `redact import` are idempotent. To remove a redaction, use
-`redact remove`.
+`redact import` is idempotent: a redaction already present is reported as such
+and not duplicated. To remove a redaction, use `redact remove`.
 
-### Step 6. Apply publish op
+`gage publish abort -y SESSION` deletes a pending op without publishing.
 
-When you are confident the session is ready to publish, use the `apply` command:
+### Step 5. Apply the publish op
+
+When you are confident the session is ready to publish, use the `apply`
+command:
 
 ```shell
-gage publish apply ID -y
+gage publish apply -y SESSION
 ```
+
+`apply` verifies that the staged session is the original with removals only,
+adds it to the store as a new session, and deletes the pending op. It is the
+only publish command that writes the store. `--tag NAME` tags the published
+session.
 
 ## Interactive vs automated sessions
 
 If you are running in an interactive session, the user participates in this
 process. Walk the user through each step. Get input from the user to strengthen
-yur understanding of user motivation, target audience, and needed filters.
+your understanding of user motivation, target audience, and needed filters.
 
-When segmenting, summarized selected segment ranges to let the user review and
+When segmenting, summarize selected segment ranges to let the user review and
 confirm the selection.
 
-Summarize the redacted text without quoting specific redacted strings.
-
-If the user wants a preview of the pending session, generate an HTML file they
-can view in a browser.
+Summarize the redacted text by class and count without quoting specific
+redacted strings.
 
 If you are not running in an interactive session, proceed with the steps above
 without user input. The user will review the published session after the
