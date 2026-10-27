@@ -50,9 +50,13 @@ pub enum PublishError {
     NoMatch(String),
     /// No driver is registered under the name the original records
     NoDriver(String),
-    /// The staged content is not a removal-only derivation of the
-    /// original, so `apply` refuses to commit it
+    /// The definition has no filter or segment, or the staged content
+    /// is not a removal-only derivation of the original, so `apply`
+    /// refuses to commit it
     Refused(String),
+    /// The definition has a filter or segment but none of them changed
+    /// the session, so `apply` refuses to commit it unless forced
+    Unchanged,
 }
 
 impl fmt::Display for PublishError {
@@ -67,6 +71,7 @@ impl fmt::Display for PublishError {
                 write!(f, "{m}")
             }
             PublishError::NoDriver(name) => write!(f, "no driver named {name:?} is registered"),
+            PublishError::Unchanged => write!(f, "no filter or segment changed the session"),
         }
     }
 }
@@ -488,11 +493,44 @@ impl<'a> Publisher<'a> {
         derive::check_removal_only(&definition, &source, &staged)
     }
 
-    /// Publish the pending publish `id`: check it, commit the staged
+    /// Verify that the pending publish `id` can be published: its
+    /// definition has a filter or a segment, its staged session passes
+    /// [`check`], and the definition changed the session. A definition
+    /// with no filter and no segment is refused regardless of `force`;
+    /// an unchanged session is refused unless `force` is set. Reads
+    /// only.
+    ///
+    /// [`check`]: Publisher::check
+    pub fn verify(&self, id: &str, force: bool) -> Result<(), PublishError> {
+        let definition = self.definition(id)?;
+        if definition.filters.is_empty() && definition.segments.is_empty() {
+            return Err(PublishError::Refused(
+                "definition has no filter or segment; push the session directly to \
+                 publish it unmodified"
+                    .into(),
+            ));
+        }
+        self.check(id)?;
+        if !force && self.changes(id)? == 0 {
+            return Err(PublishError::Unchanged);
+        }
+        Ok(())
+    }
+
+    /// The number of changes the pending publish `id` makes to its
+    /// original: every dropped line, dropped value, dropped attribute,
+    /// and redacted span. Reads only.
+    pub fn changes(&self, id: &str) -> Result<usize, PublishError> {
+        let definition = self.definition(id)?;
+        let session = self.open_original(id)?;
+        derive::change_count(&definition, &session)
+    }
+
+    /// Publish the pending publish `id`: verify it, commit the staged
     /// directory as a new session object, and delete the staging
     /// directory and the definition. Returns the new object's commit.
-    pub fn apply(&self, id: &str) -> Result<String, PublishError> {
-        self.check(id)?;
+    pub fn apply(&self, id: &str, force: bool) -> Result<String, PublishError> {
+        self.verify(id, force)?;
         Ok(self.publish.apply(id)?)
     }
 

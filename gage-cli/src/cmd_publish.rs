@@ -428,6 +428,10 @@ pub struct ApplyArgs {
     #[arg(long, requires = "tag")]
     force_tag: bool,
 
+    /// Publish session even when no filter or segment changed it
+    #[arg(long)]
+    force: bool,
+
     /// Skip confirmation prompt
     #[arg(short, long)]
     yes: bool,
@@ -1779,8 +1783,11 @@ fn apply(args: ApplyArgs) -> Result<(), CliError> {
         .definition(&pending.id)
         .map_err(|e| fail(e.to_string()))?;
     publisher
-        .check(&pending.id)
-        .map_err(|e| fail(e.to_string()))?;
+        .verify(&pending.id, args.force)
+        .map_err(|e| match e {
+            PublishError::Unchanged => fail(format!("{e} (use --force to publish it unchanged)")),
+            e => fail(e.to_string()),
+        })?;
     let tags = TagStore::from(&store);
     if let Some(name) = &args.tag {
         tags.check_available(name, args.force_tag)
@@ -1818,7 +1825,7 @@ fn apply(args: ApplyArgs) -> Result<(), CliError> {
             }
         }
         publisher
-            .apply(&pending.id)
+            .apply(&pending.id, args.force)
             .map_err(|e| DialogError::Failed(e.to_string()))?;
         if let Some(name) = &args.tag {
             let added = tags
@@ -1916,7 +1923,7 @@ mod tests {
     use gage_store::{SessionAttrsRecord, SummaryAttrs};
 
     use super::*;
-    use crate::Cli;
+    use crate::{Cli, Command};
 
     /// An unknown filter name reports as clap reports a value outside
     /// a known set, naming the argument as its help does, the valid
@@ -2018,6 +2025,21 @@ mod tests {
             .is_err()
         );
         assert!(Cli::try_parse_from(["gage", "publish", "status", "--stored", "abc"]).is_err());
+    }
+
+    /// `apply --force` stands alone; `--force-tag` still needs `--tag`.
+    #[test]
+    fn apply_force_is_separate_from_force_tag() {
+        let cli = Cli::try_parse_from(["gage", "publish", "apply", "abc", "--force"]).unwrap();
+        let Command::Publish(PublishArgs {
+            command: PublishCommand::Apply(args),
+        }) = cli.command
+        else {
+            panic!("expected publish apply");
+        };
+        assert!(args.force);
+        assert!(!args.force_tag);
+        assert!(Cli::try_parse_from(["gage", "publish", "apply", "abc", "--force-tag"]).is_err());
     }
 
     fn pending(id: &str, origin: &str, title: Option<&str>, modified_ms: i64) -> PendingPublish {

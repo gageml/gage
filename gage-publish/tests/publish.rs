@@ -777,7 +777,7 @@ fn apply_commits_the_derived_session_and_clears_the_staging() {
         )
         .unwrap();
 
-    let commit = publisher.apply(&init.id).unwrap();
+    let commit = publisher.apply(&init.id, false).unwrap();
 
     let sessions = SessionStore::from(&f.store);
     let published = sessions.at_commit(&commit).unwrap();
@@ -809,7 +809,8 @@ fn apply_commits_the_derived_session_and_clears_the_staging() {
 fn apply_refuses_a_hand_edited_staged_session() {
     let f = fixture();
     let publisher = Publisher::with_root(&f.store, &f.publish_root);
-    let init = publisher.init(&f.original, &[]).unwrap();
+    let filters = [FilterSpec::new("custom", Some("Remove nothing".into())).unwrap()];
+    let init = publisher.init(&f.original, &filters).unwrap();
     let path = f
         .publish_root
         .join(&init.id)
@@ -819,7 +820,7 @@ fn apply_refuses_a_hand_edited_staged_session() {
 
     let refused = |edited: String, expect: &str| {
         fs::write(&path, edited).unwrap();
-        let err = publisher.apply(&init.id).unwrap_err();
+        let err = publisher.apply(&init.id, true).unwrap_err();
         assert!(matches!(err, PublishError::Refused(_)), "{err}");
         assert!(err.to_string().contains(expect), "{err}");
         assert_eq!(SessionStore::from(&f.store).iter().unwrap().count(), 1);
@@ -841,6 +842,47 @@ fn apply_refuses_a_hand_edited_staged_session() {
 
     fs::write(&path, &staged).unwrap();
     publisher.check(&init.id).unwrap();
+}
+
+/// `apply` refuses a definition with no filter and no segment, forced
+/// or not: an unmodified session is pushed directly. A definition
+/// whose filters and segments changed nothing is refused unless
+/// forced, and a forced apply publishes the session as it is.
+#[test]
+fn apply_requires_a_filter_or_segment_and_a_change_unless_forced() {
+    let f = fixture();
+    let publisher = Publisher::with_root(&f.store, &f.publish_root);
+    let sessions = SessionStore::from(&f.store);
+
+    let empty = publisher.init(&f.original, &[]).unwrap();
+    for force in [false, true] {
+        let err = publisher.apply(&empty.id, force).unwrap_err();
+        assert!(matches!(err, PublishError::Refused(_)), "{err}");
+        assert!(err.to_string().contains("no filter or segment"), "{err}");
+    }
+    assert!(f.publish_root.join(&empty.id).is_dir());
+    assert_eq!(sessions.iter().unwrap().count(), 1);
+
+    let filters = [FilterSpec::new("custom", Some("Remove nothing".into())).unwrap()];
+    let unchanged = publisher.init(&f.original, &filters).unwrap();
+    assert_eq!(publisher.changes(&unchanged.id).unwrap(), 0);
+    let err = publisher.apply(&unchanged.id, false).unwrap_err();
+    assert!(matches!(err, PublishError::Unchanged), "{err}");
+    assert!(f.publish_root.join(&unchanged.id).is_dir());
+    assert_eq!(sessions.iter().unwrap().count(), 1);
+
+    let commit = publisher.apply(&unchanged.id, true).unwrap();
+    let published = sessions.at_commit(&commit).unwrap();
+    assert_eq!(published.id, unchanged.id);
+    let mut text = String::new();
+    sessions
+        .content(&commit)
+        .open("session.jsonl")
+        .unwrap()
+        .read_to_string(&mut text)
+        .unwrap();
+    assert_eq!(text, SESSION);
+    assert!(!f.publish_root.join(&unchanged.id).exists());
 }
 
 #[test]

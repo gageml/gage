@@ -372,6 +372,16 @@ pub fn counts(
     Ok(counts_of(definition, &instances))
 }
 
+/// The number of instances `definition` produces over `session`.
+/// Reads only.
+pub fn change_count(
+    definition: &PublishDefinition,
+    session: &SessionText,
+) -> Result<usize, PublishError> {
+    let Expanded { instances, .. } = expand(definition, session)?;
+    Ok(instances.len())
+}
+
 /// Every line a `Line` instance drops.
 fn dropped_of(instances: &[Instance]) -> BTreeSet<u32> {
     let mut dropped = BTreeSet::new();
