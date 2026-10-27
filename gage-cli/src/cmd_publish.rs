@@ -10,6 +10,7 @@
 
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
+use std::env;
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
@@ -249,9 +250,11 @@ pub struct RedactImportArgs {
 
     /// Author of redactions given without one
     ///
-    /// Required when any redaction has no author of its own. A filter
-    /// name is recorded as "filter:NAME"; a value with ":" is recorded
-    /// as given.
+    /// A filter name is recorded as "filter:NAME"; a value with ":" is
+    /// recorded as given. Without it, a session ID set in
+    /// CLAUDE_CODE_SESSION_ID is recorded as "session:ID", and a
+    /// redaction with no author of its own is an error when that is
+    /// unset too.
     #[arg(short, long, value_name = "AUTHOR")]
     author: Option<String>,
 
@@ -1240,7 +1243,10 @@ fn redact_import(args: RedactImportArgs) -> Result<(), CliError> {
     let definition = publisher
         .definition(&pending.id)
         .map_err(|e| fail(e.to_string()))?;
-    let items = import_items(&json, args.author.as_deref(), &definition).map_err(fail)?;
+    let session_id =
+        env::var_os("CLAUDE_CODE_SESSION_ID").map(|id| id.to_string_lossy().into_owned());
+    let author = import_author(args.author.as_deref(), session_id.as_deref());
+    let items = import_items(&json, author.as_deref(), &definition).map_err(fail)?;
 
     dialog::run("Import redactions", || {
         dialog::step_value("Session", short_uuid(&pending.id))?;
@@ -1286,6 +1292,14 @@ fn redact_import(args: RedactImportArgs) -> Result<(), CliError> {
     })
 }
 
+/// The author of import rows that carry none: the `--author` value
+/// when given, else the session Claude Code names in
+/// `CLAUDE_CODE_SESSION_ID` as `session:ID`.
+fn import_author(flag: Option<&str>, session_id: Option<&str>) -> Option<String> {
+    flag.map(str::to_string)
+        .or_else(|| session_id.map(|id| format!("session:{id}")))
+}
+
 /// The redactions of an import: `json` is an array of
 /// `[text, reason, author, no_mark]` or `[text, reason, no_mark]`
 /// rows, the latter authored by `author`, which is required when any
@@ -1318,9 +1332,9 @@ fn import_items(
                 .map_err(|e| fail(e.to_string()))?;
             let author = match author {
                 Some(a) => resolve_import_author(a, definition).map_err(fail)?,
-                None => default_author
-                    .clone()
-                    .ok_or_else(|| fail("no author; give one with --author".to_string()))?,
+                None => default_author.clone().ok_or_else(|| {
+                    fail("no author; give --author or set CLAUDE_CODE_SESSION_ID".to_string())
+                })?,
             };
             Ok((input, author))
         })
@@ -2398,7 +2412,10 @@ mod tests {
             import_items(r#"[["sam", "pii", false]]"#, Some("pii"), &definition).unwrap();
         assert_eq!(by_filter[0].1, "filter:pii");
         let no_author = import_items(r#"[["sam", "pii", false]]"#, None, &definition).unwrap_err();
-        assert_eq!(no_author, "redaction 1: no author; give one with --author");
+        assert_eq!(
+            no_author,
+            "redaction 1: no author; give --author or set CLAUDE_CODE_SESSION_ID"
+        );
         let unknown =
             import_items(r#"[["x", "pii", "language", false]]"#, None, &definition).unwrap_err();
         assert_eq!(
@@ -2451,6 +2468,21 @@ mod tests {
         };
         assert_eq!(args.author.as_deref(), Some("session:abc"));
         Cli::try_parse_from(["gage", "publish", "redact", "import", "abc", "-", "-y"]).unwrap();
+    }
+
+    /// `--author` wins; without it the Claude Code session, when the
+    /// environment names one, is the author as `session:ID`.
+    #[test]
+    fn import_author_is_the_flag_else_the_claude_code_session() {
+        assert_eq!(
+            import_author(Some("user:me"), Some("abc")).as_deref(),
+            Some("user:me")
+        );
+        assert_eq!(
+            import_author(None, Some("abc")).as_deref(),
+            Some("session:abc")
+        );
+        assert_eq!(import_author(None, None), None);
     }
 
     /// `apply --force` stands alone; `--force-tag` still needs `--tag`.
