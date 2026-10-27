@@ -1,0 +1,50 @@
+[
+  {
+    "code": "privacy",
+    "description": "Private conversational content (candid tone directed at an agent)"
+  },
+  {
+    "code": "language",
+    "description": "Profanity and other language unfit for a public record"
+  },
+  {
+    "code": "pii",
+    "description": "Content identifying a person (name, email address, phone number)"
+  },
+  {
+    "code": "secret",
+    "description": "A credential or key (password, API key, token)"
+  },
+  {
+    "code": "system",
+    "description": "Information about the machine or network the session ran on (path, host, OS version)"
+  },
+  {
+    "code": "confidential",
+    "description": "Trade secrets and commercial, financial, or privileged content"
+  },
+  {
+    "code": "policy",
+    "description": "Internal personnel rules and practices of an organization"
+  },
+  {
+    "code": "safety",
+    "description": "Content whose disclosure could endanger a person's life or safety"
+  },
+  {
+    "code": "scope",
+    "description": "Content not applicable to the publish scope"
+  },
+  {
+    "code": "statute",
+    "description": "Content a statute exempts from disclosure"
+  },
+  {
+    "code": "non-narrative",
+    "description": "Harness bookkeeping that is no part of the conversation narrative"
+  },
+  {
+    "code": "custom",
+    "description": "Content the publish's own instructions remove"
+  }
+]

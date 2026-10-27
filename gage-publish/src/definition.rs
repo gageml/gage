@@ -9,6 +9,7 @@
 use std::collections::HashSet;
 use std::fmt;
 use std::str::FromStr;
+use std::sync::LazyLock;
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -32,11 +33,11 @@ pub fn requires_prompt(name: &str) -> bool {
 }
 
 /// A reason code a redaction may carry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct Reason {
-    pub code: &'static str,
+    pub code: String,
     /// One line on what the code covers, for a listing
-    pub description: &'static str,
+    pub description: String,
 }
 
 impl Reason {
@@ -46,61 +47,12 @@ impl Reason {
     }
 }
 
-/// The reason codes, in listing order.
-pub const REASONS: &[Reason] = &[
-    Reason {
-        code: "privacy",
-        description: "Private conversational content (candid tone directed at an agent)",
-    },
-    Reason {
-        code: "language",
-        description: "Profanity and other language unfit for a public record",
-    },
-    Reason {
-        code: "pii",
-        description: "Content identifying a person (name, email address, phone number)",
-    },
-    Reason {
-        code: "secret",
-        description: "A credential or key (password, API key, token)",
-    },
-    Reason {
-        code: "system",
-        description: "Information about the machine or network the session ran on (path, host, OS version)",
-    },
-    Reason {
-        code: "confidential",
-        description: "Trade secrets and commercial, financial, or privileged content",
-    },
-    Reason {
-        code: "opaque",
-        description: "Content that cannot be evaluated",
-    },
-    Reason {
-        code: "policy",
-        description: "Internal personnel rules and practices of an organization",
-    },
-    Reason {
-        code: "safety",
-        description: "Content whose disclosure could endanger a person's life or safety",
-    },
-    Reason {
-        code: "scope",
-        description: "Content not applicable to the publish scope",
-    },
-    Reason {
-        code: "statute",
-        description: "Content a statute exempts from disclosure",
-    },
-    Reason {
-        code: "non-narrative",
-        description: "Harness bookkeeping that is no part of the conversation narrative",
-    },
-    Reason {
-        code: "custom",
-        description: "Content the publish's own instructions remove",
-    },
-];
+/// The reason codes, in listing order. A filter's prose cites codes
+/// from this list; the list is not defined by the filters.
+pub static REASONS: LazyLock<Vec<Reason>> = LazyLock::new(|| {
+    serde_json::from_str(include_str!("../filters/reasons.json"))
+        .expect("filters/reasons.json is fixed and valid")
+});
 
 /// One filter of a publish: a named filter, with the prompt that adds
 /// to its instructions or, for a filter that requires one, is its
@@ -519,7 +471,7 @@ fn check_reason(reason: &str) -> Result<(), PublishError> {
         "unknown reason {reason:?}; reasons are {}",
         REASONS
             .iter()
-            .map(|r| r.code)
+            .map(|r| r.code.as_str())
             .collect::<Vec<_>>()
             .join(", ")
     )))
@@ -564,12 +516,16 @@ mod tests {
         assert!(requires_prompt("custom") && !requires_prompt("system"));
     }
 
+    /// The reason file lists each code once with a description.
     #[test]
-    fn every_reason_has_a_description() {
-        for r in REASONS {
+    fn every_reason_is_listed_once_with_a_description() {
+        let mut codes = HashSet::new();
+        for r in REASONS.iter() {
             assert!(!r.description.is_empty(), "{}", r.code);
+            assert!(codes.insert(r.code.as_str()), "{}", r.code);
         }
         assert!(Reason::find("scope").is_some());
+        assert!(Reason::find("opaque").is_none());
         assert!(Reason::find("nope").is_none());
     }
 

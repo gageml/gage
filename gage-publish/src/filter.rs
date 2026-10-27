@@ -24,10 +24,6 @@ pub struct Filter {
     /// The instruction prose for the agent. A filter that requires a
     /// prompt has prose on how the prompt is read
     pub instructions: &'static str,
-    /// The reason codes the agent may assign under this filter, each
-    /// with one sentence on when it applies. Empty for a filter whose
-    /// removals are all mechanical
-    pub reasons: &'static [(&'static str, &'static str)],
     /// The attributes of `attrs.json` the filter leaves out of the
     /// published session
     pub attrs: &'static [&'static str],
@@ -488,6 +484,18 @@ impl Filter {
         &FILTERS
     }
 
+    /// The instructions with `prompt` in place of every `{{ prompt }}`
+    /// placeholder. Without a placeholder the prompt has no place in
+    /// the instructions and is left out.
+    pub fn instructions_with_prompt(&self, prompt: Option<&str>) -> String {
+        static PLACEHOLDER: LazyLock<Regex> =
+            LazyLock::new(|| Regex::new(r"\{\{\s*prompt\s*\}\}").unwrap());
+        PLACEHOLDER
+            .replace_all(self.instructions, prompt.unwrap_or_default())
+            .trim_end()
+            .to_string()
+    }
+
     pub fn patterns(&self) -> &[Pattern] {
         &self.patterns
     }
@@ -521,11 +529,6 @@ static FILTERS: LazyLock<Vec<Filter>> = LazyLock::new(|| {
             reason: "pii",
             description: "Remove personally identifiable information",
             instructions: include_str!("../filters/pii.md"),
-            reasons: &[(
-                "pii",
-                "A name of a private individual, an email address, a phone number, a postal \
-                 address, or an account or national identifier",
-            )],
             attrs: &[],
             patterns: vec![
                 Pattern::new("email", r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"),
@@ -545,11 +548,6 @@ static FILTERS: LazyLock<Vec<Filter>> = LazyLock::new(|| {
             reason: "secret",
             description: "Remove passwords, API keys, and other secrets",
             instructions: include_str!("../filters/secret.md"),
-            reasons: &[(
-                "secret",
-                "A password, API key, access token, bearer token, private key, signing secret, \
-                 or connection string that embeds a password",
-            )],
             attrs: &[],
             keywords: Keywords::new(&secret),
             patterns: secret,
@@ -559,17 +557,6 @@ static FILTERS: LazyLock<Vec<Filter>> = LazyLock::new(|| {
             reason: "language",
             description: "Remove profanity and other language unfit for a public record",
             instructions: include_str!("../filters/language.md"),
-            reasons: &[
-                (
-                    "language",
-                    "Profanity, slurs, sexual content, and abuse directed at a person or at \
-                     the agent",
-                ),
-                (
-                    "privacy",
-                    "Candid material that is not profanity, such as venting about a colleague",
-                ),
-            ],
             attrs: &[],
             patterns: Vec::new(),
             keywords: None,
@@ -579,11 +566,6 @@ static FILTERS: LazyLock<Vec<Filter>> = LazyLock::new(|| {
             reason: "system",
             description: "Remove paths, hosts, and OS versions",
             instructions: include_str!("../filters/system.md"),
-            reasons: &[(
-                "system",
-                "An absolute filesystem path, a hostname, an IP address, an internal URL, a \
-                 version control remote, or an operating system or kernel version",
-            )],
             attrs: &["project"],
             patterns: Vec::new(),
             keywords: None,
@@ -593,7 +575,6 @@ static FILTERS: LazyLock<Vec<Filter>> = LazyLock::new(|| {
             reason: "non-narrative",
             description: "Leave out entries the harness wrote for its own bookkeeping",
             instructions: include_str!("../filters/non-narrative.md"),
-            reasons: &[],
             attrs: &[],
             patterns: Vec::new(),
             keywords: None,
@@ -603,7 +584,6 @@ static FILTERS: LazyLock<Vec<Filter>> = LazyLock::new(|| {
             reason: "custom",
             description: "Remove what a prompt of your own describes",
             instructions: include_str!("../filters/custom.md"),
-            reasons: &[("custom", "What the prompt describes")],
             attrs: &[],
             patterns: Vec::new(),
             keywords: None,
@@ -615,29 +595,56 @@ static FILTERS: LazyLock<Vec<Filter>> = LazyLock::new(|| {
 mod tests {
     use super::*;
 
-    /// A filter's reason list and its prose agree: every code the
-    /// prose quotes as a reason is in the list, every listed code is a
-    /// known reason, and a filter with any reason lists its own.
+    /// Every code a filter's prose quotes as a reason is a listed
+    /// reason, and a filter's own code is one.
     #[test]
-    fn reason_lists_agree_with_the_prose() {
+    fn reason_codes_in_the_prose_are_listed() {
         use crate::definition::Reason;
         for filter in FILTERS.iter() {
-            let listed: Vec<&str> = filter.reasons.iter().map(|(code, _)| *code).collect();
-            for code in &listed {
-                assert!(Reason::find(code).is_some(), "{}: {code}", filter.name);
-            }
-            if !listed.is_empty() {
-                assert!(listed.contains(&filter.reason), "{}", filter.name);
-            }
+            assert!(Reason::find(filter.reason).is_some(), "{}", filter.name);
             for quoted in filter
                 .instructions
                 .split("reason \"")
                 .skip(1)
                 .filter_map(|rest| rest.split('"').next())
             {
-                assert!(listed.contains(&quoted), "{}: {quoted}", filter.name);
+                assert!(Reason::find(quoted).is_some(), "{}: {quoted}", filter.name);
             }
         }
+    }
+
+    /// The prompt lands at every placeholder, whatever the spacing
+    /// inside the braces, and nowhere when the prose has none.
+    #[test]
+    fn prompt_replaces_each_placeholder_or_is_left_out() {
+        let custom = Filter::named("custom").unwrap();
+        let with = custom.instructions_with_prompt(Some("Remove every duck"));
+        assert!(with.ends_with("\n\nRemove every duck"), "{with}");
+        assert!(!with.contains("{{"), "{with}");
+        let without = custom.instructions_with_prompt(None);
+        assert_eq!(
+            without,
+            custom
+                .instructions
+                .trim_end()
+                .trim_end_matches("{{ prompt }}")
+                .trim_end()
+        );
+        let filter = Filter {
+            name: "t",
+            reason: "custom",
+            description: "",
+            instructions: "A {{prompt}} B {{  prompt  }} C",
+            attrs: &[],
+            patterns: Vec::new(),
+            keywords: None,
+        };
+        assert_eq!(filter.instructions_with_prompt(Some("x")), "A x B x C");
+        let pii = Filter::named("pii").unwrap();
+        assert_eq!(
+            pii.instructions_with_prompt(Some("ignored")),
+            pii.instructions.trim_end()
+        );
     }
 
     #[test]
