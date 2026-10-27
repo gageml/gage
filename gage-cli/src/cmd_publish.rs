@@ -772,15 +772,6 @@ fn origin_cell(origin: &str, highlighter: &IdHighlighter) -> String {
     format!("{} {}", highlighter.short(id), console::style(commit).dim())
 }
 
-/// The short id of a session origin's original, or the origin as
-/// given when it is not a session origin.
-fn origin_id(origin: &str) -> String {
-    match parse_session_origin(origin) {
-        Ok((id, _)) => short_uuid(id).to_string(),
-        Err(_) => origin.to_string(),
-    }
-}
-
 /// A session origin for the status table: the full original session
 /// id, a space, and the first 8 characters of the commit dimmed. Any
 /// other origin is shown as stored.
@@ -826,13 +817,7 @@ fn init(args: InitArgs) -> Result<(), CliError> {
 
     dialog::run("Publish session", || {
         let (line, kind) = match &original {
-            Original::Stored(record) => (
-                SessionLine {
-                    id: record.id.clone(),
-                    title: record.attrs.summary.title.clone(),
-                },
-                IdKind::Gage,
-            ),
+            Original::Stored(record) => (SessionLine::from(record.as_ref()), IdKind::Gage),
             Original::Native {
                 driver,
                 spec,
@@ -2051,16 +2036,8 @@ fn abort(args: AbortArgs) -> Result<(), CliError> {
     }
 
     dialog::run("Abort publish", || {
-        dialog::step_list(
-            "Sessions",
-            pending.iter().map(|p| {
-                format!(
-                    "{} (origin {})",
-                    short_uuid(&p.id),
-                    origin_id(&p.attrs.origin)
-                )
-            }),
-        )?;
+        let lines: Vec<SessionLine> = pending.iter().map(SessionLine::from).collect();
+        preview_sessions(&lines, IdKind::Gage, None)?;
         cli::log::remark("Original sessions are unaffected")?;
         if !args.yes {
             let confirmed = cli::confirm("Continue?").initial_value(false).interact()?;
@@ -2568,22 +2545,6 @@ mod tests {
         assert_eq!(rows[1][2], "");
         assert_eq!(rows[1][3], "", "a deleted definition shows no count");
         assert_eq!(rows[1][4], "1h ago");
-    }
-
-    /// An origin that is not a derived `session:<id>@<commit>` value is
-    /// shown as stored.
-    #[test]
-    fn origin_id_is_the_short_original_id() {
-        assert_eq!(
-            origin_id(
-                "session:2wytm029kwbtyr94c6f0x2qqke@c5833fed2f11ce62e64ecb93c638d8922d315c67"
-            ),
-            "2wytm029"
-        );
-        assert_eq!(
-            origin_id("claude:/home/u/.claude/abc"),
-            "claude:/home/u/.claude/abc"
-        );
     }
 
     #[test]

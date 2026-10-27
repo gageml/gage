@@ -11,14 +11,14 @@ use anyhow::{Context, anyhow};
 use clap::{ArgGroup, Args, Subcommand};
 use cliclack as cli;
 use datafusion::arrow::array::{
-    Array, BooleanArray, Float32Array, Int64Array, StringArray, TimestampMillisecondArray,
+    Array, Float32Array, Int64Array, StringArray, TimestampMillisecondArray,
 };
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::prelude::SessionContext;
 use gage_core::uuid::short_uuid;
 use gage_query::ContextBuilder;
 use gage_registry::driver::DriverRegistry;
-use gage_session::{Driver, SessionLiveError, Source, SourceOptions};
+use gage_session::{Driver, NativeLookupError, SessionLiveError, Source, SourceOptions};
 use gage_store::url::LineSelection;
 use gage_store::{
     DatasetStore, PublishStore, SessionRecord, SessionStore, Store, StoreError, TagStore,
@@ -818,13 +818,7 @@ async fn add_dialog(
                 return Err(DialogError::Failed(errors.join("\n")));
             }
             dialog::step_value("Dataset", short_uuid(&dataset_id))?;
-            let lines: Vec<SessionLine> = records
-                .iter()
-                .map(|r| SessionLine {
-                    id: r.id.clone(),
-                    title: r.attrs.summary.title.clone(),
-                })
-                .collect();
+            let lines: Vec<SessionLine> = records.iter().map(SessionLine::from).collect();
             preview_sessions(&lines, IdKind::Gage, args.tag.as_deref())?;
             confirm_add(args.yes)?;
             link_stored(&store, &dataset_id, &records, &mut |e| view.on(e))?;
@@ -1431,16 +1425,8 @@ pub fn remove(
     };
 
     dialog::run("Remove sessions", || {
-        dialog::step_list(
-            "Sessions",
-            records.iter().map(|r| {
-                format!(
-                    "{} (native {})",
-                    short_uuid(&r.id),
-                    short_uuid(r.attrs.native_id())
-                )
-            }),
-        )?;
+        let lines: Vec<SessionLine> = records.iter().map(SessionLine::from).collect();
+        preview_sessions(&lines, IdKind::Gage, None)?;
         if let Some(id) = &dataset_id {
             dialog::step_value("Dataset", short_uuid(id))?;
         }
@@ -1542,35 +1528,20 @@ async fn delete_dialog(
         spinner.start("Looking for empty sessions");
         let targets = delete_targets(
             &ctx,
-            &format!("SELECT id, is_empty FROM {from} WHERE is_empty"),
+            &format!("SELECT id, title FROM {from} WHERE is_empty"),
         )
         .await
         .map_err(|e| DialogError::Other(e.into()))?;
         spinner.clear();
         targets
     } else {
-        // Resolve every argument before deleting anything, so one bad
-        // argument leaves the source untouched
-        let mut ids: Vec<String> = Vec::with_capacity(args.ids.len());
-        let mut errors = 0;
-        for prefix in &args.ids {
-            match source.find_native(prefix) {
-                Ok(id) => ids.push(id),
-                Err(e) => {
-                    cli::log::error(format!("{prefix}: {e}"))?;
-                    errors += 1;
-                }
-            }
-        }
-        if errors > 0 {
-            return Err(DialogError::Failed("Unknown sessions".to_string()));
-        }
+        let ids = find_delete_ids(&args.ids, |prefix| source.find_native(prefix))?;
         let in_list = ids
             .iter()
             .map(|id| format!("'{}'", id.replace('\'', "''")))
             .collect::<Vec<_>>()
             .join(", ");
-        let sql = format!("SELECT id, is_empty FROM {from} WHERE id IN ({in_list})");
+        let sql = format!("SELECT id, title FROM {from} WHERE id IN ({in_list})");
         delete_targets(&ctx, &sql)
             .await
             .map_err(|e| DialogError::Other(e.into()))?
@@ -1580,16 +1551,7 @@ async fn delete_dialog(
     }
 
     let total = targets.len();
-    dialog::step_list(
-        "Sessions",
-        targets.iter().map(|t| {
-            if t.is_empty {
-                format!("{} (empty)", short_uuid(&t.id))
-            } else {
-                short_uuid(&t.id).to_string()
-            }
-        }),
-    )?;
+    preview_sessions(&targets, IdKind::Native, None)?;
 
     cli::log::remark("This cannot be undone")?;
     if !args.yes {
@@ -1671,29 +1633,62 @@ fn move_dialog(args: &SessionMoveArgs, source: &dyn Source) -> Result<DialogResu
     Ok(format!("Moved session {} to {}", short_uuid(&id), dir.display()).into())
 }
 
-/// A session selected for deletion
-struct DeleteTarget {
-    id: String,
-    is_empty: bool,
+/// Resolve every prefix before anything is deleted, so one bad
+/// argument leaves the source untouched. The prefixes that match no
+/// session fail the dialog as one list; any other lookup error is
+/// reported on its own line first.
+fn find_delete_ids(
+    prefixes: &[String],
+    find: impl Fn(&str) -> Result<String, NativeLookupError>,
+) -> Result<Vec<String>, DialogError> {
+    let mut ids: Vec<String> = Vec::with_capacity(prefixes.len());
+    let mut missing: Vec<&str> = Vec::new();
+    let mut errors = 0;
+    for prefix in prefixes {
+        match find(prefix) {
+            Ok(id) => ids.push(id),
+            Err(NativeLookupError::NoMatch(_)) => missing.push(prefix),
+            Err(e) => {
+                cli::log::error(format!("{prefix}: {e}"))?;
+                errors += 1;
+            }
+        }
+    }
+    if !missing.is_empty() {
+        return Err(DialogError::Failed(format!(
+            "No sessions match: {}",
+            missing.join(", ")
+        )));
+    }
+    if errors > 0 {
+        return Err(DialogError::Failed("Unknown sessions".to_string()));
+    }
+    Ok(ids)
 }
 
-/// Run `sql`, which selects `id` and `is_empty`, as the delete targets
+/// Run `sql`, which selects `id` and `title`, as the delete targets
 async fn delete_targets(
     ctx: &SessionContext,
     sql: &str,
-) -> datafusion::error::Result<Vec<DeleteTarget>> {
-    let mut targets = Vec::new();
-    for batch in &run_query(ctx, sql).await? {
+) -> datafusion::error::Result<Vec<SessionLine>> {
+    Ok(delete_lines(&run_query(ctx, sql).await?))
+}
+
+/// The sessions in `batches`, whose columns are `id` and `title`; a
+/// null title is absent
+fn delete_lines(batches: &[RecordBatch]) -> Vec<SessionLine> {
+    let mut lines = Vec::new();
+    for batch in batches {
         let ids = column::<StringArray>(batch, 0);
-        let empties = column::<BooleanArray>(batch, 1);
+        let titles = column::<StringArray>(batch, 1);
         for i in 0..batch.num_rows() {
-            targets.push(DeleteTarget {
+            lines.push(SessionLine {
                 id: ids.value(i).to_string(),
-                is_empty: empties.is_valid(i) && empties.value(i),
+                title: (!titles.is_null(i)).then(|| titles.value(i).to_string()),
             });
         }
     }
-    Ok(targets)
+    lines
 }
 
 pub async fn view(
@@ -1837,6 +1832,52 @@ fn warm_picker_sessions(source: &dyn Source) -> Result<(), Box<dyn Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Prefixes that match no session fail as one list; a full set
+    /// of matches resolves in argument order.
+    #[test]
+    fn find_delete_ids_lists_every_unmatched_prefix_in_one_failure() {
+        let find = |prefix: &str| match prefix {
+            "a" => Ok("a-full".to_string()),
+            "b" => Ok("b-full".to_string()),
+            other => Err(NativeLookupError::NoMatch(other.to_string())),
+        };
+        let args = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let Ok(ids) = find_delete_ids(&args(&["a", "b"]), find) else {
+            panic!("matched prefixes should resolve");
+        };
+        assert_eq!(ids, ["a-full", "b-full"]);
+        let Err(DialogError::Failed(msg)) = find_delete_ids(&args(&["832", "a", "579"]), find)
+        else {
+            panic!("unmatched prefixes should fail the dialog");
+        };
+        assert_eq!(msg, "No sessions match: 832, 579");
+    }
+
+    /// A delete target carries the row's id and title; a null title
+    /// is absent.
+    #[test]
+    fn delete_lines_read_id_and_optional_title() {
+        let batch = RecordBatch::try_from_iter(vec![
+            (
+                "id",
+                Arc::new(StringArray::from(vec!["a1", "b2"])) as Arc<dyn Array>,
+            ),
+            (
+                "title",
+                Arc::new(StringArray::from(vec![Some("Fix the duck"), None])),
+            ),
+        ])
+        .unwrap();
+        let lines = delete_lines(&[batch]);
+        assert_eq!(
+            lines
+                .iter()
+                .map(|l| (l.id.as_str(), l.title.as_deref()))
+                .collect::<Vec<_>>(),
+            [("a1", Some("Fix the duck")), ("b2", None)]
+        );
+    }
 
     #[test]
     fn pick_pending_resolves_a_unique_prefix() {

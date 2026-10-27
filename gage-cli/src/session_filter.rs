@@ -21,6 +21,7 @@ use gage_core::style::IdKind;
 use gage_core::uuid::short_uuid;
 use gage_query::ContextBuilder;
 use gage_session::SourceOptions;
+use gage_store::{PendingPublish, SessionRecord};
 use rand::seq::SliceRandom;
 
 use crate::dialog;
@@ -228,6 +229,24 @@ pub const PREVIEW_SESSIONS: usize = 5;
 pub struct SessionLine {
     pub id: String,
     pub title: Option<String>,
+}
+
+impl From<&SessionRecord> for SessionLine {
+    fn from(record: &SessionRecord) -> Self {
+        SessionLine {
+            id: record.id.clone(),
+            title: record.attrs.summary.title.clone(),
+        }
+    }
+}
+
+impl From<&PendingPublish> for SessionLine {
+    fn from(pending: &PendingPublish) -> Self {
+        SessionLine {
+            id: pending.id.clone(),
+            title: pending.attrs.summary.title.clone(),
+        }
+    }
 }
 
 /// Print the `Sessions` step of an add dialog: one line per session
@@ -497,11 +516,62 @@ mod tests {
 
     use console::style;
     use gage_core::style::IdKind;
+    use gage_store::{PendingPublish, SessionAttrsRecord, SessionRecord, SummaryAttrs};
 
     use super::{
         DIALOG_GUTTER, MIN_PREVIEW_WIDTH, PREVIEW_SESSIONS, RIGHT_MARGIN, SessionLine,
         preview_width, project_path_candidate, resolve_project_slug, session_lines,
     };
+
+    fn attrs(title: Option<&str>) -> SessionAttrsRecord {
+        SessionAttrsRecord {
+            driver: "claude 1".to_string(),
+            origin: "claude:abc".to_string(),
+            native_mtime: 0,
+            native_size: 0,
+            session_type: "claude".to_string(),
+            content_format: "claude-jsonl 1".to_string(),
+            size: 0,
+            project: None,
+            summary: SummaryAttrs {
+                title: title.map(String::from),
+                ..SummaryAttrs::default()
+            },
+        }
+    }
+
+    /// A stored session and a pending publish become the line of
+    /// their id and summary title.
+    #[test]
+    fn session_line_from_stored_records_carries_id_and_title() {
+        let record = SessionRecord {
+            id: "stored1".to_string(),
+            commit_sha: String::new(),
+            type_version: String::new(),
+            created_ms: None,
+            modified_ms: None,
+            attrs: attrs(Some("Fix the duck")),
+            driver_name: "claude".to_string(),
+            driver_version: "1".to_string(),
+        };
+        let line = SessionLine::from(&record);
+        assert_eq!(
+            (line.id.as_str(), line.title.as_deref()),
+            ("stored1", Some("Fix the duck"))
+        );
+
+        let pending = PendingPublish {
+            id: "pending1".to_string(),
+            attrs: attrs(None),
+            root: PathBuf::from("/tmp/publish/pending1"),
+            modified_ms: 0,
+        };
+        let line = SessionLine::from(&pending);
+        assert_eq!(
+            (line.id.as_str(), line.title.as_deref()),
+            ("pending1", None)
+        );
+    }
 
     fn session(id: &str, title: Option<&str>) -> SessionLine {
         SessionLine {
