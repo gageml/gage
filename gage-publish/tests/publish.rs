@@ -889,6 +889,103 @@ fn apply_refuses_a_hand_edited_staged_session() {
     publisher.check(&init.id).unwrap();
 }
 
+/// A literal that is already a redaction restates it: the call reports
+/// the existing id, adds nothing, and leaves the entry as it stood,
+/// whatever its case, reason, or author in the restatement.
+#[test]
+fn redacting_a_literal_again_restates_the_existing_redaction() {
+    let f = fixture();
+    let publisher = Publisher::with_root(&f.store, &f.publish_root);
+    let init = publisher
+        .init(&f.original, &[], &[], "session:test")
+        .unwrap();
+    let first = RedactionInput::parse_text("garrett", "pii", true).unwrap();
+    let again = RedactionInput::parse_text("GARRETT", "custom", false).unwrap();
+    let fucking = RedactionInput::parse_text("fucking", "language", false).unwrap();
+
+    let applied = publisher
+        .redact(&init.id, &[first.clone()], "user:a")
+        .unwrap();
+    assert!(applied[0].added);
+    let written = fs::metadata(publisher.store().definition_file(&init.id))
+        .unwrap()
+        .modified()
+        .unwrap();
+
+    let applied = publisher
+        .redact_as(
+            &init.id,
+            &[
+                (&again, "filter:pii"),
+                (&fucking, "user:b"),
+                (&fucking, "user:c"),
+            ],
+        )
+        .unwrap();
+    let summary: Vec<(u64, bool)> = applied.iter().map(|a| (a.id, a.added)).collect();
+    assert_eq!(summary, [(1, false), (2, true), (2, false)]);
+    let texts: Vec<(u64, &str, &str, &str, bool)> = applied
+        .iter()
+        .map(|a| (a.id, a.literal.as_str(), a.reason.as_str(), "", a.mark))
+        .collect();
+    assert_eq!(texts[0], (1, "garrett", "pii", "", true));
+    let definition = publisher.definition(&init.id).unwrap();
+    assert_eq!(definition.text.len(), 2);
+    assert_eq!(definition.text[0].author, "user:a");
+    assert_eq!(definition.text[1].author, "user:b");
+
+    let applied = publisher.redact(&init.id, &[first], "user:d").unwrap();
+    assert!(!applied[0].added);
+    let unchanged = fs::metadata(publisher.store().definition_file(&init.id))
+        .unwrap()
+        .modified()
+        .unwrap();
+    assert!(unchanged >= written);
+    assert_eq!(publisher.definition(&init.id).unwrap().text.len(), 2);
+}
+
+/// `redact_as` records each redaction under its own author, and a
+/// miss anywhere in the batch adds nothing.
+#[test]
+fn redact_as_records_each_redaction_under_its_author() {
+    let f = fixture();
+    let publisher = Publisher::with_root(&f.store, &f.publish_root);
+    let init = publisher
+        .init(&f.original, &[], &[], "session:test")
+        .unwrap();
+    let garrett = RedactionInput::parse_text("garrett", "pii", true).unwrap();
+    let fucking = RedactionInput::parse_text("fucking", "language", false).unwrap();
+    let missing = RedactionInput::parse_text("nowhere", "custom", true).unwrap();
+
+    let err = publisher
+        .redact_as(&init.id, &[(&garrett, "filter:pii"), (&missing, "user:x")])
+        .unwrap_err();
+    assert!(matches!(err, PublishError::NoMatch(_)), "{err}");
+    assert!(publisher.definition(&init.id).unwrap().text.is_empty());
+
+    let applied = publisher
+        .redact_as(
+            &init.id,
+            &[(&garrett, "filter:pii"), (&fucking, "filter:language")],
+        )
+        .unwrap();
+    assert_eq!(applied.len(), 2);
+    let authors: Vec<(String, String)> = publisher
+        .definition(&init.id)
+        .unwrap()
+        .text
+        .iter()
+        .map(|t| (t.literal.clone(), t.author.clone()))
+        .collect();
+    assert_eq!(
+        authors,
+        [
+            ("garrett".to_string(), "filter:pii".to_string()),
+            ("fucking".to_string(), "filter:language".to_string()),
+        ]
+    );
+}
+
 /// `init` adds a segment per description, without lines, attributed
 /// to the author; the staged session is unchanged until a segment has
 /// lines.

@@ -185,6 +185,10 @@ pub struct Applied {
     pub reason: String,
     pub mark: bool,
     pub instances: usize,
+    /// Whether the call added the redaction. False when the literal was
+    /// already a redaction, which the call left as it stood, and on an
+    /// edit.
+    pub added: bool,
 }
 
 /// What a build produced: the instances, and the number of spans each

@@ -337,14 +337,43 @@ impl<'a> Publisher<'a> {
         inputs: &[RedactionInput],
         author: &str,
     ) -> Result<Vec<Applied>, PublishError> {
+        let items: Vec<(&RedactionInput, &str)> = inputs.iter().map(|i| (i, author)).collect();
+        self.redact_as(id, &items)
+    }
+
+    /// Add each input of `items` to the pending publish `id` under the
+    /// author paired with it, and rebuild. An input whose literal is
+    /// already a redaction, compared without case, restates that
+    /// redaction: it is reported under the existing id and left as it
+    /// stood. An input that matches nothing is an error, and nothing
+    /// changes. The result is one entry per item, in order.
+    pub fn redact_as(
+        &self,
+        id: &str,
+        items: &[(&RedactionInput, &str)],
+    ) -> Result<Vec<Applied>, PublishError> {
         let mut definition = self.definition(id)?;
         let session = self.open_original(id)?;
-        let ids: Vec<u64> = inputs
+        let ids: Vec<(u64, bool)> = items
             .iter()
-            .map(|input| definition.push_text(&input.literal, &input.reason, author, input.mark))
+            .map(
+                |(input, author)| match definition.find_text(&input.literal) {
+                    Some(existing) => (existing.id, false),
+                    None => {
+                        let id =
+                            definition.push_text(&input.literal, &input.reason, author, input.mark);
+                        (id, true)
+                    }
+                },
+            )
+            .collect();
+        let added: Vec<u64> = ids
+            .iter()
+            .filter(|(_, added)| *added)
+            .map(|(id, _)| *id)
             .collect();
         let counts = derive::counts(&definition, &session)?;
-        for text in definition.text.iter().filter(|t| ids.contains(&t.id)) {
+        for text in definition.text.iter().filter(|t| added.contains(&t.id)) {
             if counts.get(&text.id).copied().unwrap_or(0) == 0 {
                 return Err(PublishError::NoMatch(format!(
                     "text {:?} matches nothing in the session",
@@ -352,20 +381,27 @@ impl<'a> Publisher<'a> {
                 )));
             }
         }
-        self.build(id, &definition, &session)?;
-        self.write_definition(id, &definition)?;
-        Ok(definition
-            .text
-            .iter()
-            .filter(|t| ids.contains(&t.id))
-            .map(|t| Applied {
-                id: t.id,
-                literal: t.literal.clone(),
-                reason: t.reason.clone(),
-                mark: t.mark,
-                instances: counts.get(&t.id).copied().unwrap_or(0),
+        if !added.is_empty() {
+            self.build(id, &definition, &session)?;
+            self.write_definition(id, &definition)?;
+        }
+        ids.iter()
+            .map(|(id, added)| {
+                let t = definition
+                    .text
+                    .iter()
+                    .find(|t| t.id == *id)
+                    .expect("every item resolved to an entry of the definition");
+                Ok(Applied {
+                    id: t.id,
+                    literal: t.literal.clone(),
+                    reason: t.reason.clone(),
+                    mark: t.mark,
+                    instances: counts.get(&t.id).copied().unwrap_or(0),
+                    added: *added,
+                })
             })
-            .collect())
+            .collect()
     }
 
     /// Change the literal, the reason, or the mark of the text
@@ -413,6 +449,7 @@ impl<'a> Publisher<'a> {
             reason: edited.reason,
             mark: edited.mark,
             instances,
+            added: false,
         })
     }
 

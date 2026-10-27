@@ -10,7 +10,9 @@
 
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
-use std::io;
+use std::fs;
+use std::io::{self, Read};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use clap::{Args, Subcommand};
@@ -18,7 +20,7 @@ use cliclack as cli;
 use gage_core::style::IdHighlighter;
 use gage_core::uuid::short_uuid;
 use gage_publish::{
-    Candidate, Filter, FilterEntry, FilterSpec, MARKER, NAMED_FILTERS, PublishDefinition,
+    Applied, Candidate, Filter, FilterEntry, FilterSpec, MARKER, NAMED_FILTERS, PublishDefinition,
     PublishError, Publisher, REASONS, RedactionInput, TextEntry,
 };
 use gage_session::{Driver, NativeSession, SourceOptions};
@@ -156,6 +158,16 @@ pub enum RedactCommand {
     /// of session, and a literal that matches nothing is an error.
     Add(RedactAddArgs),
 
+    /// Add text redactions to a pending publish from JSON
+    ///
+    /// Input is an array of redactions, each an array of text, reason
+    /// code, author, and no-mark flag: [TEXT, REASON, AUTHOR, NO_MARK].
+    /// An author without ":" names a filter of the publish and is
+    /// recorded as "filter:NAME"; an author with ":" is recorded as
+    /// given. Every literal is matched before any is added: one that
+    /// matches nothing is an error, and nothing is added.
+    Import(RedactImportArgs),
+
     /// Change a text redaction of a pending publish
     ///
     /// Literal, reason, and mark change only when given.
@@ -220,6 +232,23 @@ pub struct RedactAddArgs {
 }
 
 #[derive(Args)]
+pub struct RedactImportArgs {
+    /// Pending publish session to redact (ID or prefix)
+    #[arg(value_name = "SESSION")]
+    session: String,
+
+    /// Redactions to import
+    ///
+    /// A JSON file, or "-" to read standard input.
+    #[arg(value_name = "PATH")]
+    path: PathBuf,
+
+    /// Skip confirmation prompt
+    #[arg(short, long)]
+    yes: bool,
+}
+
+#[derive(Args)]
 pub struct RedactEditArgs {
     /// Pending publish session to change (ID or prefix)
     #[arg(value_name = "SESSION")]
@@ -280,8 +309,20 @@ pub struct CandidateArgs {
     session: String,
 
     /// Show redactions applied to text
+    ///
+    /// In text output each redacted span is struck through and
+    /// followed by its marker. In JSON output each candidate carries
+    /// its spans as byte offsets into text, end exclusive, with
+    /// whether a marker replaces the span.
     #[arg(long)]
     applied: bool,
+
+    /// Output JSON
+    ///
+    /// An array with one object per candidate: line, pointer, and
+    /// text, plus spans with --applied.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Args)]
@@ -485,6 +526,11 @@ pub enum FilterCommand {
     Run(FilterRunArgs),
 
     /// List filters of a pending publish
+    ///
+    /// With --instructions, prints redaction instructions of each
+    /// filter as JSON in place of the table: an object keyed by filter
+    /// name, each holding its instructions, its reasons as an object
+    /// of code to when it applies, and prompt given for it or null.
     List(FilterListArgs),
 }
 
@@ -581,6 +627,10 @@ pub struct FilterListArgs {
     /// Pending publish session to show (ID or prefix)
     #[arg(value_name = "SESSION")]
     session: String,
+
+    /// Print redaction instructions of each filter as JSON
+    #[arg(long)]
+    instructions: bool,
 }
 
 #[derive(Args)]
@@ -603,6 +653,7 @@ pub async fn run(args: PublishArgs) -> Result<(), CliError> {
         PublishCommand::List => list(),
         PublishCommand::Redact(args) => match args.command {
             RedactCommand::Add(args) => redact_add(args),
+            RedactCommand::Import(args) => redact_import(args),
             RedactCommand::Edit(args) => redact_edit(args),
             RedactCommand::Remove(args) => redact_remove(args),
             RedactCommand::Candidate(args) => candidate(args),
@@ -1144,13 +1195,121 @@ fn redact_add(args: RedactAddArgs) -> Result<(), CliError> {
             .into_iter()
             .next()
             .expect("one input gives one applied redaction");
+        let verb = if applied.added {
+            "Added"
+        } else {
+            "Already present:"
+        };
         Ok(format!(
-            "Added redaction {} ({})",
+            "{verb} redaction {} ({})",
             applied.id,
             count(applied.instances, "instance")
         )
         .into())
     })
+}
+
+/// Add text redactions from a JSON file or standard input after
+/// confirmation. The input is parsed and each author resolved before
+/// the dialog opens.
+fn redact_import(args: RedactImportArgs) -> Result<(), CliError> {
+    let command = "gage publish redact import";
+    let fail = |e: String| CliError::message(format!("{command}: {e}"));
+    let from_stdin = args.path == Path::new("-");
+    let json = if from_stdin {
+        let mut text = String::new();
+        io::stdin()
+            .read_to_string(&mut text)
+            .map_err(|e| fail(format!("stdin: {e}")))?;
+        text
+    } else {
+        fs::read_to_string(&args.path).map_err(|e| fail(format!("{}: {e}", args.path.display())))?
+    };
+    let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
+    let publisher = Publisher::new(&store);
+    let pending = publisher
+        .store()
+        .get(&args.session)
+        .map_err(|e| fail(e.to_string()))?;
+    let definition = publisher
+        .definition(&pending.id)
+        .map_err(|e| fail(e.to_string()))?;
+    let items = import_items(&json, &definition).map_err(fail)?;
+
+    dialog::run("Import redactions", || {
+        dialog::step_value("Session", short_uuid(&pending.id))?;
+        dialog::step_value(
+            "Source",
+            if from_stdin {
+                "stdin".to_string()
+            } else {
+                args.path.display().to_string()
+            },
+        )?;
+        dialog::step_list(
+            "Redactions",
+            items
+                .iter()
+                .map(|(input, author)| format!("{} by {author}", describe_input(input))),
+        )?;
+        if !args.yes {
+            let confirmed = cli::confirm("Continue?").initial_value(true).interact()?;
+            if !confirmed {
+                return Err(DialogError::Canceled);
+            }
+        }
+        let borrowed: Vec<(&RedactionInput, &str)> = items
+            .iter()
+            .map(|(input, author)| (input, author.as_str()))
+            .collect();
+        let applied = publisher
+            .redact_as(&pending.id, &borrowed)
+            .map_err(|e| DialogError::Failed(e.to_string()))?;
+        let (added, present): (Vec<&Applied>, Vec<&Applied>) =
+            applied.iter().partition(|a| a.added);
+        let instances: usize = added.iter().map(|a| a.instances).sum();
+        let mut summary = format!(
+            "Added {} ({})",
+            count(added.len(), "redaction"),
+            count(instances, "instance")
+        );
+        if !present.is_empty() {
+            summary.push_str(&format!(", {} already present", present.len()));
+        }
+        Ok(summary.into())
+    })
+}
+
+/// The redactions of an import: `json` is an array of
+/// `[text, reason, author, no_mark]`. An author with ":" is kept; one
+/// without names a filter of `definition` and becomes `filter:NAME`.
+/// An error names the item.
+fn import_items(
+    json: &str,
+    definition: &PublishDefinition,
+) -> Result<Vec<(RedactionInput, String)>, String> {
+    let rows: Vec<(String, String, String, bool)> = serde_json::from_str(json)
+        .map_err(|e| format!("expected an array of [TEXT, REASON, AUTHOR, NO_MARK]: {e}"))?;
+    if rows.is_empty() {
+        return Err("no redactions".to_string());
+    }
+    rows.iter()
+        .enumerate()
+        .map(|(i, (text, reason, author, no_mark))| {
+            let item = i + 1;
+            let input = RedactionInput::parse_text(text, reason, !no_mark)
+                .map_err(|e| format!("redaction {item}: {e}"))?;
+            let author = if author.contains(':') {
+                author.clone()
+            } else {
+                match definition.find_filter(author) {
+                    Ok(_) => format!("filter:{author}"),
+                    Err(e) => return Err(format!("redaction {item}: {e}")),
+                }
+            };
+            Ok((input, author))
+        })
+        .collect()
 }
 
 /// Change a text redaction after confirmation. The id is resolved
@@ -1300,6 +1459,10 @@ fn candidate(args: CandidateArgs) -> Result<(), CliError> {
     let candidates = publisher
         .candidates(&pending.id)
         .map_err(|e| fail(e.to_string()))?;
+    if args.json {
+        println!("{}", candidates_json(&candidates, args.applied));
+        return Ok(());
+    }
     let width = console::Term::stdout().size().1 as usize;
     for c in &candidates {
         let head = format!("{} {}", c.line, c.pointer);
@@ -1321,6 +1484,33 @@ fn candidate(args: CandidateArgs) -> Result<(), CliError> {
         }
     }
     Ok(())
+}
+
+/// The candidates as a JSON array, one object per candidate with its
+/// line, pointer, and text; with `applied`, its spans as byte offsets
+/// into the text, end exclusive, and whether a marker replaces each.
+fn candidates_json(candidates: &[Candidate], applied: bool) -> String {
+    let objects: Vec<serde_json::Value> = candidates
+        .iter()
+        .map(|c| {
+            let mut object = serde_json::Map::new();
+            object.insert("line".into(), c.line.into());
+            object.insert("pointer".into(), c.pointer.clone().into());
+            object.insert("text".into(), c.text.clone().into());
+            if applied {
+                let spans: Vec<serde_json::Value> = c
+                    .spans
+                    .iter()
+                    .map(|&(start, end, mark)| {
+                        serde_json::json!({"start": start, "end": end + 1, "mark": mark})
+                    })
+                    .collect();
+                object.insert("spans".into(), spans.into());
+            }
+            serde_json::Value::Object(object)
+        })
+        .collect();
+    serde_json::to_string_pretty(&objects).expect("a candidate holds only strings and integers")
 }
 
 /// A candidate's text with each redacted span struck through in
@@ -1722,6 +1912,10 @@ fn filter_list(args: FilterListArgs) -> Result<(), CliError> {
         println!("No filters");
         return Ok(());
     }
+    if args.instructions {
+        println!("{}", instructions_json(&definition).map_err(fail)?);
+        return Ok(());
+    }
     let header: Vec<String> = ["Filter", "Prompt", "Redactions"]
         .iter()
         .map(|s| s.to_string())
@@ -1753,6 +1947,35 @@ fn filter_list(args: FilterListArgs) -> Result<(), CliError> {
         .to_string();
     println!("{table}");
     Ok(())
+}
+
+/// The redaction instructions of every filter of `definition` as a
+/// JSON object keyed by filter name: per filter its instruction
+/// prose, its reasons as an object of code to when the code applies,
+/// and the prompt given for it or null.
+fn instructions_json(definition: &PublishDefinition) -> Result<String, String> {
+    let mut filters = serde_json::Map::new();
+    for entry in &definition.filters {
+        let filter =
+            Filter::named(&entry.name).ok_or_else(|| format!("unknown filter {:?}", entry.name))?;
+        let reasons: serde_json::Map<String, serde_json::Value> = filter
+            .reasons
+            .iter()
+            .map(|&(code, rule)| (code.to_string(), rule.into()))
+            .collect();
+        let mut object = serde_json::Map::new();
+        object.insert("instructions".into(), filter.instructions.trim_end().into());
+        object.insert("reasons".into(), reasons.into());
+        object.insert(
+            "prompt".into(),
+            entry
+                .prompt
+                .as_deref()
+                .map_or(serde_json::Value::Null, Into::into),
+        );
+        filters.insert(filter.name.into(), serde_json::Value::Object(object));
+    }
+    serde_json::to_string_pretty(&serde_json::Value::Object(filters)).map_err(|e| e.to_string())
 }
 
 /// A filter as a one-line cell: its name, or its instruction
@@ -2067,6 +2290,85 @@ mod tests {
         assert!(Cli::try_parse_from(["gage", "publish", "status", "--stored", "abc"]).is_err());
     }
 
+    /// The instructions are an object keyed by filter name, each
+    /// holding the prose, the reasons keyed by code, and the prompt or
+    /// null.
+    #[test]
+    fn instructions_are_keyed_by_filter_with_reasons_and_prompt() {
+        let filters = [
+            FilterSpec::new("language", None).unwrap(),
+            FilterSpec::new("custom", Some("Remove the project codename".into())).unwrap(),
+        ];
+        let definition = PublishDefinition::new(&filters);
+        let json: serde_json::Value =
+            serde_json::from_str(&instructions_json(&definition).unwrap()).unwrap();
+        let language = Filter::named("language").unwrap();
+        let custom = Filter::named("custom").unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "language": {
+                    "instructions": language.instructions.trim_end(),
+                    "reasons": {
+                        "language": language.reasons[0].1,
+                        "privacy": language.reasons[1].1,
+                    },
+                    "prompt": null,
+                },
+                "custom": {
+                    "instructions": custom.instructions.trim_end(),
+                    "reasons": {"custom": custom.reasons[0].1},
+                    "prompt": "Remove the project codename",
+                },
+            })
+        );
+        assert_eq!(language.reasons[1].0, "privacy");
+        Cli::try_parse_from(["gage", "publish", "filter", "list", "abc", "--instructions"])
+            .unwrap();
+    }
+
+    /// An import item's author is kept when it has a prefix and becomes
+    /// `filter:NAME` when it names a filter of the publish; anything
+    /// else, a bad shape, or an empty array is an error naming the item.
+    #[test]
+    fn import_items_resolve_authors_and_name_bad_items() {
+        let definition = PublishDefinition::new(&[FilterSpec::new("pii", None).unwrap()]);
+        let items = import_items(
+            r#"[["garrett", "pii", "pii", false], ["ok", "custom", "user:me", true]]"#,
+            &definition,
+        )
+        .unwrap();
+        let summary: Vec<(&str, &str, bool, &str)> = items
+            .iter()
+            .map(|(i, a)| (i.literal.as_str(), i.reason.as_str(), i.mark, a.as_str()))
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                ("garrett", "pii", true, "filter:pii"),
+                ("ok", "custom", false, "user:me"),
+            ]
+        );
+        let unknown =
+            import_items(r#"[["x", "pii", "language", false]]"#, &definition).unwrap_err();
+        assert_eq!(
+            unknown,
+            "redaction 1: no filter named \"language\" is on the list"
+        );
+        let reason = import_items(r#"[["x", "nope", "pii", false]]"#, &definition).unwrap_err();
+        assert!(
+            reason.starts_with("redaction 1: unknown reason"),
+            "{reason}"
+        );
+        let shape = import_items(r#"[["x", "pii"]]"#, &definition).unwrap_err();
+        assert!(shape.starts_with("expected an array of"), "{shape}");
+        assert_eq!(
+            import_items("[]", &definition).unwrap_err(),
+            "no redactions"
+        );
+        Cli::try_parse_from(["gage", "publish", "redact", "import", "abc", "-", "-y"]).unwrap();
+    }
+
     /// `apply --force` stands alone; `--force-tag` still needs `--tag`.
     #[test]
     fn apply_force_is_separate_from_force_tag() {
@@ -2199,6 +2501,46 @@ mod tests {
             ..c
         };
         assert_eq!(applied_text(&none), "key AAAA then BBBB end");
+    }
+
+    /// JSON output is one object per candidate; the spans appear only
+    /// with `--applied`, end exclusive, and the text stays unstyled.
+    #[test]
+    fn candidates_json_carries_spans_only_when_applied() {
+        let c = Candidate {
+            line: 1,
+            pointer: "/message/content".into(),
+            text: "key AAAA\nthen BBBB end".into(),
+            spans: vec![(4, 7, true), (14, 17, false)],
+        };
+        let plain: serde_json::Value =
+            serde_json::from_str(&candidates_json(std::slice::from_ref(&c), false)).unwrap();
+        assert_eq!(
+            plain,
+            serde_json::json!([
+                {"line": 1, "pointer": "/message/content", "text": "key AAAA\nthen BBBB end"}
+            ])
+        );
+        let applied: serde_json::Value =
+            serde_json::from_str(&candidates_json(&[c], true)).unwrap();
+        assert_eq!(
+            applied[0]["spans"],
+            serde_json::json!([
+                {"start": 4, "end": 8, "mark": true},
+                {"start": 14, "end": 18, "mark": false}
+            ])
+        );
+        assert_eq!(candidates_json(&[], false), "[]");
+        Cli::try_parse_from([
+            "gage",
+            "publish",
+            "redact",
+            "candidate",
+            "abc",
+            "--json",
+            "--applied",
+        ])
+        .unwrap();
     }
 
     #[test]

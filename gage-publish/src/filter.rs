@@ -24,6 +24,10 @@ pub struct Filter {
     /// The instruction prose for the agent. A filter that requires a
     /// prompt has prose on how the prompt is read
     pub instructions: &'static str,
+    /// The reason codes the agent may assign under this filter, each
+    /// with one sentence on when it applies. Empty for a filter whose
+    /// removals are all mechanical
+    pub reasons: &'static [(&'static str, &'static str)],
     /// The attributes of `attrs.json` the filter leaves out of the
     /// published session
     pub attrs: &'static [&'static str],
@@ -517,6 +521,11 @@ static FILTERS: LazyLock<Vec<Filter>> = LazyLock::new(|| {
             reason: "pii",
             description: "Remove personally identifiable information",
             instructions: include_str!("../filters/pii.md"),
+            reasons: &[(
+                "pii",
+                "A name of a private individual, an email address, a phone number, a postal \
+                 address, or an account or national identifier",
+            )],
             attrs: &[],
             patterns: vec![
                 Pattern::new("email", r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"),
@@ -536,6 +545,11 @@ static FILTERS: LazyLock<Vec<Filter>> = LazyLock::new(|| {
             reason: "secret",
             description: "Remove passwords, API keys, and other secrets",
             instructions: include_str!("../filters/secret.md"),
+            reasons: &[(
+                "secret",
+                "A password, API key, access token, bearer token, private key, signing secret, \
+                 or connection string that embeds a password",
+            )],
             attrs: &[],
             keywords: Keywords::new(&secret),
             patterns: secret,
@@ -545,6 +559,17 @@ static FILTERS: LazyLock<Vec<Filter>> = LazyLock::new(|| {
             reason: "language",
             description: "Remove profanity and other language unfit for a public record",
             instructions: include_str!("../filters/language.md"),
+            reasons: &[
+                (
+                    "language",
+                    "Profanity, slurs, sexual content, and abuse directed at a person or at \
+                     the agent",
+                ),
+                (
+                    "privacy",
+                    "Candid material that is not profanity, such as venting about a colleague",
+                ),
+            ],
             attrs: &[],
             patterns: Vec::new(),
             keywords: None,
@@ -554,6 +579,11 @@ static FILTERS: LazyLock<Vec<Filter>> = LazyLock::new(|| {
             reason: "system",
             description: "Remove paths, hosts, and OS versions",
             instructions: include_str!("../filters/system.md"),
+            reasons: &[(
+                "system",
+                "An absolute filesystem path, a hostname, an IP address, an internal URL, a \
+                 version control remote, or an operating system or kernel version",
+            )],
             attrs: &["project"],
             patterns: Vec::new(),
             keywords: None,
@@ -563,6 +593,7 @@ static FILTERS: LazyLock<Vec<Filter>> = LazyLock::new(|| {
             reason: "non-narrative",
             description: "Leave out entries the harness wrote for its own bookkeeping",
             instructions: include_str!("../filters/non-narrative.md"),
+            reasons: &[],
             attrs: &[],
             patterns: Vec::new(),
             keywords: None,
@@ -572,6 +603,7 @@ static FILTERS: LazyLock<Vec<Filter>> = LazyLock::new(|| {
             reason: "custom",
             description: "Remove what a prompt of your own describes",
             instructions: include_str!("../filters/custom.md"),
+            reasons: &[("custom", "What the prompt describes")],
             attrs: &[],
             patterns: Vec::new(),
             keywords: None,
@@ -582,6 +614,31 @@ static FILTERS: LazyLock<Vec<Filter>> = LazyLock::new(|| {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A filter's reason list and its prose agree: every code the
+    /// prose quotes as a reason is in the list, every listed code is a
+    /// known reason, and a filter with any reason lists its own.
+    #[test]
+    fn reason_lists_agree_with_the_prose() {
+        use crate::definition::Reason;
+        for filter in FILTERS.iter() {
+            let listed: Vec<&str> = filter.reasons.iter().map(|(code, _)| *code).collect();
+            for code in &listed {
+                assert!(Reason::find(code).is_some(), "{}: {code}", filter.name);
+            }
+            if !listed.is_empty() {
+                assert!(listed.contains(&filter.reason), "{}", filter.name);
+            }
+            for quoted in filter
+                .instructions
+                .split("reason \"")
+                .skip(1)
+                .filter_map(|rest| rest.split('"').next())
+            {
+                assert!(listed.contains(&quoted), "{}: {quoted}", filter.name);
+            }
+        }
+    }
 
     #[test]
     fn every_named_filter_has_prose_and_a_description() {

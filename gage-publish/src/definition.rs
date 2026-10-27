@@ -381,6 +381,14 @@ impl PublishDefinition {
         id
     }
 
+    /// The text redaction whose literal is `literal`, compared the way
+    /// redaction matches, without case.
+    pub fn find_text(&self, literal: &str) -> Option<&TextEntry> {
+        self.text
+            .iter()
+            .find(|t| t.literal.eq_ignore_ascii_case(literal))
+    }
+
     /// Whether a filter may not record `literal`: it was removed
     /// before. Literals match the way redaction does, without case.
     pub fn is_allowed(&self, literal: &str) -> bool {
