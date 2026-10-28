@@ -17,7 +17,7 @@
 //! a fetch's refs land under.
 
 use std::collections::BTreeMap;
-use std::process::{ExitStatus, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 
 use gage_core::uuid::new_uuid;
 
@@ -346,11 +346,8 @@ impl RemoteStore<'_> {
         for ref_name in &set.delete {
             cmd.arg(format!(":{ref_name}"));
         }
-        cmd.env("GAGE_PUSH_APPROVAL", approval)
-            .stdin(Stdio::null())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit());
-        cmd.status().map_err(StoreError::Spawn)
+        cmd.env("GAGE_PUSH_APPROVAL", approval);
+        run_transport(cmd)
     }
 
     /// The store's object and tag refs against what `repository`
@@ -430,14 +427,11 @@ impl RemoteStore<'_> {
     /// runs.
     pub fn fetch_all(&self, source: &FetchSource) -> Result<ExitStatus, StoreError> {
         let refspec = format!("+{ROOT}*:{}*", source.tracking());
-        let mut cmd = git_transport_in(
+        let cmd = git_transport_in(
             self.store.path(),
             ["fetch", "--prune", source.repository().spec(), &refspec],
         );
-        cmd.stdin(Stdio::null())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit());
-        cmd.status().map_err(StoreError::Spawn)
+        run_transport(cmd)
     }
 
     /// Fetch the named Gage refs of `source` into its tracking prefix,
@@ -455,10 +449,7 @@ impl RemoteStore<'_> {
             };
             cmd.arg(format!("+{ref_name}:{tracking}"));
         }
-        cmd.stdin(Stdio::null())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit());
-        cmd.status().map_err(StoreError::Spawn)
+        run_transport(cmd)
     }
 
     /// Delete every ref under every transient namespace: what a URL
@@ -516,6 +507,36 @@ impl RemoteStore<'_> {
     }
 }
 
+/// Run a push or fetch and return git's exit status. Git's output goes
+/// to the terminal as it runs, so progress and a hook's rejection
+/// reason reach the user live. Under the crate's own tests the output
+/// is captured and re-emitted through Rust's stderr instead: a child
+/// writing to an inherited descriptor bypasses the test harness, which
+/// captures only the test thread's own prints, so the re-emitted bytes
+/// show on a failing test alone.
+fn run_transport(mut cmd: Command) -> Result<ExitStatus, StoreError> {
+    cmd.stdin(Stdio::null());
+    if !cfg!(test) {
+        cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+        return cmd.status().map_err(StoreError::Spawn);
+    }
+    let (status, output) = capture_transport(cmd)?;
+    eprint!("{output}");
+    Ok(status)
+}
+
+/// Run a transport command to completion with its output captured:
+/// the exit status and git's stdout followed by its stderr.
+fn capture_transport(mut cmd: Command) -> Result<(ExitStatus, String), StoreError> {
+    let output = cmd.output().map_err(StoreError::Spawn)?;
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok((output.status, text))
+}
+
 /// Parse `git config --get-regexp` lines of the form
 /// `remote.<name>.url <url>` and `remote.<name>.gage-backup <bool>`
 /// into remotes, in name order. A remote name may hold dots, so the
@@ -552,6 +573,22 @@ mod tests {
 
     use super::*;
     use crate::test_support::open_store;
+
+    /// A captured transport reports the failing status and carries
+    /// git's own reason, which the harness shows on a failing test.
+    #[test]
+    fn capture_transport_returns_the_status_and_gits_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(dir.path());
+        let missing = dir.path().join("missing.git");
+        let cmd = git_transport_in(store.path(), ["fetch", missing.to_str().unwrap()]);
+        let (status, output) = capture_transport(cmd).unwrap();
+        assert!(!status.success());
+        assert!(
+            output.contains("does not appear to be a git repository"),
+            "{output}"
+        );
+    }
 
     #[test]
     fn add_writes_the_tracking_refspec_and_list_reads_it_back() {
