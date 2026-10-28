@@ -632,8 +632,9 @@ pub fn derive_entry(session_id: &str, line_num: u32, entry: &serde_json::Value) 
 
         let joined = entry_text(entry).unwrap_or_default();
         // Out-of-band tags are prepended to user prompts only. A
-        // tool result or assistant turn that opens with a
-        // tag-shaped pair (e.g. <tool_use_error>) is content.
+        // tool result, a compaction summary, or an assistant turn that
+        // opens with a tag-shaped pair (e.g. <tool_use_error>) is
+        // content.
         let (text, ide_tags) = match (entry_type, msg_subtype) {
             ("user", Some("text" | "meta")) => split_ide_tags(&joined),
             _ => (joined, None),
@@ -662,6 +663,7 @@ pub fn derive_entry(session_id: &str, line_num: u32, entry: &serde_json::Value) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arrow::array::{Array, StringArray};
     use serde_json::json;
 
     #[test]
@@ -784,6 +786,32 @@ mod tests {
             assert_eq!(message_subtype(&entry), Some("model_refusal"), "{subtype}");
             assert_eq!(entry_text(&entry).as_deref(), Some("Why"), "{subtype}");
         }
+    }
+
+    #[test]
+    fn compaction_summary_is_its_own_subtype_with_content_verbatim() {
+        let summary = "<system-reminder>x</system-reminder>\nThis session is being continued";
+        let entry = json!({
+            "type": "user",
+            "isCompactSummary": true,
+            "isVisibleInTranscriptOnly": true,
+            "message": { "role": "user", "content": summary },
+        });
+        assert_eq!(message_subtype(&entry), Some("compact_summary"));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        std::fs::write(&path, format!("{entry}\n")).unwrap();
+        let batch = derive_session("s", &path).unwrap().batch;
+        let column = |i: usize| {
+            batch
+                .column(i)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap()
+        };
+        assert_eq!(column(COL_MESSAGE_SUBTYPE).value(0), "compact_summary");
+        assert_eq!(column(COL_TEXT).value(0), summary);
+        assert!(column(COL_IDE_TAGS).is_null(0), "no tag split on a summary");
     }
 
     #[test]

@@ -21,6 +21,7 @@
     "isSidechain": { "type": "boolean", "description": "True on a sub-agent's own transcript" },
     "userType": { "type": "string" },
     "isMeta": { "type": "boolean", "description": "True on a user row the harness wrote rather than the person" },
+    "isCompactSummary": { "type": "boolean", "description": "True on the user row holding the summary a compaction wrote in place of the dropped turns" },
     "slug": { "type": "string" },
     "subtype": { "type": "string", "description": "On system rows: stop_hook_summary, turn_duration, local_command, compact_boundary, informational, model_refusal_no_fallback, model_refusal_fallback, and others" },
     "message": {

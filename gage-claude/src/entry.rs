@@ -88,7 +88,8 @@ pub const SYSTEM_MESSAGE_SUBTYPES: &[(&str, &str)] = &[
 /// - `assistant` → `tool_use` if any content block is `tool_use`,
 ///   else `thinking` if any is `thinking`, else `text`.
 /// - `user` → `tool_result` if any content block is `tool_result`,
-///   else `meta` if `entry.isMeta` is true, else `text`.
+///   else `compact_summary` if `entry.isCompactSummary` is true, else
+///   `meta` if `entry.isMeta` is true, else `text`.
 /// - `system` → the message subtype [`SYSTEM_MESSAGE_SUBTYPES`] pairs
 ///   with the raw subtype, when it lists it.
 /// - `attachment` → the inner `attachment.type`
@@ -119,6 +120,8 @@ pub fn message_subtype(entry: &Value) -> Option<&'static str> {
         "user" => {
             if blocks.contains(&"tool_result") {
                 Some("tool_result")
+            } else if entry.get("isCompactSummary").and_then(Value::as_bool) == Some(true) {
+                Some("compact_summary")
             } else if entry.get("isMeta").and_then(Value::as_bool) == Some(true) {
                 Some("meta")
             } else {
