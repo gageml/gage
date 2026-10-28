@@ -412,7 +412,7 @@ pub struct SegmentEditArgs {
     ///
     /// Read from a file as @PATH.
     #[arg(value_name = "TEXT")]
-    text: String,
+    text: Option<String>,
 
     /// Lines segment keeps
     ///
@@ -1643,9 +1643,17 @@ fn segment_add(args: SegmentAddArgs) -> Result<(), CliError> {
 fn segment_edit(args: SegmentEditArgs) -> Result<(), CliError> {
     let command = "gage publish segment edit";
     let fail = |e: String| CliError::message(format!("{command}: {e}"));
-    let text = text_value(command, "TEXT", &args.text).map_err(|e| fail(e.to_string()))?;
-    let text = text.trim_end().to_string();
+    let text = args
+        .text
+        .as_deref()
+        .map(|t| text_value(command, "TEXT", t))
+        .transpose()
+        .map_err(|e| fail(e.to_string()))?
+        .map(|t| t.trim_end().to_string());
     let lines = args.lines.as_ref().map(ranges).transpose()?;
+    if text.is_none() && lines.is_none() {
+        return Err(fail("nothing to change; give TEXT or --lines".into()));
+    }
     let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
     let publisher = Publisher::new(&store);
     let pending = publisher
@@ -1667,7 +1675,9 @@ fn segment_edit(args: SegmentEditArgs) -> Result<(), CliError> {
             "Segment",
             format!("{} {}", target.id, value_cell(&target.description)),
         )?;
-        dialog::step_value("Description", value_cell(&text))?;
+        if let Some(text) = &text {
+            dialog::step_value("Description", value_cell(text))?;
+        }
         if let Some(lines) = &lines {
             dialog::step_value("Lines", lines_cell(lines))?;
         }
@@ -1678,7 +1688,7 @@ fn segment_edit(args: SegmentEditArgs) -> Result<(), CliError> {
             }
         }
         let segment = publisher
-            .segment_edit(&pending.id, args.id, Some(&text), lines.as_deref())
+            .segment_edit(&pending.id, args.id, text.as_deref(), lines.as_deref())
             .map_err(|e| DialogError::Failed(e.to_string()))?;
         Ok(format!("Changed segment {}", segment.id).into())
     })
@@ -2271,6 +2281,24 @@ mod tests {
         );
     }
 
+    /// `segment edit` with neither TEXT nor --lines has nothing to do
+    /// and says so before it opens the store.
+    #[test]
+    fn segment_edit_without_text_or_lines_is_nothing_to_change() {
+        let args = SegmentEditArgs {
+            session: "abc".into(),
+            id: 1,
+            text: None,
+            lines: None,
+            yes: true,
+        };
+        let err = segment_edit(args).unwrap_err();
+        assert!(
+            matches!(err, CliError::Exit { message: Some(ref m), .. } if m.contains("nothing to change; give TEXT or --lines")),
+            "neither TEXT nor --lines is a plain error"
+        );
+    }
+
     /// The publish commands live under `gage publish`, not `gage
     /// session`. `init` keeps its own --source and --stored; the other
     /// commands take neither.
@@ -2317,6 +2345,9 @@ mod tests {
                 "gage", "publish", "segment", "add", "abc", "Reply", "--lines", "2-3,9",
             ],
             vec!["gage", "publish", "segment", "edit", "abc", "1", "Reply"],
+            vec![
+                "gage", "publish", "segment", "edit", "abc", "1", "--lines", "2-3",
+            ],
             vec!["gage", "publish", "segment", "remove", "abc", "1"],
             vec![
                 "gage", "publish", "filter", "edit", "abc", "pii", "--prompt", "x",

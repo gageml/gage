@@ -236,10 +236,10 @@ gage publish segment list SESSION
 ```
 
 When you have identified the lines for a segment, set them. The description is
-a required positional and can repeat the current one:
+optional and keeps its current value when left out:
 
 ```shell
-gage publish segment edit -y SESSION ID TEXT --lines LINES
+gage publish segment edit -y SESSION ID --lines LINES
 ```
 
 A segment can also be added with its lines in one command:
@@ -310,8 +310,8 @@ If you identify an error, you must stop and fix it. Use any of these commands:
   `redact list` shows
 - `gage publish redact edit -y SESSION ID [TEXT] [--reason REASON] [--mark |
   --no-mark]` - change a redaction
-- `gage publish segment edit -y SESSION ID TEXT --lines LINES` - change
-  segmentation lines
+- `gage publish segment edit -y SESSION ID [TEXT] [--lines LINES]` - change a
+  segment's description, its lines, or both
 - `gage publish filter add -y SESSION NAME` - add a filter; `custom` requires
   `--prompt TEXT`
 - `gage publish filter remove -y SESSION NAME` - remove a filter and its
