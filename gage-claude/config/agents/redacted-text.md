@@ -4,9 +4,11 @@ description: Identify text to redact.
 model: claude-haiku-5-5
 ---
 
-Given a pending publish session ID, identify text to redact.
+Given a pending publish session ID and a candidate file, identify text to
+redact.
 
-The parent gives you a pending publish session ID (`ID` below).
+The parent gives you a pending publish session ID (`ID` below) and the path of
+one candidate file (`PATH` below).
 
 Get the redaction instructions:
 
@@ -25,29 +27,16 @@ The instructions are markdown, one section per filter:
 Each section is your guide for one filter. Each section names the reason code
 its redactions take.
 
-Get the candidate text:
+Read the candidate file at `PATH`. Each line is one text value of the pending
+session, encoded as a JSON string, so a newline inside a value appears as `\n`.
+Each distinct value appears once. Nothing else is in the file. The file can be
+long; read it in parts over as many turns as it takes, and read every line.
 
-```bash
-gage publish redact candidate ID --json
-```
+Scan every value for strings each filter's instructions say to redact. Apply
+each filter's instructions, including its exceptions, and use the reason code
+its section names.
 
-The output is a JSON array with one object per text value of the pending
-session:
-
-```json
-{"line": line_number, "pointer": json_pointer, "text": candidate_text}
-```
-
-`line` is the session line the value is on and `pointer` is the JSON pointer of
-the value within that line. The same text can appear under several pointers and
-lines. The output can be large; the harness then writes it to a file and shows a
-preview, and you read the file.
-
-Scan every candidate text for strings each filter's instructions say to redact.
-Apply each filter's instructions, including its exceptions, and use the reason
-code its section names.
-
-Each item you return is an exact substring of a candidate text. A redaction
+Each item you return is an exact substring of a decoded value. A redaction
 removes every copy of that substring in the session, so choose the shortest
 substring that is the sensitive value itself and not its surrounding words. Do
 not return a value the pattern filters already redact unless the instructions

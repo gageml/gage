@@ -18,11 +18,12 @@ use std::sync::Arc;
 
 use clap::{Args, Subcommand};
 use cliclack as cli;
+use gage_core::config::gage_home;
 use gage_core::style::IdHighlighter;
 use gage_core::uuid::short_uuid;
 use gage_publish::{
-    Applied, Candidate, Filter, FilterEntry, FilterSpec, MARKER, NAMED_FILTERS, PublishDefinition,
-    PublishError, Publisher, REASONS, RedactionInput, TextEntry,
+    Applied, Filter, FilterEntry, FilterSpec, NAMED_FILTERS, PublishDefinition, PublishError,
+    Publisher, REASONS, RedactionInput, TextEntry, candidate,
 };
 use gage_session::{Driver, NativeSession, SourceOptions};
 use gage_store::url::{LineSelection, parse_session_origin};
@@ -185,13 +186,13 @@ pub enum RedactCommand {
     /// removed: filter does not record it again.
     Remove(RedactRemoveArgs),
 
-    /// List text values of a pending publish open to redaction
+    /// Print candidate text of a pending publish
     ///
-    /// One value per line as "LINE POINTER TEXT", with dropped lines
-    /// and left-out values omitted. A value that holds a line break or
-    /// runs past terminal width is listed as "LINE POINTER" with its
-    /// text indented on lines that follow. With --applied, redacted
-    /// text is struck through in yellow and followed by its marker.
+    /// Each distinct text value of kept lines, with left-out values
+    /// omitted, once, one per line as a JSON string, in order of first
+    /// occurrence. Text is divided into splits bounded by --split, one
+    /// per file with --split-files. This is what a redaction agent
+    /// reads.
     Candidate(CandidateArgs),
 
     /// List text redactions of a pending publish
@@ -323,22 +324,34 @@ pub struct CandidateArgs {
     #[arg(value_name = "SESSION")]
     session: String,
 
-    /// Show redactions applied to text
+    /// Bytes per split (default 400000)
     ///
-    /// In text output each redacted span is struck through and
-    /// followed by its marker. In JSON output each candidate carries
-    /// its spans as byte offsets into text, end exclusive, with
-    /// whether a marker replaces the span.
-    #[arg(long)]
-    applied: bool,
+    /// Candidate text is each distinct text value once, one per line as
+    /// a JSON string. A split closes when its next line would carry it
+    /// past this size, and a line larger than this size is a split by
+    /// itself. In standard output a line holding null marks a boundary
+    /// between splits.
+    #[arg(long, value_name = "BYTES")]
+    split: Option<usize>,
 
-    /// Output JSON
+    /// Write splits to files and print their paths
     ///
-    /// An array with one object per candidate: line, pointer, and
-    /// text, plus spans with --applied.
+    /// Files are named 000001.jsonl onward in tmp/candidate/SESSION_ID
+    /// under Gage home unless --split-files-dir names a directory. Split
+    /// files already in that directory are removed first.
     #[arg(long)]
-    json: bool,
+    split_files: bool,
+
+    /// Directory for split files
+    ///
+    /// Default is tmp/candidate/SESSION_ID under Gage home. Implies
+    /// --split-files.
+    #[arg(long, value_name = "DIR")]
+    split_files_dir: Option<PathBuf>,
 }
+
+/// Bytes per candidate split when `--split` is not given.
+const DEFAULT_SPLIT_BYTES: usize = 400_000;
 
 #[derive(Args)]
 pub struct SegmentArgs {
@@ -1516,89 +1529,33 @@ fn candidate(args: CandidateArgs) -> Result<(), CliError> {
         .store()
         .get(&args.session)
         .map_err(|e| fail(e.to_string()))?;
-    let candidates = publisher
-        .candidates(&pending.id)
+    let texts = publisher
+        .candidate_texts(&pending.id)
         .map_err(|e| fail(e.to_string()))?;
-    if args.json {
-        println!("{}", candidates_json(&candidates, args.applied));
-        return Ok(());
-    }
-    let width = console::Term::stdout().size().1 as usize;
-    for c in &candidates {
-        let head = format!("{} {}", c.line, c.pointer);
-        let text = if args.applied {
-            applied_text(c)
-        } else {
-            c.text.clone()
-        };
-        let one_line =
-            !c.text.contains('\n') && head.chars().count() + 1 + c.text.chars().count() <= width;
-        let head = console::style(&head).dim();
-        if one_line {
-            println!("{head} {text}");
-        } else {
-            println!("{head}");
-            for line in text.lines() {
-                println!("  {line}");
-            }
+    let splits = candidate::splits(&texts, args.split.unwrap_or(DEFAULT_SPLIT_BYTES));
+    if args.split_files || args.split_files_dir.is_some() {
+        let dir = args
+            .split_files_dir
+            .unwrap_or_else(|| candidate_files_dir(&pending.id));
+        let paths = candidate::write_files(&dir, &splits).map_err(|e| {
+            fail(format!(
+                "cannot write candidate files to {}: {e}",
+                dir.display()
+            ))
+        })?;
+        for path in paths {
+            println!("{}", path.display());
         }
+    } else {
+        print!("{}", candidate::render(&splits));
     }
     Ok(())
 }
 
-/// The candidates as a JSON array, one object per candidate with its
-/// line, pointer, and text; with `applied`, its spans as byte offsets
-/// into the text, end exclusive, and whether a marker replaces each.
-fn candidates_json(candidates: &[Candidate], applied: bool) -> String {
-    let objects: Vec<serde_json::Value> = candidates
-        .iter()
-        .map(|c| {
-            let mut object = serde_json::Map::new();
-            object.insert("line".into(), c.line.into());
-            object.insert("pointer".into(), c.pointer.clone().into());
-            object.insert("text".into(), c.text.clone().into());
-            if applied {
-                let spans: Vec<serde_json::Value> = c
-                    .spans
-                    .iter()
-                    .map(|&(start, end, mark)| {
-                        serde_json::json!({"start": start, "end": end + 1, "mark": mark})
-                    })
-                    .collect();
-                object.insert("spans".into(), spans.into());
-            }
-            serde_json::Value::Object(object)
-        })
-        .collect();
-    serde_json::to_string_pretty(&objects).expect("a candidate holds only strings and integers")
-}
-
-/// A candidate's text with each redacted span struck through in
-/// yellow and, where a marker replaces it, the marker in yellow after
-/// it.
-fn applied_text(c: &Candidate) -> String {
-    let slice = |range: std::ops::Range<usize>| {
-        c.text
-            .get(range)
-            .expect("a candidate's spans lie within its text on character boundaries")
-    };
-    let mut out = String::with_capacity(c.text.len());
-    let mut cursor = 0;
-    for &(start, end, mark) in &c.spans {
-        out.push_str(slice(cursor..start));
-        out.push_str(
-            &console::style(slice(start..end + 1))
-                .yellow()
-                .strikethrough()
-                .to_string(),
-        );
-        if mark {
-            out.push_str(&console::style(MARKER).yellow().to_string());
-        }
-        cursor = end + 1;
-    }
-    out.push_str(slice(cursor..c.text.len()));
-    out
+/// Where `--split-files` writes when no directory is named:
+/// `tmp/candidate/<pending id>` under Gage home.
+fn candidate_files_dir(id: &str) -> PathBuf {
+    gage_home().join("tmp").join("candidate").join(id)
 }
 
 /// Add a segment after confirmation.
@@ -2340,7 +2297,25 @@ mod tests {
                 "gage", "publish", "redact", "edit", "abc", "3", "--reason", "pii",
             ],
             vec!["gage", "publish", "redact", "remove", "abc", "3", "4"],
-            vec!["gage", "publish", "redact", "candidate", "abc", "--applied"],
+            vec![
+                "gage",
+                "publish",
+                "redact",
+                "candidate",
+                "abc",
+                "--split-files",
+            ],
+            vec![
+                "gage",
+                "publish",
+                "redact",
+                "candidate",
+                "abc",
+                "--split",
+                "1000",
+                "--split-files-dir",
+                "/tmp/c",
+            ],
             vec![
                 "gage", "publish", "segment", "add", "abc", "Reply", "--lines", "2-3,9",
             ],
@@ -2629,66 +2604,6 @@ mod tests {
         expected.sort_unstable();
         assert_eq!(names, expected);
         assert!(rows.iter().all(|r| r.len() == 2 && !r[1].is_empty()));
-    }
-
-    /// A candidate's text keeps everything outside its spans, and each
-    /// marked span is followed by the marker. Styles are off outside a
-    /// terminal, so the plain text is checked.
-    #[test]
-    fn applied_text_follows_each_marked_span_with_the_marker() {
-        console::set_colors_enabled(false);
-        let c = Candidate {
-            line: 1,
-            pointer: "/message/content".into(),
-            text: "key AAAA then BBBB end".into(),
-            spans: vec![(4, 7, true), (14, 17, false)],
-        };
-        assert_eq!(applied_text(&c), "key AAAA[REDACTED] then BBBB end");
-        let none = Candidate {
-            spans: Vec::new(),
-            ..c
-        };
-        assert_eq!(applied_text(&none), "key AAAA then BBBB end");
-    }
-
-    /// JSON output is one object per candidate; the spans appear only
-    /// with `--applied`, end exclusive, and the text stays unstyled.
-    #[test]
-    fn candidates_json_carries_spans_only_when_applied() {
-        let c = Candidate {
-            line: 1,
-            pointer: "/message/content".into(),
-            text: "key AAAA\nthen BBBB end".into(),
-            spans: vec![(4, 7, true), (14, 17, false)],
-        };
-        let plain: serde_json::Value =
-            serde_json::from_str(&candidates_json(std::slice::from_ref(&c), false)).unwrap();
-        assert_eq!(
-            plain,
-            serde_json::json!([
-                {"line": 1, "pointer": "/message/content", "text": "key AAAA\nthen BBBB end"}
-            ])
-        );
-        let applied: serde_json::Value =
-            serde_json::from_str(&candidates_json(&[c], true)).unwrap();
-        assert_eq!(
-            applied[0]["spans"],
-            serde_json::json!([
-                {"start": 4, "end": 8, "mark": true},
-                {"start": 14, "end": 18, "mark": false}
-            ])
-        );
-        assert_eq!(candidates_json(&[], false), "[]");
-        Cli::try_parse_from([
-            "gage",
-            "publish",
-            "redact",
-            "candidate",
-            "abc",
-            "--json",
-            "--applied",
-        ])
-        .unwrap();
     }
 
     #[test]

@@ -335,11 +335,13 @@ impl PublishDefinition {
     }
 
     /// The text redaction whose literal is `literal`, compared the way
-    /// redaction matches, without case.
-    pub fn find_text(&self, literal: &str) -> Option<&TextEntry> {
-        self.text
-            .iter()
-            .find(|t| t.literal.eq_ignore_ascii_case(literal))
+    /// redaction matches, without case, under `reason` and `author`.
+    /// The same literal under another reason or author is another
+    /// redaction.
+    pub fn find_text(&self, literal: &str, reason: &str, author: &str) -> Option<&TextEntry> {
+        self.text.iter().find(|t| {
+            t.literal.eq_ignore_ascii_case(literal) && t.reason == reason && t.author == author
+        })
     }
 
     /// Whether a filter may not record `literal`: it was removed

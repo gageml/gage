@@ -262,9 +262,20 @@ Segmentation drops unrelated entries altogether, including all their text.
 Filters and segments prune the pending session, leaving a subset of text to
 check for redactions.
 
-Start a `gage:redacted-text` sub-agent with the pending session ID. The agent
-has instructions for getting the filter redaction instructions and the candidate
-text. It returns a JSON encoded list of text to redact in the format:
+Write the candidate text to files:
+
+```shell
+gage publish redact candidate SESSION --split-files
+```
+
+The command prints one path per line. Each file holds a share of the distinct
+text values of the pending session, one per line as a JSON string, bounded in
+size so that one sub-agent can read it in full.
+
+Start one `gage:redacted-text` sub-agent per path, all in the same message so
+they run at once. Give each the pending session ID and its path. The agent has
+instructions for getting the filter redaction instructions and reading its
+file. Each returns a JSON encoded list of text to redact in the format:
 
 ```json
 [
@@ -273,17 +284,20 @@ text. It returns a JSON encoded list of text to redact in the format:
 ]
 ```
 
-Write the returned JSON to a file in your scratchpad directory and import it:
+Write each returned list to a file in your scratchpad directory and import it:
 
 ```shell
 gage publish redact import -y SESSION PATH
 ```
 
+Import every list. A redaction two agents both return is recorded once; the
+command reports the repeat as already present.
+
 The author of the imported redactions is the current Claude Code session, which
 the command reads from `CLAUDE_CODE_SESSION_ID`. Do not pass `--author`.
 
-Do not read the candidate text yourself. It is the whole text of the pending
-session and is large. The agent reads it so that you do not have to.
+Do not read the candidate files yourself. They are the whole text of the
+pending session and are large. The agents read them so that you do not have to.
 
 ### Step 4. Review the pending op and iterate as needed
 
@@ -319,8 +333,10 @@ If you identify an error, you must stop and fix it. Use any of these commands:
 If you alter the filters or segments, re-run step 3. Filters and segments change
 what text is dropped and what remains to check.
 
-`redact import` is idempotent: a redaction already present is reported as such
-and not duplicated. To remove a redaction, use `redact remove`.
+`redact import` is idempotent: a redaction whose text, reason, and author are
+already present is reported as such and not duplicated. The same text under
+another reason is a redaction of its own. To remove a redaction, use
+`redact remove`.
 
 `gage publish abort -y SESSION` deletes a pending op without publishing.
 

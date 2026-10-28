@@ -4,7 +4,7 @@
 
 use std::fs;
 
-use gage_publish::{FilterSpec, PublishError, Publisher, RedactionInput};
+use gage_publish::{FilterSpec, PublishError, Publisher, RedactionInput, candidate};
 use gage_registry::driver::DriverRegistry;
 use gage_session::SourceOptions;
 use gage_store::{
@@ -983,7 +983,8 @@ fn redacting_a_literal_again_restates_the_existing_redaction() {
         .init(&f.original, &[], &[], "session:test")
         .unwrap();
     let first = RedactionInput::parse_text("garrett", "pii", true).unwrap();
-    let again = RedactionInput::parse_text("GARRETT", "custom", false).unwrap();
+    let again = RedactionInput::parse_text("GARRETT", "pii", false).unwrap();
+    let other_reason = RedactionInput::parse_text("garrett", "custom", true).unwrap();
     let fucking = RedactionInput::parse_text("fucking", "language", false).unwrap();
 
     let applied = publisher
@@ -995,36 +996,90 @@ fn redacting_a_literal_again_restates_the_existing_redaction() {
         .modified()
         .unwrap();
 
+    // The key is the literal without case, the reason, and the author.
+    // A repeat of the triple restates the redaction, mark included;
+    // another reason or another author is a redaction of its own.
     let applied = publisher
         .redact_as(
             &init.id,
             &[
-                (&again, "filter:pii"),
+                (&again, "user:a"),
                 (&fucking, "user:b"),
-                (&fucking, "user:c"),
+                (&fucking, "user:b"),
+                (&other_reason, "user:a"),
+                (&first, "user:c"),
             ],
         )
         .unwrap();
     let summary: Vec<(u64, bool)> = applied.iter().map(|a| (a.id, a.added)).collect();
-    assert_eq!(summary, [(1, false), (2, true), (2, false)]);
-    let texts: Vec<(u64, &str, &str, &str, bool)> = applied
+    assert_eq!(
+        summary,
+        [(1, false), (2, true), (2, false), (3, true), (4, true)]
+    );
+    let texts: Vec<(u64, &str, &str, bool)> = applied
         .iter()
-        .map(|a| (a.id, a.literal.as_str(), a.reason.as_str(), "", a.mark))
+        .map(|a| (a.id, a.literal.as_str(), a.reason.as_str(), a.mark))
         .collect();
-    assert_eq!(texts[0], (1, "garrett", "pii", "", true));
+    assert_eq!(texts[0], (1, "garrett", "pii", true));
+    assert_eq!(texts[3], (3, "garrett", "custom", true));
     let definition = publisher.definition(&init.id).unwrap();
-    assert_eq!(definition.text.len(), 2);
-    assert_eq!(definition.text[0].author, "user:a");
-    assert_eq!(definition.text[1].author, "user:b");
+    let authors: Vec<&str> = definition.text.iter().map(|t| t.author.as_str()).collect();
+    assert_eq!(authors, ["user:a", "user:b", "user:a", "user:c"]);
 
-    let applied = publisher.redact(&init.id, &[first], "user:d").unwrap();
+    let applied = publisher.redact(&init.id, &[first], "user:a").unwrap();
     assert!(!applied[0].added);
     let unchanged = fs::metadata(publisher.store().definition_file(&init.id))
         .unwrap()
         .modified()
         .unwrap();
     assert!(unchanged >= written);
-    assert_eq!(publisher.definition(&init.id).unwrap().text.len(), 2);
+    assert_eq!(publisher.definition(&init.id).unwrap().text.len(), 4);
+}
+
+/// The candidate text is each distinct disclosed value once, in order
+/// of first occurrence, divided into splits that `--split-files`
+/// writes one per file.
+#[test]
+fn candidate_texts_are_each_distinct_value_once_in_splits() {
+    let f = fixture();
+    let publisher = Publisher::with_root(&f.store, &f.publish_root);
+    let init = publisher
+        .init(&f.original, &[], &[], "session:test")
+        .unwrap();
+    let candidates = publisher.candidates(&init.id).unwrap();
+    let texts = publisher.candidate_texts(&init.id).unwrap();
+    // "ok" is the tool result's content and the harness's stdout copy
+    assert_eq!(candidates.iter().filter(|c| c.text == "ok").count(), 2);
+    assert_eq!(texts.iter().filter(|t| *t == "ok").count(), 1);
+    let mut expected: Vec<&str> = Vec::new();
+    for c in &candidates {
+        if !expected.contains(&c.text.as_str()) {
+            expected.push(&c.text);
+        }
+    }
+    assert_eq!(texts, expected);
+    assert!(
+        texts.contains(&"Hello, what the fucking hell is this? Mail alice@example.com".to_string())
+    );
+
+    let total: usize = texts.iter().map(|t| candidate::encode_line(t).len()).sum();
+    let splits = candidate::splits(&texts, total / 2);
+    assert!(splits.len() >= 2, "{splits:#?}");
+    assert_eq!(splits.iter().flatten().count(), texts.len());
+    let dir = f.publish_root.join("candidate");
+    let paths = candidate::write_files(&dir, &splits).unwrap();
+    assert_eq!(paths.len(), splits.len());
+    let back: Vec<String> = paths
+        .iter()
+        .flat_map(|p| {
+            fs::read_to_string(p)
+                .unwrap()
+                .lines()
+                .map(|l| serde_json::from_str::<String>(l).unwrap())
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert_eq!(back, texts);
 }
 
 /// `redact_as` records each redaction under its own author, and a

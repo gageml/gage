@@ -9,6 +9,7 @@
 //! mutation rebuilds the staged session from the original plus the
 //! full definition. The original is named by the staged `attrs.json`.
 
+pub mod candidate;
 mod definition;
 mod derive;
 mod filter;
@@ -342,10 +343,12 @@ impl<'a> Publisher<'a> {
     }
 
     /// Add each input of `items` to the pending publish `id` under the
-    /// author paired with it, and rebuild. An input whose literal is
-    /// already a redaction, compared without case, restates that
-    /// redaction: it is reported under the existing id and left as it
-    /// stood. An input that matches nothing is an error, and nothing
+    /// author paired with it, and rebuild. An input whose literal,
+    /// compared without case, reason, and author are already a
+    /// redaction's restates that redaction: it is reported under the
+    /// existing id and left as it stood, its mark included. The same
+    /// literal under another reason or author is a redaction of its
+    /// own. An input that matches nothing is an error, and nothing
     /// changes. The result is one entry per item, in order.
     pub fn redact_as(
         &self,
@@ -356,16 +359,16 @@ impl<'a> Publisher<'a> {
         let session = self.open_original(id)?;
         let ids: Vec<(u64, bool)> = items
             .iter()
-            .map(
-                |(input, author)| match definition.find_text(&input.literal) {
+            .map(|(input, author)| {
+                match definition.find_text(&input.literal, &input.reason, author) {
                     Some(existing) => (existing.id, false),
                     None => {
                         let id =
                             definition.push_text(&input.literal, &input.reason, author, input.mark);
                         (id, true)
                     }
-                },
-            )
+                }
+            })
             .collect();
         let added: Vec<u64> = ids
             .iter()
@@ -511,6 +514,13 @@ impl<'a> Publisher<'a> {
         let definition = self.definition(id)?;
         let session = self.open_original(id)?;
         derive::candidates(&definition, &session)
+    }
+
+    /// Each distinct text the pending publish `id` discloses, once, in
+    /// order of first occurrence: the candidate text as the redaction
+    /// agent reads it. Reads only.
+    pub fn candidate_texts(&self, id: &str) -> Result<Vec<String>, PublishError> {
+        Ok(candidate::unique_texts(&self.candidates(id)?))
     }
 
     /// The number of spans each text redaction of the pending publish
