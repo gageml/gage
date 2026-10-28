@@ -209,48 +209,107 @@ mod tests {
         assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
-    /// The `metadata` filter leaves out every entry that is not a user
-    /// prompt, an assistant message, or a system entry the message
-    /// table promotes, and leaves out a user entry the harness injected
-    /// as meta. The selectors agree with the entry classifier on the
-    /// sample transcript and on one entry of each shape.
-    #[test]
-    fn metadata_filter_leaves_out_every_entry_that_is_not_conversation() {
-        let descriptor = text_descriptor();
-        let dropped = |line: &str| descriptor.filter_values("metadata", line).unwrap().dropped;
-        let conversation = |line: &str| {
-            let entry: serde_json::Value = serde_json::from_str(line).unwrap();
-            let ty = entry["type"].as_str().unwrap_or_default();
-            let meta = entry["isMeta"].as_bool() == Some(true);
-            match ty {
-                "user" => !meta,
-                "assistant" => true,
-                "system" => message_subtype(&entry).is_some(),
-                _ => false,
+    /// The entry types the harness wrote into the model's context: the
+    /// request shape and blobs, attachments, and a user entry injected
+    /// as meta.
+    fn is_context(entry: &serde_json::Value) -> bool {
+        let ty = entry["type"].as_str().unwrap_or_default();
+        match ty {
+            "api-request-shape" | "api-request-blob" | "attachment" => true,
+            "user" => entry["isMeta"].as_bool() == Some(true),
+            _ => false,
+        }
+    }
+
+    /// The system subtypes a publish keeps: the ones the message table
+    /// promotes, and the refusals, which are part of what happened
+    /// though the table does not show them.
+    const KEPT_SYSTEM_SUBTYPES: &[&str] = &["model_refusal_no_fallback", "model_refusal_fallback"];
+
+    /// What a publish keeps when both harness filters are on: user
+    /// prompts, assistant messages, the kept system subtypes, and the
+    /// user-authored session labels.
+    fn is_conversation(entry: &serde_json::Value) -> bool {
+        let ty = entry["type"].as_str().unwrap_or_default();
+        match ty {
+            "user" => !is_context(entry),
+            "assistant" | "custom-title" | "agent-name" => true,
+            "system" => {
+                message_subtype(entry).is_some()
+                    || entry["subtype"]
+                        .as_str()
+                        .is_some_and(|s| KEPT_SYSTEM_SUBTYPES.contains(&s))
             }
-        };
-        for line in SAMPLE.lines().filter(|l| !l.trim().is_empty()) {
-            assert_eq!(dropped(line), !conversation(line), "{line}");
+            _ => false,
         }
-        let shapes = [
-            r#"{"type":"user","message":{"role":"user","content":"hi"}}"#,
-            r#"{"type":"user","isMeta":true,"message":{"role":"user","content":"<meta>"}}"#,
-            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}"#,
-            r#"{"type":"system","subtype":"turn_duration","durationMs":5}"#,
-            r#"{"type":"system","subtype":"informational","content":"note"}"#,
-            r#"{"type":"system","content":"no subtype"}"#,
-            r#"{"type":"attachment","attachment":{"type":"skill_listing"}}"#,
-            r#"{"type":"progress","data":{}}"#,
-            r#"{"type":"file-history-snapshot","snapshot":{}}"#,
-            r#"{"type":"api-request","params":{}}"#,
-            r#"{"type":"mode","mode":"normal"}"#,
-        ];
-        for line in shapes {
-            assert_eq!(dropped(line), !conversation(line), "{line}");
+    }
+
+    /// One entry of each shape the harness filters distinguish.
+    const SHAPES: &[&str] = &[
+        r#"{"type":"user","message":{"role":"user","content":"hi"}}"#,
+        r#"{"type":"user","isMeta":true,"message":{"role":"user","content":"<meta>"}}"#,
+        r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}"#,
+        r#"{"type":"system","subtype":"turn_duration","durationMs":5}"#,
+        r#"{"type":"system","subtype":"informational","content":"note"}"#,
+        r#"{"type":"system","subtype":"model_refusal_no_fallback","content":""}"#,
+        r#"{"type":"system","content":"no subtype"}"#,
+        r#"{"type":"custom-title","customTitle":"Ducks"}"#,
+        r#"{"type":"agent-name","agentName":"mallard"}"#,
+        r#"{"type":"attachment","attachment":{"type":"skill_listing"}}"#,
+        r#"{"type":"api-request-shape","shape":{"tools":[]}}"#,
+        r#"{"type":"api-request-blob","message":{"content":[]}}"#,
+        r#"{"type":"progress","data":{}}"#,
+        r#"{"type":"file-history-snapshot","snapshot":{}}"#,
+        r#"{"type":"api-request","params":{}}"#,
+        r#"{"type":"mode","mode":"normal"}"#,
+    ];
+
+    fn sample_and_shapes() -> impl Iterator<Item = &'static str> {
+        SAMPLE
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .chain(SHAPES.iter().copied())
+    }
+
+    /// The `harness-context` filter leaves out exactly the entries the
+    /// harness wrote into the model's context, on the sample transcript
+    /// and on one entry of each shape.
+    #[test]
+    fn harness_context_filter_leaves_out_what_the_harness_put_in_context() {
+        let descriptor = text_descriptor();
+        for line in sample_and_shapes() {
+            let entry: serde_json::Value = serde_json::from_str(line).unwrap();
+            let dropped = descriptor
+                .filter_values("harness-context", line)
+                .unwrap()
+                .dropped;
+            assert_eq!(dropped, is_context(&entry), "{line}");
         }
-        for subtype in SYSTEM_MESSAGE_SUBTYPES {
+    }
+
+    /// The `harness-records` filter leaves out every entry that is
+    /// neither conversation nor context, so the two filters together
+    /// leave exactly the conversation. The kept system subtypes agree
+    /// with the entry classifier plus the refusals.
+    #[test]
+    fn harness_records_filter_leaves_out_every_other_entry_that_is_not_conversation() {
+        let descriptor = text_descriptor();
+        for line in sample_and_shapes() {
+            let entry: serde_json::Value = serde_json::from_str(line).unwrap();
+            let dropped = descriptor
+                .filter_values("harness-records", line)
+                .unwrap()
+                .dropped;
+            let expected = !is_conversation(&entry) && !is_context(&entry);
+            assert_eq!(dropped, expected, "{line}");
+        }
+        for subtype in SYSTEM_MESSAGE_SUBTYPES.iter().chain(KEPT_SYSTEM_SUBTYPES) {
             let line = format!(r#"{{"type":"system","subtype":"{subtype}","content":"x"}}"#);
-            assert!(!dropped(&line), "{line}");
+            let dropped = descriptor
+                .filter_values("harness-records", &line)
+                .unwrap()
+                .dropped;
+            assert!(!dropped, "{line}");
         }
     }
 

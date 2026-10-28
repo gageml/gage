@@ -40,8 +40,12 @@
     "description": "Content a statute exempts from disclosure"
   },
   {
-    "code": "metadata",
-    "description": "Content that describes the run rather than what happened in it"
+    "code": "harness-context",
+    "description": "Content the harness placed in the model's context (system prompt, tool definitions, injected instructions)"
+  },
+  {
+    "code": "harness-records",
+    "description": "Records the harness kept about the run (request logs, snapshots, state, usage)"
   },
   {
     "code": "custom",

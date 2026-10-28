@@ -131,10 +131,21 @@ Gage supports these filters:
 `system`
 : Remove paths, hosts, and OS versions.
 
-`metadata`
-: Leave out entries and fields not needed to show what happened: harness
-bookkeeping entries (file snapshots, API request records, attachments, hook and
-skill listings) and run-description fields (version, token usage, request IDs).
+`harness-context`
+: Leave out what the harness placed in the model's context: the system prompt
+and tool definitions, message content as sent with its reminders and
+instruction files, attachments (rendered reminders, instruction files, skill
+and agent listings, hook output), and injected meta entries. What the model saw
+is part of the conversation, so this filter is a motivation and audience
+decision: on for a conversation record, off for an exact record of the run.
+
+`harness-records`
+: Leave out records the harness kept about the run: API request records, file
+snapshots, queue operations, generated titles, mode and permission records, cost
+state, the system entries the conversation does not show, and the
+run-description fields (version, token usage, request IDs) on the entries that
+stay. No reader wants these, so this filter is on for every publish unless the
+user says otherwise.
 
 `custom`
 : Remove what a prompt of your own describes. Added with

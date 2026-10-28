@@ -40,6 +40,26 @@ const SYSTEM_SESSION: &str = concat!(
     "\n",
 );
 
+/// A session whose context entries, the request shape and blob, an
+/// attachment, and a meta user entry, sit between the conversation and
+/// an API request record.
+const CONTEXT_SESSION: &str = concat!(
+    r#"{"type":"user","uuid":"u1","timestamp":"2025-01-01T00:00:00Z","cwd":"/home/garrett/proj","message":{"role":"user","content":"Hello"}}"#,
+    "\n",
+    r#"{"type":"attachment","uuid":"at1","timestamp":"2025-01-01T00:00:00Z","attachment":{"type":"skill_listing","content":"- publish: Publish a session"}}"#,
+    "\n",
+    r#"{"type":"user","uuid":"u2","isMeta":true,"timestamp":"2025-01-01T00:00:00Z","message":{"role":"user","content":"Base directory for this skill: /home/garrett/.gage"}}"#,
+    "\n",
+    r#"{"type":"api-request-shape","id":"s1","shape":{"system":[{"type":"text","text":"You are Claude Code"}],"tools":[{"name":"Bash","description":"Run a command"}]}}"#,
+    "\n",
+    r#"{"type":"api-request-blob","id":"b1","message":{"role":"user","content":[{"type":"text","text":"<system-reminder>rules</system-reminder>"}]}}"#,
+    "\n",
+    r#"{"type":"assistant","uuid":"a1","timestamp":"2025-01-01T00:00:01Z","message":{"id":"m1","role":"assistant","content":[{"type":"text","text":"Hi"}],"usage":{"input_tokens":10,"output_tokens":1}}}"#,
+    "\n",
+    r#"{"type":"api-request","id":"r1","params":{"model":"m"}}"#,
+    "\n",
+);
+
 struct Fixture {
     _home: tempfile::TempDir,
     _claude: tempfile::TempDir,
@@ -292,17 +312,18 @@ fn custom_requires_a_prompt_and_any_filter_takes_one() {
     assert_eq!(publisher.definition(&init.id).unwrap().filters.len(), 1);
 }
 
-/// The `harness` filter leaves out the entries the harness wrote for
-/// itself: the API request on line 5 goes, with one line record under
-/// the filter, and a literal found only there is a miss.
+/// The `harness-records` filter leaves out the entries the harness
+/// kept about the run: the API request on line 5 goes, with one line
+/// record under the filter, and the descriptive fields of the entries
+/// that stay go with it.
 #[test]
-fn metadata_filter_leaves_out_record_keeping_entries_and_descriptive_fields() {
+fn harness_records_filter_leaves_out_run_records_and_descriptive_fields() {
     let f = fixture();
     let publisher = Publisher::with_root(&f.store, &f.publish_root);
     let init = publisher
         .init(
             &f.original,
-            &["metadata".parse::<FilterSpec>().unwrap()],
+            &["harness-records".parse::<FilterSpec>().unwrap()],
             &[],
             "session:test",
         )
@@ -319,7 +340,10 @@ fn metadata_filter_leaves_out_record_keeping_entries_and_descriptive_fields() {
         .filter(|r| r.kind == FilteredKind::Line)
         .map(|r| (r.line, r.line_end, r.reason.as_str(), r.author.as_str()))
         .collect();
-    assert_eq!(dropped, [(5, Some(5), "metadata", "filter:metadata")]);
+    assert_eq!(
+        dropped,
+        [(5, Some(5), "harness-records", "filter:harness-records")]
+    );
     // The token usage is a descriptive field and goes; the working
     // directory is the system filter's and stays
     assert!(!lines[1].contains("\"usage\""), "{}", lines[1]);
@@ -338,7 +362,7 @@ fn metadata_filter_leaves_out_record_keeping_entries_and_descriptive_fields() {
         records
             .iter()
             .filter(|r| r.kind == FilteredKind::Value)
-            .all(|r| r.reason == "metadata" && r.author == "filter:metadata")
+            .all(|r| r.reason == "harness-records" && r.author == "filter:harness-records")
     );
     let summary = staged_summary(&f.publish_root, &init.id);
     assert_eq!(summary["line_count"], 4, "{summary}");
@@ -352,6 +376,44 @@ fn metadata_filter_leaves_out_record_keeping_entries_and_descriptive_fields() {
         )
         .unwrap_err();
     assert!(matches!(err, PublishError::NoMatch(_)), "{err}");
+}
+
+/// The `harness-context` filter leaves out exactly what the harness put
+/// in the model's context: the attachment, the meta user entry, and the
+/// request shape and blob go as one run of lines, while the API request
+/// record stays and the token usage stays.
+#[test]
+fn harness_context_filter_leaves_out_context_entries_and_nothing_else() {
+    let f = fixture_with(CONTEXT_SESSION);
+    let publisher = Publisher::with_root(&f.store, &f.publish_root);
+    let init = publisher
+        .init(
+            &f.original,
+            &["harness-context".parse::<FilterSpec>().unwrap()],
+            &[],
+            "session:test",
+        )
+        .unwrap();
+    let lines = staged_lines(&f.publish_root, &init.id);
+    assert_eq!(lines.len(), 3, "{lines:#?}");
+    assert!(lines[0].contains("\"content\":\"Hello\""), "{}", lines[0]);
+    assert!(lines[1].contains("\"usage\""), "{}", lines[1]);
+    assert!(lines[2].contains("\"api-request\""), "{}", lines[2]);
+    let records = filtered(&f.publish_root, &init.id);
+    let dropped: Vec<(u32, Option<u32>, &str, &str)> = records
+        .iter()
+        .filter(|r| r.kind == FilteredKind::Line)
+        .map(|r| (r.line, r.line_end, r.reason.as_str(), r.author.as_str()))
+        .collect();
+    assert_eq!(
+        dropped,
+        [(2, Some(5), "harness-context", "filter:harness-context")]
+    );
+    assert!(
+        records.iter().all(|r| r.kind == FilteredKind::Line),
+        "{records:#?}"
+    );
+    publisher.check(&init.id).unwrap();
 }
 
 /// `init` rejects a filter given twice.

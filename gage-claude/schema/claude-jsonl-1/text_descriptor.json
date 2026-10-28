@@ -128,7 +128,13 @@
     "$.serverClassifierContext.context.git_state.visibility.visibility_cache[*].visibility"
   ],
   "filters": {
-    "metadata": {
+    "harness-context": {
+      "entries": [
+        "$[?$.type == 'api-request-shape' || $.type == 'api-request-blob' || $.type == 'attachment']",
+        "$[?$.type == 'user' && $.isMeta == true]"
+      ]
+    },
+    "harness-records": {
       "value": [
         "$.version",
         "$.entrypoint",
@@ -143,9 +149,8 @@
         "$.message.usage"
       ],
       "entries": [
-        "$[?$.type != 'user' && $.type != 'assistant' && $.type != 'system']",
-        "$[?$.type == 'system' && $.subtype != 'api_error' && $.subtype != 'away_summary' && $.subtype != 'compact_boundary' && $.subtype != 'informational' && $.subtype != 'local_command']",
-        "$[?$.type == 'user' && $.isMeta == true]"
+        "$[?$.type != 'user' && $.type != 'assistant' && $.type != 'system' && $.type != 'custom-title' && $.type != 'agent-name' && $.type != 'api-request-shape' && $.type != 'api-request-blob' && $.type != 'attachment']",
+        "$[?$.type == 'system' && $.subtype != 'api_error' && $.subtype != 'away_summary' && $.subtype != 'compact_boundary' && $.subtype != 'informational' && $.subtype != 'local_command' && $.subtype != 'model_refusal_no_fallback' && $.subtype != 'model_refusal_fallback']"
       ]
     },
     "pii": {

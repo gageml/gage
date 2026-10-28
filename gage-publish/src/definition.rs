@@ -17,7 +17,15 @@ use serde_json::json;
 use crate::PublishError;
 
 /// The filters with a built-in definition, in listing order.
-pub const NAMED_FILTERS: &[&str] = &["pii", "language", "secret", "system", "metadata", "custom"];
+pub const NAMED_FILTERS: &[&str] = &[
+    "pii",
+    "language",
+    "secret",
+    "system",
+    "harness-context",
+    "harness-records",
+    "custom",
+];
 
 /// Whether the filter `name` has no instructions of its own and takes
 /// its prompt as the whole instruction.
