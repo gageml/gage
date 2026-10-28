@@ -33,7 +33,7 @@ pub use definition::{
     RedactionInput, Segment, TextEntry, requires_prompt,
 };
 pub use derive::{Applied, Built, Candidate, Instance, InstanceKind, Span};
-pub use filter::{Filter, Pattern};
+pub use filter::{Audience, Filter, Pattern, Use};
 
 /// The marker a redacted span or value is replaced with.
 pub const MARKER: &str = "[REDACTED]";

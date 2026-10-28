@@ -11,6 +11,7 @@
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
 use std::env;
+use std::fmt;
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
@@ -22,8 +23,8 @@ use gage_core::config::gage_home;
 use gage_core::style::IdHighlighter;
 use gage_core::uuid::short_uuid;
 use gage_publish::{
-    Applied, Filter, FilterEntry, FilterSpec, NAMED_FILTERS, PublishDefinition, PublishError,
-    Publisher, REASONS, RedactionInput, TextEntry, candidate,
+    Applied, Audience, Filter, FilterEntry, FilterSpec, NAMED_FILTERS, PublishDefinition,
+    PublishError, Publisher, REASONS, RedactionInput, TextEntry, Use, candidate,
 };
 use gage_session::{Driver, NativeSession, SourceOptions};
 use gage_store::url::{LineSelection, parse_session_origin};
@@ -122,6 +123,28 @@ pub struct InitArgs {
     /// Publish a stored session
     #[arg(id = "stored", short = 'S', long = "stored", conflicts_with = "source")]
     stored: bool,
+
+    /// Audience session is published for (default self)
+    ///
+    /// Audience session is published for (default self)
+    ///
+    /// Selects every filter that lists audience. Values are "self"
+    /// (private use only; no filter lists it), "trusted" (an audience
+    /// you know and trust), and "public" (anyone). Values are
+    /// independent: one implies nothing about another.
+    #[arg(short, long, value_name = "AUDIENCE", hide_default_value = true)]
+    audience: Option<String>,
+
+    /// Use session is published for (default scan)
+    ///
+    /// Use session is published for (default scan)
+    ///
+    /// Selects every filter that lists use. Values are "scan" (every
+    /// entry stays; no filter lists it) and "reading" (entries a reader
+    /// does not want are left out). Values are independent: one implies
+    /// nothing about another.
+    #[arg(short, long, value_name = "USE", hide_default_value = true)]
+    r#use: Option<String>,
 
     /// Filter to apply (repeatable)
     #[arg(
@@ -518,7 +541,7 @@ pub struct ApplyArgs {
 const FILTER_HELP: &str = "A filter name; see --list-filters. Filter names are \"pii\", \
 \"language\", \"secret\", \"system\", \"harness-context\", \"harness-records\", and \
 \"custom\". \"custom\" takes --prompt as its whole instruction, so it is added with filter \
-add.";
+add. On init, a filter is added to those --audience and --use select.";
 
 /// The `filter` group declares the `--source` and `--stored` override
 /// itself: none of its commands takes them, so the group capturing a
@@ -815,11 +838,14 @@ fn init(args: InitArgs) -> Result<(), CliError> {
     };
     let (source, stored) = (args.source.clone(), args.stored);
     let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
-    let filters = args
+    let audience = parse_audience(args.audience.as_deref())?;
+    let uses = parse_use(args.r#use.as_deref())?;
+    let added = args
         .filter
         .iter()
         .map(|name| parse_filter("gage publish init", "--filter", name, None))
         .collect::<Result<Vec<_>, _>>()?;
+    let filters = selected_filters(audience, uses, added);
     let segments = args
         .segment
         .iter()
@@ -851,6 +877,8 @@ fn init(args: InitArgs) -> Result<(), CliError> {
             }
         };
         preview_sessions(&[line], kind, None)?;
+        dialog::step_value("Audience", audience)?;
+        dialog::step_value("Use", uses)?;
         filters_step(&filters)?;
         if !segments.is_empty() {
             dialog::step_list("Segments", segments.iter().map(|s| value_cell(s)))?;
@@ -875,7 +903,7 @@ fn init(args: InitArgs) -> Result<(), CliError> {
 /// Print the named filters as a table, the way `gage scan
 /// --list-scanners` prints scanners.
 fn list_filters() {
-    let header: Vec<String> = ["Filter", "Description"]
+    let header: Vec<String> = ["Filter", "Audience", "Use", "Description"]
         .iter()
         .map(|s| s.to_string())
         .collect();
@@ -893,17 +921,66 @@ fn list_filters() {
             Columns::one(0).not(Rows::first()),
             style::tty(Color::FG_BRIGHT_YELLOW),
         )
-        .modify(Columns::one(1).not(Rows::first()), style::dim())
+        .modify(Columns::one(3).not(Rows::first()), style::dim())
         .to_string();
     println!("{table}");
 }
 
-/// One row per named filter: name and description.
+/// One row per named filter: name, the audiences and uses it lists
+/// (empty when it lists none), and description.
 fn filter_rows() -> Vec<Vec<String>> {
+    fn joined<T: fmt::Display>(values: &[T]) -> String {
+        values
+            .iter()
+            .map(|v| v.to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
     Filter::all()
         .iter()
-        .map(|f| vec![f.name.to_string(), f.description.to_string()])
+        .map(|f| {
+            vec![
+                f.name.to_string(),
+                joined(&f.audience),
+                joined(&f.uses),
+                f.description.to_string(),
+            ]
+        })
         .collect()
+}
+
+/// The audience `text` names, `self` when there is none. A name
+/// outside the list is a usage error in clap's layout.
+fn parse_audience(text: Option<&str>) -> Result<Audience, CliError> {
+    let Some(text) = text else {
+        return Ok(Audience::Private);
+    };
+    if !Audience::NAMES.contains(&text) {
+        return Err(CliError::invalid_value(
+            "gage publish init",
+            "--audience",
+            text,
+            Audience::NAMES,
+        ));
+    }
+    Ok(text.parse().expect("a listed audience name parses"))
+}
+
+/// The use `text` names, `scan` when there is none. A name outside
+/// the list is a usage error in clap's layout.
+fn parse_use(text: Option<&str>) -> Result<Use, CliError> {
+    let Some(text) = text else {
+        return Ok(Use::Scan);
+    };
+    if !Use::NAMES.contains(&text) {
+        return Err(CliError::invalid_value(
+            "gage publish init",
+            "--use",
+            text,
+            Use::NAMES,
+        ));
+    }
+    Ok(text.parse().expect("a listed use name parses"))
 }
 
 /// The filter `text` denotes, with `@PATH` read as a file. An unknown
@@ -933,6 +1010,24 @@ fn parse_filter(
         .map_err(|e| CliError::message(format!("{command}: {e}")))?;
     FilterSpec::new(name, prompt.map(|p| p.trim_end().to_string()))
         .map_err(|e| CliError::message(format!("{command}: {e}")))
+}
+
+/// The filters an init stages: those `audience` or `uses` selects, in
+/// listing order, then each of `added` not already among them.
+fn selected_filters(audience: Audience, uses: Use, added: Vec<FilterSpec>) -> Vec<FilterSpec> {
+    let mut filters: Vec<FilterSpec> = Filter::selected(audience, uses)
+        .into_iter()
+        .map(|f| {
+            FilterSpec::new(f.name, None)
+                .expect("custom lists no value, so no selected filter needs a prompt")
+        })
+        .collect();
+    for spec in added {
+        if !filters.iter().any(|f| f.name == spec.name) {
+            filters.push(spec);
+        }
+    }
+    filters
 }
 
 /// The `Filters` step of the dialog: one line per filter, or `none`.
@@ -2596,14 +2691,69 @@ mod tests {
     }
 
     #[test]
-    fn filter_rows_list_every_named_filter_with_a_description() {
+    fn filter_rows_list_every_named_filter_with_its_values_and_a_description() {
         let rows = filter_rows();
         let mut names: Vec<&str> = rows.iter().map(|r| r[0].as_str()).collect();
         names.sort_unstable();
         let mut expected = NAMED_FILTERS.to_vec();
         expected.sort_unstable();
         assert_eq!(names, expected);
-        assert!(rows.iter().all(|r| r.len() == 2 && !r[1].is_empty()));
+        assert!(rows.iter().all(|r| r.len() == 4 && !r[3].is_empty()));
+        let row = |name: &str| rows.iter().find(|r| r[0] == name).unwrap();
+        assert_eq!(row("secret")[1], "public, trusted");
+        assert_eq!(row("secret")[2], "");
+        assert_eq!(row("harness-context")[1], "");
+        assert_eq!(row("harness-context")[2], "reading");
+        assert_eq!(row("custom")[1], "");
+        assert_eq!(row("custom")[2], "");
+    }
+
+    /// An init stages what the audience and use select, then the
+    /// filters given, each once. The defaults select nothing.
+    #[test]
+    fn init_filters_are_the_selection_then_the_added_ones_once() {
+        let spec = |name: &str| FilterSpec::new(name, None).unwrap();
+        let names = |audience: Option<&str>, uses: Option<&str>, added| -> Vec<String> {
+            let (Ok(audience), Ok(uses)) = (parse_audience(audience), parse_use(uses)) else {
+                panic!("{audience:?} {uses:?} parse");
+            };
+            selected_filters(audience, uses, added)
+                .into_iter()
+                .map(|f| f.name)
+                .collect()
+        };
+        assert_eq!(names(None, None, vec![spec("pii")]), ["pii"]);
+        assert_eq!(
+            names(
+                Some("trusted"),
+                Some("reading"),
+                vec![spec("secret"), spec("pii")]
+            ),
+            [
+                "secret",
+                "language",
+                "harness-context",
+                "harness-records",
+                "pii"
+            ]
+        );
+        let text = match parse_audience(Some("everyone")) {
+            Err(CliError::Usage(e)) => e.render().to_string(),
+            _ => panic!("not a usage error"),
+        };
+        assert!(
+            text.contains("invalid value 'everyone' for '--audience <AUDIENCE>'"),
+            "{text}"
+        );
+        assert!(
+            text.contains("[possible values: self, trusted, public]"),
+            "{text}"
+        );
+        let text = match parse_use(Some("read")) {
+            Err(CliError::Usage(e)) => e.render().to_string(),
+            _ => panic!("not a usage error"),
+        };
+        assert!(text.contains("[possible values: scan, reading]"), "{text}");
     }
 
     #[test]

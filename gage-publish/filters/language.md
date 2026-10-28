@@ -1,4 +1,8 @@
-Identify language that is not fit for a public record: profanity, slurs, sexual
++++
+audience = ["public", "trusted"]
++++
+
+Identify language that is not fit for a shared record: profanity, slurs, sexual
 content, and abuse directed at a person or at the agent.
 
 Specify the exact match of the text to redact.

@@ -86,21 +86,37 @@ it to a repository that other users (or agents) have access to. To determine
 what information can be shared, you must understand who will eventually see the
 information.
 
-There are two classes of audience:
+`init` takes the audience as `--audience`:
 
-- Private access (limited audience)
-- Public access (general audience)
+`self`
+: Private use only. No filter is selected for it.
 
-These classes correspond to private and public Git repositories respectively.
+`trusted`
+: An audience the user knows and trusts. A trusted audience includes only those
+  who the user grants access to, such as the readers of a private Git
+  repository.
 
-Publishing shared sessions to a general audience requires the highest level of
-scrutiny. A public audience represents all users, including those actively
-seeking to do harm to the user.
+`public`
+: Anyone. A public audience represents all users, including those actively
+  seeking to do harm to the user, such as the readers of a public Git
+  repository. Publishing to a public audience requires the highest level of
+  scrutiny.
 
-A limited audience includes only those who the user grants access to.
+The values are independent: each filter lists the audiences it is selected for,
+and one value implies nothing about another. It's imperative to know who will be
+given access to the published session in all cases.
 
-A limited audience may be highly trusted or not trusted. It's imperative to know
-who will be given access to the published session in all cases.
+### Use
+
+A published session is read for its narrative, or it is scanned by tooling.
+`init` takes the use as `--use`:
+
+`scan`
+: Scanning. Every entry stays; no filter is selected for it.
+
+`reading`
+: Reading for narrative content. The entries a reader does not want are left
+  out.
 
 ### Filters
 
@@ -115,43 +131,45 @@ A filter specifies:
 - Session attributes to drop
 - Model instructions for redacting text
 
-Filters are named.
+Filters are named. Each filter lists the audiences and the uses it is selected
+for; `--audience` and `--use` on `init` select every filter that lists the
+value, and `--filter` adds to that selection.
 
 Gage supports these filters:
 
-`pii`
+`pii` (audience: public)
 : Remove personally identifiable information.
 
-`secret`
+`secret` (audience: public, trusted)
 : Remove passwords, API keys, and other secrets.
 
-`language`
-: Remove profanity and other language unfit for a public record.
+`language` (audience: public, trusted)
+: Remove profanity and other language unfit for a shared record.
 
-`system`
+`system` (audience: public)
 : Remove paths, hosts, and OS versions.
 
-`harness-context`
+`harness-context` (use: reading)
 : Leave out what the harness placed in the model's context: the system prompt
   and tool definitions, message content as sent with its reminders and
   instruction files, attachments (rendered reminders, instruction files, skill
   and agent listings, hook output), and injected meta entries. What the model
-  saw is part of the conversation, so this filter is a motivation and audience
-  decision: on for a conversation record, off for an exact record of the run.
+  saw is part of the conversation, so a reader of the narrative does not want
+  it, and a scan of the exact run does.
 
-`harness-records`
+`harness-records` (use: reading)
 : Leave out records the harness kept about the run: API request records, file
   snapshots, queue operations, generated titles, mode and permission records,
   cost state, the system entries the conversation does not show, and the
   run-description fields (version, token usage, request IDs) on the entries that
-  stay. No reader wants these, so this filter is on for every publish unless the
-  user says otherwise.
+  stay. No reader wants these; a scan keeps them.
 
 `custom`
 : Remove what a prompt of your own describes. Added with
   `gage publish filter add` and `--prompt`, never with `init --filter`.
 
-`gage publish init --list-filters` prints this list.
+`gage publish init --list-filters` prints this list with each filter's audiences
+and uses.
 
 ### Segments
 
@@ -197,21 +215,26 @@ is unambiguous works.
 A native Claude Code session is named by its ID or an ID prefix:
 
 ```shell
-gage publish init -y --filter FILTER --segment TEXT SESSION_TO_PUBLISH
+gage publish init -y --audience AUDIENCE --use USE --filter FILTER --segment TEXT SESSION_TO_PUBLISH
 ```
 
 A session already in the Gage store is named by tag, ID, or prefix with `-S`:
 
 ```shell
-gage publish init -y -S --filter FILTER --segment TEXT SESSION_TO_PUBLISH
+gage publish init -y -S --audience AUDIENCE --use USE --filter FILTER --segment TEXT SESSION_TO_PUBLISH
 ```
+
+Always pass `--audience` and `--use`, so the publish states who it is for and
+what it is for. Without them `init` publishes for `self` and `scan`, which
+select no filter.
 
 Without `-S`, `init` looks for a native session only and a stored session is "no
 native session matches". `gage session list` lists native sessions and
 `gage session list -S` stored ones.
 
-Repeat `--filter` and `--segment` as needed. A segment given here starts without
-lines and drops nothing until step 2 gives it lines.
+Repeat `--filter` and `--segment` as needed. A filter given here is added to
+those the audience and use select. A segment given here starts without lines
+and drops nothing until step 2 gives it lines.
 
 The command prints a dialog ending in `Staged publish SESSION`. It also reports,
 per filter, the redactions the filter's deterministic patterns staged at once.

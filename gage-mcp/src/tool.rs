@@ -8,6 +8,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use gage_core::front_matter;
 use rmcp::handler::server::router::tool::ToolRoute;
 use rmcp::model::{CallToolResult, Content, JsonObject, Tool as ToolMeta, ToolAnnotations};
 use serde::Deserialize;
@@ -145,12 +146,8 @@ struct Annotations {
 }
 
 fn parse_md(md: &str) -> (Frontmatter, &str) {
-    let after_open = md
-        .strip_prefix("+++\n")
-        .expect("tool .md must start with `+++` line");
-    let (fm_str, body) = after_open
-        .split_once("\n+++\n")
-        .expect("tool .md must close frontmatter with `+++` line");
+    let (fm_str, body) = front_matter::split(md).expect("tool .md closes its frontmatter");
+    let fm_str = fm_str.expect("tool .md starts with a `+++` line");
     let fm: Frontmatter = toml::from_str(fm_str).expect("invalid TOML frontmatter");
     (fm, body.trim())
 }

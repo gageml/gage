@@ -8,11 +8,15 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::str::FromStr;
 use std::sync::LazyLock;
 
 use aho_corasick::{AhoCorasick, AhoCorasickBuilder};
+use gage_core::front_matter;
 use regex::Regex;
 use serde::Deserialize;
+
+use crate::PublishError;
 
 /// A named filter.
 pub struct Filter {
@@ -21,9 +25,16 @@ pub struct Filter {
     pub reason: &'static str,
     /// One line on what the filter removes, for a listing
     pub description: &'static str,
-    /// The instruction prose for the agent. A filter that requires a
-    /// prompt has prose on how the prompt is read
+    /// The instruction prose for the agent, after the front matter. A
+    /// filter that requires a prompt has prose on how the prompt is
+    /// read
     pub instructions: &'static str,
+    /// The audiences the filter is selected for. The values are
+    /// independent: a listed value selects the filter, and no value
+    /// implies another.
+    pub audience: Vec<Audience>,
+    /// The uses the filter is selected for, under the same rule.
+    pub uses: Vec<Use>,
     /// The attributes of `attrs.json` the filter leaves out of the
     /// published session
     pub attrs: &'static [&'static str],
@@ -31,6 +42,113 @@ pub struct Filter {
     /// The keyword prefilter: a pattern with keywords runs only on text
     /// containing one of them.
     keywords: Option<Keywords>,
+}
+
+/// Who will read the published session. The values are independent
+/// labels; a filter lists each one it is selected for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Audience {
+    /// Private use only; no filter lists it
+    #[serde(rename = "self")]
+    Private,
+    /// An audience the publisher knows and trusts
+    Trusted,
+    /// Anyone
+    Public,
+}
+
+impl Audience {
+    /// The values as the CLI and the front matter spell them, in
+    /// listing order.
+    pub const NAMES: &[&str] = &["self", "trusted", "public"];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Audience::Private => "self",
+            Audience::Trusted => "trusted",
+            Audience::Public => "public",
+        }
+    }
+}
+
+impl FromStr for Audience {
+    type Err = PublishError;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        match text {
+            "self" => Ok(Audience::Private),
+            "trusted" => Ok(Audience::Trusted),
+            "public" => Ok(Audience::Public),
+            other => Err(PublishError::Input(format!(
+                "unknown audience {other:?}; audiences are {}",
+                Audience::NAMES.join(", ")
+            ))),
+        }
+    }
+}
+
+impl fmt::Display for Audience {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// What the published session is for. The values are independent
+/// labels; a filter lists each one it is selected for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Use {
+    /// Scanning; every entry stays, and no filter lists it
+    Scan,
+    /// Reading for narrative content
+    Reading,
+}
+
+impl Use {
+    /// The values as the CLI and the front matter spell them, in
+    /// listing order.
+    pub const NAMES: &[&str] = &["scan", "reading"];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Use::Scan => "scan",
+            Use::Reading => "reading",
+        }
+    }
+}
+
+impl FromStr for Use {
+    type Err = PublishError;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        match text {
+            "scan" => Ok(Use::Scan),
+            "reading" => Ok(Use::Reading),
+            other => Err(PublishError::Input(format!(
+                "unknown use {other:?}; uses are {}",
+                Use::NAMES.join(", ")
+            ))),
+        }
+    }
+}
+
+impl fmt::Display for Use {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// The front matter of a filter's prose file: the audiences and uses
+/// the filter is selected for. A file without front matter lists
+/// neither.
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FrontMatter {
+    #[serde(default)]
+    audience: Vec<Audience>,
+    #[serde(default, rename = "use")]
+    uses: Vec<Use>,
 }
 
 /// A compiled matcher for a known shape of sensitive text. The secret
@@ -484,6 +602,29 @@ impl Filter {
         &FILTERS
     }
 
+    /// The named filters that list `audience` or list `uses`, in
+    /// listing order.
+    pub fn selected(audience: Audience, uses: Use) -> Vec<&'static Filter> {
+        FILTERS
+            .iter()
+            .filter(|f| f.audience.contains(&audience) || f.uses.contains(&uses))
+            .collect()
+    }
+
+    /// The filter with its front matter read out of `instructions`:
+    /// the audiences and uses it lists, and the prose after them.
+    fn read_front_matter(mut self) -> Self {
+        let (toml, body) = front_matter::split(self.instructions)
+            .unwrap_or_else(|e| panic!("filter {}: {e}", self.name));
+        let front: FrontMatter = toml
+            .map(|t| toml::from_str(t).unwrap_or_else(|e| panic!("filter {}: {e}", self.name)))
+            .unwrap_or_default();
+        self.audience = front.audience;
+        self.uses = front.uses;
+        self.instructions = body.trim_start();
+        self
+    }
+
     /// The instructions with `prompt` in place of every `{{ prompt }}`
     /// placeholder. Without a placeholder the prompt has no place in
     /// the instructions and is left out.
@@ -523,12 +664,14 @@ const GITLEAKS: &str = include_str!("../filters/gitleaks.toml");
 
 static FILTERS: LazyLock<Vec<Filter>> = LazyLock::new(|| {
     let secret = gitleaks_patterns(GITLEAKS).expect("vendored gitleaks rules compile");
-    vec![
+    let filters = vec![
         Filter {
             name: "pii",
             reason: "pii",
             description: "Remove personally identifiable information",
             instructions: include_str!("../filters/pii.md"),
+            audience: Vec::new(),
+            uses: Vec::new(),
             attrs: &[],
             patterns: vec![
                 Pattern::new("email", r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"),
@@ -551,6 +694,8 @@ static FILTERS: LazyLock<Vec<Filter>> = LazyLock::new(|| {
             reason: "secret",
             description: "Remove passwords, API keys, and other secrets",
             instructions: include_str!("../filters/secret.md"),
+            audience: Vec::new(),
+            uses: Vec::new(),
             attrs: &[],
             keywords: Keywords::new(&secret),
             patterns: secret,
@@ -558,8 +703,10 @@ static FILTERS: LazyLock<Vec<Filter>> = LazyLock::new(|| {
         Filter {
             name: "language",
             reason: "language",
-            description: "Remove profanity and other language unfit for a public record",
+            description: "Remove profanity and other language unfit for a shared record",
             instructions: include_str!("../filters/language.md"),
+            audience: Vec::new(),
+            uses: Vec::new(),
             attrs: &[],
             patterns: Vec::new(),
             keywords: None,
@@ -569,6 +716,8 @@ static FILTERS: LazyLock<Vec<Filter>> = LazyLock::new(|| {
             reason: "system",
             description: "Remove paths, hosts, and OS versions",
             instructions: include_str!("../filters/system.md"),
+            audience: Vec::new(),
+            uses: Vec::new(),
             attrs: &["project"],
             patterns: Vec::new(),
             keywords: None,
@@ -578,6 +727,8 @@ static FILTERS: LazyLock<Vec<Filter>> = LazyLock::new(|| {
             reason: "harness-context",
             description: "Leave out what the harness placed in the model's context",
             instructions: include_str!("../filters/harness-context.md"),
+            audience: Vec::new(),
+            uses: Vec::new(),
             attrs: &[],
             patterns: Vec::new(),
             keywords: None,
@@ -587,6 +738,8 @@ static FILTERS: LazyLock<Vec<Filter>> = LazyLock::new(|| {
             reason: "harness-records",
             description: "Leave out records the harness kept about the run",
             instructions: include_str!("../filters/harness-records.md"),
+            audience: Vec::new(),
+            uses: Vec::new(),
             attrs: &[],
             patterns: Vec::new(),
             keywords: None,
@@ -596,11 +749,14 @@ static FILTERS: LazyLock<Vec<Filter>> = LazyLock::new(|| {
             reason: "custom",
             description: "Remove what a prompt of your own describes",
             instructions: include_str!("../filters/custom.md"),
+            audience: Vec::new(),
+            uses: Vec::new(),
             attrs: &[],
             patterns: Vec::new(),
             keywords: None,
         },
-    ]
+    ];
+    filters.into_iter().map(Filter::read_front_matter).collect()
 });
 
 #[cfg(test)]
@@ -647,6 +803,8 @@ mod tests {
             reason: "custom",
             description: "",
             instructions: "A {{prompt}} B {{  prompt  }} C",
+            audience: Vec::new(),
+            uses: Vec::new(),
             attrs: &[],
             patterns: Vec::new(),
             keywords: None,
@@ -671,6 +829,90 @@ mod tests {
         }
         assert_eq!(Filter::all().len(), crate::NAMED_FILTERS.len());
         assert!(Filter::named("ducks").is_none());
+    }
+
+    /// The front matter never reaches the model: every filter's
+    /// instructions open with prose.
+    #[test]
+    fn instructions_begin_with_prose_and_carry_no_front_matter() {
+        for filter in Filter::all() {
+            let rendered = filter.instructions_with_prompt(None);
+            assert!(!rendered.contains("+++"), "{}: {rendered}", filter.name);
+            assert!(
+                rendered.starts_with(|c: char| c.is_ascii_uppercase()),
+                "{}: {rendered}",
+                filter.name
+            );
+        }
+    }
+
+    /// The audiences and uses each filter lists, as its front matter
+    /// states them. A change here is a change to what an audience or
+    /// a use selects.
+    #[test]
+    fn front_matter_lists_each_filters_audiences_and_uses() {
+        use Audience::{Public, Trusted};
+        use Use::Reading;
+        let listed: Vec<(&str, &[Audience], &[Use])> = Filter::all()
+            .iter()
+            .map(|f| (f.name, f.audience.as_slice(), f.uses.as_slice()))
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                ("pii", &[Public][..], &[][..]),
+                ("secret", &[Public, Trusted][..], &[][..]),
+                ("language", &[Public, Trusted][..], &[][..]),
+                ("system", &[Public][..], &[][..]),
+                ("harness-context", &[][..], &[Reading][..]),
+                ("harness-records", &[][..], &[Reading][..]),
+                ("custom", &[][..], &[][..]),
+            ]
+        );
+    }
+
+    /// A selection is the filters that list either value, in listing
+    /// order. The identity values select nothing because no filter
+    /// lists them, and the values imply nothing about one another.
+    #[test]
+    fn selection_is_containment_in_either_list() {
+        let names = |audience, uses| -> Vec<&str> {
+            Filter::selected(audience, uses)
+                .into_iter()
+                .map(|f| f.name)
+                .collect()
+        };
+        assert!(names(Audience::Private, Use::Scan).is_empty());
+        assert_eq!(
+            names(Audience::Public, Use::Reading),
+            [
+                "pii",
+                "secret",
+                "language",
+                "system",
+                "harness-context",
+                "harness-records"
+            ]
+        );
+        assert_eq!(names(Audience::Trusted, Use::Scan), ["secret", "language"]);
+        assert_eq!(
+            names(Audience::Private, Use::Reading),
+            ["harness-context", "harness-records"]
+        );
+    }
+
+    #[test]
+    fn audience_and_use_parse_their_names_and_reject_others() {
+        for name in Audience::NAMES {
+            assert_eq!(name.parse::<Audience>().unwrap().name(), *name);
+        }
+        for name in Use::NAMES {
+            assert_eq!(name.parse::<Use>().unwrap().name(), *name);
+        }
+        let err = "ducks".parse::<Audience>().unwrap_err().to_string();
+        assert!(err.contains("self, trusted, public"), "{err}");
+        let err = "ducks".parse::<Use>().unwrap_err().to_string();
+        assert!(err.contains("scan, reading"), "{err}");
     }
 
     #[test]

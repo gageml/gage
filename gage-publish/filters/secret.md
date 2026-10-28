@@ -1,3 +1,7 @@
++++
+audience = ["public", "trusted"]
++++
+
 Remove every credential or key whose leak enables unauthorized access or
 impersonation: passwords, API keys, access tokens, bearer tokens, private keys,
 signing secrets, and connection strings that embed a password. A public

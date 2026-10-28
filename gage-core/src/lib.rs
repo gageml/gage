@@ -1,6 +1,7 @@
 pub mod author;
 pub mod config;
 pub mod datetime;
+pub mod front_matter;
 pub mod fs;
 pub mod glob;
 pub mod path;
