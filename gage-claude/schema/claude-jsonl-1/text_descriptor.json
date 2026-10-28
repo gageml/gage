@@ -127,6 +127,10 @@
     "$.serverClassifierContext.context.git_state.visibility.remotes[*].visibility",
     "$.serverClassifierContext.context.git_state.visibility.visibility_cache[*].visibility"
   ],
+  "allow": [
+    "^.{0,2}$",
+    "^/(tmp|home|usr|var|opt|root|mnt|srv|etc)/?$"
+  ],
   "filters": {
     "harness-context": {
       "entries": [
@@ -154,10 +158,16 @@
       ]
     },
     "pii": {
-      "literal": ["$..user_identity", "$..home_dir"],
+      "literal": ["$..user_identity"],
       "value": ["$.attachment.context.userEmail"]
     },
     "system": {
+      "literal": [
+        "$.cwd",
+        "$..home_dir",
+        "$.attachment.snapshot.scratchpadDirectory",
+        "$.attachment.snapshot.osVersion"
+      ],
       "value": [
         "$.cwd",
         "$..live_cwd",

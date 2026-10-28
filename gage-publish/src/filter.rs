@@ -540,6 +540,9 @@ static FILTERS: LazyLock<Vec<Filter>> = LazyLock::new(|| {
                     "ssn",
                     r"(?:^|[^0-9-])([0-9]{3}-[0-9]{2}-[0-9]{4})(?:[^0-9-]|$)",
                 ),
+                // The name the harness's repository status reminder
+                // quotes from the Git identity
+                Pattern::new("git-user", r"(?m)^Git user: (.+?)[ \t]*$"),
             ],
             keywords: None,
         },
@@ -802,7 +805,7 @@ mod tests {
     }
 
     #[test]
-    fn pii_patterns_find_emails_phones_and_ssns() {
+    fn pii_patterns_find_emails_phones_ssns_and_the_git_user() {
         let text =
             "mail alice@example.com or call 555-123-4567; ssn 123-45-6789; ticket 2026-10-23";
         let found = Filter::named("pii").unwrap().matches(text);
@@ -811,5 +814,10 @@ mod tests {
             literals,
             ["alice@example.com", "555-123-4567", "123-45-6789"]
         );
+        // The git user line yields the name alone, without the label or
+        // trailing whitespace; the label mid-line is not the reminder
+        let status = "Main branch: main\n\nGit user: Alice B. Carol  \n\nStatus:\n(clean)\nsee Git user: docs";
+        let found = Filter::named("pii").unwrap().matches(status);
+        assert_eq!(found, [("git-user", "Alice B. Carol")]);
     }
 }

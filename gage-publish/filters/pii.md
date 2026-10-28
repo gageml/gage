@@ -1,5 +1,6 @@
 The user's email address field is left out of the published session by type, and
-the username and home directory are redacted everywhere by pattern. Remove what
+the username and the name on the "Git user:" line of the repository status
+reminder are redacted everywhere by pattern. Remove what
 remains whose disclosure would be an unwarranted invasion of personal privacy:
 names of private individuals, email addresses, phone numbers, postal addresses,
 and account and national identifiers, wherever they appear in text. A public

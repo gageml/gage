@@ -1,7 +1,9 @@
 The fields whose type says they hold a path, a host, or an OS version are left
 out of the published session: the working directory, the home directory, the git
 state, the trusted directories, the rule roots, the remotes, and the environment
-snapshot. Remove what remains in text and would help someone target the machine
+snapshot. The working directory, the home directory, the scratchpad directory,
+and the OS version are also redacted everywhere by pattern. Remove what remains
+in text and would help someone target the machine
 or network the session ran on: an absolute filesystem path, a hostname, an IP
 address, an internal URL, the remote of a version control host, and an operating
 system or kernel version quoted in a prompt, a tool call, a tool result, or a

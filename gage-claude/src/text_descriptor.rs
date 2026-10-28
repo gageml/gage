@@ -1,8 +1,9 @@
 //! The Claude driver's text descriptor: which fields of a transcript
 //! line are identifiers, timestamps, digests, signatures, or
 //! enumerations rather than text, which fields a named filter treats
-//! as sensitive by type, and which entries the harness wrote for its
-//! own bookkeeping. The publish redaction engine reads it.
+//! as sensitive by type, which entries the harness wrote for its own
+//! bookkeeping, and which literals are too generic to redact. The
+//! publish redaction engine reads it.
 //! `schema/claude-jsonl-1/text_descriptor.json` holds the pattern
 //! lists beside the content schemas of the same format.
 
@@ -16,6 +17,8 @@ const DESCRIPTOR: &str = include_str!("../schema/claude-jsonl-1/text_descriptor.
 #[derive(Deserialize)]
 struct Lists {
     safe: Vec<String>,
+    #[serde(default)]
+    allow: Vec<String>,
     #[serde(default)]
     filters: BTreeMap<String, FilterLists>,
 }
@@ -36,8 +39,10 @@ pub(crate) fn text_descriptor() -> TextDescriptor {
     fn strs(v: &[String]) -> Vec<&str> {
         v.iter().map(String::as_str).collect()
     }
-    let mut descriptor =
-        TextDescriptor::new(&strs(&lists.safe)).expect("descriptor patterns should be JSONPath");
+    let mut descriptor = TextDescriptor::new(&strs(&lists.safe))
+        .expect("descriptor patterns should be JSONPath")
+        .with_allow(&strs(&lists.allow))
+        .expect("descriptor allow patterns should be regexes");
     for (name, paths) in &lists.filters {
         descriptor = descriptor
             .with_filter(
@@ -307,7 +312,7 @@ mod tests {
     fn pii_filter_paths_select_the_username_and_the_email_field() {
         let line = r#"{"type":"api-request","params":{"safeguards":[{"classifier_context":{"user_identity":"garrett","home_dir":"/home/garrett"}}]}}"#;
         let found = text_descriptor().filter_values("pii", line).unwrap();
-        assert_eq!(found.literals, ["garrett", "/home/garrett"]);
+        assert_eq!(found.literals, ["garrett"]);
         let attachment = r#"{"type":"attachment","attachment":{"context":{"userEmail":"The user's email address is g@x.y"}}}"#;
         let found = text_descriptor().filter_values("pii", attachment).unwrap();
         assert_eq!(pointers(&found), ["/attachment/context/userEmail"]);
@@ -315,7 +320,10 @@ mod tests {
     }
 
     /// The `system` filter names every field that holds a path, a
-    /// host, or an OS version, wherever the classifier context nests it.
+    /// host, or an OS version, wherever the classifier context nests
+    /// it. The working directory, the home directory, the scratchpad
+    /// directory, and the OS version are literals as well, so their
+    /// copies in text are redacted.
     #[test]
     fn system_filter_paths_select_paths_hosts_and_the_os_version() {
         let descriptor = text_descriptor();
@@ -323,6 +331,15 @@ mod tests {
         let found = descriptor.filter_values("system", user).unwrap();
         assert_eq!(pointers(&found), ["/cwd"]);
         assert_eq!(found.values[0].path, "$.cwd");
+        assert_eq!(found.literals, ["/home/garrett/proj"]);
+        // A root or a bare top-level directory is left out by type but
+        // too generic to redact as text
+        for cwd in ["/", "/tmp", "/home/"] {
+            let line = format!(r#"{{"type":"user","cwd":"{cwd}"}}"#);
+            let found = descriptor.filter_values("system", &line).unwrap();
+            assert_eq!(pointers(&found), ["/cwd"], "{cwd}");
+            assert!(found.literals.is_empty(), "{cwd}: {found:?}");
+        }
         let request = r#"{"type":"api-request","params":{"safeguards":[{"classifier_context":{"user_identity":"garrett","home_dir":"/home/garrett","live_cwd":"/home/garrett/proj","rule_roots":{"userSettings":"/home/garrett/.claude"},"trusted_directories":{"primary":{"path":"/home/garrett/proj","resolved":["/home/garrett/proj"]}},"git_state":{"cwd":"/home/garrett/proj","root":"/home/garrett/proj","branch":"main","visibility":{"push_remote":"origin","origin":{"remote":"git@git.example:a/b.git","host":"git.example","visibility":"private"},"remotes":[{"name":"origin","remote":"git@git.example:a/b.git","host":"git.example","visibility":"private"}]}},"prior_turn_context":[{"context":{"live_cwd":"/home/garrett/proj"}}]}}]}}"#;
         let found = descriptor.filter_values("system", request).unwrap();
         let context = "/params/safeguards/0/classifier_context";
@@ -349,6 +366,7 @@ mod tests {
         let mut expected_sorted = expected.clone();
         expected_sorted.sort();
         assert_eq!(found_sorted, expected_sorted, "{found:#?}");
+        assert_eq!(found.literals, ["/home/garrett"]);
         assert!(!found.values.iter().any(|h| h.pointer.ends_with("/branch")));
         assert!(
             !found
@@ -368,6 +386,7 @@ mod tests {
                 "/attachment/snapshot/osVersion",
             ]
         );
+        assert_eq!(found.literals, ["/tmp/s", "Linux 6.17.0-1032-oem"]);
         let backups = r#"{"type":"file-history-snapshot","snapshot":{"trackedFileBackups":{"src/a.rs":{"realParentDir":"/home/garrett/proj/src","backupFileName":"abc@v1"}}}}"#;
         let found = descriptor.filter_values("system", backups).unwrap();
         assert_eq!(

@@ -8,19 +8,23 @@ use std::collections::BTreeSet;
 use std::error::Error;
 use std::fmt;
 
+use regex::{Regex, RegexBuilder};
 use serde::de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor};
 use serde_json::Value;
 use serde_json_path::JsonPath;
 
 /// What a driver knows about the strings of one content format: the
-/// fields whose type is not text, and per named filter the fields
-/// whose type says their value is sensitive. All are lists of JSONPath
-/// (RFC 9535) patterns. A pattern selects a node and covers every
-/// string under it.
+/// fields whose type is not text, per named filter the fields whose
+/// type says their value is sensitive, and the literals a filter's
+/// paths select that are too generic to redact. The paths are lists
+/// of JSONPath (RFC 9535) patterns; a pattern selects a node and
+/// covers every string under it. The allow list is regexes over the
+/// literal.
 #[derive(Debug, Clone)]
 pub struct TextDescriptor {
     safe: PathSet,
     filters: Vec<FilterPaths>,
+    allow: Vec<Regex>,
 }
 
 /// A set of path patterns matched against a string's JSON Pointer by
@@ -224,7 +228,8 @@ pub struct TextValue {
     pub text: String,
 }
 
-/// A descriptor pattern that is not JSONPath.
+/// A descriptor pattern that is not JSONPath, or an allow pattern
+/// that is not a regex.
 #[derive(Debug)]
 pub struct DescriptorError {
     pub pattern: String,
@@ -245,7 +250,25 @@ impl TextDescriptor {
         Ok(Self {
             safe: PathSet::compile(safe)?,
             filters: Vec::new(),
+            allow: Vec::new(),
         })
+    }
+
+    /// Add the regexes a literal a filter's `literal` path selects is
+    /// checked against: a literal one of them matches is not reported.
+    /// Matching is case-insensitive, as redaction is.
+    pub fn with_allow(mut self, allow: &[&str]) -> std::result::Result<Self, DescriptorError> {
+        for pattern in allow {
+            let regex = RegexBuilder::new(pattern)
+                .case_insensitive(true)
+                .build()
+                .map_err(|e| DescriptorError {
+                    pattern: pattern.to_string(),
+                    message: e.to_string(),
+                })?;
+            self.allow.push(regex);
+        }
+        Ok(self)
     }
 
     /// Add the typed-sensitive paths of the named filter `name`.
@@ -274,7 +297,8 @@ impl TextDescriptor {
     }
 
     /// What the filter `name`'s typed-sensitive paths select in one
-    /// entry. Empty for a filter without paths.
+    /// entry. Empty for a filter without paths. A literal on the allow
+    /// list is left out.
     pub fn filter_values(
         &self,
         name: &str,
@@ -293,6 +317,7 @@ impl TextDescriptor {
                     .filter_map(|v| v.as_str().map(String::from))
                     .collect::<Vec<_>>()
             })
+            .filter(|literal| !self.allow.iter().any(|a| a.is_match(literal)))
             .collect();
         let values = paths
             .value
@@ -488,6 +513,29 @@ mod tests {
         let values = descriptor().text_values(line).unwrap();
         let pointers: Vec<&str> = values.iter().map(|v| v.pointer.as_str()).collect();
         assert_eq!(pointers, ["/a~1b", "/c~0d", "/note"]);
+    }
+
+    /// A literal on the allow list is not reported, whatever filter
+    /// selects it; the allow list does not touch whole values.
+    #[test]
+    fn allowed_literals_are_not_reported() {
+        let descriptor = descriptor()
+            .with_allow(&["^.{0,2}$", "^/(tmp|home)/?$"])
+            .unwrap()
+            .with_filter("system", &["$.cwd", "$..home_dir"], &["$.cwd"], &[])
+            .unwrap();
+        let line = r#"{"cwd":"/","params":{"home_dir":"/HOME/"}}"#;
+        let found = descriptor.filter_values("system", line).unwrap();
+        assert!(found.literals.is_empty(), "{found:?}");
+        assert_eq!(found.values.len(), 1);
+        let line = r#"{"cwd":"/home/garrett","params":{"home_dir":"/tmp/x"}}"#;
+        let found = descriptor.filter_values("system", line).unwrap();
+        assert_eq!(found.literals, ["/home/garrett", "/tmp/x"]);
+        let err = TextDescriptor::new(&[])
+            .unwrap()
+            .with_allow(&["("])
+            .unwrap_err();
+        assert_eq!(err.pattern, "(");
     }
 
     #[test]

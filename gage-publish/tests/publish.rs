@@ -145,19 +145,21 @@ fn init_runs_the_named_filters_and_records_their_instances() {
             .filter(|t| t.author == author)
             .count()
     };
-    // pii: the email pattern, plus the username and home_dir typed literals
-    assert_eq!(by_author("filter:pii"), 3, "{definition:#?}");
+    // pii: the email pattern, plus the username typed literal
+    assert_eq!(by_author("filter:pii"), 2, "{definition:#?}");
     // secret: one key, found by pattern in two places
     assert_eq!(by_author("filter:secret"), 1, "{definition:#?}");
     let counts = publisher.instances(&init.id).unwrap();
-    assert_eq!(counts.len(), 4);
+    assert_eq!(counts.len(), 3);
     assert!(counts.values().all(|n| *n > 0), "{counts:?}");
 
     let lines = staged_lines(&f.publish_root, &init.id);
     assert_eq!(lines.len(), 5);
     assert!(lines[0].contains("Mail [REDACTED]"), "{}", lines[0]);
+    // The home directory is the system filter's; pii redacts the
+    // username inside it
     assert!(
-        lines[0].contains(r#""cwd":"[REDACTED]/proj""#),
+        lines[0].contains(r#""cwd":"/home/[REDACTED]/proj""#),
         "{}",
         lines[0]
     );
@@ -870,11 +872,13 @@ fn candidates_are_the_disclosed_text_values_with_their_spans() {
         ],
         "{candidates:#?}"
     );
+    // The system filter's working-directory literal and the home
+    // directory redaction merge into one span
     let command = &candidates[0];
     assert_eq!(command.text, "ls /home/garrett/proj");
-    assert_eq!(command.spans, [(3, 15, true)]);
+    assert_eq!(command.spans, [(3, 20, true)]);
     assert!(candidates[1].spans.is_empty(), "{candidates:#?}");
-    assert_eq!(candidates[3].spans, [(15, 27, true)]);
+    assert_eq!(candidates[3].spans, [(15, 32, true)]);
 }
 
 /// `apply` commits the staged session as a new session object with the
@@ -1162,13 +1166,24 @@ fn system_filter_leaves_out_system_values_and_drops_the_project_attribute() {
         .init(&f.original, &filters, &[], "session:test")
         .unwrap();
 
-    // The system filter has no patterns and no literal paths: what it
-    // leaves out is derived at build time, not recorded as text
+    // The system filter has no patterns; its literal paths record the
+    // working directory and the home directory as its text redactions.
+    // The username is the pii filter's.
     let definition = publisher.definition(&init.id).unwrap();
-    assert!(
-        definition.text.iter().all(|t| t.author == "filter:pii"),
+    let literals = |author: &str| -> Vec<&str> {
+        definition
+            .text
+            .iter()
+            .filter(|t| t.author == author)
+            .map(|t| t.literal.as_str())
+            .collect()
+    };
+    assert_eq!(
+        literals("filter:system"),
+        ["/home/garrett", "/home/garrett/proj"],
         "{definition:#?}"
     );
+    assert_eq!(literals("filter:pii"), ["garrett"], "{definition:#?}");
 
     let lines = staged_lines(&f.publish_root, &init.id);
     // A left-out value goes with its name, and the rest of the line is
@@ -1195,23 +1210,21 @@ fn system_filter_leaves_out_system_values_and_drops_the_project_attribute() {
         "{}",
         lines[4]
     );
-    // The home directory is a pii literal everywhere it is text: in a
-    // tool input, a tool result, and prose
+    // The working directory is a system literal everywhere it is text:
+    // in a tool input, a tool result, and prose. The home directory
+    // literal inside it merges into the one marker. The username
+    // inside both is the pii filter's and merges as well.
     assert!(
-        lines[1].contains(r#""command":"ls [REDACTED]/proj""#),
+        lines[1].contains(r#""command":"ls [REDACTED]""#),
         "{}",
         lines[1]
     );
     assert!(
-        lines[2].contains(r#""stdout":"[REDACTED]/proj/a.txt""#),
+        lines[2].contains(r#""stdout":"[REDACTED]/a.txt""#),
         "{}",
         lines[2]
     );
-    assert!(
-        lines[3].contains("at [REDACTED]/proj/a.txt"),
-        "{}",
-        lines[3]
-    );
+    assert!(lines[3].contains("at [REDACTED]/a.txt"), "{}", lines[3]);
 
     let records = filtered(&f.publish_root, &init.id);
     let attrs: Vec<&FilteredRecord> = records
@@ -1284,11 +1297,17 @@ fn system_filter_leaves_out_system_values_and_drops_the_project_attribute() {
     let attrs = staged_attrs(&f.publish_root, &init.id);
     assert_eq!(attrs["project"], "-home-garrett-proj");
     let lines = staged_lines(&f.publish_root, &init.id);
-    // The cwd is back, with the pii literal redacted inside it
+    // The cwd is back, with the pii username redacted inside it; the
+    // system literals went with the filter
     assert!(
-        lines[0].contains(r#""cwd":"[REDACTED]/proj""#),
+        lines[0].contains(r#""cwd":"/home/[REDACTED]/proj""#),
         "{}",
         lines[0]
+    );
+    assert!(
+        lines[1].contains(r#""command":"ls /home/[REDACTED]/proj""#),
+        "{}",
+        lines[1]
     );
     let records = filtered(&f.publish_root, &init.id);
     assert!(
@@ -1296,6 +1315,48 @@ fn system_filter_leaves_out_system_values_and_drops_the_project_attribute() {
             .iter()
             .any(|r| r.kind == FilteredKind::Attr || r.kind == FilteredKind::Value),
         "{records:#?}"
+    );
+}
+
+/// The name on the reminder's git user line is a pii pattern literal:
+/// found in the attachment, redacted there and in a quoted copy.
+#[test]
+fn the_git_user_name_is_redacted_from_the_reminder_and_its_quotes() {
+    let session = concat!(
+        r#"{"type":"attachment","uuid":"x1","timestamp":"2025-01-01T00:00:00Z","attachment":{"type":"session_context","context":{"gitStatus":"Current branch: main\n\nGit user: Alice Carol\n\nStatus:\n(clean)"}}}"#,
+        "\n",
+        r#"{"type":"user","uuid":"u1","timestamp":"2025-01-01T00:00:01Z","message":{"role":"user","content":"Hello"}}"#,
+        "\n",
+        r#"{"type":"assistant","uuid":"a1","timestamp":"2025-01-01T00:00:02Z","message":{"id":"m1","role":"assistant","content":[{"type":"text","text":"Commits are by Alice Carol."}],"usage":{"input_tokens":1,"output_tokens":1}}}"#,
+        "\n",
+    );
+    let f = fixture_with(session);
+    let publisher = Publisher::with_root(&f.store, &f.publish_root);
+    let init = publisher
+        .init(
+            &f.original,
+            &["pii".parse::<FilterSpec>().unwrap()],
+            &[],
+            "session:test",
+        )
+        .unwrap();
+    let definition = publisher.definition(&init.id).unwrap();
+    let pii: Vec<(&str, &str)> = definition
+        .text
+        .iter()
+        .map(|t| (t.literal.as_str(), t.author.as_str()))
+        .collect();
+    assert_eq!(pii, [("Alice Carol", "filter:pii")], "{definition:#?}");
+    let lines = staged_lines(&f.publish_root, &init.id);
+    assert!(
+        lines[0].contains(r#"Git user: [REDACTED]\n"#),
+        "{}",
+        lines[0]
+    );
+    assert!(
+        lines[2].contains("Commits are by [REDACTED]."),
+        "{}",
+        lines[2]
     );
 }
 
