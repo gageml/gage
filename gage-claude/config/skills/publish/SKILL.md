@@ -36,9 +36,9 @@ critical to understand why a user wants to publish a session.
 
 You need to understand this information:
 
-- What motivates the user to publish a session (motivation)
-- Who will have access to the shared session (target audience)
-- What content must not be shared (filters and segments)
+- What motivates the user to publish a session (**motivation**)
+- Who will have access to the shared session (**target audience**)
+- What content must not be shared (**filters and segments**)
 
 The user may not initially have this information. Due to the sensitivity of
 sharing sessions, the user must form a clear understanding of the implications
@@ -133,23 +133,23 @@ Gage supports these filters:
 
 `harness-context`
 : Leave out what the harness placed in the model's context: the system prompt
-and tool definitions, message content as sent with its reminders and
-instruction files, attachments (rendered reminders, instruction files, skill
-and agent listings, hook output), and injected meta entries. What the model saw
-is part of the conversation, so this filter is a motivation and audience
-decision: on for a conversation record, off for an exact record of the run.
+  and tool definitions, message content as sent with its reminders and
+  instruction files, attachments (rendered reminders, instruction files, skill
+  and agent listings, hook output), and injected meta entries. What the model
+  saw is part of the conversation, so this filter is a motivation and audience
+  decision: on for a conversation record, off for an exact record of the run.
 
 `harness-records`
 : Leave out records the harness kept about the run: API request records, file
-snapshots, queue operations, generated titles, mode and permission records, cost
-state, the system entries the conversation does not show, and the
-run-description fields (version, token usage, request IDs) on the entries that
-stay. No reader wants these, so this filter is on for every publish unless the
-user says otherwise.
+  snapshots, queue operations, generated titles, mode and permission records,
+  cost state, the system entries the conversation does not show, and the
+  run-description fields (version, token usage, request IDs) on the entries that
+  stay. No reader wants these, so this filter is on for every publish unless the
+  user says otherwise.
 
 `custom`
 : Remove what a prompt of your own describes. Added with
-`gage publish filter add` and `--prompt`, never with `init --filter`.
+  `gage publish filter add` and `--prompt`, never with `init --filter`.
 
 `gage publish init --list-filters` prints this list.
 
@@ -189,8 +189,8 @@ session.
 
 Use `gage publish` commands to perform the steps. Every command that changes the
 op takes `-y` to skip its confirmation prompt. The ID an op is known by is the
-pending session ID that `init` prints (`SESSION` below). Any prefix of it that is
-unambiguous works.
+pending session ID that `init` prints (`SESSION` below). Any prefix of it that
+is unambiguous works.
 
 ### Step 1. Init the op
 
@@ -206,8 +206,8 @@ A session already in the Gage store is named by tag, ID, or prefix with `-S`:
 gage publish init -y -S --filter FILTER --segment TEXT SESSION_TO_PUBLISH
 ```
 
-Without `-S`, `init` looks for a native session only and a stored session is
-"no native session matches". `gage session list` lists native sessions and
+Without `-S`, `init` looks for a native session only and a stored session is "no
+native session matches". `gage session list` lists native sessions and
 `gage session list -S` stored ones.
 
 Repeat `--filter` and `--segment` as needed. A segment given here starts without
@@ -225,9 +225,8 @@ pending op and decide how to adjust it to meet the user's goals.
 ### Step 2. Apply segmentation
 
 If the user wants to segment the session, use the `message` table of the Gage
-Query tool to identify each segment's line ranges. A stored session is read
-with its stored ID; a native session with `native_message('')` and its native
-ID.
+Query tool to identify each segment's line ranges. A stored session is read with
+its stored ID; a native session with `native_message('')` and its native ID.
 
 List each segment and note its ID:
 
@@ -264,8 +263,8 @@ Filters and segments prune the pending session, leaving a subset of text to
 check for redactions.
 
 Start a `gage:redacted-text` sub-agent with the pending session ID. The agent
-has instructions for getting the filter redaction instructions and the
-candidate text. It returns a JSON encoded list of text to redact in the format:
+has instructions for getting the filter redaction instructions and the candidate
+text. It returns a JSON encoded list of text to redact in the format:
 
 ```json
 [
@@ -308,8 +307,8 @@ If you identify an error, you must stop and fix it. Use any of these commands:
   to `custom`
 - `gage publish redact remove -y SESSION ID...` - remove redactions by the IDs
   `redact list` shows
-- `gage publish redact edit -y SESSION ID [TEXT] [--reason REASON] [--mark |
-  --no-mark]` - change a redaction
+- `gage publish redact edit -y SESSION ID [TEXT] [--reason REASON] [--mark | --no-mark]` -
+  change a redaction
 - `gage publish segment edit -y SESSION ID [TEXT] [--lines LINES]` - change a
   segment's description, its lines, or both
 - `gage publish filter add -y SESSION NAME` - add a filter; `custom` requires
@@ -317,8 +316,8 @@ If you identify an error, you must stop and fix it. Use any of these commands:
 - `gage publish filter remove -y SESSION NAME` - remove a filter and its
   redactions
 
-If you alter the filters or segments, re-run step 3. Filters and segments
-change what text is dropped and what remains to check.
+If you alter the filters or segments, re-run step 3. Filters and segments change
+what text is dropped and what remains to check.
 
 `redact import` is idempotent: a redaction already present is reported as such
 and not duplicated. To remove a redaction, use `redact remove`.
@@ -327,8 +326,7 @@ and not duplicated. To remove a redaction, use `redact remove`.
 
 ### Step 5. Apply the publish op
 
-When you are confident the session is ready to publish, use the `apply`
-command:
+When you are confident the session is ready to publish, use the `apply` command:
 
 ```shell
 gage publish apply -y SESSION
@@ -348,8 +346,8 @@ your understanding of user motivation, target audience, and needed filters.
 When segmenting, summarize selected segment ranges to let the user review and
 confirm the selection.
 
-Summarize the redacted text by class and count without quoting specific
-redacted strings.
+Summarize the redacted text by class and count without quoting specific redacted
+strings.
 
 If you are not running in an interactive session, proceed with the steps above
 without user input. The user will review the published session after the

@@ -21,8 +21,8 @@ use gage_registry::driver::DriverRegistry;
 use gage_session::{Driver, NativeLookupError, SessionLiveError, Source, SourceOptions};
 use gage_store::url::LineSelection;
 use gage_store::{
-    DatasetStore, PublishStore, SessionRecord, SessionStore, Store, StoreError, TagStore,
-    show_publishing,
+    DatasetStore, PublishStore, SESSION_TYPE, SessionRecord, SessionStore, Store, StoreError,
+    TagStore, show_publishing,
 };
 use gage_tui::session::{Backend, picker_page_size};
 use gage_tui::{ViewOptions, session_view};
@@ -801,7 +801,7 @@ async fn add_dialog(
             })?;
     }
     let mut view = AddView::new();
-    let placed_ids = match dataset_id {
+    let placed_ids = match dataset_id.as_deref() {
         Some(dataset_id) if stored => {
             let sessions = SessionStore::from(&store);
             // Resolve every argument before writing anything, so one
@@ -817,11 +817,11 @@ async fn add_dialog(
             if !errors.is_empty() {
                 return Err(DialogError::Failed(errors.join("\n")));
             }
-            dialog::step_value("Dataset", short_uuid(&dataset_id))?;
+            dialog::step_value("Dataset", short_uuid(dataset_id))?;
             let lines: Vec<SessionLine> = records.iter().map(SessionLine::from).collect();
             preview_sessions(&lines, IdKind::Gage, args.tag.as_deref())?;
             confirm_add(args.yes)?;
-            link_stored(&store, &dataset_id, &records, &mut |e| view.on(e))?;
+            link_stored(&store, dataset_id, &records, &mut |e| view.on(e))?;
             records.into_iter().map(|r| r.id).collect()
         }
         _ => {
@@ -875,7 +875,26 @@ async fn add_dialog(
             None => cli::log::info(format!("Tagged session {} as {name}", short_uuid(id)))?,
         }
     }
-    Ok(done.into())
+    let outro = if stored {
+        done
+    } else {
+        add_outro(&store, &placed_ids, dataset_id.as_deref(), &done)
+    };
+    Ok(outro.into())
+}
+
+/// The outro of a native add. One placed session names its new stored
+/// id, since the caller has no other way to learn it; any other count
+/// keeps the closing line of the add.
+fn add_outro(store: &Store, placed_ids: &[String], dataset_id: Option<&str>, done: &str) -> String {
+    let [id] = placed_ids else {
+        return done.to_string();
+    };
+    let shown = style::outro_id(store, SESSION_TYPE, id);
+    match dataset_id {
+        Some(dataset) => format!("Added session {shown} to dataset {}", short_uuid(dataset)),
+        None => format!("Added session {shown} to the store"),
+    }
 }
 
 /// The confirmation before an add writes; `yes` skips it
@@ -1832,6 +1851,37 @@ fn warm_picker_sessions(source: &dyn Source) -> Result<(), Box<dyn Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One placed native session names its stored id; a dataset add
+    /// names the dataset; more than one keeps the closing line. The
+    /// color flag is process-wide, so the id's styling is stripped
+    /// rather than disabled.
+    #[test]
+    fn add_outro_names_the_one_new_session_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("store.git");
+        gage_store::init(&path).unwrap();
+        let store = Store::open(&path).unwrap();
+        let one = ["01k2h4t9aaaabbbbccccddddee".to_string()];
+        let two = [one[0].clone(), "01k2h4t9ffffbbbbccccddddee".to_string()];
+        assert_eq!(
+            console::strip_ansi_codes(&add_outro(&store, &one, None, "Added 1 session")),
+            "Added session 01k2h4t9 to the store"
+        );
+        assert_eq!(
+            console::strip_ansi_codes(&add_outro(
+                &store,
+                &one,
+                Some("7zzzzzzzzzzzzzzzzzzzzzzzzz"),
+                "Added 1 session to dataset 7zzzzzzz"
+            )),
+            "Added session 01k2h4t9 to dataset 7zzzzzzz"
+        );
+        assert_eq!(
+            add_outro(&store, &two, None, "Added 2 sessions"),
+            "Added 2 sessions"
+        );
+    }
 
     /// Prefixes that match no session fail as one list; a full set
     /// of matches resolves in argument order.
