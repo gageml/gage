@@ -63,18 +63,24 @@ pub fn entry_subtype(entry: &Value) -> Option<&str> {
     entry.get("subtype").and_then(Value::as_str)
 }
 
-/// System entry subtypes promoted to message rows. Each carries
-/// content that is a meaningful injection into the user/assistant
-/// message flow, and each has hard-coded text rendering in the
-/// derivation (gage-index). Unknown system subtypes stay entry-only;
+/// System entry subtypes promoted to message rows, as `(raw, message)`
+/// pairs: the harness's `subtype` value and the subtype the message
+/// row carries. Each carries content that is a meaningful injection
+/// into the user/assistant message flow, and each has hard-coded text
+/// rendering in the derivation (gage-index). The message subtype is a
+/// name of our own, as `text` and `tool_use` are: the two refusal
+/// forms differ only in whether the harness retried on another model
+/// and are one subtype. Unknown system subtypes stay entry-only;
 /// bookkeeping subtypes (`turn_duration`, `stop_hook_summary`) are
 /// deliberately excluded.
-pub const SYSTEM_MESSAGE_SUBTYPES: &[&str] = &[
-    "api_error",
-    "away_summary",
-    "compact_boundary",
-    "informational",
-    "local_command",
+pub const SYSTEM_MESSAGE_SUBTYPES: &[(&str, &str)] = &[
+    ("api_error", "api_error"),
+    ("away_summary", "away_summary"),
+    ("compact_boundary", "compact_boundary"),
+    ("informational", "informational"),
+    ("local_command", "local_command"),
+    ("model_refusal_no_fallback", "model_refusal"),
+    ("model_refusal_fallback", "model_refusal"),
 ];
 
 /// Infer the subtype of a message-shaped session entry.
@@ -83,8 +89,8 @@ pub const SYSTEM_MESSAGE_SUBTYPES: &[&str] = &[
 ///   else `thinking` if any is `thinking`, else `text`.
 /// - `user` → `tool_result` if any content block is `tool_result`,
 ///   else `meta` if `entry.isMeta` is true, else `text`.
-/// - `system` → the raw subtype when it is one of
-///   [`SYSTEM_MESSAGE_SUBTYPES`].
+/// - `system` → the message subtype [`SYSTEM_MESSAGE_SUBTYPES`] pairs
+///   with the raw subtype, when it lists it.
 /// - `attachment` → the inner `attachment.type`
 ///   (e.g. `deferred_tools_delta`, `skill_listing`).
 /// - Other entry types have no message subtype.
@@ -121,7 +127,10 @@ pub fn message_subtype(entry: &Value) -> Option<&'static str> {
         }
         "system" => {
             let sub = entry_subtype(entry)?;
-            SYSTEM_MESSAGE_SUBTYPES.iter().find(|s| **s == sub).copied()
+            SYSTEM_MESSAGE_SUBTYPES
+                .iter()
+                .find(|(raw, _)| *raw == sub)
+                .map(|(_, message)| *message)
         }
         "attachment" => {
             let inner = entry

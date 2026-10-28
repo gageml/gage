@@ -260,9 +260,15 @@ pub fn entry_text(entry: &serde_json::Value) -> Option<String> {
 /// `informational`, `local_command`) use their `content` string
 /// verbatim — tags included, as tool results do. `api_error` has no
 /// `content`; it renders its error and retry fields as a YAML mapping,
-/// the same shape as a tool call. Non-promoted subtypes return `None`.
+/// the same shape as a tool call. A refusal's `content` is empty or a
+/// model-switch notice; its text is the API's `apiRefusalExplanation`.
+/// Non-promoted subtypes return `None`.
 fn system_entry_text(entry: &serde_json::Value) -> Option<String> {
     match message_subtype(entry)? {
+        "model_refusal" => entry
+            .get("apiRefusalExplanation")
+            .and_then(|v| v.as_str())
+            .map(String::from),
         "api_error" => {
             let mut fields = serde_json::Map::new();
             for key in ["error", "retryAttempt", "retryInMs", "maxRetries"] {
@@ -760,9 +766,23 @@ mod tests {
             "compact_boundary",
             "informational",
             "local_command",
+            "model_refusal_no_fallback",
+            "model_refusal_fallback",
         ] {
             let entry = system_entry(subtype, json!({}));
             assert!(is_message_row(&entry), "{subtype} should be a message row");
+        }
+    }
+
+    #[test]
+    fn both_refusal_forms_are_one_subtype_with_the_api_explanation_as_text() {
+        for subtype in ["model_refusal_no_fallback", "model_refusal_fallback"] {
+            let entry = system_entry(
+                subtype,
+                json!({ "content": "Switched model", "apiRefusalExplanation": "Why" }),
+            );
+            assert_eq!(message_subtype(&entry), Some("model_refusal"), "{subtype}");
+            assert_eq!(entry_text(&entry).as_deref(), Some("Why"), "{subtype}");
         }
     }
 

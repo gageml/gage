@@ -22,7 +22,7 @@
     "userType": { "type": "string" },
     "isMeta": { "type": "boolean", "description": "True on a user row the harness wrote rather than the person" },
     "slug": { "type": "string" },
-    "subtype": { "type": "string", "description": "On system rows: stop_hook_summary, turn_duration, local_command, compact_boundary, informational, and others" },
+    "subtype": { "type": "string", "description": "On system rows: stop_hook_summary, turn_duration, local_command, compact_boundary, informational, model_refusal_no_fallback, model_refusal_fallback, and others" },
     "message": {
       "description": "On user and assistant rows. On an assistant row this is one API response, written as one row per content block: every row of a response repeats the same `id` and `usage`. Count a response once by grouping on `message.id`.",
       "type": "object",

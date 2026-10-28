@@ -221,25 +221,15 @@ mod tests {
         }
     }
 
-    /// The system subtypes a publish keeps: the ones the message table
-    /// promotes, and the refusals, which are part of what happened
-    /// though the table does not show them.
-    const KEPT_SYSTEM_SUBTYPES: &[&str] = &["model_refusal_no_fallback", "model_refusal_fallback"];
-
     /// What a publish keeps when both harness filters are on: user
-    /// prompts, assistant messages, the kept system subtypes, and the
-    /// user-authored session labels.
+    /// prompts, assistant messages, the system subtypes the message
+    /// table promotes, and the user-authored session labels.
     fn is_conversation(entry: &serde_json::Value) -> bool {
         let ty = entry["type"].as_str().unwrap_or_default();
         match ty {
             "user" => !is_context(entry),
             "assistant" | "custom-title" | "agent-name" => true,
-            "system" => {
-                message_subtype(entry).is_some()
-                    || entry["subtype"]
-                        .as_str()
-                        .is_some_and(|s| KEPT_SYSTEM_SUBTYPES.contains(&s))
-            }
+            "system" => message_subtype(entry).is_some(),
             _ => false,
         }
     }
@@ -289,8 +279,8 @@ mod tests {
 
     /// The `harness-records` filter leaves out every entry that is
     /// neither conversation nor context, so the two filters together
-    /// leave exactly the conversation. The kept system subtypes agree
-    /// with the entry classifier plus the refusals.
+    /// leave exactly the conversation. The kept system subtypes are
+    /// the ones the message table promotes.
     #[test]
     fn harness_records_filter_leaves_out_every_other_entry_that_is_not_conversation() {
         let descriptor = text_descriptor();
@@ -303,7 +293,7 @@ mod tests {
             let expected = !is_conversation(&entry) && !is_context(&entry);
             assert_eq!(dropped, expected, "{line}");
         }
-        for subtype in SYSTEM_MESSAGE_SUBTYPES.iter().chain(KEPT_SYSTEM_SUBTYPES) {
+        for (subtype, _) in SYSTEM_MESSAGE_SUBTYPES {
             let line = format!(r#"{{"type":"system","subtype":"{subtype}","content":"x"}}"#);
             let dropped = descriptor
                 .filter_values("harness-records", &line)
