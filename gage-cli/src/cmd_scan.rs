@@ -28,8 +28,8 @@ use gage_scan::{CompiledScanner, Event, ScanConfig, ScanError, ScanOutput, summa
 use gage_session::{Driver, ResolveSession};
 use gage_store::ScanDirLayout;
 use gage_store::{
-    DatasetOrigin, DatasetStore, IssueStatus, IssueStore, SCAN_TYPE, ScanStore, StatusReason,
-    Store, StoreError, TagStore,
+    DatasetOrigin, DatasetStore, IssueStatus, IssueStore, SCAN_TYPE, ScanStore, SessionRecord,
+    SessionStore, StatusReason, Store, StoreError, TagStore,
 };
 use gage_tui::scan_view::{
     self, AgentItem, AgentState, EventItem, EvidenceItem, IssueItem, IssueSessionItem,
@@ -57,7 +57,7 @@ use tracing_subscriber::fmt::format::Writer;
 use crate::cmd_dataset::{self, AddView};
 use crate::cmd_issue::event_label;
 use crate::cmd_note::{count_rows, target_cell, value_cell};
-use crate::cmd_session::{column, run_query};
+use crate::cmd_session::{column, link_stored, run_query};
 use crate::cmd_tag::TAG_HELP;
 use crate::dialog::{self, DialogError};
 use crate::error::CliError;
@@ -65,7 +65,8 @@ use crate::human::{count, format_duration, format_elapsed_ms};
 use crate::scanner_attach;
 use crate::scanner_spec::{self, ResolvedSpec};
 use crate::session_filter::{
-    FILTER_ARG_NAMES, SessionFilterArgs, native_session_lines, preview_sessions, select_sessions,
+    FILTER_ARG_NAMES, SessionFilterArgs, SessionSelect, native_session_lines, preview_sessions,
+    select_sessions, stored_session_lines,
 };
 use crate::source;
 use crate::style::{self as s, IdKind};
@@ -182,6 +183,19 @@ enum ScanCommand {
 
 #[derive(Args)]
 pub struct ScanRunArgs {
+    /// Session source
+    #[arg(
+        long,
+        value_name = "SOURCE",
+        long_help = format!("Session source\n\n{}", source::SOURCE_HELP),
+        conflicts_with_all = ["stored", "dataset", "no_dataset"],
+    )]
+    source: Option<String>,
+
+    /// Scan stored sessions
+    #[arg(short = 'S', long, conflicts_with_all = ["dataset", "no_dataset"])]
+    stored: bool,
+
     /// Scanner to run (name or path; repeatable)
     ///
     /// A scanner name, or when no scanner has that name, a path: a
@@ -1567,7 +1581,8 @@ async fn run_scan(args: ScanRunArgs) -> Result<(), CliError> {
     let store = open_store("gage scan")?;
     let config = Config::load_user().context("gage scan: reading config")?;
 
-    let driver = source::default_driver("gage scan")?;
+    let (driver, _) = source::resolve_source(&source::driver_registry(), args.source.as_deref())
+        .map_err(|e| CliError::message(format!("gage scan: {e}")))?;
 
     // The dialog settles the inputs and builds the dataset; the scan
     // itself runs after it, under the progress view or headless
@@ -1608,10 +1623,10 @@ struct ScanPrep {
 }
 
 /// A chosen session set for the scan: an existing dataset, a new
-/// dataset to be built from the resolved native sessions, or none.
-/// `Reuse` and `None` carry everything needed to preview the plan;
-/// `New` carries the sessions resolved from `select_sessions`
-/// before any dataset is written.
+/// dataset to be built from the resolved sessions, or none. `Reuse`
+/// and `None` carry everything needed to preview the plan; `New`
+/// carries the sessions resolved from `select_sessions` before any
+/// dataset is written.
 enum DatasetPlan {
     Reuse {
         id: String,
@@ -1619,9 +1634,28 @@ enum DatasetPlan {
         session_count: usize,
     },
     New {
-        selected: Vec<String>,
+        selected: Selected,
     },
     None,
+}
+
+/// The sessions a new dataset is built from.
+enum Selected {
+    /// Native ids in a source; `None` is the default source
+    Native {
+        source: Option<String>,
+        ids: Vec<String>,
+    },
+    /// Ids of sessions in the store
+    Stored { ids: Vec<String> },
+}
+
+impl Selected {
+    fn ids(&self) -> &[String] {
+        match self {
+            Selected::Native { ids, .. } | Selected::Stored { ids } => ids,
+        }
+    }
 }
 
 /// Session-axis window prompt choices.
@@ -1674,7 +1708,7 @@ async fn prepare_scan_dialog(
     // or none. The plan is a preview only; nothing is written until
     // after the confirmation.
     let plan = resolve_dataset_plan(&mut args, store).await?;
-    preview_dataset(&plan).await?;
+    preview_dataset(&plan, store).await?;
 
     // A tag that cannot be added is reported before anything is
     // written
@@ -1717,7 +1751,7 @@ async fn prepare_scan_dialog(
     }
 
     if let DatasetPlan::New { selected } = &plan
-        && selected.is_empty()
+        && selected.ids().is_empty()
     {
         return Err(DialogError::Failed(
             "No sessions matched the selection".to_string(),
@@ -2004,7 +2038,8 @@ fn preview_scanners(scanners: &[Scanner<'_>]) -> Result<(), DialogError> {
 /// Decide what the scan's dataset will be. Reuses `--dataset`,
 /// honors `--no-dataset`, otherwise prompts the session axis under
 /// an empty-and-not-`-y` call and runs `select_sessions` for the
-/// final native-session list.
+/// final session list: stored sessions under `--stored`, native
+/// sessions in `--source` otherwise.
 async fn resolve_dataset_plan(
     args: &mut ScanRunArgs,
     store: &Store,
@@ -2029,9 +2064,22 @@ async fn resolve_dataset_plan(
     if args.sessions.is_empty() && args.filter.is_empty() && !args.yes {
         prompt_session_axis(&mut args.filter)?;
     }
-    let selected = select_sessions(None, &args.sessions, &args.filter)
+    let select = if args.stored {
+        SessionSelect::Stored(store)
+    } else {
+        SessionSelect::Native(args.source.as_deref())
+    };
+    let ids = select_sessions(select, &args.sessions, &args.filter)
         .await
         .map_err(|e| DialogError::Failed(format!("{e}")))?;
+    let selected = if args.stored {
+        Selected::Stored { ids }
+    } else {
+        Selected::Native {
+            source: args.source.clone(),
+            ids,
+        }
+    };
     Ok(DatasetPlan::New { selected })
 }
 
@@ -2064,7 +2112,7 @@ fn prompt_session_axis(filter: &mut SessionFilterArgs) -> Result<(), DialogError
     Ok(())
 }
 
-async fn preview_dataset(plan: &DatasetPlan) -> Result<(), DialogError> {
+async fn preview_dataset(plan: &DatasetPlan, store: &Store) -> Result<(), DialogError> {
     match plan {
         DatasetPlan::Reuse {
             id, session_count, ..
@@ -2072,11 +2120,24 @@ async fn preview_dataset(plan: &DatasetPlan) -> Result<(), DialogError> {
             let line = format!("{} ({})", short_uuid(id), count(*session_count, "session"));
             cli::log::step(format!("Dataset\n{}", style(line).dim()))?;
         }
-        DatasetPlan::New { selected } => {
-            let lines = native_session_lines(None, selected)
+        DatasetPlan::New {
+            selected: Selected::Native { source, ids },
+        } => {
+            let registry = source::driver_registry();
+            let (driver, spec) = source::resolve_source(&registry, source.as_deref())
+                .map_err(DialogError::Failed)?;
+            dialog::step_value("Source", source::describe_source(driver.as_ref(), &spec))?;
+            let lines = native_session_lines(source.as_deref(), ids)
                 .await
                 .map_err(|e| DialogError::Failed(format!("{e}")))?;
             preview_sessions(&lines, IdKind::Native, None)?;
+        }
+        DatasetPlan::New {
+            selected: Selected::Stored { ids },
+        } => {
+            let lines =
+                stored_session_lines(store, ids).map_err(|e| DialogError::Failed(e.to_string()))?;
+            preview_sessions(&lines, IdKind::Gage, None)?;
         }
         DatasetPlan::None => {
             cli::log::step(format!("Dataset\n{}", style("none").dim()))?;
@@ -2119,10 +2180,28 @@ async fn materialize_dataset(
             let id = cmd_dataset::create_dataset(store, Some(&origin))
                 .map_err(|e| DialogError::Failed(e.to_string()))?;
             let mut view = AddView::with_progress(progress);
-            cmd_dataset::add_native_to_dataset(store, &id, None, &selected, None, &mut |event| {
-                view.on(event)
-            })
-            .map_err(DialogError::Failed)?;
+            match selected {
+                Selected::Native { source, ids } => {
+                    cmd_dataset::add_native_to_dataset(
+                        store,
+                        &id,
+                        source.as_deref(),
+                        &ids,
+                        None,
+                        &mut |event| view.on(event),
+                    )
+                    .map_err(DialogError::Failed)?;
+                }
+                Selected::Stored { ids } => {
+                    let sessions = SessionStore::from(store);
+                    let records = ids
+                        .iter()
+                        .map(|id| sessions.get(id))
+                        .collect::<Result<Vec<SessionRecord>, _>>()
+                        .map_err(|e| DialogError::Failed(e.to_string()))?;
+                    link_stored(store, &id, &records, &mut |event| view.on(event))?;
+                }
+            }
             let placed = view.finish()?;
             scanner_attach::attach_for_scanners(store, &id, scanners, driver).await?;
             let commit_sha = DatasetStore::from(store)
@@ -2256,9 +2335,51 @@ mod tests {
     use std::fs;
     use std::path::Path;
 
+    use clap::Parser;
     use gage_store::{ScanStore, Store};
 
     use super::*;
+    use crate::{Cli, Command};
+
+    /// `--source` and `--stored` select the sessions a scan's dataset
+    /// is built from. Each excludes the other and the options that
+    /// name an existing dataset or no dataset; the subcommands are
+    /// unaffected.
+    #[test]
+    fn source_and_stored_scope_the_session_selection() {
+        let run_args = |argv: &[&str]| {
+            let cli = Cli::try_parse_from([&["gage", "scan"], argv].concat()).unwrap();
+            let Command::Scan(ScanArgs {
+                command: None,
+                run_args,
+            }) = cli.command
+            else {
+                panic!("expected a scan run");
+            };
+            run_args
+        };
+        let args = run_args(&["--stored", "abc", "def"]);
+        assert!(args.stored);
+        assert_eq!(args.sessions, ["abc", "def"]);
+        let args = run_args(&["--source", "claude:/tmp/claude", "--days", "7"]);
+        assert_eq!(args.source.as_deref(), Some("claude:/tmp/claude"));
+        assert_eq!(args.filter.days, Some(7));
+        let args = run_args(&["-S", "--all"]);
+        assert!(args.stored && args.filter.all);
+        Cli::try_parse_from(["gage", "scan", "list"]).unwrap();
+        for argv in [
+            vec!["--source", "claude:/tmp/claude", "--stored"],
+            vec!["--stored", "--dataset", "abc"],
+            vec!["--stored", "--no-dataset", "-y"],
+            vec!["--source", "claude:/tmp/claude", "--no-dataset"],
+            vec!["--source", "claude:/tmp/claude", "--dataset", "abc"],
+        ] {
+            assert!(
+                Cli::try_parse_from([&["gage", "scan"], &argv[..]].concat()).is_err(),
+                "{argv:?} parsed"
+            );
+        }
+    }
 
     /// Write a stored scan whose one task ran one agent per entry of
     /// `agents`: the agent's id and its recorded cost, `None` for an

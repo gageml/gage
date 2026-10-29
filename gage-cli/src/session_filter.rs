@@ -1,8 +1,8 @@
 //! Shared session-filter surface for commands that operate on more
-//! than one native session at a time. `SessionFilterArgs` flattens
-//! into a subcommand's clap struct next to that command's own
-//! positional session list; `select_sessions` turns the two into a
-//! concrete list of native session ids.
+//! than one session at a time. `SessionFilterArgs` flattens into a
+//! subcommand's clap struct next to that command's own positional
+//! session list; `select_sessions` turns the two into a concrete
+//! list of session ids in a source or in the store.
 //!
 //! The same struct is used by `session add`, `dataset add`, and
 //! `scan`.
@@ -11,6 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::{self, Write as _};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use clap::Args;
@@ -21,7 +22,7 @@ use gage_core::style::IdKind;
 use gage_core::uuid::short_uuid;
 use gage_query::ContextBuilder;
 use gage_session::SourceOptions;
-use gage_store::{PendingPublish, SessionRecord};
+use gage_store::{PendingPublish, SessionRecord, SessionStore, Store, StoreError};
 use rand::seq::SliceRandom;
 
 use crate::dialog;
@@ -75,6 +76,16 @@ pub struct SessionFilterArgs {
     pub sample: Option<usize>,
 }
 
+/// Where `select_sessions` reads its sessions. A command that takes
+/// `--source` and `--stored` maps them onto these two; a command
+/// without `--stored` always selects native sessions.
+pub enum SessionSelect<'a> {
+    /// Native sessions in a source; `None` is the default source.
+    Native(Option<&'a str>),
+    /// Sessions in the store.
+    Stored(&'a Store),
+}
+
 /// The failure modes of `select_sessions`.
 #[derive(Debug)]
 pub enum SessionSelectError {
@@ -123,47 +134,59 @@ impl SessionFilterArgs {
 }
 
 /// Resolve a command's positional session list and filter options to
-/// native session ids in `source`, the default source when `None`.
+/// session ids: native ids for `SessionSelect::Native`, stored ids
+/// for `SessionSelect::Stored`.
 ///
 /// A non-empty `sessions` list is resolved prefix by prefix through
-/// the source. Otherwise the filter axes become one query over the
-/// source's session table, which the driver answers from its listing
-/// without parsing a session: a missing window defaults to the past
-/// 30 days, and a missing limit defaults to 20 unless a window or
+/// the source or the store. Otherwise the filter axes become one
+/// query over the source's `native_session` table, which the driver
+/// answers from its listing without parsing a session, or over the
+/// store's `session` table: a missing window defaults to the past 30
+/// days, and a missing limit defaults to 20 unless a window or
 /// `--project` was pinned (in which case the full filtered set is
-/// returned).
+/// returned). The window is the native modification time for a
+/// source and the store's `modified` marker for the store.
 pub async fn select_sessions(
-    source: Option<&str>,
+    select: SessionSelect<'_>,
     sessions: &[String],
     filter: &SessionFilterArgs,
 ) -> Result<Vec<String>, SessionSelectError> {
-    let registry = source::driver_registry();
-    let (driver, spec) =
-        source::resolve_source(&registry, source).map_err(SessionSelectError::Setup)?;
-
-    if !sessions.is_empty() {
-        let handle = driver
-            .open_source(&SourceOptions::new(&spec))
-            .map_err(|e| SessionSelectError::Setup(format!("{spec}: {e}")))?;
-        let mut out = Vec::with_capacity(sessions.len());
-        let mut errors = Vec::new();
-        for prefix in sessions {
-            match handle.find_native(prefix) {
-                Ok(id) => out.push(id),
-                Err(e) => errors.push(e.to_string()),
+    let (ctx, from, modified_col) = match select {
+        SessionSelect::Native(source) => {
+            let registry = source::driver_registry();
+            let (driver, spec) =
+                source::resolve_source(&registry, source).map_err(SessionSelectError::Setup)?;
+            if !sessions.is_empty() {
+                let handle = driver
+                    .open_source(&SourceOptions::new(&spec))
+                    .map_err(|e| SessionSelectError::Setup(format!("{spec}: {e}")))?;
+                let ids = resolve_prefixes(sessions, |prefix| handle.find_native(prefix));
+                handle
+                    .close()
+                    .map_err(|e| SessionSelectError::Setup(format!("{spec}: {e}")))?;
+                return ids;
             }
+            let ctx = ContextBuilder::new(None).build().await;
+            let from = format!("native_session('{}')", sql_str(&spec));
+            (ctx, from, "mtime")
         }
-        handle
-            .close()
-            .map_err(|e| SessionSelectError::Setup(format!("{spec}: {e}")))?;
-        if !errors.is_empty() {
-            return Err(SessionSelectError::Lookup(errors));
+        SessionSelect::Stored(store) => {
+            if !sessions.is_empty() {
+                let sessions_store = SessionStore::from(store);
+                return resolve_prefixes(sessions, |prefix| {
+                    sessions_store.get(prefix).map(|record| record.id)
+                });
+            }
+            // The query context owns a shared store handle; the
+            // caller's borrowed handle cannot be moved into it
+            let store =
+                Store::open(store.path()).map_err(|e| SessionSelectError::Setup(e.to_string()))?;
+            let ctx = ContextBuilder::new(Some(Arc::new(Mutex::new(store))))
+                .build()
+                .await;
+            (ctx, "session".to_string(), "modified")
         }
-        return Ok(out);
-    }
-
-    let ctx = ContextBuilder::new(None).build().await;
-    let from = format!("native_session('{}')", sql_str(&spec));
+    };
     let mut predicates = Vec::new();
 
     if let Some(value) = &filter.project {
@@ -185,7 +208,9 @@ pub async fn select_sessions(
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis();
-        predicates.push(format!("mtime >= to_timestamp_millis({cutoff_ms})"));
+        predicates.push(format!(
+            "{modified_col} >= to_timestamp_millis({cutoff_ms})"
+        ));
     }
 
     let window_pinned = filter.all || filter.today || filter.days.is_some();
@@ -204,7 +229,7 @@ pub async fn select_sessions(
         sql.push_str(" WHERE ");
         sql.push_str(&predicates.join(" AND "));
     }
-    sql.push_str(" ORDER BY mtime DESC");
+    sql.push_str(&format!(" ORDER BY {modified_col} DESC"));
     if let Some(n) = limit {
         sql.push_str(&format!(" LIMIT {n}"));
     }
@@ -216,6 +241,26 @@ pub async fn select_sessions(
         ids.truncate(n);
     }
     Ok(ids)
+}
+
+/// Resolve every prefix through `find` before reporting, so one bad
+/// prefix fails the selection with every failure listed.
+fn resolve_prefixes<E: fmt::Display>(
+    prefixes: &[String],
+    find: impl Fn(&str) -> Result<String, E>,
+) -> Result<Vec<String>, SessionSelectError> {
+    let mut out = Vec::with_capacity(prefixes.len());
+    let mut errors = Vec::new();
+    for prefix in prefixes {
+        match find(prefix) {
+            Ok(id) => out.push(id),
+            Err(e) => errors.push(e.to_string()),
+        }
+    }
+    if !errors.is_empty() {
+        return Err(SessionSelectError::Lookup(errors));
+    }
+    Ok(out)
 }
 
 /// Sessions an add preview lists by name. A selection with more
@@ -361,6 +406,14 @@ pub async fn native_session_lines(
             title: titles.get(id).cloned().flatten(),
         })
         .collect())
+}
+
+/// The preview lines for stored sessions `ids`, in the order of `ids`.
+pub fn stored_session_lines(store: &Store, ids: &[String]) -> Result<Vec<SessionLine>, StoreError> {
+    let sessions = SessionStore::from(store);
+    ids.iter()
+        .map(|id| sessions.get(id).map(|record| SessionLine::from(&record)))
+        .collect()
 }
 
 fn utf8_column<'a>(
@@ -512,15 +565,21 @@ pub(crate) fn since_local_midnight() -> Duration {
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
+    use std::fs;
     use std::path::{Path, PathBuf};
 
     use console::style;
     use gage_core::style::IdKind;
-    use gage_store::{PendingPublish, SessionAttrsRecord, SessionRecord, SummaryAttrs};
+    use gage_registry::driver::DriverRegistry;
+    use gage_session::SourceOptions;
+    use gage_store::{
+        PendingPublish, SessionAttrsRecord, SessionRecord, SessionStore, Store, SummaryAttrs,
+    };
 
     use super::{
-        DIALOG_GUTTER, MIN_PREVIEW_WIDTH, PREVIEW_SESSIONS, RIGHT_MARGIN, SessionLine,
-        preview_width, project_path_candidate, resolve_project_slug, session_lines,
+        DIALOG_GUTTER, MIN_PREVIEW_WIDTH, PREVIEW_SESSIONS, RIGHT_MARGIN, SessionFilterArgs,
+        SessionLine, SessionSelect, SessionSelectError, preview_width, project_path_candidate,
+        resolve_project_slug, select_sessions, session_lines,
     };
 
     fn attrs(title: Option<&str>) -> SessionAttrsRecord {
@@ -725,5 +784,137 @@ mod tests {
     #[test]
     fn relative_path_resolves_against_cwd() {
         assert_eq!(path("proj"), Path::new("/work/proj"));
+    }
+
+    /// Write a one-message Claude session `id` under `project` in
+    /// `claude_root` and add it to `store`; the stored id.
+    fn add_stored(store: &Store, claude_root: &Path, project: &str, id: &str) -> String {
+        let project_dir = claude_root.join("projects").join(project);
+        fs::create_dir_all(&project_dir).unwrap();
+        fs::write(
+            project_dir.join(format!("{id}.jsonl")),
+            concat!(
+                r#"{"type":"user","uuid":"u1","timestamp":"2025-01-01T00:00:00Z","message":{"role":"user","content":"hello"}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        let spec = format!("claude:{}", claude_root.display());
+        let registry = DriverRegistry::builtin();
+        let driver = registry.driver_for(&spec).unwrap();
+        let source = driver
+            .open_source(SourceOptions::new(&spec).cache_root(claude_root.join("cache")))
+            .unwrap();
+        let mut native = source.open_native(id).unwrap();
+        SessionStore::from(store)
+            .add(driver.as_ref(), native.as_mut())
+            .unwrap()
+            .id
+    }
+
+    fn sorted(mut ids: Vec<String>) -> Vec<String> {
+        ids.sort();
+        ids
+    }
+
+    /// In stored mode a positional prefix resolves through the store,
+    /// and the filter axes select over the store's `session` table:
+    /// `--all` is every stored session, `--project` a project's
+    /// sessions, `--limit` a cap, and a window includes a session
+    /// stored within it. An unknown prefix is a lookup failure.
+    #[tokio::test]
+    async fn stored_selection_resolves_prefixes_and_filters_the_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("store.git");
+        gage_store::init(&path).unwrap();
+        let store = Store::open(&path).unwrap();
+        let claude_root = tmp.path().join("claude");
+        let proj_a = add_stored(
+            &store,
+            &claude_root,
+            "-w-proj",
+            "11111111-2222-3333-4444-555555555555",
+        );
+        let proj_b = add_stored(
+            &store,
+            &claude_root,
+            "-w-proj",
+            "66666666-7777-8888-9999-000000000000",
+        );
+        let other = add_stored(
+            &store,
+            &claude_root,
+            "-w-other",
+            "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        );
+        let no_filter = || SessionFilterArgs {
+            project: None,
+            days: None,
+            today: false,
+            all: false,
+            limit: None,
+            sample: None,
+        };
+
+        let by_prefix = select_sessions(
+            SessionSelect::Stored(&store),
+            &[proj_a[..8].to_string(), other.clone()],
+            &no_filter(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(by_prefix, [proj_a.clone(), other.clone()]);
+
+        let missing = select_sessions(
+            SessionSelect::Stored(&store),
+            &["zzzzzzzz".to_string()],
+            &no_filter(),
+        )
+        .await;
+        assert!(matches!(missing, Err(SessionSelectError::Lookup(ref e)) if e.len() == 1));
+
+        async fn select_in(store: &Store, filter: SessionFilterArgs) -> Vec<String> {
+            sorted(
+                select_sessions(SessionSelect::Stored(store), &[], &filter)
+                    .await
+                    .unwrap(),
+            )
+        }
+        let select = |filter| select_in(&store, filter);
+        let every = sorted(vec![proj_a.clone(), proj_b.clone(), other.clone()]);
+        assert_eq!(
+            select(SessionFilterArgs {
+                all: true,
+                ..no_filter()
+            })
+            .await,
+            every
+        );
+        assert_eq!(select(no_filter()).await, every);
+        assert_eq!(
+            select(SessionFilterArgs {
+                days: Some(1),
+                ..no_filter()
+            })
+            .await,
+            every
+        );
+        assert_eq!(
+            select(SessionFilterArgs {
+                project: Some("-w-proj".to_string()),
+                ..no_filter()
+            })
+            .await,
+            sorted(vec![proj_a.clone(), proj_b.clone()])
+        );
+        assert_eq!(
+            select(SessionFilterArgs {
+                limit: Some(1),
+                ..no_filter()
+            })
+            .await
+            .len(),
+            1
+        );
     }
 }

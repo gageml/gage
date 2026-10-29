@@ -42,8 +42,8 @@ use crate::dialog::{self, DialogError, DialogResult};
 use crate::error::CliError;
 use crate::human::{count, format_elapsed_ms};
 use crate::session_filter::{
-    FILTER_ARG_NAMES, SessionFilterArgs, SessionLine, native_session_lines, preview_sessions,
-    select_sessions,
+    FILTER_ARG_NAMES, SessionFilterArgs, SessionLine, SessionSelect, native_session_lines,
+    preview_sessions, select_sessions,
 };
 use crate::size_limit::SizeLimitArgs;
 use crate::source;
@@ -747,14 +747,6 @@ pub async fn add(
             "gage session add: --stored applies only with --dataset; sessions are added from a source",
         ));
     }
-    // --stored --dataset resolves stored session IDs, not the native
-    // filter axes. Reject anything but positional session IDs here so
-    // a filter given with --stored fails up front.
-    if stored && (args.sessions.is_empty() || !args.filter.is_empty()) {
-        return Err(CliError::message(
-            "gage session add: --stored --dataset takes stored session IDs; the selection flags apply to native sessions",
-        ));
-    }
     if args.tag.is_some() && !selects_one_session(&args) {
         return Err(CliError::message(
             "gage session add: --tag applies to a single session; give one session ID and no selection flags",
@@ -803,20 +795,21 @@ async fn add_dialog(
     let mut view = AddView::new();
     let placed_ids = match dataset_id.as_deref() {
         Some(dataset_id) if stored => {
+            let selected =
+                select_sessions(SessionSelect::Stored(&store), &args.sessions, &args.filter)
+                    .await
+                    .map_err(|e| DialogError::Failed(format!("{e}")))?;
+            if selected.is_empty() {
+                return Err(DialogError::Failed(
+                    "No sessions matched the selection".to_string(),
+                ));
+            }
             let sessions = SessionStore::from(&store);
-            // Resolve every argument before writing anything, so one
-            // bad argument leaves the store untouched
-            let mut records: Vec<SessionRecord> = Vec::with_capacity(args.sessions.len());
-            let mut errors = Vec::new();
-            for prefix in &args.sessions {
-                match sessions.get(prefix) {
-                    Ok(record) => records.push(record),
-                    Err(e) => errors.push(e.to_string()),
-                }
-            }
-            if !errors.is_empty() {
-                return Err(DialogError::Failed(errors.join("\n")));
-            }
+            let records = selected
+                .iter()
+                .map(|id| sessions.get(id))
+                .collect::<Result<Vec<SessionRecord>, _>>()
+                .map_err(|e| DialogError::Failed(e.to_string()))?;
             dialog::step_value("Dataset", short_uuid(dataset_id))?;
             let lines: Vec<SessionLine> = records.iter().map(SessionLine::from).collect();
             preview_sessions(&lines, IdKind::Gage, args.tag.as_deref())?;
@@ -828,9 +821,13 @@ async fn add_dialog(
             let registry = source::driver_registry();
             let (driver, spec) = source::resolve_source(&registry, source.as_deref())
                 .map_err(DialogError::Failed)?;
-            let selected = select_sessions(source.as_deref(), &args.sessions, &args.filter)
-                .await
-                .map_err(|e| DialogError::Failed(format!("{e}")))?;
+            let selected = select_sessions(
+                SessionSelect::Native(source.as_deref()),
+                &args.sessions,
+                &args.filter,
+            )
+            .await
+            .map_err(|e| DialogError::Failed(format!("{e}")))?;
             if selected.is_empty() {
                 return Err(DialogError::Failed(
                     "No sessions matched the selection".to_string(),
@@ -924,7 +921,7 @@ pub(crate) async fn add_all(
         limit: None,
         sample: None,
     };
-    let selected = select_sessions(Some(source), &[], &filter)
+    let selected = select_sessions(SessionSelect::Native(Some(source)), &[], &filter)
         .await
         .map_err(|e| DialogError::Failed(format!("{source}: {e}")))?;
     if selected.is_empty() {
@@ -946,7 +943,7 @@ pub(crate) async fn add_all(
 
 /// Link sessions already in the store as members of `dataset_id`,
 /// reporting each to `on_event`.
-fn link_stored(
+pub(crate) fn link_stored(
     store: &Store,
     dataset_id: &str,
     records: &[SessionRecord],
