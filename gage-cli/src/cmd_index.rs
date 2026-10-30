@@ -18,6 +18,7 @@ use tabled::{
     },
 };
 
+use crate::dialog;
 use crate::error::CliError;
 use crate::human::format_size;
 use crate::source;
@@ -170,11 +171,11 @@ fn format_elapsed(ms: u64) -> String {
 fn print_status(s: &MaintenanceStatus) {
     let dir = match &s.state_dir {
         Some(dir) => format!("{} ({})", dir.display(), format_size(s.state_bytes as i64)),
-        None => "none".to_string(),
+        None => dialog::NONE.to_string(),
     };
     let text = match &s.text_dir {
         Some(dir) => format!("{} ({})", dir.display(), format_size(s.text_bytes as i64)),
-        None => "none".to_string(),
+        None => dialog::NONE.to_string(),
     };
     let rows = [
         [

@@ -939,10 +939,10 @@ fn selected_filters(
     filters
 }
 
-/// The `Filters` step of the dialog: one line per filter, or `none`.
+/// The `Filters` step of the dialog: one line per filter, or `None`.
 fn filters_step(filters: &[FilterSpec]) -> io::Result<()> {
     if filters.is_empty() {
-        return dialog::step_value("Filters", "none");
+        return dialog::step_none("Filters");
     }
     dialog::step_list("Filters", filters.iter().map(|f| f.to_string()))
 }

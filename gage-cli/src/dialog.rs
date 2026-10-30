@@ -207,17 +207,30 @@ pub fn step_list(label: &str, lines: impl IntoIterator<Item = String>) -> io::Re
 
 /// A step whose lines carry their own styling
 pub fn step_lines(label: &str, lines: impl IntoIterator<Item = String>) -> io::Result<()> {
+    cli::log::step(step_text(label, lines))
+}
+
+fn step_text(label: &str, lines: impl IntoIterator<Item = String>) -> String {
     let mut text = label.to_string();
     for line in lines {
         text.push('\n');
         text.push_str(&line);
     }
-    cli::log::step(text)
+    text
 }
 
 /// A step with one dimmed value line
 pub fn step_value(label: &str, value: impl Display) -> io::Result<()> {
     step_list(label, [value.to_string()])
+}
+
+/// The rendering of an absent value in a dialog step or a status
+/// listing. A column-aligned table uses `-` for an empty cell.
+pub const NONE: &str = "None";
+
+/// A step whose value is absent: `label` over a dimmed `None`
+pub fn step_none(label: &str) -> io::Result<()> {
+    step_value(label, NONE)
 }
 
 /// The failure of a loop that completed `done` of `total` objects:
@@ -242,4 +255,17 @@ pub fn wrap_text(term: &Term, text: &str) -> String {
     let width = term.size().1 as usize;
     let width = width.saturating_sub(4).clamp(40, 79);
     textwrap::fill(text, width)
+}
+
+#[cfg(test)]
+mod tests {
+    use console::strip_ansi_codes;
+
+    use super::*;
+
+    #[test]
+    fn absent_value_renders_as_title_case_none() {
+        let text = step_text("Filters", [style(NONE).dim().to_string()]);
+        assert_eq!(strip_ansi_codes(&text), "Filters\nNone");
+    }
 }

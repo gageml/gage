@@ -2140,7 +2140,7 @@ async fn preview_dataset(plan: &DatasetPlan, store: &Store) -> Result<(), Dialog
             preview_sessions(&lines, IdKind::Gage, None)?;
         }
         DatasetPlan::None => {
-            cli::log::step(format!("Dataset\n{}", style("none").dim()))?;
+            dialog::step_none("Dataset")?;
         }
     }
     Ok(())
