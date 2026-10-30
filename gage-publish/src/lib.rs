@@ -5,9 +5,10 @@
 //! gage-store stages the directory and knows where the definition file
 //! lives; this crate reads and writes the definition, expands it to
 //! instances over the original's text values, and writes the staged
-//! content and `filtered.json` through the session's driver. Every
-//! mutation rebuilds the staged session from the original plus the
-//! full definition. The original is named by the staged `attrs.json`.
+//! content and `filtered.json` through the session's driver. The
+//! definition is edited by hand, and a refresh rebuilds the staged
+//! session from the original plus the full definition. The original
+//! is named by the staged `attrs.json`.
 
 pub mod candidate;
 mod definition;
@@ -29,10 +30,10 @@ use gage_store::{
 };
 
 pub use definition::{
-    Allow, FilterEntry, FilterSpec, NAMED_FILTERS, PublishDefinition, REASONS, Reason,
-    RedactionInput, Segment, TextEntry, requires_prompt,
+    Allow, FilterEntry, FilterSpec, InitArgs, NAMED_FILTERS, PublishDefinition, REASONS, Reason,
+    Segment, TextEntry, format_lines, parse_lines, requires_prompt,
 };
-pub use derive::{Applied, Built, Candidate, Instance, InstanceKind, Span};
+pub use derive::{Built, Candidate, Instance, InstanceKind, Span};
 pub use filter::{Audience, Filter, Pattern, Use};
 
 /// The marker a redacted span or value is replaced with.
@@ -47,8 +48,6 @@ pub enum PublishError {
     Edit(EditError),
     /// A spec or argument the caller gave is malformed
     Input(String),
-    /// A literal matched nothing, or named a value it is not in
-    NoMatch(String),
     /// No driver is registered under the name the original records
     NoDriver(String),
     /// The definition has no filter or segment, or the staged content
@@ -68,7 +67,7 @@ impl fmt::Display for PublishError {
             PublishError::Io(e) => write!(f, "{e}"),
             PublishError::Json(e) => write!(f, "{e}"),
             PublishError::Edit(e) => write!(f, "{e}"),
-            PublishError::Input(m) | PublishError::NoMatch(m) | PublishError::Refused(m) => {
+            PublishError::Input(m) | PublishError::Refused(m) => {
                 write!(f, "{m}")
             }
             PublishError::NoDriver(name) => write!(f, "no driver named {name:?} is registered"),
@@ -127,6 +126,16 @@ pub struct Publisher<'a> {
     drivers: DriverRegistry,
 }
 
+/// What a refresh produced: the spans the text redactions produced,
+/// the rows that took the refresh's author, and the rows that matched
+/// nothing, each by 1-based position with its literal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Refreshed {
+    pub instances: usize,
+    pub authored: usize,
+    pub unmatched: Vec<(usize, String)>,
+}
+
 impl<'a> Publisher<'a> {
     pub fn new(store: &'a Store) -> Self {
         Self {
@@ -150,18 +159,21 @@ impl<'a> Publisher<'a> {
     }
 
     /// Start a publish of `original` under `filters`, with a segment
-    /// per description in `segments` attributed to `author`: stage the
-    /// directory, run every filter, write the definition, and build
-    /// the staged session. A segment starts without lines and drops
-    /// nothing until it has them. A filter given twice is an error.
+    /// per description in `segments` attributed to `author` and
+    /// `init` recorded for the reader: stage the directory, run every
+    /// filter, write the definition, and build the staged session. A
+    /// segment starts without lines and drops nothing until it has
+    /// them. A filter given twice is an error.
     pub fn init(
         &self,
         original: &SessionRecord,
         filters: &[FilterSpec],
         segments: &[String],
         author: &str,
+        init: &InitArgs,
     ) -> Result<PublishInit, PublishError> {
-        let mut definition = PublishDefinition::new(filters);
+        let mut definition = PublishDefinition::new(&original.id, filters);
+        definition.init = init.clone();
         for description in segments {
             definition.push_segment(description, &[], author);
         }
@@ -175,337 +187,41 @@ impl<'a> Publisher<'a> {
         Ok(init)
     }
 
-    /// Add `filter` to the pending publish `id`, run it, and rebuild.
-    /// A filter already on the list is an error.
-    pub fn filter_add(
-        &self,
-        id: &str,
-        filter: &FilterSpec,
-    ) -> Result<PublishDefinition, PublishError> {
-        let mut definition = self.definition(id)?;
-        if definition.filters.iter().any(|f| f.name == filter.name) {
-            return Err(PublishError::Input(format!(
-                "filter {filter} is already on the list"
-            )));
-        }
-        definition.filters.push(FilterEntry::new(filter));
-        definition.validate()?;
-        let session = self.open_original(id)?;
-        derive::run_filters(
-            &mut definition,
-            &session,
-            std::slice::from_ref(&filter.name),
-        )?;
-        self.build(id, &definition, &session)?;
-        self.write_definition(id, &definition)?;
-        Ok(definition)
-    }
-
-    /// Remove the filter `name` from the pending publish `id` with its
-    /// text redactions, and rebuild. The allow list stays, so adding
-    /// the filter back does not record a literal that was removed.
-    /// Returns the removed filter.
-    pub fn filter_remove(&self, id: &str, name: &str) -> Result<FilterEntry, PublishError> {
-        let mut definition = self.definition(id)?;
-        let (index, _) = definition.find_filter(name)?;
-        let removed = definition.filters.remove(index);
-        let author = removed.author();
-        definition.text.retain(|t| t.author != author);
-        let session = self.open_original(id)?;
-        self.build(id, &definition, &session)?;
-        self.write_definition(id, &definition)?;
-        Ok(removed)
-    }
-
-    /// Set the prompt of the filter `name` on the pending publish `id`.
-    /// A prompt is instructions, not rules, so nothing is rebuilt.
-    /// Returns the filter as it now stands.
-    pub fn filter_edit(
-        &self,
-        id: &str,
-        name: &str,
-        prompt: Option<String>,
-    ) -> Result<FilterEntry, PublishError> {
-        let mut definition = self.definition(id)?;
-        let (index, _) = definition.find_filter(name)?;
-        let entry = definition
-            .filters
-            .get_mut(index)
-            .expect("find_filter returned the index");
-        entry.prompt = prompt;
-        let edited = entry.clone();
-        definition.validate()?;
-        self.write_definition(id, &definition)?;
-        Ok(edited)
-    }
-
-    /// Add a segment to the pending publish `id` as `author` and
-    /// rebuild. Returns its id.
-    pub fn segment_add(
-        &self,
-        id: &str,
-        description: &str,
-        lines: &[(u32, u32)],
-        author: &str,
-    ) -> Result<u64, PublishError> {
-        let mut definition = self.definition(id)?;
-        let segment = definition.push_segment(description, lines, author);
-        definition.validate()?;
-        let session = self.open_original(id)?;
-        self.build(id, &definition, &session)?;
-        self.write_definition(id, &definition)?;
-        Ok(segment)
-    }
-
-    /// Change the description or the lines of segment `segment` of the
-    /// pending publish `id` and rebuild. Returns the segment as it now
-    /// stands.
-    pub fn segment_edit(
-        &self,
-        id: &str,
-        segment: u64,
-        description: Option<&str>,
-        lines: Option<&[(u32, u32)]>,
-    ) -> Result<Segment, PublishError> {
-        let mut definition = self.definition(id)?;
-        let target = definition
-            .segments
-            .iter_mut()
-            .find(|s| s.id == segment)
-            .ok_or_else(|| PublishError::Input(format!("no segment with id {segment}")))?;
-        if let Some(description) = description {
-            target.description = description.to_string();
-        }
-        if let Some(lines) = lines {
-            target.lines = lines.to_vec();
-        }
-        let edited = target.clone();
-        definition.validate()?;
-        let session = self.open_original(id)?;
-        self.build(id, &definition, &session)?;
-        self.write_definition(id, &definition)?;
-        Ok(edited)
-    }
-
-    /// Remove segment `segment` from the pending publish `id` and
-    /// rebuild. Returns the removed segment.
-    pub fn segment_remove(&self, id: &str, segment: u64) -> Result<Segment, PublishError> {
-        let mut definition = self.definition(id)?;
-        let index = definition
-            .segments
-            .iter()
-            .position(|s| s.id == segment)
-            .ok_or_else(|| PublishError::Input(format!("no segment with id {segment}")))?;
-        let removed = definition.segments.remove(index);
-        let session = self.open_original(id)?;
-        self.build(id, &definition, &session)?;
-        self.write_definition(id, &definition)?;
-        Ok(removed)
-    }
-
-    /// Re-run the named filter `name`, or every named filter on the
-    /// list when `name` is `None`, and rebuild. The filter's earlier
-    /// text redactions go, and an allowed literal is not recorded.
-    pub fn filter_run(
-        &self,
-        id: &str,
-        name: Option<&str>,
-    ) -> Result<PublishDefinition, PublishError> {
-        let mut definition = self.definition(id)?;
-        let names = match name {
-            Some(name) => {
-                if !definition.named_filters().iter().any(|n| n == name) {
-                    return Err(PublishError::Input(format!(
-                        "no named filter {name:?} is on the list"
-                    )));
-                }
-                vec![name.to_string()]
-            }
-            None => definition.named_filters(),
-        };
-        let session = self.open_original(id)?;
-        derive::run_filters(&mut definition, &session, &names)?;
-        self.build(id, &definition, &session)?;
-        self.write_definition(id, &definition)?;
-        Ok(definition)
-    }
-
-    /// Add `inputs` to the pending publish `id` as `author` and rebuild.
-    /// An input that matches nothing is an error, and nothing changes.
-    pub fn redact(
-        &self,
-        id: &str,
-        inputs: &[RedactionInput],
-        author: &str,
-    ) -> Result<Vec<Applied>, PublishError> {
-        let items: Vec<(&RedactionInput, &str)> = inputs.iter().map(|i| (i, author)).collect();
-        self.redact_as(id, &items)
-    }
-
-    /// Add each input of `items` to the pending publish `id` under the
-    /// author paired with it, and rebuild. An input whose literal,
-    /// compared without case, reason, and author are already a
-    /// redaction's restates that redaction: it is reported under the
-    /// existing id and left as it stood, its mark included. The same
-    /// literal under another reason or author is a redaction of its
-    /// own. An input that matches nothing is an error, and nothing
-    /// changes. The result is one entry per item, in order.
-    pub fn redact_as(
-        &self,
-        id: &str,
-        items: &[(&RedactionInput, &str)],
-    ) -> Result<Vec<Applied>, PublishError> {
-        let mut definition = self.definition(id)?;
-        let session = self.open_original(id)?;
-        let ids: Vec<(u64, bool)> = items
-            .iter()
-            .map(|(input, author)| {
-                match definition.find_text(&input.literal, &input.reason, author) {
-                    Some(existing) => (existing.id, false),
-                    None => {
-                        let id =
-                            definition.push_text(&input.literal, &input.reason, author, input.mark);
-                        (id, true)
-                    }
-                }
-            })
-            .collect();
-        let added: Vec<u64> = ids
-            .iter()
-            .filter(|(_, added)| *added)
-            .map(|(id, _)| *id)
-            .collect();
-        let counts = derive::counts(&definition, &session)?;
-        for text in definition.text.iter().filter(|t| added.contains(&t.id)) {
-            if counts.get(&text.id).copied().unwrap_or(0) == 0 {
-                return Err(PublishError::NoMatch(format!(
-                    "text {:?} matches nothing in the session",
-                    text.literal
-                )));
-            }
-        }
-        if !added.is_empty() {
-            self.build(id, &definition, &session)?;
-            self.write_definition(id, &definition)?;
-        }
-        ids.iter()
-            .map(|(id, added)| {
-                let t = definition
-                    .text
-                    .iter()
-                    .find(|t| t.id == *id)
-                    .expect("every item resolved to an entry of the definition");
-                Ok(Applied {
-                    id: t.id,
-                    literal: t.literal.clone(),
-                    reason: t.reason.clone(),
-                    mark: t.mark,
-                    instances: counts.get(&t.id).copied().unwrap_or(0),
-                    added: *added,
-                })
-            })
-            .collect()
-    }
-
-    /// Change the literal, the reason, or the mark of the text
-    /// redaction `text` of the pending publish `id` and rebuild. A
-    /// literal that matches nothing is an error, and nothing changes.
-    pub fn redact_edit(
-        &self,
-        id: &str,
-        text: u64,
-        literal: Option<&str>,
-        reason: Option<&str>,
-        mark: Option<bool>,
-    ) -> Result<Applied, PublishError> {
-        let mut definition = self.definition(id)?;
-        let target = definition
-            .text
-            .iter_mut()
-            .find(|t| t.id == text)
-            .ok_or_else(|| PublishError::Input(format!("no redaction with id {text}")))?;
-        if let Some(literal) = literal {
-            target.literal = literal.to_string();
-        }
-        if let Some(reason) = reason {
-            target.reason = reason.to_string();
-        }
-        if let Some(mark) = mark {
-            target.mark = mark;
-        }
-        let edited = target.clone();
-        definition.validate()?;
-        let session = self.open_original(id)?;
-        let counts = derive::counts(&definition, &session)?;
-        let instances = counts.get(&text).copied().unwrap_or(0);
-        if instances == 0 {
-            return Err(PublishError::NoMatch(format!(
-                "text {:?} matches nothing in the session",
-                edited.literal
-            )));
-        }
-        self.build(id, &definition, &session)?;
-        self.write_definition(id, &definition)?;
-        Ok(Applied {
-            id: edited.id,
-            literal: edited.literal,
-            reason: edited.reason,
-            mark: edited.mark,
-            instances,
-            added: false,
-        })
-    }
-
-    /// Remove the text redactions `ids` from the pending publish `id`
-    /// as `author` and rebuild. Every id must exist, or nothing
-    /// changes. A filter's literal goes on the allow list so a re-run
-    /// of the filter does not record it again. Returns the removed
-    /// redactions.
-    pub fn redact_remove(
-        &self,
-        id: &str,
-        ids: &[u64],
-        author: &str,
-    ) -> Result<Vec<TextEntry>, PublishError> {
-        let mut definition = self.definition(id)?;
-        let missing: Vec<String> = ids
-            .iter()
-            .filter(|i| !definition.text.iter().any(|t| t.id == **i))
-            .map(u64::to_string)
-            .collect();
-        if !missing.is_empty() {
-            return Err(PublishError::Input(format!(
-                "no redaction with id {}",
-                missing.join(", ")
-            )));
-        }
-        let (removed, kept): (Vec<TextEntry>, Vec<TextEntry>) =
-            definition.text.drain(..).partition(|t| ids.contains(&t.id));
-        definition.text = kept;
-        for t in &removed {
-            if t.author.starts_with("filter:") && !definition.is_allowed(&t.literal) {
-                definition.allow.push(Allow {
-                    literal: t.literal.clone(),
-                    author: author.to_string(),
-                });
-            }
-        }
-        let session = self.open_original(id)?;
-        self.build(id, &definition, &session)?;
-        self.write_definition(id, &definition)?;
-        Ok(removed)
-    }
-
     /// Rebuild the pending publish `id` from its definition as it is on
-    /// disk, for a definition edited by hand. The definition is checked
-    /// first and an invalid one is an error naming the entry. Returns
-    /// the number of spans the text redactions produced.
-    pub fn refresh(&self, id: &str) -> Result<usize, PublishError> {
-        let definition = self.definition(id)?;
+    /// disk, for a definition edited by hand. A redaction written
+    /// without an author takes `author`. The definition is checked
+    /// first and an invalid one is an error naming the row; nothing
+    /// changes. Every named filter runs again, so a filter's row
+    /// deleted by hand comes back unless its literal is allowed. The
+    /// file is rewritten with what the refresh changed.
+    pub fn refresh(&self, id: &str, author: &str) -> Result<Refreshed, PublishError> {
+        let mut definition = self.definition(id)?;
+        let authored = definition.fill_authors(author);
         definition.validate()?;
+        let original = self.original(id)?;
+        if definition.session != original.record.id {
+            return Err(PublishError::Input(format!(
+                "session {:?} is not the original {} the publish was staged from",
+                definition.session, original.record.id
+            )));
+        }
         let session = self.open_original(id)?;
+        let names = definition.named_filters();
+        derive::run_filters(&mut definition, &session, &names)?;
         let built = self.build(id, &definition, &session)?;
-        Ok(built.counts.values().sum())
+        self.write_definition(id, &definition)?;
+        let unmatched = definition
+            .redact
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| built.counts.get(i).copied().unwrap_or(0) == 0)
+            .map(|(i, t)| (i + 1, t.literal.clone()))
+            .collect();
+        Ok(Refreshed {
+            instances: built.counts.values().sum(),
+            authored,
+            unmatched,
+        })
     }
 
     /// Every text value the pending publish `id` discloses, with the
@@ -524,8 +240,8 @@ impl<'a> Publisher<'a> {
     }
 
     /// The number of spans each text redaction of the pending publish
-    /// `id` produces, by id. Reads only.
-    pub fn instances(&self, id: &str) -> Result<BTreeMap<u64, usize>, PublishError> {
+    /// `id` produces, by its index in `redact`. Reads only.
+    pub fn instances(&self, id: &str) -> Result<BTreeMap<usize, usize>, PublishError> {
         let definition = self.definition(id)?;
         let session = self.open_original(id)?;
         derive::counts(&definition, &session)
@@ -548,15 +264,23 @@ impl<'a> Publisher<'a> {
     }
 
     /// Verify that the pending publish `id` can be published: its
-    /// definition has a filter or a segment, its staged session passes
-    /// [`check`], and the definition changed the session. A definition
-    /// with no filter and no segment is refused regardless of `force`;
-    /// an unchanged session is refused unless `force` is set. Reads
-    /// only.
+    /// definition is valid, names its original, and has a filter or a
+    /// segment, its staged session passes [`check`], and the
+    /// definition changed the session. A definition with no filter and
+    /// no segment is refused regardless of `force`; an unchanged
+    /// session is refused unless `force` is set. Reads only.
     ///
     /// [`check`]: Publisher::check
     pub fn verify(&self, id: &str, force: bool) -> Result<(), PublishError> {
         let definition = self.definition(id)?;
+        definition.validate()?;
+        let original = self.original(id)?;
+        if definition.session != original.record.id {
+            return Err(PublishError::Refused(format!(
+                "definition names session {:?}, not the original {} the publish was staged from",
+                definition.session, original.record.id
+            )));
+        }
         if definition.filters.is_empty() && definition.segments.is_empty() {
             return Err(PublishError::Refused(
                 "definition has no filter or segment; push the session directly to \
@@ -588,11 +312,12 @@ impl<'a> Publisher<'a> {
         Ok(self.publish.apply(id)?)
     }
 
-    /// The definition of the pending publish `id`.
+    /// The definition of the pending publish `id`, as the file holds
+    /// it. A row written without an author has an empty one.
     pub fn definition(&self, id: &str) -> Result<PublishDefinition, PublishError> {
         let path = self.publish.definition_file(id);
-        let bytes = match fs::read(&path) {
-            Ok(bytes) => bytes,
+        let text = match fs::read_to_string(&path) {
+            Ok(text) => text,
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 return Err(PublishError::Store(StoreError::ObjectNotFound(
                     id.to_string(),
@@ -600,15 +325,22 @@ impl<'a> Publisher<'a> {
             }
             Err(e) => return Err(PublishError::Io(e)),
         };
-        Ok(serde_json::from_slice(&bytes)?)
+        PublishDefinition::from_jsonc(&text)
     }
 
+    /// Write the definition of `id` with the original's title beside
+    /// the session.
     fn write_definition(
         &self,
         id: &str,
         definition: &PublishDefinition,
     ) -> Result<(), PublishError> {
-        fs::write(self.publish.definition_file(id), definition.to_json_text())?;
+        let original = self.original(id)?;
+        let title = original.record.attrs.summary.title.as_deref();
+        fs::write(
+            self.publish.definition_file(id),
+            definition.to_jsonc_text(title),
+        )?;
         Ok(())
     }
 

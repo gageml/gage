@@ -71,9 +71,9 @@ impl SessionText {
 /// One effect of the definition on the session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Instance {
-    /// The text redaction that produced a span; none for a dropped
-    /// line, a left-out value, or an attribute
-    pub entry: Option<u64>,
+    /// The index in `redact` of the text redaction that produced a
+    /// span; none for a dropped line, a left-out value, or an attribute
+    pub entry: Option<usize>,
     pub reason: String,
     pub author: String,
     pub kind: InstanceKind,
@@ -173,40 +173,35 @@ impl Instance {
     }
 }
 
-/// A text redaction as `redact` reports it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Applied {
-    pub id: u64,
-    pub literal: String,
-    pub reason: String,
-    pub mark: bool,
-    pub instances: usize,
-    /// Whether the call added the redaction. False when the literal was
-    /// already a redaction, which the call left as it stood, and on an
-    /// edit.
-    pub added: bool,
-}
-
 /// What a build produced: the instances, and the number of spans each
-/// text redaction produced, by id.
+/// text redaction produced, by its index in `redact`.
 pub struct Built {
     pub instances: Vec<Instance>,
-    pub counts: BTreeMap<u64, usize>,
+    pub counts: BTreeMap<usize, usize>,
 }
 
-/// Run the named filters `names` over the original and record what
-/// their patterns and typed literal paths find as the filter's text
-/// redactions, replacing the filter's earlier ones. A literal on the
-/// allow list is not recorded.
+/// Run the named filters `names`, the filters on the list, over the
+/// original and record what their patterns and typed literal paths
+/// find as the filter's text redactions. A row the filter recorded
+/// before stays in place when the filter finds its literal again and
+/// goes when it does not; a literal found anew is appended. A literal
+/// on the allow list is not recorded. A row authored by a filter not
+/// on the list goes.
 pub fn run_filters(
     definition: &mut PublishDefinition,
     session: &SessionText,
     names: &[String],
 ) -> Result<(), PublishError> {
+    definition
+        .redact
+        .retain(|t| match t.author.strip_prefix("filter:") {
+            Some(name) => names.iter().any(|n| n == name),
+            None => true,
+        });
     for name in names {
         let author = format!("filter:{name}");
-        definition.text.retain(|t| t.author != author);
         let Some(filter) = Filter::named(name) else {
+            definition.redact.retain(|t| t.author != author);
             continue;
         };
         let mut literals: BTreeSet<String> = BTreeSet::new();
@@ -222,11 +217,18 @@ pub fn run_filters(
                 .map_err(|e| PublishError::Input(format!("line {}: {e}", entry.line)))?;
             literals.extend(found.literals);
         }
+        literals.retain(|literal| !definition.is_allowed(literal));
+        definition.redact.retain(|t| {
+            t.author != author || literals.iter().any(|l| l.eq_ignore_ascii_case(&t.literal))
+        });
         for literal in literals {
-            if definition.is_allowed(&literal) {
-                continue;
+            let present = definition
+                .redact
+                .iter()
+                .any(|t| t.author == author && t.literal.eq_ignore_ascii_case(&literal));
+            if !present {
+                definition.push_redact(&literal, filter.reason, &author, true);
             }
-            definition.push_text(&literal, filter.reason, &author, true);
         }
     }
     Ok(())
@@ -363,11 +365,11 @@ fn merge_spans(mut ranges: Vec<Span>) -> Vec<Span> {
 }
 
 /// The number of spans each text redaction of `definition` produces
-/// over `session`, by id. Reads only.
+/// over `session`, by its index in `redact`. Reads only.
 pub fn counts(
     definition: &PublishDefinition,
     session: &SessionText,
-) -> Result<BTreeMap<u64, usize>, PublishError> {
+) -> Result<BTreeMap<usize, usize>, PublishError> {
     let Expanded { instances, .. } = expand(definition, session)?;
     Ok(counts_of(definition, &instances))
 }
@@ -395,11 +397,11 @@ fn dropped_of(instances: &[Instance]) -> BTreeSet<u32> {
 
 /// The spans per text redaction, with every redaction of the
 /// definition present, at zero when it produced none.
-fn counts_of(definition: &PublishDefinition, instances: &[Instance]) -> BTreeMap<u64, usize> {
-    let mut counts: BTreeMap<u64, usize> = definition.text.iter().map(|t| (t.id, 0)).collect();
+fn counts_of(definition: &PublishDefinition, instances: &[Instance]) -> BTreeMap<usize, usize> {
+    let mut counts: BTreeMap<usize, usize> = (0..definition.redact.len()).map(|i| (i, 0)).collect();
     for i in instances {
-        if let Some(id) = i.entry {
-            *counts.entry(id).or_default() += 1;
+        if let Some(index) = i.entry {
+            *counts.entry(index).or_default() += 1;
         }
     }
     counts
@@ -609,7 +611,7 @@ fn expand(definition: &PublishDefinition, session: &SessionText) -> Result<Expan
         }));
     }
 
-    for text in &definition.text {
+    for (index, text) in definition.redact.iter().enumerate() {
         let regex = literal_regex(&text.literal);
         for entry in &session.entries {
             if dropped.contains(&entry.line) {
@@ -619,11 +621,16 @@ fn expand(definition: &PublishDefinition, session: &SessionText) -> Result<Expan
                 if deleted.contains(&(entry.line, value.pointer.clone())) {
                     continue;
                 }
-                instances.extend(
-                    regex
-                        .find_iter(&value.text)
-                        .map(|m| span_of(text, entry.line, &value.pointer, m.start(), m.end() - 1)),
-                );
+                instances.extend(regex.find_iter(&value.text).map(|m| {
+                    span_of(
+                        index,
+                        text,
+                        entry.line,
+                        &value.pointer,
+                        m.start(),
+                        m.end() - 1,
+                    )
+                }));
             }
         }
     }
@@ -642,10 +649,18 @@ fn runs(lines: impl IntoIterator<Item = u32>) -> Vec<(u32, u32)> {
     runs
 }
 
-/// The span `start..=end` of `value` on `line` as `text` redacts it.
-fn span_of(text: &TextEntry, line: u32, pointer: &str, start: usize, end: usize) -> Instance {
+/// The span `start..=end` of `value` on `line` as `text`, the
+/// redaction at `index`, redacts it.
+fn span_of(
+    index: usize,
+    text: &TextEntry,
+    line: u32,
+    pointer: &str,
+    start: usize,
+    end: usize,
+) -> Instance {
     Instance {
-        entry: Some(text.id),
+        entry: Some(index),
         reason: text.reason.clone(),
         author: text.author.clone(),
         kind: InstanceKind::Span {
@@ -896,7 +911,7 @@ mod tests {
     #[test]
     fn records_round_trip_through_the_store_parser() {
         let instance = |kind| Instance {
-            entry: Some(1),
+            entry: Some(0),
             reason: "pii".to_string(),
             author: "filter:pii".to_string(),
             kind,
@@ -952,9 +967,8 @@ mod tests {
         );
     }
 
-    fn segment(id: u64, lines: &[(u32, u32)], author: &str) -> Segment {
+    fn segment(lines: &[(u32, u32)], author: &str) -> Segment {
         Segment {
-            id,
             description: String::new(),
             lines: lines.to_vec(),
             author: author.to_string(),
@@ -968,10 +982,7 @@ mod tests {
     fn segment_gaps_are_the_runs_outside_the_merged_ranges() {
         assert!(segment_gaps(&[], 10).is_empty());
         let gaps = segment_gaps(
-            &[
-                segment(1, &[(4, 5), (9, 9)], "a"),
-                segment(2, &[(2, 3)], "b"),
-            ],
+            &[segment(&[(4, 5), (9, 9)], "a"), segment(&[(2, 3)], "b")],
             12,
         );
         assert_eq!(
@@ -982,9 +993,9 @@ mod tests {
                 (10, 12, "a".to_string()),
             ]
         );
-        let whole = segment_gaps(&[segment(1, &[(1, 12)], "a")], 12);
+        let whole = segment_gaps(&[segment(&[(1, 12)], "a")], 12);
         assert!(whole.is_empty(), "{whole:?}");
-        let past = segment_gaps(&[segment(1, &[(1, 20)], "a")], 12);
+        let past = segment_gaps(&[segment(&[(1, 20)], "a")], 12);
         assert!(past.is_empty(), "{past:?}");
     }
 

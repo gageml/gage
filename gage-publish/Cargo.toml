@@ -17,6 +17,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 serde_json_path = "0.7"
 toml = { workspace = true }
+jsonc-parser = { version = "0.32.4", features = ["serde"] }
 
 [dev-dependencies]
 gage-claude = { path = "../gage-claude" }

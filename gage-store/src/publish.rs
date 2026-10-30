@@ -7,7 +7,7 @@
 //! `filtered.json`. It is the same shape an added session's tree has,
 //! so one decoder serves both the staged directory and a committed
 //! session, the way a scan directory mirrors a stored scan. Beside it,
-//! `publish/<session id>.publish.json` is the publish definition: the
+//! `publish/<session id>.publish.jsonc` is the publish definition: the
 //! instructions the staged session is derived from, which may hold
 //! anything and is never committed. The session enters the store only
 //! on apply, which commits the staged directory as it stands and then
@@ -32,7 +32,7 @@ use crate::{SessionRecord, SessionStore, Store, StoreError};
 const PUBLISH_DIR: &str = "publish";
 const ATTRS_FILE: &str = "attrs.json";
 pub(crate) const FILTERED_FILE: &str = "filtered.json";
-const DEFINITION_SUFFIX: &str = ".publish.json";
+const DEFINITION_SUFFIX: &str = ".publish.jsonc";
 
 /// Whether the data layer includes pending publish working trees in
 /// the session tables, set by `GAGE_SHOW_PUBLISHING=1`. Only the
@@ -381,7 +381,7 @@ impl<'a> PublishStore<'a> {
     }
 
     /// The definition file of the pending publish `id`,
-    /// `publish/<id>.publish.json`: the instructions the staged session
+    /// `publish/<id>.publish.jsonc`: the instructions the staged session
     /// is derived from. Never committed.
     pub fn definition_file(&self, id: &str) -> PathBuf {
         self.root.join(format!("{id}{DEFINITION_SUFFIX}"))

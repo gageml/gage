@@ -2,21 +2,23 @@
 //! publish of selected sessions through Claude Code when no
 //! subcommand is given.
 //!
-//! `init` stages a publish of a session; `redact`, `status`, `undo`,
-//! `refresh`, the `filter` commands, `abort`, and `apply` follow.
-//! `apply` is the only command that writes the store. The source session is resolved
-//! through the session command's `--source` and `--stored`, the way
+//! `init` stages a pending publish per selected session and writes
+//! its definition file; `edit` and `refresh` rebuild the staged
+//! session from the file; `show` prints it; `candidate` prints the
+//! text open to redaction; `abort` and `apply` end the publish.
+//! `apply` is the only command that writes the store. The original
+//! sessions are resolved through `--source` and `--stored`, the way
 //! `gage scan` resolves sessions: a `--stored` session is used as is,
 //! and a native session is added to the store first so it has an
 //! object id and commit for `origin`.
 
 use std::cmp::Reverse;
-use std::collections::BTreeMap;
 use std::env;
 use std::fmt;
 use std::fs;
-use std::io::{self, Read};
-use std::path::{Path, PathBuf};
+use std::io;
+use std::path::PathBuf;
+use std::process::Command;
 use std::sync::Arc;
 
 use clap::{Args, Subcommand};
@@ -25,11 +27,11 @@ use gage_core::config::gage_home;
 use gage_core::style::IdHighlighter;
 use gage_core::uuid::short_uuid;
 use gage_publish::{
-    Applied, Audience, Filter, FilterEntry, FilterSpec, NAMED_FILTERS, PublishDefinition,
-    PublishError, Publisher, REASONS, RedactionInput, TextEntry, Use, candidate,
+    Audience, Filter, FilterSpec, InitArgs as InitRecord, NAMED_FILTERS, PublishError, Publisher,
+    Use, candidate,
 };
 use gage_session::{Driver, NativeSession, SourceOptions};
-use gage_store::url::{LineSelection, parse_session_origin};
+use gage_store::url::parse_session_origin;
 use gage_store::{
     PendingPublish, PublishStore, SESSION_TYPE, SessionRecord, SessionStore, Store, StoreError,
     TagStore,
@@ -161,34 +163,53 @@ are independent: one implies nothing about another, and a value not given select
 
 #[derive(Subcommand)]
 pub enum PublishCommand {
-    /// Start a publish of a session
+    /// Stage a publish of selected sessions
     ///
-    /// Stages a pending publish and prints the new session ID, the
-    /// value the other publish commands take as their SESSION
-    /// argument.
-    Init(InitArgs),
+    /// Stage a publish of selected sessions. Stages one pending
+    /// publish per session and prints its ID, the value the other
+    /// publish commands take as their SESSION argument. Named filters
+    /// run at once and their redactions are recorded in definition
+    /// file.
+    Init(Box<InitArgs>),
 
     /// List pending publish sessions
     List,
 
-    /// Manage text redactions of a pending publish
-    Redact(RedactArgs),
+    /// Show definition of a pending publish
+    ///
+    /// Show definition of a pending publish. Prints definition file.
+    /// With --instructions, prints redaction instructions of each
+    /// filter as markdown instead: a heading naming filter, then its
+    /// instructions with prompt given for it in place of its
+    /// placeholder.
+    Show(ShowArgs),
 
-    /// Manage segments of a pending publish
-    Segment(SegmentArgs),
-
-    /// Show filters, segments, and redactions of a pending publish
-    Status(StatusArgs),
+    /// Edit definition of a pending publish in system editor
+    ///
+    /// Edit definition of a pending publish in system editor. Opens
+    /// definition file in $VISUAL or $EDITOR and rebuilds staged
+    /// session when editor exits, as refresh does. An invalid
+    /// definition is reported and nothing changes; file is kept as
+    /// saved.
+    Edit(EditArgs),
 
     /// Rebuild a pending publish from its definition
     ///
-    /// Re-applies publish definition file as it is on disk, for a
-    /// definition edited by hand. An invalid definition is reported and
-    /// nothing changes.
+    /// Rebuild a pending publish from its definition. Re-applies
+    /// definition file as it is on disk, for a definition edited
+    /// elsewhere. Every named filter runs again, and a redaction
+    /// without an author takes author of this run. An invalid
+    /// definition is reported and nothing changes.
     Refresh(RefreshArgs),
 
-    /// Manage filters of a pending publish
-    Filter(FilterArgs),
+    /// Print candidate text of a pending publish
+    ///
+    /// Print candidate text of a pending publish. Each distinct text
+    /// value of kept lines, with left-out values omitted, once, one
+    /// per line as a JSON string, in order of first occurrence. Text
+    /// is divided into splits bounded by --split, one per file with
+    /// --split-files. This is what a redaction agent reads.
+    Candidate(CandidateArgs),
 
     /// Abort pending publishes
     ///
@@ -207,9 +228,9 @@ pub enum PublishCommand {
 
 #[derive(Args)]
 pub struct InitArgs {
-    /// Session to publish (tag, ID, or prefix)
-    #[arg(value_name = "SESSION", required = true)]
-    session: Option<String>,
+    /// Sessions to publish (ID or prefix)
+    #[arg(value_name = "SESSION", conflicts_with_all = FILTER_ARG_NAMES)]
+    sessions: Vec<String>,
 
     /// Session source
     #[arg(
@@ -217,29 +238,33 @@ pub struct InitArgs {
         short = 's',
         long = "source",
         value_name = "SOURCE",
-        long_help = format!("Session source\n\n{}", source::SOURCE_HELP)
+        long_help = format!("Session source\n\n{}", source::SOURCE_HELP),
+        conflicts_with = "stored",
     )]
     source: Option<String>,
 
-    /// Publish a stored session
-    #[arg(id = "stored", short = 'S', long = "stored", conflicts_with = "source")]
+    /// Publish stored sessions
+    #[arg(id = "stored", short = 'S', long = "stored")]
     stored: bool,
 
-    /// Audience session is published for
+    #[command(flatten)]
+    select: SessionFilterArgs,
+
+    /// Audience sessions are published for
     #[arg(
         short = 'A',
         long,
         value_name = "AUDIENCE",
-        long_help = format!("Audience session is published for\n\n{AUDIENCE_HELP}")
+        long_help = format!("Audience sessions are published for\n\n{AUDIENCE_HELP}")
     )]
     audience: Option<String>,
 
-    /// Use session is published for
+    /// Use sessions are published for
     #[arg(
         short = 'U',
         long,
         value_name = "USE",
-        long_help = format!("Use session is published for\n\n{USE_HELP}")
+        long_help = format!("Use sessions are published for\n\n{USE_HELP}")
     )]
     r#use: Option<String>,
 
@@ -254,10 +279,17 @@ pub struct InitArgs {
 
     /// Segment to add (repeatable)
     ///
-    /// A segment starts without lines and drops nothing until segment
-    /// edit gives it lines.
+    /// A segment starts without lines and drops nothing until
+    /// definition gives it lines.
     #[arg(short = 'g', long, value_name = "TEXT")]
     segment: Vec<String>,
+
+    /// Notes about use, audience, segments
+    ///
+    /// Read from a file as @PATH. Recorded in definition with
+    /// audience and use.
+    #[arg(short = 'N', long, value_name = "TEXT")]
+    notes: Option<String>,
 
     /// Skip confirmation prompt
     #[arg(short, long)]
@@ -268,170 +300,36 @@ pub struct InitArgs {
     list_filters: bool,
 }
 
-#[derive(Args)]
-pub struct RedactArgs {
-    #[command(subcommand)]
-    command: RedactCommand,
-}
-
-#[derive(Subcommand)]
-pub enum RedactCommand {
-    /// Add a text redaction to a pending publish
-    ///
-    /// Literal is matched case-insensitively against every text value
-    /// of session, and a literal that matches nothing is an error.
-    Add(RedactAddArgs),
-
-    /// Add text redactions to a pending publish from JSON
-    ///
-    /// Input is an array of redactions, each an array of text, reason
-    /// code, author, and no-mark flag, [TEXT, REASON, AUTHOR, NO_MARK],
-    /// or of text, reason code, and no-mark flag, [TEXT, REASON,
-    /// NO_MARK], which takes its author from --author. An author
-    /// without ":" names a filter of the publish and is recorded as
-    /// "filter:NAME"; an author with ":" is recorded as given. Every
-    /// literal is matched before any is added: one that matches nothing
-    /// is an error, and nothing is added.
-    Import(RedactImportArgs),
-
-    /// Change a text redaction of a pending publish
-    ///
-    /// Literal, reason, and mark change only when given.
-    Edit(RedactEditArgs),
-
-    /// Remove text redactions from a pending publish
-    ///
-    /// Staged session is rebuilt from original with remaining
-    /// redactions. A literal a named filter found is allowed once
-    /// removed: filter does not record it again.
-    Remove(RedactRemoveArgs),
-
-    /// Print candidate text of a pending publish
-    ///
-    /// Each distinct text value of kept lines, with left-out values
-    /// omitted, once, one per line as a JSON string, in order of first
-    /// occurrence. Text is divided into splits bounded by --split, one
-    /// per file with --split-files. This is what a redaction agent
-    /// reads.
-    Candidate(CandidateArgs),
-
-    /// List text redactions of a pending publish
-    ///
-    /// One row per redaction: its ID, the text, the reason, the
-    /// author, and the number of instances. The ID is what redact
-    /// edit and redact remove take.
-    List(RedactListArgs),
-}
+/// The paragraph `--filter` options share on what a filter argument
+/// is.
+const FILTER_HELP: &str = "A filter name; see --list-filters. Filter names are \"pii\", \
+\"language\", \"secret\", \"system\", \"harness-context\", \"harness-records\", and \
+\"custom\". \"custom\" takes a prompt as its whole instruction, so it is added in definition \
+file. A filter given here is added to those --audience and --use select.";
 
 #[derive(Args)]
-pub struct RedactAddArgs {
-    /// Pending publish session to redact (ID or prefix)
-    #[arg(value_name = "SESSION", required = true)]
-    session: Option<String>,
-
-    /// Text to redact everywhere
-    ///
-    /// Read from a file as @PATH.
-    #[arg(value_name = "TEXT", required = true)]
-    text: Option<String>,
-
-    /// Reason for redaction (default custom)
-    ///
-    /// A reason code; see --list-reasons.
-    #[arg(short, long, value_name = "REASON")]
-    reason: Option<String>,
-
-    /// Remove redacted text without a marker
-    ///
-    /// Without it a redacted span is replaced by "[REDACTED]"; with it
-    /// span is removed and surrounding whitespace is normalized.
-    #[arg(short = 'n', long)]
-    no_mark: bool,
-
-    /// Skip confirmation prompt
-    #[arg(short, long)]
-    yes: bool,
-
-    /// Show reason codes and exit
-    #[arg(long, exclusive = true)]
-    list_reasons: bool,
-}
-
-#[derive(Args)]
-pub struct RedactImportArgs {
-    /// Pending publish session to redact (ID or prefix)
+pub struct ShowArgs {
+    /// Pending publish session to show (ID or prefix)
     #[arg(value_name = "SESSION")]
     session: String,
 
-    /// Redactions to import
-    ///
-    /// A JSON file, or "-" to read standard input.
-    #[arg(value_name = "PATH")]
-    path: PathBuf,
-
-    /// Author of redactions given without one
-    ///
-    /// A filter name is recorded as "filter:NAME"; a value with ":" is
-    /// recorded as given. Without it, a session ID set in
-    /// CLAUDE_CODE_SESSION_ID is recorded as "session:ID", and a
-    /// redaction with no author of its own is an error when that is
-    /// unset too.
-    #[arg(short, long, value_name = "AUTHOR")]
-    author: Option<String>,
-
-    /// Skip confirmation prompt
-    #[arg(short, long)]
-    yes: bool,
+    /// Print redaction instructions of each filter as markdown
+    #[arg(long)]
+    instructions: bool,
 }
 
 #[derive(Args)]
-pub struct RedactEditArgs {
-    /// Pending publish session to change (ID or prefix)
+pub struct EditArgs {
+    /// Pending publish session to edit (ID or prefix)
     #[arg(value_name = "SESSION")]
     session: String,
-
-    /// Redaction to change
-    ///
-    /// An ID as status lists it.
-    #[arg(value_name = "ID")]
-    id: u64,
-
-    /// New text to redact everywhere
-    ///
-    /// Read from a file as @PATH.
-    #[arg(value_name = "TEXT")]
-    text: Option<String>,
-
-    /// New reason for redaction
-    ///
-    /// A reason code; see redact add --list-reasons.
-    #[arg(short, long, value_name = "REASON")]
-    reason: Option<String>,
-
-    /// Replace redacted text with a marker
-    #[arg(short, long, conflicts_with = "no_mark")]
-    mark: bool,
-
-    /// Remove redacted text without a marker
-    #[arg(short = 'n', long)]
-    no_mark: bool,
-
-    /// Skip confirmation prompt
-    #[arg(short, long)]
-    yes: bool,
 }
 
 #[derive(Args)]
-pub struct RedactRemoveArgs {
-    /// Pending publish session to change (ID or prefix)
+pub struct RefreshArgs {
+    /// Pending publish session to rebuild (ID or prefix)
     #[arg(value_name = "SESSION")]
     session: String,
-
-    /// Redactions to remove
-    ///
-    /// IDs as status lists them.
-    #[arg(value_name = "ID", required = true)]
-    ids: Vec<u64>,
 
     /// Skip confirmation prompt
     #[arg(short, long)]
@@ -474,127 +372,6 @@ pub struct CandidateArgs {
 const DEFAULT_SPLIT_BYTES: usize = 400_000;
 
 #[derive(Args)]
-pub struct SegmentArgs {
-    #[command(subcommand)]
-    command: SegmentCommand,
-}
-
-#[derive(Subcommand)]
-pub enum SegmentCommand {
-    /// Add a segment to a pending publish
-    ///
-    /// A segment is lines of original session that publication keeps,
-    /// under a description. Once any segment has lines, every line
-    /// outside every segment is dropped. A segment without lines drops
-    /// nothing.
-    Add(SegmentAddArgs),
-
-    /// Change a segment of a pending publish
-    ///
-    /// Lines change only when given.
-    Edit(SegmentEditArgs),
-
-    /// Remove a segment from a pending publish
-    Remove(SegmentRemoveArgs),
-
-    /// List segments of a pending publish
-    ///
-    /// One row per segment: its ID, the author, the lines, and the
-    /// description. The ID is what segment edit and segment remove
-    /// take.
-    List(SegmentListArgs),
-}
-
-#[derive(Args)]
-pub struct SegmentAddArgs {
-    /// Pending publish session to change (ID or prefix)
-    #[arg(value_name = "SESSION")]
-    session: String,
-
-    /// Description of segment
-    ///
-    /// Read from a file as @PATH.
-    #[arg(value_name = "TEXT")]
-    text: String,
-
-    /// Lines segment keeps
-    ///
-    /// Original session lines as "12-20,31": lines or inclusive ranges
-    /// separated by commas.
-    #[arg(short, long, value_name = "LINES")]
-    lines: Option<LineSelection>,
-
-    /// Skip confirmation prompt
-    #[arg(short, long)]
-    yes: bool,
-}
-
-#[derive(Args)]
-pub struct SegmentEditArgs {
-    /// Pending publish session to change (ID or prefix)
-    #[arg(value_name = "SESSION")]
-    session: String,
-
-    /// Segment to change
-    ///
-    /// An ID as status lists it.
-    #[arg(value_name = "ID")]
-    id: u64,
-
-    /// New description of segment
-    ///
-    /// Read from a file as @PATH.
-    #[arg(value_name = "TEXT")]
-    text: Option<String>,
-
-    /// Lines segment keeps
-    ///
-    /// Original session lines as "12-20,31": lines or inclusive ranges
-    /// separated by commas.
-    #[arg(short, long, value_name = "LINES")]
-    lines: Option<LineSelection>,
-
-    /// Skip confirmation prompt
-    #[arg(short, long)]
-    yes: bool,
-}
-
-#[derive(Args)]
-pub struct SegmentRemoveArgs {
-    /// Pending publish session to change (ID or prefix)
-    #[arg(value_name = "SESSION")]
-    session: String,
-
-    /// Segment to remove
-    ///
-    /// An ID as status lists it.
-    #[arg(value_name = "ID")]
-    id: u64,
-
-    /// Skip confirmation prompt
-    #[arg(short, long)]
-    yes: bool,
-}
-
-#[derive(Args)]
-pub struct StatusArgs {
-    /// Pending publish session to show (ID or prefix)
-    #[arg(value_name = "SESSION")]
-    session: String,
-}
-
-#[derive(Args)]
-pub struct RefreshArgs {
-    /// Pending publish session to rebuild (ID or prefix)
-    #[arg(value_name = "SESSION")]
-    session: String,
-
-    /// Skip confirmation prompt
-    #[arg(short, long)]
-    yes: bool,
-}
-
-#[derive(Args)]
 pub struct AbortArgs {
     /// Pending publish sessions to abort (ID or prefix; repeatable)
     #[arg(value_name = "SESSION", required = true)]
@@ -633,199 +410,17 @@ pub struct ApplyArgs {
     yes: bool,
 }
 
-/// The paragraph `init --filter` and `filter add` share on what a
-/// filter argument is.
-const FILTER_HELP: &str = "A filter name; see --list-filters. Filter names are \"pii\", \
-\"language\", \"secret\", \"system\", \"harness-context\", \"harness-records\", and \
-\"custom\". \"custom\" takes --prompt as its whole instruction, so it is added with filter \
-add. On init, a filter is added to those --audience and --use select.";
-
-/// The `filter` group declares the `--source` and `--stored` override
-/// itself: none of its commands takes them, so the group capturing a
-/// flag given before the command is the rejection wanted.
-#[derive(Args)]
-pub struct FilterArgs {
-    #[command(subcommand)]
-    command: FilterCommand,
-}
-
-#[derive(Subcommand)]
-pub enum FilterCommand {
-    /// Add a filter to a pending publish
-    ///
-    /// A named filter's deterministic rules run at once. A filter
-    /// already on the list is an error.
-    Add(FilterAddArgs),
-
-    /// Change instructions of a filter on a pending publish
-    ///
-    /// A prompt is instructions, not rules, so nothing is rebuilt.
-    Edit(FilterEditArgs),
-
-    /// Remove a filter from a pending publish
-    ///
-    /// Filter's redactions are removed with it. A literal allowed
-    /// earlier stays allowed if filter is added again.
-    Remove(FilterRemoveArgs),
-
-    /// Run named filters of a pending publish
-    ///
-    /// Filter's earlier redactions are replaced by what its rules find
-    /// now.
-    Run(FilterRunArgs),
-
-    /// List filters of a pending publish
-    ///
-    /// With --instructions, prints redaction instructions of each
-    /// filter as markdown in place of the table: a heading naming
-    /// filter, then its instructions with prompt given for it in
-    /// place of its placeholder.
-    List(FilterListArgs),
-}
-
-#[derive(Args)]
-pub struct FilterAddArgs {
-    /// Pending publish session to change (ID or prefix)
-    #[arg(value_name = "SESSION", required = true)]
-    session: Option<String>,
-
-    /// Filter to add
-    #[arg(
-        value_name = "FILTER",
-        required = true,
-        long_help = format!("Filter to add\n\n{FILTER_HELP}")
-    )]
-    filter: Option<String>,
-
-    /// Instructions for filter
-    ///
-    /// Read from a file as @PATH. Required for "custom", whose prompt
-    /// is its whole instruction; for any other filter it adds to
-    /// filter's own instructions.
-    #[arg(short, long, value_name = "TEXT")]
-    prompt: Option<String>,
-
-    /// Skip confirmation prompt
-    #[arg(short, long)]
-    yes: bool,
-
-    /// Show available named filters and exit
-    #[arg(long, exclusive = true)]
-    list_filters: bool,
-}
-
-#[derive(Args)]
-pub struct FilterEditArgs {
-    /// Pending publish session to change (ID or prefix)
-    #[arg(value_name = "SESSION")]
-    session: String,
-
-    /// Filter to change
-    ///
-    /// A filter name on the list.
-    #[arg(value_name = "FILTER")]
-    filter: String,
-
-    /// Instructions for filter
-    ///
-    /// Read from a file as @PATH. For "custom", prompt is its whole
-    /// instruction; for any other filter it adds to filter's own
-    /// instructions.
-    #[arg(short, long, value_name = "TEXT")]
-    prompt: String,
-
-    /// Skip confirmation prompt
-    #[arg(short, long)]
-    yes: bool,
-}
-
-#[derive(Args)]
-pub struct FilterRemoveArgs {
-    /// Pending publish session to change (ID or prefix)
-    #[arg(value_name = "SESSION")]
-    session: String,
-
-    /// Filter to remove
-    ///
-    /// A filter name on the list.
-    #[arg(value_name = "FILTER")]
-    filter: String,
-
-    /// Skip confirmation prompt
-    #[arg(short, long)]
-    yes: bool,
-}
-
-#[derive(Args)]
-pub struct FilterRunArgs {
-    /// Pending publish session to change (ID or prefix)
-    #[arg(value_name = "SESSION")]
-    session: String,
-
-    /// Named filter to run (default every named filter on list)
-    #[arg(value_name = "NAME")]
-    name: Option<String>,
-
-    /// Skip confirmation prompt
-    #[arg(short, long)]
-    yes: bool,
-}
-
-#[derive(Args)]
-pub struct FilterListArgs {
-    /// Pending publish session to show (ID or prefix)
-    #[arg(value_name = "SESSION")]
-    session: String,
-
-    /// Print redaction instructions of each filter as markdown
-    #[arg(long)]
-    instructions: bool,
-}
-
-#[derive(Args)]
-pub struct RedactListArgs {
-    /// Pending publish session to show (ID or prefix)
-    #[arg(value_name = "SESSION")]
-    session: String,
-}
-
-#[derive(Args)]
-pub struct SegmentListArgs {
-    /// Pending publish session to show (ID or prefix)
-    #[arg(value_name = "SESSION")]
-    session: String,
-}
-
 pub async fn run(args: PublishArgs) -> Result<(), CliError> {
     let Some(command) = args.command else {
         return publish_sessions(args.run_args).await;
     };
     match command {
-        PublishCommand::Init(args) => init(args),
+        PublishCommand::Init(args) => init(*args).await,
         PublishCommand::List => list(),
-        PublishCommand::Redact(args) => match args.command {
-            RedactCommand::Add(args) => redact_add(args),
-            RedactCommand::Import(args) => redact_import(args),
-            RedactCommand::Edit(args) => redact_edit(args),
-            RedactCommand::Remove(args) => redact_remove(args),
-            RedactCommand::Candidate(args) => candidate(args),
-            RedactCommand::List(args) => redact_list(args),
-        },
-        PublishCommand::Segment(args) => match args.command {
-            SegmentCommand::Add(args) => segment_add(args),
-            SegmentCommand::Edit(args) => segment_edit(args),
-            SegmentCommand::Remove(args) => segment_remove(args),
-            SegmentCommand::List(args) => segment_list(args),
-        },
-        PublishCommand::Status(args) => status(args),
+        PublishCommand::Show(args) => show(args),
+        PublishCommand::Edit(args) => edit(args),
         PublishCommand::Refresh(args) => refresh(args),
-        PublishCommand::Filter(args) => match args.command {
-            FilterCommand::Add(args) => filter_add(args),
-            FilterCommand::Edit(args) => filter_edit(args),
-            FilterCommand::Remove(args) => filter_remove(args),
-            FilterCommand::Run(args) => filter_run(args),
-            FilterCommand::List(args) => filter_list(args),
-        },
+        PublishCommand::Candidate(args) => candidate(args),
         PublishCommand::Abort(args) => abort(args),
         PublishCommand::Apply(args) => apply(args),
     }
@@ -1068,7 +663,7 @@ fn pending_rows(
 /// definition, or no count when the definition was deleted.
 fn redaction_count(publisher: &Publisher<'_>, id: &str) -> Result<String, PublishError> {
     match publisher.definition(id) {
-        Ok(definition) => Ok(definition.text.len().to_string()),
+        Ok(definition) => Ok(definition.redact.len().to_string()),
         Err(PublishError::Store(StoreError::ObjectNotFound(_))) => Ok(String::new()),
         Err(e) => Err(e),
     }
@@ -1085,31 +680,17 @@ fn origin_cell(origin: &str, highlighter: &IdHighlighter) -> String {
     format!("{} {}", highlighter.short(id), console::style(commit).dim())
 }
 
-/// A session origin for the status table: the full original session
-/// id, a space, and the first 8 characters of the commit dimmed. Any
-/// other origin is shown as stored.
-fn origin_status_cell(origin: &str) -> String {
-    let Ok((id, commit)) = parse_session_origin(origin) else {
-        return origin.to_string();
-    };
-    let commit: String = commit.chars().take(8).collect();
-    format!("{} {}", id, console::style(commit).dim())
-}
-
-/// Stage a publish after confirmation. The original is resolved
-/// before the dialog opens, so a bad argument fails without a prompt,
-/// and a native session is added to the store only after the user
-/// confirms.
-fn init(args: InitArgs) -> Result<(), CliError> {
+/// Stage a publish per selected session after confirmation. The
+/// sessions are resolved before the dialog opens, so a bad argument
+/// fails without a prompt, and a native session is added to the store
+/// only after the user confirms.
+async fn init(args: InitArgs) -> Result<(), CliError> {
     let fail = |e: String| CliError::message(format!("gage publish init: {e}"));
     if args.list_filters {
         list_filters();
         return Ok(());
     }
-    let Some(session) = args.session.as_deref() else {
-        return Err(fail("SESSION is required".into()));
-    };
-    let (source, stored) = (args.source.clone(), args.stored);
+    check_init_args(&args).map_err(fail)?;
     let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
     let audience = parse_audience("gage publish init", args.audience.as_deref())?;
     let uses = parse_use("gage publish init", args.r#use.as_deref())?;
@@ -1128,33 +709,45 @@ fn init(args: InitArgs) -> Result<(), CliError> {
                 .map_err(|e| fail(e.to_string()))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let original = resolve_original(&store, source.as_deref(), stored, session)?;
-    let author = resolve_author(None);
+    let notes = args
+        .notes
+        .as_deref()
+        .map(|text| {
+            text_value("gage publish init", "--notes", text)
+                .map(|t| t.trim().to_string())
+                .map_err(|e| fail(e.to_string()))
+        })
+        .transpose()?;
+    let record = InitRecord {
+        audience: audience.map(|a| a.to_string()),
+        uses: uses.map(|u| u.to_string()),
+        notes,
+    };
+    let originals = resolve_originals(
+        &store,
+        args.source.as_deref(),
+        args.stored,
+        &args.sessions,
+        &args.select,
+    )
+    .await?;
+    let author = default_author();
 
-    dialog::run("Publish session", || {
-        let (line, kind) = match &original {
-            Original::Stored(record) => (SessionLine::from(record.as_ref()), IdKind::Gage),
-            Original::Native {
-                driver,
-                spec,
-                native,
-            } => {
-                dialog::step_value("Source", source::describe_source(driver.as_ref(), spec))?;
-                (
-                    SessionLine {
-                        id: native.id().to_string(),
-                        title: native.attrs().title().map(String::from),
-                    },
-                    IdKind::Native,
-                )
-            }
-        };
-        preview_sessions(&[line], kind, None)?;
+    let title = if originals.len() == 1 {
+        "Publish session"
+    } else {
+        "Publish sessions"
+    };
+    dialog::run(title, || {
+        originals.preview()?;
         if let Some(audience) = audience {
             dialog::step_value("Audience", audience)?;
         }
         if let Some(uses) = uses {
             dialog::step_value("Use", uses)?;
+        }
+        if let Some(notes) = &record.notes {
+            dialog::step_value("Notes", value_cell(notes))?;
         }
         filters_step(&filters)?;
         if !segments.is_empty() {
@@ -1166,15 +759,57 @@ fn init(args: InitArgs) -> Result<(), CliError> {
                 return Err(DialogError::Canceled);
             }
         }
-        let record = original.into_stored(&store).map_err(DialogError::Failed)?;
         let publisher = Publisher::new(&store);
-        let outcome = publisher
-            .init(&record, &filters, &segments, &author)
-            .map_err(|e| DialogError::Failed(e.to_string()))?;
-        report_filter_redactions(&publisher, &outcome.id)
-            .map_err(|e| DialogError::Failed(e.to_string()))?;
-        Ok(format!("Staged publish {}", short_uuid(&outcome.id)).into())
+        let total = originals.len();
+        let mut staged: Vec<String> = Vec::new();
+        for original in originals.into_stored(&store) {
+            let stage = || -> Result<String, String> {
+                let record_of = original?;
+                let outcome = publisher
+                    .init(&record_of, &filters, &segments, &author, &record)
+                    .map_err(|e| e.to_string())?;
+                cli::log::info(format!(
+                    "Staged publish {} of session {}",
+                    short_uuid(&outcome.id),
+                    short_uuid(&record_of.id)
+                ))
+                .map_err(|e| e.to_string())?;
+                report_filter_redactions(&publisher, &outcome.id).map_err(|e| e.to_string())?;
+                Ok(outcome.id)
+            };
+            match stage() {
+                Ok(id) => staged.push(id),
+                Err(e) if staged.is_empty() => return Err(DialogError::Failed(e)),
+                Err(e) => {
+                    cli::log::error(e)?;
+                    return Err(dialog::partial("Staged", staged.len(), total, "publish"));
+                }
+            }
+        }
+        Ok(match staged.as_slice() {
+            [id] => format!("Staged publish {}", short_uuid(id)),
+            _ => format!("Staged {}", count(staged.len(), "publish")),
+        }
+        .into())
     })
+}
+
+/// The rule clap does not express: a session or a selection option is
+/// required.
+fn check_init_args(args: &InitArgs) -> Result<(), String> {
+    if args.sessions.is_empty() && args.select.is_empty() {
+        return Err("SESSION or a selection option is required".to_string());
+    }
+    Ok(())
+}
+
+/// The author of what this run writes: the Claude Code session named
+/// in `CLAUDE_CODE_SESSION_ID` as `session:<id>`, else the user.
+fn default_author() -> String {
+    match env::var_os("CLAUDE_CODE_SESSION_ID") {
+        Some(id) if !id.is_empty() => format!("session:{}", id.to_string_lossy()),
+        _ => resolve_author(None),
+    }
 }
 
 /// Print the named filters as a table, the way `gage scan
@@ -1255,8 +890,6 @@ fn parse_use(command: &str, text: Option<&str>) -> Result<Option<Use>, CliError>
     Ok(Some(text.parse().expect("a listed use name parses")))
 }
 
-/// The filter `text` denotes, with `@PATH` read as a file. An unknown
-/// name is an error naming `command` and `option`.
 /// A filter argument: a filter name, with the prompt read through
 /// `@PATH`. A name outside the named filters is a usage error in
 /// clap's layout, since the argument accepts any text and the names
@@ -1325,14 +958,16 @@ fn report_filter_redactions(publisher: &Publisher<'_>, id: &str) -> Result<(), P
         .map(|f| f.name.clone())
         .map(|name| {
             let author = format!("filter:{name}");
-            let mine: Vec<&TextEntry> = definition
-                .text
+            let mine: Vec<usize> = definition
+                .redact
                 .iter()
-                .filter(|t| t.author == author)
+                .enumerate()
+                .filter(|(_, t)| t.author == author)
+                .map(|(i, _)| i)
                 .collect();
             let instances = mine
                 .iter()
-                .map(|t| counts.get(&t.id).copied().unwrap_or(0))
+                .map(|i| counts.get(i).copied().unwrap_or(0))
                 .sum();
             (name, mine.len(), instances)
         })
@@ -1353,547 +988,133 @@ fn report_filter_redactions(publisher: &Publisher<'_>, id: &str) -> Result<(), P
     Ok(())
 }
 
-/// Print the reason codes as a table.
-fn list_reasons() {
-    let header: Vec<String> = ["Reason", "Description"]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-    let rows = REASONS
-        .iter()
-        .map(|r| vec![r.code.clone(), r.description.clone()]);
-    let term_width = console::Term::stdout().size().1 as usize;
-    let table = Table::from_iter(std::iter::once(header).chain(rows))
-        .with(Style::rounded())
-        .with(
-            Width::wrap(term_width)
-                .keep_words(true)
-                .priority(Priority::max(true)),
-        )
-        .modify(Rows::first(), style::tty(Color::FG_BRIGHT_YELLOW))
-        .modify(
-            Columns::one(0).not(Rows::first()),
-            style::tty(Color::FG_BRIGHT_YELLOW),
-        )
-        .modify(Columns::one(1).not(Rows::first()), style::dim())
-        .to_string();
-    println!("{table}");
-}
-
-/// A redaction input as the dialog lists it, with its reason.
-fn describe_input(input: &RedactionInput) -> String {
-    format!(
-        "text {:?} ({}{})",
-        input.literal,
-        input.reason,
-        no_mark(input.mark)
-    )
-}
-
-/// The suffix a dialog line carries for a redaction without a marker.
-fn no_mark(mark: bool) -> &'static str {
-    if mark { "" } else { ", no mark" }
-}
-
-/// Show the filters, segments, and text redactions of a pending
-/// publish, with the spans each redaction produces.
-fn status(args: StatusArgs) -> Result<(), CliError> {
-    let fail = |e: String| CliError::message(format!("gage publish status: {e}"));
+/// Print the definition file of a pending publish, or the redaction
+/// instructions of its filters.
+fn show(args: ShowArgs) -> Result<(), CliError> {
+    let fail = |e: String| CliError::message(format!("gage publish show: {e}"));
     let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
     let publisher = Publisher::new(&store);
     let pending = publisher
         .store()
         .get(&args.session)
         .map_err(|e| fail(e.to_string()))?;
-    let definition = publisher
-        .definition(&pending.id)
-        .map_err(|e| fail(e.to_string()))?;
-    let counts = publisher
-        .instances(&pending.id)
-        .map_err(|e| fail(e.to_string()))?;
-
-    let filters: Vec<String> = definition.filters.iter().map(filter_cell).collect();
-    let rows = [
-        ["Session".to_string(), pending.id.clone()],
-        [
-            "Origin".to_string(),
-            origin_status_cell(&pending.attrs.origin),
-        ],
-        [
-            "Filters".to_string(),
-            if filters.is_empty() {
-                "none".to_string()
-            } else {
-                filters.join(", ")
-            },
-        ],
-    ];
-    println!("{}", properties_table(rows));
-    if !definition.segments.is_empty() {
-        println!("{}", segments_table(&definition));
-    }
-    if !definition.allow.is_empty() {
-        let allowed: Vec<String> = definition
-            .allow
-            .iter()
-            .map(|a| format!("{:?} ({})", a.literal, a.author))
-            .collect();
-        println!("Allowed: {}", allowed.join(", "));
-    }
-    if definition.text.is_empty() {
-        println!("No redactions");
+    if args.instructions {
+        let definition = publisher
+            .definition(&pending.id)
+            .map_err(|e| fail(e.to_string()))?;
+        let markdown = definition
+            .instructions_markdown()
+            .map_err(|e| fail(e.to_string()))?;
+        print!("{markdown}");
         return Ok(());
     }
-    println!("{}", redactions_table(&definition, &counts));
+    let path = publisher.store().definition_file(&pending.id);
+    let text = fs::read_to_string(&path).map_err(|e| fail(format!("{}: {e}", path.display())))?;
+    print!("{text}");
     Ok(())
 }
 
-/// The segments of a pending publish as a table: id, author, lines,
-/// and description. Assumes at least one segment.
-fn segments_table(definition: &PublishDefinition) -> String {
-    let header: Vec<String> = ["Id", "Author", "Lines", "Description"]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-    let rows = definition.segments.iter().map(|s| {
-        vec![
-            s.id.to_string(),
-            s.author.clone(),
-            lines_cell(&s.lines),
-            s.description.clone(),
-        ]
-    });
-    records_table(header, rows)
-}
-
-/// The text redactions of a pending publish as a table: id, text,
-/// reason, author, and instance count. Assumes at least one redaction.
-fn redactions_table(definition: &PublishDefinition, counts: &BTreeMap<u64, usize>) -> String {
-    let header: Vec<String> = ["Id", "Text", "Reason", "Author", "Instances"]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-    let rows = definition.text.iter().map(|t| {
-        vec![
-            t.id.to_string(),
-            format!("{}{}", t.literal, no_mark(t.mark)),
-            t.reason.clone(),
-            t.author.clone(),
-            counts.get(&t.id).copied().unwrap_or(0).to_string(),
-        ]
-    });
-    records_table(header, rows)
-}
-
-/// List the segments of a pending publish.
-fn segment_list(args: SegmentListArgs) -> Result<(), CliError> {
-    let fail = |e: String| CliError::message(format!("gage publish segment list: {e}"));
+/// Open the definition file in the editor and rebuild when the editor
+/// exits. The editor save is the confirmation. A file the editor left
+/// as it was rebuilds nothing.
+fn edit(args: EditArgs) -> Result<(), CliError> {
+    let fail = |e: String| CliError::message(format!("gage publish edit: {e}"));
     let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
     let publisher = Publisher::new(&store);
     let pending = publisher
         .store()
         .get(&args.session)
         .map_err(|e| fail(e.to_string()))?;
-    let definition = publisher
-        .definition(&pending.id)
-        .map_err(|e| fail(e.to_string()))?;
-    if definition.segments.is_empty() {
-        println!("No segments");
+    let path = publisher.store().definition_file(&pending.id);
+    let read =
+        |path: &PathBuf| fs::read(path).map_err(|e| fail(format!("{}: {e}", path.display())));
+    let before = read(&path)?;
+
+    let editor = env::var_os("VISUAL")
+        .or_else(|| env::var_os("EDITOR"))
+        .unwrap_or_else(|| "vi".into());
+    let status = Command::new(&editor).arg(&path).status().map_err(|e| {
+        fail(format!(
+            "cannot launch editor {}: {e}",
+            editor.to_string_lossy()
+        ))
+    })?;
+    if !status.success() {
+        return Err(fail(format!("editor exited with status {status}")));
+    }
+    if read(&path)? == before {
+        println!("No change");
         return Ok(());
     }
-    println!("{}", segments_table(&definition));
-    Ok(())
+    refresh_dialog("Edit publish", &publisher, &pending, false)
 }
 
-/// List the text redactions of a pending publish.
-fn redact_list(args: RedactListArgs) -> Result<(), CliError> {
-    let fail = |e: String| CliError::message(format!("gage publish redact list: {e}"));
+/// Rebuild a pending publish from its definition after confirmation.
+fn refresh(args: RefreshArgs) -> Result<(), CliError> {
+    let fail = |e: String| CliError::message(format!("gage publish refresh: {e}"));
     let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
     let publisher = Publisher::new(&store);
     let pending = publisher
         .store()
         .get(&args.session)
         .map_err(|e| fail(e.to_string()))?;
-    let definition = publisher
-        .definition(&pending.id)
-        .map_err(|e| fail(e.to_string()))?;
-    let counts = publisher
-        .instances(&pending.id)
-        .map_err(|e| fail(e.to_string()))?;
-    if definition.text.is_empty() {
-        println!("No redactions");
-        return Ok(());
-    }
-    println!("{}", redactions_table(&definition, &counts));
-    Ok(())
+    refresh_dialog("Refresh publish", &publisher, &pending, !args.yes)
 }
 
-/// A property table: labels down the left column, highlighted as a
-/// heading.
-fn properties_table(rows: impl IntoIterator<Item = [String; 2]>) -> String {
-    Table::from_iter(rows)
-        .with(Style::rounded().horizontals([]))
-        .modify(Columns::first(), style::tty(Color::FG_BRIGHT_YELLOW))
-        .to_string()
-}
-
-/// A status table: the header highlighted, the id column plain, the
-/// other columns dimmed, and the last column right-aligned.
-fn records_table(header: Vec<String>, rows: impl Iterator<Item = Vec<String>>) -> String {
-    let width = header.len();
-    Table::from_iter(std::iter::once(header).chain(rows))
-        .with(Style::rounded())
-        .modify(Rows::first(), style::tty(Color::FG_BRIGHT_YELLOW))
-        .modify(Columns::one(width - 1), Alignment::right())
-        .modify(Columns::new(1..width - 1).not(Rows::first()), style::dim())
-        .to_string()
-}
-
-/// Add a text redaction after confirmation. The literal is checked
-/// before the dialog opens.
-fn redact_add(args: RedactAddArgs) -> Result<(), CliError> {
-    let command = "gage publish redact add";
-    let fail = |e: String| CliError::message(format!("{command}: {e}"));
-    if args.list_reasons {
-        list_reasons();
-        return Ok(());
-    }
-    let (Some(session), Some(text)) = (args.session.as_deref(), args.text.as_deref()) else {
-        return Err(fail("SESSION and TEXT are required".into()));
-    };
-    let text = text_value(command, "TEXT", text).map_err(|e| fail(e.to_string()))?;
-    let reason = args.reason.as_deref().unwrap_or("custom");
-    let input = RedactionInput::parse_text(text.trim_end(), reason, !args.no_mark)
-        .map_err(|e| fail(e.to_string()))?;
-    let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
-    let publisher = Publisher::new(&store);
-    let pending = publisher
-        .store()
-        .get(session)
-        .map_err(|e| fail(e.to_string()))?;
-    let author = resolve_author(None);
-
-    dialog::run("Add redaction", || {
+/// The dialog that rebuilds `pending` from its definition: the
+/// definition is read and checked, its counts shown, the rebuild
+/// confirmed when `confirm` is set, and every redaction that matches
+/// nothing reported by its position.
+fn refresh_dialog(
+    title: &str,
+    publisher: &Publisher<'_>,
+    pending: &PendingPublish,
+    confirm: bool,
+) -> Result<(), CliError> {
+    let author = default_author();
+    dialog::run(title, || {
         dialog::step_value("Session", short_uuid(&pending.id))?;
-        dialog::step_value("Redaction", describe_input(&input))?;
-        if !args.yes {
-            let confirmed = cli::confirm("Continue?").initial_value(true).interact()?;
-            if !confirmed {
-                return Err(DialogError::Canceled);
-            }
-        }
-        let applied = publisher
-            .redact(&pending.id, std::slice::from_ref(&input), &author)
+        let mut definition = publisher
+            .definition(&pending.id)
             .map_err(|e| DialogError::Failed(e.to_string()))?;
-        let applied = applied
-            .into_iter()
-            .next()
-            .expect("one input gives one applied redaction");
-        let verb = if applied.added {
-            "Added"
-        } else {
-            "Already present:"
-        };
-        Ok(format!(
-            "{verb} redaction {} ({})",
-            applied.id,
-            count(applied.instances, "instance")
-        )
-        .into())
-    })
-}
-
-/// Add text redactions from a JSON file or standard input after
-/// confirmation. The input is parsed and each author resolved before
-/// the dialog opens.
-fn redact_import(args: RedactImportArgs) -> Result<(), CliError> {
-    let command = "gage publish redact import";
-    let fail = |e: String| CliError::message(format!("{command}: {e}"));
-    let from_stdin = args.path == Path::new("-");
-    let json = if from_stdin {
-        let mut text = String::new();
-        io::stdin()
-            .read_to_string(&mut text)
-            .map_err(|e| fail(format!("stdin: {e}")))?;
-        text
-    } else {
-        fs::read_to_string(&args.path).map_err(|e| fail(format!("{}: {e}", args.path.display())))?
-    };
-    let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
-    let publisher = Publisher::new(&store);
-    let pending = publisher
-        .store()
-        .get(&args.session)
-        .map_err(|e| fail(e.to_string()))?;
-    let definition = publisher
-        .definition(&pending.id)
-        .map_err(|e| fail(e.to_string()))?;
-    let session_id =
-        env::var_os("CLAUDE_CODE_SESSION_ID").map(|id| id.to_string_lossy().into_owned());
-    let author = import_author(args.author.as_deref(), session_id.as_deref());
-    let items = import_items(&json, author.as_deref(), &definition).map_err(fail)?;
-
-    dialog::run("Import redactions", || {
-        dialog::step_value("Session", short_uuid(&pending.id))?;
+        definition.fill_authors(&author);
+        definition
+            .validate()
+            .map_err(|e| DialogError::Failed(e.to_string()))?;
         dialog::step_value(
-            "Source",
-            if from_stdin {
-                "stdin".to_string()
-            } else {
-                args.path.display().to_string()
-            },
+            "Definition",
+            format!(
+                "{}, {}, {}",
+                count(definition.filters.len(), "filter"),
+                count(definition.segments.len(), "segment"),
+                count(definition.redact.len(), "redaction")
+            ),
         )?;
-        dialog::step_list(
-            "Redactions",
-            items
-                .iter()
-                .map(|(input, author)| format!("{} by {author}", describe_input(input))),
-        )?;
-        if !args.yes {
+        if confirm {
             let confirmed = cli::confirm("Continue?").initial_value(true).interact()?;
             if !confirmed {
                 return Err(DialogError::Canceled);
             }
         }
-        let borrowed: Vec<(&RedactionInput, &str)> = items
-            .iter()
-            .map(|(input, author)| (input, author.as_str()))
-            .collect();
-        let applied = publisher
-            .redact_as(&pending.id, &borrowed)
+        let refreshed = publisher
+            .refresh(&pending.id, &author)
             .map_err(|e| DialogError::Failed(e.to_string()))?;
-        let (added, present): (Vec<&Applied>, Vec<&Applied>) =
-            applied.iter().partition(|a| a.added);
-        let instances: usize = added.iter().map(|a| a.instances).sum();
-        let mut summary = format!(
-            "Added {} ({})",
-            count(added.len(), "redaction"),
-            count(instances, "instance")
-        );
-        if !present.is_empty() {
-            summary.push_str(&format!(", {} already present", present.len()));
+        for (position, literal) in &refreshed.unmatched {
+            cli::log::warning(format!("Redaction {position} matches nothing: {literal:?}"))?;
         }
-        Ok(summary.into())
-    })
-}
-
-/// The author of import rows that carry none: the `--author` value
-/// when given, else the session Claude Code names in
-/// `CLAUDE_CODE_SESSION_ID` as `session:ID`.
-fn import_author(flag: Option<&str>, session_id: Option<&str>) -> Option<String> {
-    flag.map(str::to_string)
-        .or_else(|| session_id.map(|id| format!("session:{id}")))
-}
-
-/// The redactions of an import: `json` is an array of
-/// `[text, reason, author, no_mark]` or `[text, reason, no_mark]`
-/// rows, the latter authored by `author`, which is required when any
-/// such row is present. An author with ":" is kept; one without names
-/// a filter of `definition` and becomes `filter:NAME`. An error names
-/// the item.
-fn import_items(
-    json: &str,
-    author: Option<&str>,
-    definition: &PublishDefinition,
-) -> Result<Vec<(RedactionInput, String)>, String> {
-    const SHAPE: &str =
-        "expected an array of [TEXT, REASON, AUTHOR, NO_MARK] or [TEXT, REASON, NO_MARK]";
-    let rows: Vec<serde_json::Value> =
-        serde_json::from_str(json).map_err(|e| format!("{SHAPE}: {e}"))?;
-    if rows.is_empty() {
-        return Err("no redactions".to_string());
-    }
-    let default_author = author
-        .map(|a| resolve_import_author(a, definition))
-        .transpose()?;
-    rows.iter()
-        .enumerate()
-        .map(|(i, row)| {
-            let item = i + 1;
-            let fail = |e: String| format!("redaction {item}: {e}");
-            let (text, reason, author, no_mark) =
-                import_row(row).ok_or_else(|| fail(SHAPE.into()))?;
-            let input = RedactionInput::parse_text(text, reason, !no_mark)
-                .map_err(|e| fail(e.to_string()))?;
-            let author = match author {
-                Some(a) => resolve_import_author(a, definition).map_err(fail)?,
-                None => default_author.clone().ok_or_else(|| {
-                    fail("no author; give --author or set CLAUDE_CODE_SESSION_ID".to_string())
-                })?,
-            };
-            Ok((input, author))
-        })
-        .collect()
-}
-
-/// The fields of one import row: its text, reason, author when it
-/// has one, and no-mark flag. `None` for any other shape.
-fn import_row(row: &serde_json::Value) -> Option<(&str, &str, Option<&str>, bool)> {
-    let items = row.as_array()?;
-    match items.as_slice() {
-        [text, reason, author, no_mark] => Some((
-            text.as_str()?,
-            reason.as_str()?,
-            Some(author.as_str()?),
-            no_mark.as_bool()?,
-        )),
-        [text, reason, no_mark] => {
-            Some((text.as_str()?, reason.as_str()?, None, no_mark.as_bool()?))
-        }
-        _ => None,
-    }
-}
-
-/// `author` as recorded: kept when it has ":", else the filter it
-/// names on `definition` as `filter:NAME`.
-fn resolve_import_author(author: &str, definition: &PublishDefinition) -> Result<String, String> {
-    if author.contains(':') {
-        return Ok(author.to_string());
-    }
-    definition
-        .find_filter(author)
-        .map(|_| format!("filter:{author}"))
-        .map_err(|e| e.to_string())
-}
-
-/// Change a text redaction after confirmation. The id is resolved
-/// before the dialog opens, and a call that changes nothing is an
-/// error.
-fn redact_edit(args: RedactEditArgs) -> Result<(), CliError> {
-    let command = "gage publish redact edit";
-    let fail = |e: String| CliError::message(format!("{command}: {e}"));
-    let text = args
-        .text
-        .as_deref()
-        .map(|t| text_value(command, "TEXT", t))
-        .transpose()
-        .map_err(|e| fail(e.to_string()))?
-        .map(|t| t.trim_end().to_string());
-    let mark = match (args.mark, args.no_mark) {
-        (true, _) => Some(true),
-        (_, true) => Some(false),
-        _ => None,
-    };
-    if text.is_none() && args.reason.is_none() && mark.is_none() {
-        return Err(fail(
-            "nothing to change; give TEXT, --reason, --mark, or --no-mark".into(),
-        ));
-    }
-    let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
-    let publisher = Publisher::new(&store);
-    let pending = publisher
-        .store()
-        .get(&args.session)
-        .map_err(|e| fail(e.to_string()))?;
-    let definition = publisher
-        .definition(&pending.id)
-        .map_err(|e| fail(e.to_string()))?;
-    let target = definition
-        .text
-        .iter()
-        .find(|t| t.id == args.id)
-        .ok_or_else(|| fail(format!("no redaction with id {}", args.id)))?;
-    let mut changes = Vec::new();
-    if let Some(text) = &text {
-        changes.push(format!("text {text:?}"));
-    }
-    if let Some(reason) = &args.reason {
-        changes.push(format!("reason {reason}"));
-    }
-    if let Some(mark) = mark {
-        changes.push(if mark { "mark" } else { "no mark" }.to_string());
-    }
-
-    dialog::run("Edit redaction", || {
-        dialog::step_value("Session", short_uuid(&pending.id))?;
-        dialog::step_value("Redaction", describe_entry(target))?;
-        dialog::step_list("Changes", changes.iter().cloned())?;
-        if !args.yes {
-            let confirmed = cli::confirm("Continue?").initial_value(true).interact()?;
-            if !confirmed {
-                return Err(DialogError::Canceled);
-            }
-        }
-        let applied = publisher
-            .redact_edit(
-                &pending.id,
-                args.id,
-                text.as_deref(),
-                args.reason.as_deref(),
-                mark,
-            )
-            .map_err(|e| DialogError::Failed(e.to_string()))?;
         Ok(format!(
-            "Changed redaction {} ({})",
-            applied.id,
-            count(applied.instances, "instance")
+            "Refreshed publish {}, {}",
+            short_uuid(&pending.id),
+            count(refreshed.instances, "instance")
         )
         .into())
     })
-}
-
-/// Remove text redactions after confirmation. Every id is checked
-/// against the definition before the dialog opens.
-fn redact_remove(args: RedactRemoveArgs) -> Result<(), CliError> {
-    let fail = |e: String| CliError::message(format!("gage publish redact remove: {e}"));
-    let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
-    let publisher = Publisher::new(&store);
-    let pending = publisher
-        .store()
-        .get(&args.session)
-        .map_err(|e| fail(e.to_string()))?;
-    let definition = publisher
-        .definition(&pending.id)
-        .map_err(|e| fail(e.to_string()))?;
-    let mut targets = Vec::new();
-    for id in &args.ids {
-        let t = definition
-            .text
-            .iter()
-            .find(|t| t.id == *id)
-            .ok_or_else(|| fail(format!("no redaction with id {id}")))?;
-        targets.push(t.clone());
-    }
-    let author = resolve_author(None);
-
-    dialog::run("Remove redactions", || {
-        dialog::step_value("Session", short_uuid(&pending.id))?;
-        dialog::step_list("Redactions", targets.iter().map(describe_entry))?;
-        if targets.iter().any(|t| t.author.starts_with("filter:")) {
-            cli::log::remark(
-                "A filter's literal is allowed once removed: the filter does not record it again",
-            )?;
-        }
-        if !args.yes {
-            let confirmed = cli::confirm("Continue?").initial_value(true).interact()?;
-            if !confirmed {
-                return Err(DialogError::Canceled);
-            }
-        }
-        let removed = publisher
-            .redact_remove(&pending.id, &args.ids, &author)
-            .map_err(|e| DialogError::Failed(e.to_string()))?;
-        Ok(format!("Removed {}", count(removed.len(), "redaction")).into())
-    })
-}
-
-/// A text redaction as a dialog lists it: its id, literal, reason,
-/// mark, and author.
-fn describe_entry(t: &TextEntry) -> String {
-    format!(
-        "{} {:?} ({}{}, {})",
-        t.id,
-        t.literal,
-        t.reason,
-        no_mark(t.mark),
-        t.author
-    )
 }
 
 /// List the text values open to redaction, one per line where the
 /// value fits, else as a header with the text indented below it.
 fn candidate(args: CandidateArgs) -> Result<(), CliError> {
-    let fail = |e: String| CliError::message(format!("gage publish redact candidate: {e}"));
+    let fail = |e: String| CliError::message(format!("gage publish candidate: {e}"));
     let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
     let publisher = Publisher::new(&store);
     let pending = publisher
@@ -1927,451 +1148,6 @@ fn candidate(args: CandidateArgs) -> Result<(), CliError> {
 /// `tmp/candidate/<pending id>` under Gage home.
 fn candidate_files_dir(id: &str) -> PathBuf {
     gage_home().join("tmp").join("candidate").join(id)
-}
-
-/// Add a segment after confirmation.
-fn segment_add(args: SegmentAddArgs) -> Result<(), CliError> {
-    let command = "gage publish segment add";
-    let fail = |e: String| CliError::message(format!("{command}: {e}"));
-    let text = text_value(command, "TEXT", &args.text).map_err(|e| fail(e.to_string()))?;
-    let text = text.trim_end().to_string();
-    let lines = args
-        .lines
-        .as_ref()
-        .map(ranges)
-        .transpose()?
-        .unwrap_or_default();
-    let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
-    let publisher = Publisher::new(&store);
-    let pending = publisher
-        .store()
-        .get(&args.session)
-        .map_err(|e| fail(e.to_string()))?;
-    let author = resolve_author(None);
-
-    dialog::run("Add segment", || {
-        dialog::step_value("Session", short_uuid(&pending.id))?;
-        dialog::step_value("Description", value_cell(&text))?;
-        dialog::step_value("Lines", lines_cell(&lines))?;
-        if !args.yes {
-            let confirmed = cli::confirm("Continue?").initial_value(true).interact()?;
-            if !confirmed {
-                return Err(DialogError::Canceled);
-            }
-        }
-        let id = publisher
-            .segment_add(&pending.id, &text, &lines, &author)
-            .map_err(|e| DialogError::Failed(e.to_string()))?;
-        Ok(format!("Added segment {id}").into())
-    })
-}
-
-/// Change a segment after confirmation. The id is resolved before the
-/// dialog opens.
-fn segment_edit(args: SegmentEditArgs) -> Result<(), CliError> {
-    let command = "gage publish segment edit";
-    let fail = |e: String| CliError::message(format!("{command}: {e}"));
-    let text = args
-        .text
-        .as_deref()
-        .map(|t| text_value(command, "TEXT", t))
-        .transpose()
-        .map_err(|e| fail(e.to_string()))?
-        .map(|t| t.trim_end().to_string());
-    let lines = args.lines.as_ref().map(ranges).transpose()?;
-    if text.is_none() && lines.is_none() {
-        return Err(fail("nothing to change; give TEXT or --lines".into()));
-    }
-    let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
-    let publisher = Publisher::new(&store);
-    let pending = publisher
-        .store()
-        .get(&args.session)
-        .map_err(|e| fail(e.to_string()))?;
-    let definition = publisher
-        .definition(&pending.id)
-        .map_err(|e| fail(e.to_string()))?;
-    let target = definition
-        .segments
-        .iter()
-        .find(|s| s.id == args.id)
-        .ok_or_else(|| fail(format!("no segment with id {}", args.id)))?;
-
-    dialog::run("Edit segment", || {
-        dialog::step_value("Session", short_uuid(&pending.id))?;
-        dialog::step_value(
-            "Segment",
-            format!("{} {}", target.id, value_cell(&target.description)),
-        )?;
-        if let Some(text) = &text {
-            dialog::step_value("Description", value_cell(text))?;
-        }
-        if let Some(lines) = &lines {
-            dialog::step_value("Lines", lines_cell(lines))?;
-        }
-        if !args.yes {
-            let confirmed = cli::confirm("Continue?").initial_value(true).interact()?;
-            if !confirmed {
-                return Err(DialogError::Canceled);
-            }
-        }
-        let segment = publisher
-            .segment_edit(&pending.id, args.id, text.as_deref(), lines.as_deref())
-            .map_err(|e| DialogError::Failed(e.to_string()))?;
-        Ok(format!("Changed segment {}", segment.id).into())
-    })
-}
-
-/// Remove a segment after confirmation. The id is resolved before the
-/// dialog opens.
-fn segment_remove(args: SegmentRemoveArgs) -> Result<(), CliError> {
-    let fail = |e: String| CliError::message(format!("gage publish segment remove: {e}"));
-    let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
-    let publisher = Publisher::new(&store);
-    let pending = publisher
-        .store()
-        .get(&args.session)
-        .map_err(|e| fail(e.to_string()))?;
-    let definition = publisher
-        .definition(&pending.id)
-        .map_err(|e| fail(e.to_string()))?;
-    let target = definition
-        .segments
-        .iter()
-        .find(|s| s.id == args.id)
-        .ok_or_else(|| fail(format!("no segment with id {}", args.id)))?;
-
-    dialog::run("Remove segment", || {
-        dialog::step_value("Session", short_uuid(&pending.id))?;
-        dialog::step_value(
-            "Segment",
-            format!("{} {}", target.id, value_cell(&target.description)),
-        )?;
-        dialog::step_value("Lines", lines_cell(&target.lines))?;
-        if !args.yes {
-            let confirmed = cli::confirm("Continue?").initial_value(true).interact()?;
-            if !confirmed {
-                return Err(DialogError::Canceled);
-            }
-        }
-        let segment = publisher
-            .segment_remove(&pending.id, args.id)
-            .map_err(|e| DialogError::Failed(e.to_string()))?;
-        Ok(format!("Removed segment {}", segment.id).into())
-    })
-}
-
-/// The inclusive line ranges of `selection`.
-fn ranges(selection: &LineSelection) -> Result<Vec<(u32, u32)>, CliError> {
-    let line = |n: u64| u32::try_from(n).map_err(|e| CliError::message(format!("line {n}: {e}")));
-    selection
-        .ranges()
-        .iter()
-        .map(|&(start, end)| Ok((line(start)?, line(end)?)))
-        .collect()
-}
-
-/// Line ranges as a dialog shows them, `12-20,31`, or `none`.
-fn lines_cell(lines: &[(u32, u32)]) -> String {
-    if lines.is_empty() {
-        return "none".to_string();
-    }
-    lines
-        .iter()
-        .map(|(start, end)| {
-            if start == end {
-                start.to_string()
-            } else {
-                format!("{start}-{end}")
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(",")
-}
-
-/// Rebuild a pending publish from its definition after confirmation.
-fn refresh(args: RefreshArgs) -> Result<(), CliError> {
-    let fail = |e: String| CliError::message(format!("gage publish refresh: {e}"));
-    let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
-    let publisher = Publisher::new(&store);
-    let pending = publisher
-        .store()
-        .get(&args.session)
-        .map_err(|e| fail(e.to_string()))?;
-    let definition = publisher
-        .definition(&pending.id)
-        .map_err(|e| fail(e.to_string()))?;
-    definition.validate().map_err(|e| fail(e.to_string()))?;
-
-    dialog::run("Refresh publish", || {
-        dialog::step_value("Session", short_uuid(&pending.id))?;
-        dialog::step_value(
-            "Definition",
-            format!(
-                "{}, {}, {}",
-                count(definition.filters.len(), "filter"),
-                count(definition.segments.len(), "segment"),
-                count(definition.text.len(), "redaction")
-            ),
-        )?;
-        if !args.yes {
-            let confirmed = cli::confirm("Continue?").initial_value(true).interact()?;
-            if !confirmed {
-                return Err(DialogError::Canceled);
-            }
-        }
-        let instances = publisher
-            .refresh(&pending.id)
-            .map_err(|e| DialogError::Failed(e.to_string()))?;
-        Ok(format!(
-            "Refreshed publish {}, {}",
-            short_uuid(&pending.id),
-            count(instances, "instance")
-        )
-        .into())
-    })
-}
-
-/// Add a filter after confirmation. The filter is parsed before the
-/// dialog opens, so an unknown name fails without a prompt.
-fn filter_add(args: FilterAddArgs) -> Result<(), CliError> {
-    let command = "gage publish filter add";
-    let fail = |e: String| CliError::message(format!("{command}: {e}"));
-    if args.list_filters {
-        list_filters();
-        return Ok(());
-    }
-    let (Some(session), Some(filter)) = (args.session.as_deref(), args.filter.as_deref()) else {
-        return Err(fail("SESSION and FILTER are required".into()));
-    };
-    let filter = parse_filter(command, "FILTER", filter, args.prompt.as_deref())?;
-    let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
-    let publisher = Publisher::new(&store);
-    let pending = publisher
-        .store()
-        .get(session)
-        .map_err(|e| fail(e.to_string()))?;
-
-    dialog::run("Add publish filter", || {
-        dialog::step_value("Session", short_uuid(&pending.id))?;
-        dialog::step_value("Filter", value_cell(&filter.to_string()))?;
-        if !args.yes {
-            let confirmed = cli::confirm("Continue?").initial_value(true).interact()?;
-            if !confirmed {
-                return Err(DialogError::Canceled);
-            }
-        }
-        publisher
-            .filter_add(&pending.id, &filter)
-            .map_err(|e| DialogError::Failed(e.to_string()))?;
-        report_filter_redactions(&publisher, &pending.id)
-            .map_err(|e| DialogError::Failed(e.to_string()))?;
-        Ok(format!("Added filter {}", value_cell(&filter.to_string())).into())
-    })
-}
-
-/// Change a filter's prompt after confirmation. The filter is resolved
-/// before the dialog opens.
-fn filter_edit(args: FilterEditArgs) -> Result<(), CliError> {
-    let command = "gage publish filter edit";
-    let fail = |e: String| CliError::message(format!("{command}: {e}"));
-    let prompt = text_value(command, "--prompt", &args.prompt).map_err(|e| fail(e.to_string()))?;
-    let prompt = prompt.trim_end().to_string();
-    let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
-    let publisher = Publisher::new(&store);
-    let pending = publisher
-        .store()
-        .get(&args.session)
-        .map_err(|e| fail(e.to_string()))?;
-    let definition = publisher
-        .definition(&pending.id)
-        .map_err(|e| fail(e.to_string()))?;
-    let (_, entry) = definition
-        .find_filter(&args.filter)
-        .map_err(|e| fail(e.to_string()))?;
-    let target = filter_cell(entry);
-
-    dialog::run("Edit publish filter", || {
-        dialog::step_value("Session", short_uuid(&pending.id))?;
-        dialog::step_value("Filter", &target)?;
-        dialog::step_value("Prompt", value_cell(&prompt))?;
-        if !args.yes {
-            let confirmed = cli::confirm("Continue?").initial_value(true).interact()?;
-            if !confirmed {
-                return Err(DialogError::Canceled);
-            }
-        }
-        publisher
-            .filter_edit(&pending.id, &args.filter, Some(prompt.clone()))
-            .map_err(|e| DialogError::Failed(e.to_string()))?;
-        Ok(format!("Changed filter {target}").into())
-    })
-}
-
-/// Remove a filter after confirmation. The selector is resolved
-/// against the definition before the dialog opens.
-fn filter_remove(args: FilterRemoveArgs) -> Result<(), CliError> {
-    let fail = |e: String| CliError::message(format!("gage publish filter remove: {e}"));
-    let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
-    let publisher = Publisher::new(&store);
-    let pending = publisher
-        .store()
-        .get(&args.session)
-        .map_err(|e| fail(e.to_string()))?;
-    let definition = publisher
-        .definition(&pending.id)
-        .map_err(|e| fail(e.to_string()))?;
-    let (_, entry) = definition
-        .find_filter(&args.filter)
-        .map_err(|e| fail(e.to_string()))?;
-    let target = filter_cell(entry);
-    let author = entry.author();
-    let redactions = definition
-        .text
-        .iter()
-        .filter(|t| t.author == author)
-        .count();
-
-    dialog::run("Remove publish filter", || {
-        dialog::step_value("Session", short_uuid(&pending.id))?;
-        dialog::step_value("Filter", &target)?;
-        dialog::step_value("Redactions", count(redactions, "redaction"))?;
-        if !args.yes {
-            let confirmed = cli::confirm("Continue?").initial_value(true).interact()?;
-            if !confirmed {
-                return Err(DialogError::Canceled);
-            }
-        }
-        publisher
-            .filter_remove(&pending.id, &args.filter)
-            .map_err(|e| DialogError::Failed(e.to_string()))?;
-        Ok(format!("Removed filter {target}").into())
-    })
-}
-
-/// Re-run one named filter, or every named filter, after confirmation.
-/// A name not on the list fails before the dialog opens.
-fn filter_run(args: FilterRunArgs) -> Result<(), CliError> {
-    let fail = |e: String| CliError::message(format!("gage publish filter run: {e}"));
-    let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
-    let publisher = Publisher::new(&store);
-    let pending = publisher
-        .store()
-        .get(&args.session)
-        .map_err(|e| fail(e.to_string()))?;
-    let definition = publisher
-        .definition(&pending.id)
-        .map_err(|e| fail(e.to_string()))?;
-    let names = match &args.name {
-        Some(name) => {
-            if !definition.named_filters().iter().any(|n| n == name) {
-                return Err(fail(format!("no named filter {name:?} is on the list")));
-            }
-            vec![name.clone()]
-        }
-        None => definition.named_filters(),
-    };
-    if names.is_empty() {
-        return Err(fail("no named filters are on the list".into()));
-    }
-
-    dialog::run("Run publish filters", || {
-        dialog::step_value("Session", short_uuid(&pending.id))?;
-        dialog::step_list("Filters", names.iter().cloned())?;
-        if !args.yes {
-            let confirmed = cli::confirm("Continue?").initial_value(true).interact()?;
-            if !confirmed {
-                return Err(DialogError::Canceled);
-            }
-        }
-        publisher
-            .filter_run(&pending.id, args.name.as_deref())
-            .map_err(|e| DialogError::Failed(e.to_string()))?;
-        report_filter_redactions(&publisher, &pending.id)
-            .map_err(|e| DialogError::Failed(e.to_string()))?;
-        Ok(format!("Ran {}", count(names.len(), "filter")).into())
-    })
-}
-
-/// Print the filters of a pending publish as a table: the name or the
-/// instruction on one line, its type, and the redactions it authored.
-fn filter_list(args: FilterListArgs) -> Result<(), CliError> {
-    let fail = |e: String| CliError::message(format!("gage publish filter list: {e}"));
-    let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
-    let publisher = Publisher::new(&store);
-    let pending = publisher
-        .store()
-        .get(&args.session)
-        .map_err(|e| fail(e.to_string()))?;
-    let definition = publisher
-        .definition(&pending.id)
-        .map_err(|e| fail(e.to_string()))?;
-    if definition.filters.is_empty() {
-        println!("No filters");
-        return Ok(());
-    }
-    if args.instructions {
-        print!("{}", instructions_markdown(&definition).map_err(fail)?);
-        return Ok(());
-    }
-    let header: Vec<String> = ["Filter", "Prompt", "Redactions"]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-    let rows = definition.filters.iter().map(|f| {
-        let author = f.author();
-        let redactions = definition
-            .text
-            .iter()
-            .filter(|t| t.author == author)
-            .count();
-        vec![
-            filter_cell(f),
-            f.prompt.clone().unwrap_or_default(),
-            redactions.to_string(),
-        ]
-    });
-    let term_width = console::Term::stdout().size().1 as usize;
-    let table = Table::from_iter(std::iter::once(header).chain(rows))
-        .with(Style::rounded())
-        .with(
-            Width::truncate(term_width)
-                .suffix("…")
-                .priority(Priority::max(true)),
-        )
-        .modify(Rows::first(), style::tty(Color::FG_BRIGHT_YELLOW))
-        .modify(Columns::one(2), Alignment::right())
-        .modify(Columns::one(1).not(Rows::first()), style::dim())
-        .to_string();
-    println!("{table}");
-    Ok(())
-}
-
-/// The redaction instructions of every filter of `definition` as
-/// markdown: per filter a level-three heading with its name in code
-/// font, then its instructions with the prompt given for it in place
-/// of the placeholder. Sections are separated by a blank line.
-fn instructions_markdown(definition: &PublishDefinition) -> Result<String, String> {
-    let mut out = String::new();
-    for entry in &definition.filters {
-        let filter =
-            Filter::named(&entry.name).ok_or_else(|| format!("unknown filter {:?}", entry.name))?;
-        if !out.is_empty() {
-            out.push('\n');
-        }
-        out.push_str(&format!(
-            "### `{}`\n\n{}\n",
-            filter.name,
-            filter.instructions_with_prompt(entry.prompt.as_deref())
-        ));
-    }
-    Ok(out)
-}
-
-/// A filter as a one-line cell: its name, or its instruction
-/// flattened and cut.
-fn filter_cell(filter: &FilterEntry) -> String {
-    value_cell(&filter.spec().to_string())
 }
 
 /// Delete a pending publish after confirmation. The id is resolved
@@ -2450,7 +1226,7 @@ fn apply(args: ApplyArgs) -> Result<(), CliError> {
                 "{}, {}, {}, {}",
                 count(definition.filters.len(), "filter"),
                 count(definition.segments.len(), "segment"),
-                count(definition.text.len(), "redaction"),
+                count(definition.redact.len(), "redaction"),
                 count(instances, "instance")
             ),
         )?;
@@ -2486,28 +1262,64 @@ fn apply(args: ApplyArgs) -> Result<(), CliError> {
     })
 }
 
-/// The session a publish starts from, resolved but not yet written.
-enum Original {
-    /// A session already in the store, used as is.
-    Stored(Box<SessionRecord>),
-    /// A native session, added to the store when the publish is
+/// The sessions a publish starts from, resolved but not yet written.
+enum Originals {
+    /// Sessions already in the store, used as they are.
+    Stored(Vec<SessionRecord>),
+    /// Native sessions, each added to the store when the publish is
     /// confirmed so it has an object id and commit for `origin`.
     Native {
         driver: Arc<dyn Driver>,
         spec: String,
-        native: Box<dyn NativeSession>,
+        natives: Vec<Box<dyn NativeSession>>,
     },
 }
 
-impl Original {
-    /// The stored session to publish: the record as is, or the native
-    /// session added to the store now.
-    fn into_stored(self, store: &Store) -> Result<SessionRecord, String> {
+impl Originals {
+    fn len(&self) -> usize {
         match self {
-            Original::Stored(record) => Ok(*record),
-            Original::Native {
-                driver, mut native, ..
+            Originals::Stored(records) => records.len(),
+            Originals::Native { natives, .. } => natives.len(),
+        }
+    }
+
+    /// The `Source` step for native sessions, then the `Sessions`
+    /// step.
+    fn preview(&self) -> io::Result<()> {
+        match self {
+            Originals::Stored(records) => {
+                let lines: Vec<SessionLine> = records.iter().map(SessionLine::from).collect();
+                preview_sessions(&lines, IdKind::Gage, None)
+            }
+            Originals::Native {
+                driver,
+                spec,
+                natives,
             } => {
+                dialog::step_value("Source", source::describe_source(driver.as_ref(), spec))?;
+                let lines: Vec<SessionLine> = natives
+                    .iter()
+                    .map(|native| SessionLine {
+                        id: native.id().to_string(),
+                        title: native.attrs().title().map(String::from),
+                    })
+                    .collect();
+                preview_sessions(&lines, IdKind::Native, None)
+            }
+        }
+    }
+
+    /// The stored sessions to publish, in order: each record as it
+    /// is, or each native session added to the store now.
+    fn into_stored<'a>(
+        self,
+        store: &'a Store,
+    ) -> Box<dyn Iterator<Item = Result<SessionRecord, String>> + 'a> {
+        match self {
+            Originals::Stored(records) => Box::new(records.into_iter().map(Ok)),
+            Originals::Native {
+                driver, natives, ..
+            } => Box::new(natives.into_iter().map(move |mut native| {
                 let sessions = SessionStore::from(store);
                 let outcome = sessions
                     .add(driver.as_ref(), native.as_mut())
@@ -2515,41 +1327,58 @@ impl Original {
                 sessions
                     .at_commit(&outcome.commit_sha)
                     .map_err(|e| e.to_string())
-            }
+            })),
         }
     }
 }
 
-/// Resolve `prefix` without writing. `--stored` resolves it in the
-/// store; otherwise it is a native session in `source`.
-fn resolve_original(
+/// Resolve the selection without writing. `--stored` resolves it in
+/// the store; otherwise the sessions are native sessions in `source`.
+/// A selection that matches nothing is an error.
+async fn resolve_originals(
     store: &Store,
     source: Option<&str>,
     stored: bool,
-    prefix: &str,
-) -> Result<Original, CliError> {
+    sessions: &[String],
+    select: &SessionFilterArgs,
+) -> Result<Originals, CliError> {
     let fail = |e: String| CliError::message(format!("gage publish init: {e}"));
+    let selection = if stored {
+        SessionSelect::Stored(store)
+    } else {
+        SessionSelect::Native(source)
+    };
+    let ids = select_sessions(selection, sessions, select)
+        .await
+        .map_err(|e| fail(e.to_string()))?;
+    if ids.is_empty() {
+        return Err(fail("no sessions matched the selection".to_string()));
+    }
     if stored {
-        return SessionStore::from(store)
-            .get(prefix)
-            .map(|record| Original::Stored(Box::new(record)))
-            .map_err(|e| fail(format!("{prefix}: {e}")));
+        let records = ids
+            .iter()
+            .map(|id| SessionStore::from(store).get(id))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| fail(e.to_string()))?;
+        return Ok(Originals::Stored(records));
     }
     let registry = source::driver_registry();
     let (driver, spec) = source::resolve_source(&registry, source).map_err(fail)?;
     let opened = driver
         .open_source(&SourceOptions::new(&spec))
         .map_err(|e| fail(format!("{spec}: {e}")))?;
-    let native_id = opened
-        .find_native(prefix)
-        .map_err(|e| fail(format!("{prefix}: {e}")))?;
-    let native = opened
-        .open_native(&native_id)
-        .map_err(|e| fail(format!("{native_id}: {e}")))?;
-    Ok(Original::Native {
+    let natives = ids
+        .iter()
+        .map(|id| {
+            opened
+                .open_native(id)
+                .map_err(|e| fail(format!("{id}: {e}")))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Originals::Native {
         driver,
         spec,
-        native,
+        natives,
     })
 }
 
@@ -2569,118 +1398,108 @@ mod tests {
     /// names, and the nearest one; an instruction is not a name.
     #[test]
     fn unknown_filter_name_is_a_usage_error_in_claps_layout() {
-        let rendered =
-            |command: &str, option: &str| match parse_filter(command, option, "secrets", None) {
-                Err(CliError::Usage(e)) => {
-                    assert_eq!(e.exit_code(), 2);
-                    e.render().to_string()
-                }
-                Err(_) => panic!("not a usage error"),
-                Ok(f) => panic!("{f} parsed"),
-            };
-        let text = rendered("gage publish init", "--filter");
+        let rendered = match parse_filter("gage publish init", "--filter", "secrets", None) {
+            Err(CliError::Usage(e)) => {
+                assert_eq!(e.exit_code(), 2);
+                e.render().to_string()
+            }
+            Err(_) => panic!("not a usage error"),
+            Ok(f) => panic!("{f} parsed"),
+        };
         assert!(
-            text.contains("invalid value 'secrets' for '--filter <FILTER>'"),
-            "{text}"
+            rendered.contains("invalid value 'secrets' for '--filter <FILTER>'"),
+            "{rendered}"
         );
         assert!(
-            text.contains(
+            rendered.contains(
                 "[possible values: pii, language, secret, system, harness-context, harness-records, custom]"
             ),
-            "{text}"
+            "{rendered}"
         );
-        assert!(text.contains("a similar value exists: 'secret'"), "{text}");
-        let text = rendered("gage publish filter add", "FILTER");
-        assert!(text.contains("for '<FILTER>'"), "{text}");
+        assert!(
+            rendered.contains("a similar value exists: 'secret'"),
+            "{rendered}"
+        );
         assert!(parse_filter("gage publish init", "--filter", "pii", None).is_ok());
-        let custom = parse_filter("gage publish filter add", "FILTER", "custom", None);
+        let custom = parse_filter("gage publish init", "--filter", "custom", None);
         assert!(
             matches!(custom, Err(CliError::Exit { message: Some(ref m), .. }) if m.contains("requires a prompt")),
             "custom without a prompt is a plain error"
         );
-        assert!(
-            parse_filter(
-                "gage publish filter add",
-                "FILTER",
-                "custom",
-                Some("Remove every duck")
-            )
-            .is_ok()
-        );
-    }
-
-    /// `segment edit` with neither TEXT nor --lines has nothing to do
-    /// and says so before it opens the store.
-    #[test]
-    fn segment_edit_without_text_or_lines_is_nothing_to_change() {
-        let args = SegmentEditArgs {
-            session: "abc".into(),
-            id: 1,
-            text: None,
-            lines: None,
-            yes: true,
-        };
-        let err = segment_edit(args).unwrap_err();
-        assert!(
-            matches!(err, CliError::Exit { message: Some(ref m), .. } if m.contains("nothing to change; give TEXT or --lines")),
-            "neither TEXT nor --lines is a plain error"
-        );
     }
 
     /// The publish commands live under `gage publish`, not `gage
-    /// session`. `init` keeps its own --source and --stored; the other
-    /// commands take neither.
+    /// session`. `init` takes its own --source and --stored and the
+    /// session selection; the other commands take a pending session.
     #[test]
     fn publish_is_a_top_level_command() {
         Cli::try_parse_from(["gage", "publish", "list"]).unwrap();
         Cli::try_parse_from(["gage", "publish", "init", "--stored", "abc"]).unwrap();
-        let cli = Cli::try_parse_from([
-            "gage",
-            "publish",
-            "init",
+        let init_args = |argv: &[&str]| {
+            let cli = Cli::try_parse_from([&["gage", "publish", "init"], argv].concat()).unwrap();
+            let Command::Publish(PublishArgs {
+                command: Some(PublishCommand::Init(args)),
+                ..
+            }) = cli.command
+            else {
+                panic!("expected publish init");
+            };
+            *args
+        };
+        let args = init_args(&[
             "abc",
+            "def",
             "-g",
             "The question",
             "--segment",
             "The reply",
-        ])
-        .unwrap();
-        let Command::Publish(PublishArgs {
-            command: Some(PublishCommand::Init(args)),
-            ..
-        }) = cli.command
-        else {
-            panic!("expected publish init");
-        };
+            "-N",
+            "For the blog",
+            "-A",
+            "public",
+            "-U",
+            "reading",
+            "-y",
+        ]);
+        assert_eq!(args.sessions, ["abc", "def"]);
         assert_eq!(args.segment, ["The question", "The reply"]);
-        Cli::try_parse_from(["gage", "publish", "status", "abc"]).unwrap();
-        // A list flag stands alone: the positionals it bypasses are
-        // required otherwise
+        assert_eq!(args.notes.as_deref(), Some("For the blog"));
+        assert_eq!(args.audience.as_deref(), Some("public"));
+        assert_eq!(args.r#use.as_deref(), Some("reading"));
+        assert!(args.yes && !args.stored);
+        assert_eq!(check_init_args(&args), Ok(()));
+        let args = init_args(&["-S", "--days", "7", "-f", "secret"]);
+        assert!(args.stored);
+        assert_eq!(args.select.days, Some(7));
+        assert_eq!(args.filter, ["secret"]);
+        assert_eq!(check_init_args(&args), Ok(()));
+        let args = init_args(&["-s", "claude:/tmp/claude", "--all"]);
+        assert_eq!(args.source.as_deref(), Some("claude:/tmp/claude"));
+        assert!(args.select.all);
+        let args = init_args(&["-A", "public"]);
+        assert_eq!(
+            check_init_args(&args),
+            Err("SESSION or a selection option is required".to_string())
+        );
+        // A list flag stands alone
         Cli::try_parse_from(["gage", "publish", "init", "--list-filters"]).unwrap();
-        Cli::try_parse_from(["gage", "publish", "filter", "add", "--list-filters"]).unwrap();
-        assert!(Cli::try_parse_from(["gage", "publish", "init"]).is_err());
-        assert!(Cli::try_parse_from(["gage", "publish", "filter", "add", "abc"]).is_err());
-        assert!(Cli::try_parse_from(["gage", "publish", "init", "abc", "--list-filters"]).is_err());
-        assert!(Cli::try_parse_from(["gage", "session", "publish", "list"]).is_err());
         for argv in [
-            vec!["gage", "publish", "redact", "add", "abc", "hunter2"],
-            vec!["gage", "publish", "redact", "add", "--list-reasons"],
+            vec!["init", "abc", "--days", "7"],
+            vec!["init", "-s", "claude:/tmp/claude", "-S", "abc"],
+            vec!["init", "abc", "--list-filters"],
+        ] {
+            assert!(
+                Cli::try_parse_from([&["gage", "publish"], &argv[..]].concat()).is_err(),
+                "{argv:?} parsed"
+            );
+        }
+        for argv in [
+            vec!["show", "abc"],
+            vec!["show", "abc", "--instructions"],
+            vec!["edit", "abc"],
+            vec!["refresh", "abc", "-y"],
+            vec!["candidate", "abc", "--split-files"],
             vec![
-                "gage", "publish", "redact", "edit", "abc", "3", "--reason", "pii",
-            ],
-            vec!["gage", "publish", "redact", "remove", "abc", "3", "4"],
-            vec![
-                "gage",
-                "publish",
-                "redact",
-                "candidate",
-                "abc",
-                "--split-files",
-            ],
-            vec![
-                "gage",
-                "publish",
-                "redact",
                 "candidate",
                 "abc",
                 "--split",
@@ -2688,23 +1507,16 @@ mod tests {
                 "--split-files-dir",
                 "/tmp/c",
             ],
-            vec![
-                "gage", "publish", "segment", "add", "abc", "Reply", "--lines", "2-3,9",
-            ],
-            vec!["gage", "publish", "segment", "edit", "abc", "1", "Reply"],
-            vec![
-                "gage", "publish", "segment", "edit", "abc", "1", "--lines", "2-3",
-            ],
-            vec!["gage", "publish", "segment", "remove", "abc", "1"],
-            vec![
-                "gage", "publish", "filter", "edit", "abc", "pii", "--prompt", "x",
-            ],
+            vec!["apply", "abc", "--tag", "x"],
         ] {
-            Cli::try_parse_from(&argv).unwrap_or_else(|e| panic!("{argv:?}: {e}"));
+            Cli::try_parse_from([&["gage", "publish"], &argv[..]].concat())
+                .unwrap_or_else(|e| panic!("{argv:?}: {e}"));
         }
-        // `undo` is no longer a subcommand: the words are a run's
-        // positional sessions
-        let cli = Cli::try_parse_from(["gage", "publish", "undo", "abc", "1"]).unwrap();
+        assert!(Cli::try_parse_from(["gage", "session", "publish", "list"]).is_err());
+        assert!(Cli::try_parse_from(["gage", "publish", "show", "--stored", "abc"]).is_err());
+        assert!(Cli::try_parse_from(["gage", "publish", "edit"]).is_err());
+        // The former subcommands are a run's positional sessions
+        let cli = Cli::try_parse_from(["gage", "publish", "status", "abc"]).unwrap();
         let Command::Publish(PublishArgs {
             command: None,
             run_args,
@@ -2712,28 +1524,7 @@ mod tests {
         else {
             panic!("expected a publish run");
         };
-        assert_eq!(run_args.sessions, ["undo", "abc", "1"]);
-        assert!(Cli::try_parse_from(["gage", "publish", "redact", "add", "abc"]).is_err());
-        assert!(
-            Cli::try_parse_from([
-                "gage",
-                "publish",
-                "redact",
-                "edit",
-                "abc",
-                "3",
-                "--mark",
-                "--no-mark"
-            ])
-            .is_err()
-        );
-        assert!(
-            Cli::try_parse_from([
-                "gage", "publish", "segment", "add", "abc", "x", "--lines", "9-2"
-            ])
-            .is_err()
-        );
-        assert!(Cli::try_parse_from(["gage", "publish", "status", "--stored", "abc"]).is_err());
+        assert_eq!(run_args.sessions, ["status", "abc"]);
         let cli = Cli::try_parse_from(["gage", "publish", "abort", "abc", "def", "-y"]).unwrap();
         let Command::Publish(PublishArgs {
             command: Some(PublishCommand::Abort(args)),
@@ -2744,138 +1535,6 @@ mod tests {
         };
         assert_eq!(args.session, ["abc", "def"]);
         assert!(Cli::try_parse_from(["gage", "publish", "abort"]).is_err());
-    }
-
-    /// The instructions are one markdown section per filter: a heading
-    /// with the name, then the prose with the prompt at its placeholder.
-    #[test]
-    fn instructions_are_markdown_sections_with_the_prompt_in_place() {
-        let filters = [
-            FilterSpec::new("language", None).unwrap(),
-            FilterSpec::new("custom", Some("Remove the project codename".into())).unwrap(),
-        ];
-        let definition = PublishDefinition::new(&filters);
-        let markdown = instructions_markdown(&definition).unwrap();
-        let language = Filter::named("language").unwrap();
-        let custom = Filter::named("custom").unwrap();
-        assert_eq!(
-            markdown,
-            format!(
-                "### `language`\n\n{}\n\n### `custom`\n\n{}\n",
-                language.instructions.trim_end(),
-                custom.instructions_with_prompt(Some("Remove the project codename"))
-            )
-        );
-        assert!(
-            markdown.ends_with("\n\nRemove the project codename\n"),
-            "{markdown}"
-        );
-        Cli::try_parse_from(["gage", "publish", "filter", "list", "abc", "--instructions"])
-            .unwrap();
-    }
-
-    /// An import item's author is kept when it has a prefix and becomes
-    /// `filter:NAME` when it names a filter of the publish; a row
-    /// without an author takes `--author`, resolved the same way, and
-    /// is an error without it. Anything else, a bad shape, or an empty
-    /// array is an error naming the item.
-    #[test]
-    fn import_items_resolve_authors_and_name_bad_items() {
-        let definition = PublishDefinition::new(&[FilterSpec::new("pii", None).unwrap()]);
-        let items = import_items(
-            r#"[["garrett", "pii", "pii", false], ["ok", "custom", "user:me", true], ["sam", "pii", false]]"#,
-            Some("session:abc"),
-            &definition,
-        )
-        .unwrap();
-        let summary: Vec<(&str, &str, bool, &str)> = items
-            .iter()
-            .map(|(i, a)| (i.literal.as_str(), i.reason.as_str(), i.mark, a.as_str()))
-            .collect();
-        assert_eq!(
-            summary,
-            [
-                ("garrett", "pii", true, "filter:pii"),
-                ("ok", "custom", false, "user:me"),
-                ("sam", "pii", true, "session:abc"),
-            ]
-        );
-        let by_filter =
-            import_items(r#"[["sam", "pii", false]]"#, Some("pii"), &definition).unwrap();
-        assert_eq!(by_filter[0].1, "filter:pii");
-        let no_author = import_items(r#"[["sam", "pii", false]]"#, None, &definition).unwrap_err();
-        assert_eq!(
-            no_author,
-            "redaction 1: no author; give --author or set CLAUDE_CODE_SESSION_ID"
-        );
-        let unknown =
-            import_items(r#"[["x", "pii", "language", false]]"#, None, &definition).unwrap_err();
-        assert_eq!(
-            unknown,
-            "redaction 1: no filter named \"language\" is on the list"
-        );
-        let unknown_default =
-            import_items(r#"[["x", "pii", false]]"#, Some("language"), &definition).unwrap_err();
-        assert_eq!(
-            unknown_default,
-            "no filter named \"language\" is on the list"
-        );
-        let reason =
-            import_items(r#"[["x", "nope", "pii", false]]"#, None, &definition).unwrap_err();
-        assert!(
-            reason.starts_with("redaction 1: unknown reason"),
-            "{reason}"
-        );
-        let shape = import_items(r#"[["x", "pii"]]"#, None, &definition).unwrap_err();
-        assert!(
-            shape.starts_with("redaction 1: expected an array of"),
-            "{shape}"
-        );
-        let not_array = import_items(r#"{"x": 1}"#, None, &definition).unwrap_err();
-        assert!(not_array.starts_with("expected an array of"), "{not_array}");
-        assert_eq!(
-            import_items("[]", None, &definition).unwrap_err(),
-            "no redactions"
-        );
-        let cli = Cli::try_parse_from([
-            "gage",
-            "publish",
-            "redact",
-            "import",
-            "abc",
-            "-",
-            "-a",
-            "session:abc",
-            "-y",
-        ])
-        .unwrap();
-        let Command::Publish(PublishArgs {
-            command:
-                Some(PublishCommand::Redact(RedactArgs {
-                    command: RedactCommand::Import(args),
-                })),
-            ..
-        }) = cli.command
-        else {
-            panic!("expected publish redact import");
-        };
-        assert_eq!(args.author.as_deref(), Some("session:abc"));
-        Cli::try_parse_from(["gage", "publish", "redact", "import", "abc", "-", "-y"]).unwrap();
-    }
-
-    /// `--author` wins; without it the Claude Code session, when the
-    /// environment names one, is the author as `session:ID`.
-    #[test]
-    fn import_author_is_the_flag_else_the_claude_code_session() {
-        assert_eq!(
-            import_author(Some("user:me"), Some("abc")).as_deref(),
-            Some("user:me")
-        );
-        assert_eq!(
-            import_author(None, Some("abc")).as_deref(),
-            Some("session:abc")
-        );
-        assert_eq!(import_author(None, None), None);
     }
 
     /// `gage publish` without a subcommand is a run: its positional
@@ -2943,7 +1602,6 @@ mod tests {
             );
         }
     }
-
     /// The notice names an interactive session without `--print` and a
     /// publish run with it.
     #[test]
@@ -2951,7 +1609,6 @@ mod tests {
         assert!(usage_notice(false).starts_with("You are about to start an interactive session"));
         assert!(usage_notice(true).starts_with("You are about to publish sessions"));
     }
-
     /// `--print` needs a session selection and a filter or a segment;
     /// an interactive run needs neither.
     #[test]
@@ -2981,7 +1638,6 @@ mod tests {
             Err("--print requires a filter or segment".to_string())
         );
     }
-
     /// `apply --force` stands alone; `--force-tag` still needs `--tag`.
     #[test]
     fn apply_force_is_separate_from_force_tag() {
@@ -2997,7 +1653,6 @@ mod tests {
         assert!(!args.force_tag);
         assert!(Cli::try_parse_from(["gage", "publish", "apply", "abc", "--force-tag"]).is_err());
     }
-
     fn pending(id: &str, origin: &str, title: Option<&str>, modified_ms: i64) -> PendingPublish {
         PendingPublish {
             id: id.to_string(),
@@ -3019,7 +1674,6 @@ mod tests {
             modified_ms,
         }
     }
-
     /// Rows come newest first and carry the short id, the origin, the
     /// title, the redaction count, and the age.
     #[test]
@@ -3074,7 +1728,6 @@ mod tests {
         assert_eq!(rows[1][3], "", "a deleted definition shows no count");
         assert_eq!(rows[1][4], "1h ago");
     }
-
     #[test]
     fn origin_cell_shows_a_native_origin_as_stored() {
         let highlighter = IdHighlighter::new(vec![]);
@@ -3083,7 +1736,6 @@ mod tests {
             "claude:/home/u/.claude/abc"
         );
     }
-
     #[test]
     fn filter_rows_list_every_named_filter_with_its_values_and_a_description() {
         let rows = filter_rows();
@@ -3101,7 +1753,6 @@ mod tests {
         assert_eq!(row("custom")[1], "");
         assert_eq!(row("custom")[2], "");
     }
-
     /// An init stages what the audience and use select, then the
     /// filters given, each once. The defaults select nothing.
     #[test]
@@ -3153,24 +1804,6 @@ mod tests {
         assert!(
             text.contains("[possible values: reading, provenance, other]"),
             "{text}"
-        );
-    }
-
-    #[test]
-    fn lines_cells_join_ranges() {
-        assert_eq!(lines_cell(&[]), "none");
-        assert_eq!(lines_cell(&[(2, 3), (9, 9)]), "2-3,9");
-    }
-
-    #[test]
-    fn inputs_are_described_for_the_dialog() {
-        assert_eq!(
-            describe_input(&RedactionInput::parse_text("abc 123", "secret", true).unwrap()),
-            "text \"abc 123\" (secret)"
-        );
-        assert_eq!(
-            describe_input(&RedactionInput::parse_text("damn", "language", false).unwrap()),
-            "text \"damn\" (language, no mark)"
         );
     }
 }
