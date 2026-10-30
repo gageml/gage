@@ -890,8 +890,7 @@ async fn publish_sessions(args: PublishRunArgs) -> Result<(), CliError> {
             None if prompt => prompt_notes()?,
             None => None,
         };
-        let mode = if args.print { "print" } else { "interactive" };
-        dialog::step_value("Mode", mode)?;
+        dialog::usage_notice(usage_notice(args.print))?;
         if !args.yes {
             let confirmed = cli::confirm("Continue?").initial_value(true).interact()?;
             if !confirmed {
@@ -901,6 +900,18 @@ async fn publish_sessions(args: PublishRunArgs) -> Result<(), CliError> {
         Ok("TODO: run Claude Code".to_string().into())
     })
     .await
+}
+
+/// The notice before the confirmation: an interactive session is
+/// started, or the publish runs to completion with `--print`.
+fn usage_notice(print: bool) -> &'static str {
+    if print {
+        "You are about to publish sessions using the selected model. Standard token usage \
+         applies."
+    } else {
+        "You are about to start an interactive session to publish sessions. Standard token \
+         usage applies for the selected model."
+    }
 }
 
 fn prompt_audience() -> Result<Audience, DialogError> {
@@ -2931,6 +2942,14 @@ mod tests {
                 "{argv:?} parsed"
             );
         }
+    }
+
+    /// The notice names an interactive session without `--print` and a
+    /// publish run with it.
+    #[test]
+    fn usage_notice_names_the_mode() {
+        assert!(usage_notice(false).starts_with("You are about to start an interactive session"));
+        assert!(usage_notice(true).starts_with("You are about to publish sessions"));
     }
 
     /// `--print` needs a session selection and a filter or a segment;

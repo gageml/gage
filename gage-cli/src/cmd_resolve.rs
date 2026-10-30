@@ -4,7 +4,7 @@
 use anyhow::Context;
 use clap::Args;
 use cliclack as cli;
-use console::{Term, style};
+use console::style;
 use gage_core::uuid::short_uuid;
 use gage_store::{IssueFull, IssueStore, Store};
 
@@ -92,11 +92,6 @@ fn run_dialog(
     }
     let ids: Vec<String> = issues.iter().map(|i| i.id.clone()).collect();
 
-    cli::log::info(dialog::wrap_text(
-        &Term::stdout(),
-        "You are about to start an interactive session to resolve issues. \
-         Standard token usage applies for the selected model.",
-    ))?;
     if issues.is_empty() {
         dialog::step_value("Issues", "all pending and open")?;
     } else {
@@ -120,6 +115,10 @@ fn run_dialog(
         None => model_prompt::prompt_model_ranked()?,
     };
 
+    dialog::usage_notice(
+        "You are about to start an interactive session to resolve issues. \
+         Standard token usage applies for the selected model.",
+    )?;
     if !args.yes {
         let confirmed = cli::confirm("Continue?").initial_value(true).interact()?;
         if !confirmed {

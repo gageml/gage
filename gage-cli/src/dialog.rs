@@ -227,6 +227,13 @@ pub fn partial(verb: &str, done: usize, total: usize, noun: &str) -> DialogError
     DialogError::Failed(format!("{verb} {done} of {}", count(total, noun)))
 }
 
+/// The notice a dialog prints before the confirmation that starts a
+/// Claude Code session: what is about to run and that token usage
+/// applies.
+pub fn usage_notice(text: &str) -> io::Result<()> {
+    cli::log::info(wrap_text(&Term::stdout(), text))
+}
+
 /// Wrap long text for dialog log lines. Width is capped at 79 columns
 /// regardless of terminal width, subject to a 40-column floor and the
 /// 4-column cliclack gutter. `term` must be the stream the wrapped text
