@@ -1,4 +1,6 @@
-//! `gage publish`: the pending-publish life cycle commands.
+//! `gage publish`: the pending-publish life cycle commands, and the
+//! publish of selected sessions through Claude Code when no
+//! subcommand is given.
 //!
 //! `init` stages a publish of a session; `redact`, `status`, `undo`,
 //! `refresh`, the `filter` commands, `abort`, and `apply` follow.
@@ -47,16 +49,109 @@ use crate::cmd_tag::TAG_HELP;
 use crate::dialog::{self, DialogError};
 use crate::error::CliError;
 use crate::human::{count, format_elapsed_ms};
-use crate::session_filter::{SessionLine, preview_sessions};
+use crate::session_filter::{
+    FILTER_ARG_NAMES, SessionFilterArgs, SessionLine, SessionSelect, native_session_lines,
+    preview_sessions, select_sessions, stored_session_lines,
+};
 use crate::source;
 use crate::style::{self, IdKind};
 use crate::text_arg::text_value;
 
 #[derive(Args)]
+#[command(args_conflicts_with_subcommands = true)]
 pub struct PublishArgs {
     #[command(subcommand)]
-    command: PublishCommand,
+    command: Option<PublishCommand>,
+
+    #[command(flatten)]
+    run_args: PublishRunArgs,
 }
+
+#[derive(Args)]
+pub struct PublishRunArgs {
+    /// Sessions to publish (ID or prefix)
+    #[arg(value_name = "SESSION", conflicts_with_all = FILTER_ARG_NAMES)]
+    sessions: Vec<String>,
+
+    /// Session source
+    #[arg(
+        long,
+        value_name = "SOURCE",
+        long_help = format!("Session source\n\n{}", source::SOURCE_HELP),
+        conflicts_with = "stored",
+    )]
+    source: Option<String>,
+
+    /// Publish stored sessions
+    #[arg(short = 'S', long)]
+    stored: bool,
+
+    #[command(flatten)]
+    select: SessionFilterArgs,
+
+    /// Audience sessions are published for (default self)
+    #[arg(
+        short = 'A',
+        long,
+        value_name = "AUDIENCE",
+        hide_default_value = true,
+        long_help = format!("Audience sessions are published for (default self)\n\n{AUDIENCE_HELP}")
+    )]
+    audience: Option<String>,
+
+    /// Use sessions are published for (default scan)
+    #[arg(
+        short = 'U',
+        long,
+        value_name = "USE",
+        hide_default_value = true,
+        long_help = format!("Use sessions are published for (default scan)\n\n{USE_HELP}")
+    )]
+    r#use: Option<String>,
+
+    /// Filter to apply (repeatable)
+    #[arg(
+        short,
+        long,
+        value_name = "FILTER",
+        long_help = format!("Filter to apply (repeatable)\n\n{FILTER_HELP}")
+    )]
+    filter: Vec<String>,
+
+    /// Segment to add (repeatable)
+    ///
+    /// A segment starts without lines and drops nothing until segment
+    /// edit gives it lines.
+    #[arg(short = 'g', long, value_name = "TEXT")]
+    segment: Vec<String>,
+
+    /// Print response and exit
+    ///
+    /// Print response and exit. Claude Code runs the publish skill to
+    /// completion without an interactive session and prints its
+    /// response. Without it, Claude Code opens an interactive session
+    /// with the skill and the arguments given.
+    #[arg(short = 'P', long)]
+    print: bool,
+
+    /// Skip confirmation prompt
+    #[arg(short, long)]
+    yes: bool,
+
+    /// Show available named filters and exit
+    #[arg(long, exclusive = true)]
+    list_filters: bool,
+}
+
+/// The paragraph the `--audience` options share.
+const AUDIENCE_HELP: &str = "Selects every filter that lists audience. Values are \"self\" \
+(private use only; no filter lists it), \"trusted\" (an audience you know and trust), and \
+\"public\" (anyone). Values are independent: one implies nothing about another.";
+
+/// The paragraph the `--use` options share.
+const USE_HELP: &str = "Selects every filter that lists use. Values are \"scan\" (every \
+entry stays; no filter lists it) and \"reading\" (entries a reader does not want are left \
+out). Values are independent: one implies nothing about another.";
 
 #[derive(Subcommand)]
 pub enum PublishCommand {
@@ -125,25 +220,23 @@ pub struct InitArgs {
     stored: bool,
 
     /// Audience session is published for (default self)
-    ///
-    /// Audience session is published for (default self)
-    ///
-    /// Selects every filter that lists audience. Values are "self"
-    /// (private use only; no filter lists it), "trusted" (an audience
-    /// you know and trust), and "public" (anyone). Values are
-    /// independent: one implies nothing about another.
-    #[arg(short, long, value_name = "AUDIENCE", hide_default_value = true)]
+    #[arg(
+        short = 'A',
+        long,
+        value_name = "AUDIENCE",
+        hide_default_value = true,
+        long_help = format!("Audience session is published for (default self)\n\n{AUDIENCE_HELP}")
+    )]
     audience: Option<String>,
 
     /// Use session is published for (default scan)
-    ///
-    /// Use session is published for (default scan)
-    ///
-    /// Selects every filter that lists use. Values are "scan" (every
-    /// entry stays; no filter lists it) and "reading" (entries a reader
-    /// does not want are left out). Values are independent: one implies
-    /// nothing about another.
-    #[arg(short, long, value_name = "USE", hide_default_value = true)]
+    #[arg(
+        short = 'U',
+        long,
+        value_name = "USE",
+        hide_default_value = true,
+        long_help = format!("Use session is published for (default scan)\n\n{USE_HELP}")
+    )]
     r#use: Option<String>,
 
     /// Filter to apply (repeatable)
@@ -700,7 +793,10 @@ pub struct SegmentListArgs {
 }
 
 pub async fn run(args: PublishArgs) -> Result<(), CliError> {
-    match args.command {
+    let Some(command) = args.command else {
+        return publish_sessions(args.run_args).await;
+    };
+    match command {
         PublishCommand::Init(args) => init(args),
         PublishCommand::List => list(),
         PublishCommand::Redact(args) => match args.command {
@@ -729,6 +825,112 @@ pub async fn run(args: PublishArgs) -> Result<(), CliError> {
         PublishCommand::Abort(args) => abort(args),
         PublishCommand::Apply(args) => apply(args),
     }
+}
+
+/// Publish the selected sessions through Claude Code. The dialog
+/// settles the inputs; the Claude Code run is not yet implemented and
+/// the outro says so.
+async fn publish_sessions(args: PublishRunArgs) -> Result<(), CliError> {
+    let fail = |e: String| CliError::message(format!("gage publish: {e}"));
+    if args.list_filters {
+        list_filters();
+        return Ok(());
+    }
+    check_run_args(&args).map_err(fail)?;
+    let audience = parse_audience("gage publish", args.audience.as_deref())?;
+    let uses = parse_use("gage publish", args.r#use.as_deref())?;
+    let added = args
+        .filter
+        .iter()
+        .map(|name| parse_filter("gage publish", "--filter", name, None))
+        .collect::<Result<Vec<_>, _>>()?;
+    let filters = selected_filters(audience, uses, added);
+    let segments = args
+        .segment
+        .iter()
+        .map(|text| {
+            text_value("gage publish", "--segment", text)
+                .map(|t| t.trim_end().to_string())
+                .map_err(|e| fail(e.to_string()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
+
+    dialog::run_async("Publish sessions", || async {
+        if selects_sessions(&args) {
+            preview_selection(&args, &store).await?;
+        } else {
+            dialog::step_value("Sessions", "none (chosen in session)")?;
+        }
+        dialog::step_value("Audience", audience)?;
+        dialog::step_value("Use", uses)?;
+        filters_step(&filters)?;
+        if !segments.is_empty() {
+            dialog::step_list("Segments", segments.iter().map(|s| value_cell(s)))?;
+        }
+        let mode = if args.print { "print" } else { "interactive" };
+        dialog::step_value("Mode", mode)?;
+        if !args.yes {
+            let confirmed = cli::confirm("Continue?").initial_value(true).interact()?;
+            if !confirmed {
+                return Err(DialogError::Canceled);
+            }
+        }
+        Ok("TODO: run Claude Code".to_string().into())
+    })
+    .await
+}
+
+/// The rule clap does not express: `--print` runs without a session
+/// to ask in, so it needs a session selection and a filter or a
+/// segment. An interactive run takes whatever is given.
+fn check_run_args(args: &PublishRunArgs) -> Result<(), String> {
+    if !args.print {
+        return Ok(());
+    }
+    if !selects_sessions(args) {
+        return Err("--print requires a session selection".to_string());
+    }
+    if args.filter.is_empty() && args.segment.is_empty() {
+        return Err("--print requires a filter or segment".to_string());
+    }
+    Ok(())
+}
+
+/// A positional session or a filter axis was given.
+fn selects_sessions(args: &PublishRunArgs) -> bool {
+    !args.sessions.is_empty() || !args.select.is_empty()
+}
+
+/// The `Sessions` step for a selection, after the `Source` step when
+/// the sessions are native.
+async fn preview_selection(args: &PublishRunArgs, store: &Store) -> Result<(), DialogError> {
+    let select = if args.stored {
+        SessionSelect::Stored(store)
+    } else {
+        SessionSelect::Native(args.source.as_deref())
+    };
+    let ids = select_sessions(select, &args.sessions, &args.select)
+        .await
+        .map_err(|e| DialogError::Failed(format!("{e}")))?;
+    if ids.is_empty() {
+        return Err(DialogError::Failed(
+            "No sessions matched the selection".to_string(),
+        ));
+    }
+    if args.stored {
+        let lines =
+            stored_session_lines(store, &ids).map_err(|e| DialogError::Failed(e.to_string()))?;
+        return Ok(preview_sessions(&lines, IdKind::Gage, None)?);
+    }
+    let registry = source::driver_registry();
+    let (driver, spec) =
+        source::resolve_source(&registry, args.source.as_deref()).map_err(DialogError::Failed)?;
+    dialog::step_value("Source", source::describe_source(driver.as_ref(), &spec))?;
+    let lines = native_session_lines(args.source.as_deref(), &ids)
+        .await
+        .map_err(|e| DialogError::Failed(format!("{e}")))?;
+    Ok(preview_sessions(&lines, IdKind::Native, None)?)
 }
 
 /// List the pending publish working trees, read from the file system,
@@ -838,8 +1040,8 @@ fn init(args: InitArgs) -> Result<(), CliError> {
     };
     let (source, stored) = (args.source.clone(), args.stored);
     let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
-    let audience = parse_audience(args.audience.as_deref())?;
-    let uses = parse_use(args.r#use.as_deref())?;
+    let audience = parse_audience("gage publish init", args.audience.as_deref())?;
+    let uses = parse_use("gage publish init", args.r#use.as_deref())?;
     let added = args
         .filter
         .iter()
@@ -951,13 +1153,13 @@ fn filter_rows() -> Vec<Vec<String>> {
 
 /// The audience `text` names, `self` when there is none. A name
 /// outside the list is a usage error in clap's layout.
-fn parse_audience(text: Option<&str>) -> Result<Audience, CliError> {
+fn parse_audience(command: &str, text: Option<&str>) -> Result<Audience, CliError> {
     let Some(text) = text else {
         return Ok(Audience::Private);
     };
     if !Audience::NAMES.contains(&text) {
         return Err(CliError::invalid_value(
-            "gage publish init",
+            command,
             "--audience",
             text,
             Audience::NAMES,
@@ -968,17 +1170,12 @@ fn parse_audience(text: Option<&str>) -> Result<Audience, CliError> {
 
 /// The use `text` names, `scan` when there is none. A name outside
 /// the list is a usage error in clap's layout.
-fn parse_use(text: Option<&str>) -> Result<Use, CliError> {
+fn parse_use(command: &str, text: Option<&str>) -> Result<Use, CliError> {
     let Some(text) = text else {
         return Ok(Use::Scan);
     };
     if !Use::NAMES.contains(&text) {
-        return Err(CliError::invalid_value(
-            "gage publish init",
-            "--use",
-            text,
-            Use::NAMES,
-        ));
+        return Err(CliError::invalid_value(command, "--use", text, Use::NAMES));
     }
     Ok(text.parse().expect("a listed use name parses"))
 }
@@ -2370,7 +2567,8 @@ mod tests {
         ])
         .unwrap();
         let Command::Publish(PublishArgs {
-            command: PublishCommand::Init(args),
+            command: Some(PublishCommand::Init(args)),
+            ..
         }) = cli.command
         else {
             panic!("expected publish init");
@@ -2425,7 +2623,17 @@ mod tests {
         ] {
             Cli::try_parse_from(&argv).unwrap_or_else(|e| panic!("{argv:?}: {e}"));
         }
-        assert!(Cli::try_parse_from(["gage", "publish", "undo", "abc", "1"]).is_err());
+        // `undo` is no longer a subcommand: the words are a run's
+        // positional sessions
+        let cli = Cli::try_parse_from(["gage", "publish", "undo", "abc", "1"]).unwrap();
+        let Command::Publish(PublishArgs {
+            command: None,
+            run_args,
+        }) = cli.command
+        else {
+            panic!("expected a publish run");
+        };
+        assert_eq!(run_args.sessions, ["undo", "abc", "1"]);
         assert!(Cli::try_parse_from(["gage", "publish", "redact", "add", "abc"]).is_err());
         assert!(
             Cli::try_parse_from([
@@ -2449,7 +2657,8 @@ mod tests {
         assert!(Cli::try_parse_from(["gage", "publish", "status", "--stored", "abc"]).is_err());
         let cli = Cli::try_parse_from(["gage", "publish", "abort", "abc", "def", "-y"]).unwrap();
         let Command::Publish(PublishArgs {
-            command: PublishCommand::Abort(args),
+            command: Some(PublishCommand::Abort(args)),
+            ..
         }) = cli.command
         else {
             panic!("expected publish abort");
@@ -2563,9 +2772,10 @@ mod tests {
         .unwrap();
         let Command::Publish(PublishArgs {
             command:
-                PublishCommand::Redact(RedactArgs {
+                Some(PublishCommand::Redact(RedactArgs {
                     command: RedactCommand::Import(args),
-                }),
+                })),
+            ..
         }) = cli.command
         else {
             panic!("expected publish redact import");
@@ -2589,12 +2799,106 @@ mod tests {
         assert_eq!(import_author(None, None), None);
     }
 
+    /// `gage publish` without a subcommand is a run: its positional
+    /// sessions, scope, selection axes, and publish configuration
+    /// parse into the run args, and the subcommands still parse. The
+    /// positional sessions exclude the axes, `--source` excludes
+    /// `--stored`, and `--list-filters` stands alone.
+    #[test]
+    fn publish_without_a_subcommand_is_a_run() {
+        let run_args = |argv: &[&str]| {
+            let cli = Cli::try_parse_from([&["gage", "publish"], argv].concat()).unwrap();
+            let Command::Publish(PublishArgs {
+                command: None,
+                run_args,
+            }) = cli.command
+            else {
+                panic!("expected a publish run");
+            };
+            run_args
+        };
+        let args = run_args(&[
+            "abc",
+            "def",
+            "-A",
+            "public",
+            "-U",
+            "reading",
+            "-f",
+            "pii",
+            "-g",
+            "The question",
+            "-P",
+            "-y",
+        ]);
+        assert_eq!(args.sessions, ["abc", "def"]);
+        assert_eq!(args.audience.as_deref(), Some("public"));
+        assert_eq!(args.r#use.as_deref(), Some("reading"));
+        assert_eq!(args.filter, ["pii"]);
+        assert_eq!(args.segment, ["The question"]);
+        assert!(args.print && args.yes && !args.stored);
+        let args = run_args(&["-S", "--days", "7", "--filter", "secret"]);
+        assert!(args.stored);
+        assert_eq!(args.select.days, Some(7));
+        let args = run_args(&["--source", "claude:/tmp/claude", "--all"]);
+        assert_eq!(args.source.as_deref(), Some("claude:/tmp/claude"));
+        assert!(args.select.all);
+        run_args(&["--list-filters"]);
+        run_args(&[]);
+        Cli::try_parse_from([
+            "gage", "publish", "init", "-A", "public", "-U", "reading", "abc",
+        ])
+        .unwrap();
+        for argv in [
+            vec!["abc", "--days", "7"],
+            vec!["--source", "claude:/tmp/claude", "--stored", "abc"],
+            vec!["--list-filters", "abc"],
+            vec!["-a", "public", "abc"],
+        ] {
+            assert!(
+                Cli::try_parse_from([&["gage", "publish"], &argv[..]].concat()).is_err(),
+                "{argv:?} parsed"
+            );
+        }
+    }
+
+    /// `--print` needs a session selection and a filter or a segment;
+    /// an interactive run needs neither.
+    #[test]
+    fn print_needs_a_selection_and_a_filter_or_segment() {
+        let check = |argv: &[&str]| {
+            let cli = Cli::try_parse_from([&["gage", "publish"], argv].concat()).unwrap();
+            let Command::Publish(PublishArgs { run_args, .. }) = cli.command else {
+                panic!("expected publish");
+            };
+            check_run_args(&run_args)
+        };
+        assert_eq!(check(&["-P", "abc", "-f", "pii"]), Ok(()));
+        assert_eq!(check(&["-P", "--days", "7", "-g", "The question"]), Ok(()));
+        assert_eq!(check(&[]), Ok(()));
+        assert_eq!(check(&["abc"]), Ok(()));
+        assert_eq!(check(&["-f", "pii"]), Ok(()));
+        assert_eq!(
+            check(&["-P", "-f", "pii"]),
+            Err("--print requires a session selection".to_string())
+        );
+        assert_eq!(
+            check(&["-P", "abc"]),
+            Err("--print requires a filter or segment".to_string())
+        );
+        assert_eq!(
+            check(&["-P", "--days", "7"]),
+            Err("--print requires a filter or segment".to_string())
+        );
+    }
+
     /// `apply --force` stands alone; `--force-tag` still needs `--tag`.
     #[test]
     fn apply_force_is_separate_from_force_tag() {
         let cli = Cli::try_parse_from(["gage", "publish", "apply", "abc", "--force"]).unwrap();
         let Command::Publish(PublishArgs {
-            command: PublishCommand::Apply(args),
+            command: Some(PublishCommand::Apply(args)),
+            ..
         }) = cli.command
         else {
             panic!("expected publish apply");
@@ -2714,7 +3018,10 @@ mod tests {
     fn init_filters_are_the_selection_then_the_added_ones_once() {
         let spec = |name: &str| FilterSpec::new(name, None).unwrap();
         let names = |audience: Option<&str>, uses: Option<&str>, added| -> Vec<String> {
-            let (Ok(audience), Ok(uses)) = (parse_audience(audience), parse_use(uses)) else {
+            let (Ok(audience), Ok(uses)) = (
+                parse_audience("gage publish init", audience),
+                parse_use("gage publish init", uses),
+            ) else {
                 panic!("{audience:?} {uses:?} parse");
             };
             selected_filters(audience, uses, added)
@@ -2737,7 +3044,7 @@ mod tests {
                 "pii"
             ]
         );
-        let text = match parse_audience(Some("everyone")) {
+        let text = match parse_audience("gage publish init", Some("everyone")) {
             Err(CliError::Usage(e)) => e.render().to_string(),
             _ => panic!("not a usage error"),
         };
@@ -2749,7 +3056,7 @@ mod tests {
             text.contains("[possible values: self, trusted, public]"),
             "{text}"
         );
-        let text = match parse_use(Some("read")) {
+        let text = match parse_use("gage publish init", Some("read")) {
             Err(CliError::Usage(e)) => e.render().to_string(),
             _ => panic!("not a usage error"),
         };
