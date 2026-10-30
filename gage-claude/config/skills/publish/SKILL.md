@@ -108,15 +108,18 @@ given access to the published session in all cases.
 
 ### Use
 
-A published session is read for its narrative, or it is scanned by tooling.
-`init` takes the use as `--use`:
-
-`scan`
-: Scanning. Every entry stays; no filter is selected for it.
+A published session is read as a narrative, kept as a record of work, or put
+to another use. `init` takes the use as `--use`:
 
 `reading`
 : Reading for narrative content. The entries a reader does not want are left
   out.
+
+`provenance`
+: A record of work. Every entry stays; no filter is selected for it.
+
+`other`
+: Another use. No filter is selected for it.
 
 ### Filters
 
@@ -225,8 +228,7 @@ gage publish init -y -S --audience AUDIENCE --use USE --filter FILTER --segment 
 ```
 
 Always pass `--audience` and `--use`, so the publish states who it is for and
-what it is for. Without them `init` publishes for `self` and `scan`, which
-select no filter.
+what it is for. Without them `init` selects no filter by audience or use.
 
 Without `-S`, `init` looks for a native session only and a stored session is "no
 native session matches". `gage session list` lists native sessions and

@@ -89,23 +89,21 @@ pub struct PublishRunArgs {
     #[command(flatten)]
     select: SessionFilterArgs,
 
-    /// Audience sessions are published for (default self)
+    /// Audience sessions are published for
     #[arg(
         short = 'A',
         long,
         value_name = "AUDIENCE",
-        hide_default_value = true,
-        long_help = format!("Audience sessions are published for (default self)\n\n{AUDIENCE_HELP}")
+        long_help = format!("Audience sessions are published for\n\n{AUDIENCE_HELP}")
     )]
     audience: Option<String>,
 
-    /// Use sessions are published for (default scan)
+    /// Use sessions are published for
     #[arg(
         short = 'U',
         long,
         value_name = "USE",
-        hide_default_value = true,
-        long_help = format!("Use sessions are published for (default scan)\n\n{USE_HELP}")
+        long_help = format!("Use sessions are published for\n\n{USE_HELP}")
     )]
     r#use: Option<String>,
 
@@ -124,6 +122,12 @@ pub struct PublishRunArgs {
     /// edit gives it lines.
     #[arg(short = 'g', long, value_name = "TEXT")]
     segment: Vec<String>,
+
+    /// Notes about use, audience, segments
+    ///
+    /// Read from a file as @PATH.
+    #[arg(short = 'N', long, value_name = "TEXT")]
+    notes: Option<String>,
 
     /// Print response and exit
     ///
@@ -144,14 +148,16 @@ pub struct PublishRunArgs {
 }
 
 /// The paragraph the `--audience` options share.
-const AUDIENCE_HELP: &str = "Selects every filter that lists audience. Values are \"self\" \
-(private use only; no filter lists it), \"trusted\" (an audience you know and trust), and \
-\"public\" (anyone). Values are independent: one implies nothing about another.";
+const AUDIENCE_HELP: &str = "Selects every filter that lists audience. Values are \"public\" \
+(everyone; requires the most filtering), \"trusted\" (only trusted users; some filtering), \
+and \"self\" (only you can read; no filter lists it). Values are independent: one implies \
+nothing about another, and a value not given selects nothing.";
 
 /// The paragraph the `--use` options share.
-const USE_HELP: &str = "Selects every filter that lists use. Values are \"scan\" (every \
-entry stays; no filter lists it) and \"reading\" (entries a reader does not want are left \
-out). Values are independent: one implies nothing about another.";
+const USE_HELP: &str = "Selects every filter that lists use. Values are \"reading\" (a \
+narrative for reading; entries a reader does not want are left out), \"provenance\" (a \
+record of work; no filter lists it), and \"other\" (another use; no filter lists it). Values \
+are independent: one implies nothing about another, and a value not given selects nothing.";
 
 #[derive(Subcommand)]
 pub enum PublishCommand {
@@ -219,23 +225,21 @@ pub struct InitArgs {
     #[arg(id = "stored", short = 'S', long = "stored", conflicts_with = "source")]
     stored: bool,
 
-    /// Audience session is published for (default self)
+    /// Audience session is published for
     #[arg(
         short = 'A',
         long,
         value_name = "AUDIENCE",
-        hide_default_value = true,
-        long_help = format!("Audience session is published for (default self)\n\n{AUDIENCE_HELP}")
+        long_help = format!("Audience session is published for\n\n{AUDIENCE_HELP}")
     )]
     audience: Option<String>,
 
-    /// Use session is published for (default scan)
+    /// Use session is published for
     #[arg(
         short = 'U',
         long,
         value_name = "USE",
-        hide_default_value = true,
-        long_help = format!("Use session is published for (default scan)\n\n{USE_HELP}")
+        long_help = format!("Use session is published for\n\n{USE_HELP}")
     )]
     r#use: Option<String>,
 
@@ -839,35 +843,53 @@ async fn publish_sessions(args: PublishRunArgs) -> Result<(), CliError> {
     check_run_args(&args).map_err(fail)?;
     let audience = parse_audience("gage publish", args.audience.as_deref())?;
     let uses = parse_use("gage publish", args.r#use.as_deref())?;
-    let added = args
-        .filter
-        .iter()
-        .map(|name| parse_filter("gage publish", "--filter", name, None))
-        .collect::<Result<Vec<_>, _>>()?;
-    let filters = selected_filters(audience, uses, added);
-    let segments = args
-        .segment
-        .iter()
-        .map(|text| {
-            text_value("gage publish", "--segment", text)
-                .map(|t| t.trim_end().to_string())
-                .map_err(|e| fail(e.to_string()))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    // Filters and segments are checked here and handed to the run;
+    // the dialog does not show them
+    for name in &args.filter {
+        parse_filter("gage publish", "--filter", name, None)?;
+    }
+    for text in &args.segment {
+        text_value("gage publish", "--segment", text).map_err(|e| fail(e.to_string()))?;
+    }
+    let notes = match &args.notes {
+        Some(text) => Some(
+            text_value("gage publish", "--notes", text)
+                .map(|t| t.trim().to_string())
+                .map_err(|e| fail(e.to_string()))?,
+        ),
+        None => None,
+    };
     let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
 
     dialog::run_async("Publish sessions", || async {
         if selects_sessions(&args) {
             preview_selection(&args, &store).await?;
-        } else {
-            dialog::step_value("Sessions", "none (chosen in session)")?;
         }
-        dialog::step_value("Audience", audience)?;
-        dialog::step_value("Use", uses)?;
-        filters_step(&filters)?;
-        if !segments.is_empty() {
-            dialog::step_list("Segments", segments.iter().map(|s| value_cell(s)))?;
-        }
+        let prompt = !args.yes;
+        let _audience = match audience {
+            Some(audience) => {
+                dialog::step_value("Audience", audience)?;
+                Some(audience)
+            }
+            None if prompt => Some(prompt_audience()?),
+            None => None,
+        };
+        let _uses = match uses {
+            Some(uses) => {
+                dialog::step_value("Use", uses)?;
+                Some(uses)
+            }
+            None if prompt => Some(prompt_use()?),
+            None => None,
+        };
+        let _notes = match notes {
+            Some(notes) => {
+                dialog::step_value("Notes", value_cell(&notes))?;
+                Some(notes)
+            }
+            None if prompt => prompt_notes()?,
+            None => None,
+        };
         let mode = if args.print { "print" } else { "interactive" };
         dialog::step_value("Mode", mode)?;
         if !args.yes {
@@ -879,6 +901,44 @@ async fn publish_sessions(args: PublishRunArgs) -> Result<(), CliError> {
         Ok("TODO: run Claude Code".to_string().into())
     })
     .await
+}
+
+fn prompt_audience() -> Result<Audience, DialogError> {
+    Ok(cli::select("Audience")
+        .item(
+            Audience::Public,
+            "public",
+            "Everyone - requires the most filtering",
+        )
+        .item(
+            Audience::Trusted,
+            "trusted",
+            "Only trusted users - some filtering",
+        )
+        .item(
+            Audience::Private,
+            "self",
+            "Only you can read - filtering not required",
+        )
+        .interact()?)
+}
+
+fn prompt_use() -> Result<Use, DialogError> {
+    Ok(cli::select("Use")
+        .item(Use::Reading, "reading", "Share as a narrative for reading")
+        .item(Use::Provenance, "provenance", "Export as a record of work")
+        .item(Use::Other, "other", "Another use")
+        .interact()?)
+}
+
+/// The notes prompt; `None` when nothing was entered.
+fn prompt_notes() -> Result<Option<String>, DialogError> {
+    let text: String = cli::input("Notes")
+        .placeholder("Additional notes (optional)")
+        .required(false)
+        .interact()?;
+    let text = text.trim();
+    Ok((!text.is_empty()).then(|| text.to_string()))
 }
 
 /// The rule clap does not express: `--print` runs without a session
@@ -1079,8 +1139,12 @@ fn init(args: InitArgs) -> Result<(), CliError> {
             }
         };
         preview_sessions(&[line], kind, None)?;
-        dialog::step_value("Audience", audience)?;
-        dialog::step_value("Use", uses)?;
+        if let Some(audience) = audience {
+            dialog::step_value("Audience", audience)?;
+        }
+        if let Some(uses) = uses {
+            dialog::step_value("Use", uses)?;
+        }
         filters_step(&filters)?;
         if !segments.is_empty() {
             dialog::step_list("Segments", segments.iter().map(|s| value_cell(s)))?;
@@ -1151,11 +1215,11 @@ fn filter_rows() -> Vec<Vec<String>> {
         .collect()
 }
 
-/// The audience `text` names, `self` when there is none. A name
+/// The audience `text` names, `None` when there is none. A name
 /// outside the list is a usage error in clap's layout.
-fn parse_audience(command: &str, text: Option<&str>) -> Result<Audience, CliError> {
+fn parse_audience(command: &str, text: Option<&str>) -> Result<Option<Audience>, CliError> {
     let Some(text) = text else {
-        return Ok(Audience::Private);
+        return Ok(None);
     };
     if !Audience::NAMES.contains(&text) {
         return Err(CliError::invalid_value(
@@ -1165,19 +1229,19 @@ fn parse_audience(command: &str, text: Option<&str>) -> Result<Audience, CliErro
             Audience::NAMES,
         ));
     }
-    Ok(text.parse().expect("a listed audience name parses"))
+    Ok(Some(text.parse().expect("a listed audience name parses")))
 }
 
-/// The use `text` names, `scan` when there is none. A name outside
+/// The use `text` names, `None` when there is none. A name outside
 /// the list is a usage error in clap's layout.
-fn parse_use(command: &str, text: Option<&str>) -> Result<Use, CliError> {
+fn parse_use(command: &str, text: Option<&str>) -> Result<Option<Use>, CliError> {
     let Some(text) = text else {
-        return Ok(Use::Scan);
+        return Ok(None);
     };
     if !Use::NAMES.contains(&text) {
         return Err(CliError::invalid_value(command, "--use", text, Use::NAMES));
     }
-    Ok(text.parse().expect("a listed use name parses"))
+    Ok(Some(text.parse().expect("a listed use name parses")))
 }
 
 /// The filter `text` denotes, with `@PATH` read as a file. An unknown
@@ -1211,7 +1275,11 @@ fn parse_filter(
 
 /// The filters an init stages: those `audience` or `uses` selects, in
 /// listing order, then each of `added` not already among them.
-fn selected_filters(audience: Audience, uses: Use, added: Vec<FilterSpec>) -> Vec<FilterSpec> {
+fn selected_filters(
+    audience: Option<Audience>,
+    uses: Option<Use>,
+    added: Vec<FilterSpec>,
+) -> Vec<FilterSpec> {
     let mut filters: Vec<FilterSpec> = Filter::selected(audience, uses)
         .into_iter()
         .map(|f| {
@@ -2828,6 +2896,8 @@ mod tests {
             "pii",
             "-g",
             "The question",
+            "-N",
+            "For the blog",
             "-p",
             "-y",
         ]);
@@ -2836,6 +2906,7 @@ mod tests {
         assert_eq!(args.r#use.as_deref(), Some("reading"));
         assert_eq!(args.filter, ["pii"]);
         assert_eq!(args.segment, ["The question"]);
+        assert_eq!(args.notes.as_deref(), Some("For the blog"));
         assert!(args.print && args.yes && !args.stored);
         let args = run_args(&["-S", "--days", "7", "--filter", "secret"]);
         assert!(args.stored);
@@ -3060,7 +3131,10 @@ mod tests {
             Err(CliError::Usage(e)) => e.render().to_string(),
             _ => panic!("not a usage error"),
         };
-        assert!(text.contains("[possible values: scan, reading]"), "{text}");
+        assert!(
+            text.contains("[possible values: reading, provenance, other]"),
+            "{text}"
+        );
     }
 
     #[test]

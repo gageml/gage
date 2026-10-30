@@ -99,21 +99,24 @@ impl fmt::Display for Audience {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Use {
-    /// Scanning; every entry stays, and no filter lists it
-    Scan,
     /// Reading for narrative content
     Reading,
+    /// A record of work; every entry stays, and no filter lists it
+    Provenance,
+    /// Another use; no filter lists it
+    Other,
 }
 
 impl Use {
     /// The values as the CLI and the front matter spell them, in
     /// listing order.
-    pub const NAMES: &[&str] = &["scan", "reading"];
+    pub const NAMES: &[&str] = &["reading", "provenance", "other"];
 
     pub fn name(self) -> &'static str {
         match self {
-            Use::Scan => "scan",
             Use::Reading => "reading",
+            Use::Provenance => "provenance",
+            Use::Other => "other",
         }
     }
 }
@@ -123,8 +126,9 @@ impl FromStr for Use {
 
     fn from_str(text: &str) -> Result<Self, Self::Err> {
         match text {
-            "scan" => Ok(Use::Scan),
             "reading" => Ok(Use::Reading),
+            "provenance" => Ok(Use::Provenance),
+            "other" => Ok(Use::Other),
             other => Err(PublishError::Input(format!(
                 "unknown use {other:?}; uses are {}",
                 Use::NAMES.join(", ")
@@ -603,11 +607,14 @@ impl Filter {
     }
 
     /// The named filters that list `audience` or list `uses`, in
-    /// listing order.
-    pub fn selected(audience: Audience, uses: Use) -> Vec<&'static Filter> {
+    /// listing order. A value not given selects nothing.
+    pub fn selected(audience: Option<Audience>, uses: Option<Use>) -> Vec<&'static Filter> {
         FILTERS
             .iter()
-            .filter(|f| f.audience.contains(&audience) || f.uses.contains(&uses))
+            .filter(|f| {
+                audience.is_some_and(|a| f.audience.contains(&a))
+                    || uses.is_some_and(|u| f.uses.contains(&u))
+            })
             .collect()
     }
 
@@ -872,8 +879,8 @@ mod tests {
     }
 
     /// A selection is the filters that list either value, in listing
-    /// order. The identity values select nothing because no filter
-    /// lists them, and the values imply nothing about one another.
+    /// order. A value not given, and the values no filter lists,
+    /// select nothing, and the values imply nothing about one another.
     #[test]
     fn selection_is_containment_in_either_list() {
         let names = |audience, uses| -> Vec<&str> {
@@ -882,9 +889,11 @@ mod tests {
                 .map(|f| f.name)
                 .collect()
         };
-        assert!(names(Audience::Private, Use::Scan).is_empty());
+        assert!(names(None, None).is_empty());
+        assert!(names(Some(Audience::Private), Some(Use::Provenance)).is_empty());
+        assert!(names(Some(Audience::Private), Some(Use::Other)).is_empty());
         assert_eq!(
-            names(Audience::Public, Use::Reading),
+            names(Some(Audience::Public), Some(Use::Reading)),
             [
                 "pii",
                 "secret",
@@ -894,9 +903,9 @@ mod tests {
                 "harness-records"
             ]
         );
-        assert_eq!(names(Audience::Trusted, Use::Scan), ["secret", "language"]);
+        assert_eq!(names(Some(Audience::Trusted), None), ["secret", "language"]);
         assert_eq!(
-            names(Audience::Private, Use::Reading),
+            names(None, Some(Use::Reading)),
             ["harness-context", "harness-records"]
         );
     }
@@ -912,7 +921,7 @@ mod tests {
         let err = "ducks".parse::<Audience>().unwrap_err().to_string();
         assert!(err.contains("self, trusted, public"), "{err}");
         let err = "ducks".parse::<Use>().unwrap_err().to_string();
-        assert!(err.contains("scan, reading"), "{err}");
+        assert!(err.contains("reading, provenance, other"), "{err}");
     }
 
     #[test]
