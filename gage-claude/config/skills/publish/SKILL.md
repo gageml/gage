@@ -247,16 +247,28 @@ the file describe each key. In outline:
   A filter's row deleted from `redact` comes back on the next refresh unless its
   text is listed here.
 
-Change the file with your file editing tools, then rebuild the staged session:
+Change the file with your file editing tools, then check it:
+
+```shell
+gage publish show --check SESSION
+```
+
+`show --check` prints nothing for a file without problems. Otherwise it prints
+each problem on its own line as `PATH:LINE:COLUMN: error: MESSAGE` and exits 1.
+A key the file does not have, a row of the wrong shape, an unknown filter or
+reason, a filter listed twice, and a session other than the original are all
+problems. A redaction row without an author is not.
+
+Then rebuild the staged session:
 
 ```shell
 gage publish refresh -y SESSION
 ```
 
-`refresh` validates the file and names the row that is wrong by position. It
-re-runs every named filter, fills in missing authors, rewrites the file, and
-warns about each redaction that matches nothing in the session. An invalid file
-changes nothing and is left as written.
+`refresh` checks the file the same way and reports the same lines. It re-runs
+every named filter, fills in missing authors, rewrites the file, and warns about
+each redaction that matches nothing in the session. An invalid file changes
+nothing and is left as written.
 
 ### Step 1. Init the op
 

@@ -17,7 +17,7 @@ use std::env;
 use std::fmt;
 use std::fs;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 
@@ -27,8 +27,8 @@ use gage_core::config::gage_home;
 use gage_core::style::IdHighlighter;
 use gage_core::uuid::short_uuid;
 use gage_publish::{
-    Audience, Filter, FilterSpec, InitArgs as InitRecord, NAMED_FILTERS, PublishError, Publisher,
-    Use, candidate,
+    Audience, Filter, FilterSpec, InitArgs as InitRecord, NAMED_FILTERS, Problem, PublishError,
+    Publisher, Use, candidate,
 };
 use gage_session::{Driver, NativeSession, SourceOptions};
 use gage_store::url::parse_session_origin;
@@ -181,7 +181,8 @@ pub enum PublishCommand {
     /// With --instructions, prints redaction instructions of each
     /// filter as markdown instead: a heading naming filter, then its
     /// instructions with prompt given for it in place of its
-    /// placeholder.
+    /// placeholder. With --check, prints nothing and reports each
+    /// problem of definition file by line instead.
     Show(ShowArgs),
 
     /// Edit definition of a pending publish in system editor
@@ -316,6 +317,15 @@ pub struct ShowArgs {
     /// Print redaction instructions of each filter as markdown
     #[arg(long)]
     instructions: bool,
+
+    /// Check definition file and report each problem by line
+    ///
+    /// Check definition file and report each problem by line. A
+    /// problem is one line on standard error, as "PATH:LINE:COLUMN:
+    /// error: MESSAGE". A file without problems prints nothing. Exit
+    /// status is 1 when there is a problem.
+    #[arg(long, conflicts_with = "instructions")]
+    check: bool,
 }
 
 #[derive(Args)]
@@ -660,10 +670,12 @@ fn pending_rows(
 }
 
 /// The redaction count of the pending publish `id` from its
-/// definition, or no count when the definition was deleted.
+/// definition, "invalid" for a definition that does not read, or no
+/// count when the definition was deleted.
 fn redaction_count(publisher: &Publisher<'_>, id: &str) -> Result<String, PublishError> {
     match publisher.definition(id) {
         Ok(definition) => Ok(definition.redact.len().to_string()),
+        Err(PublishError::Definition(_)) => Ok("invalid".into()),
         Err(PublishError::Store(StoreError::ObjectNotFound(_))) => Ok(String::new()),
         Err(e) => Err(e),
     }
@@ -988,8 +1000,8 @@ fn report_filter_redactions(publisher: &Publisher<'_>, id: &str) -> Result<(), P
     Ok(())
 }
 
-/// Print the definition file of a pending publish, or the redaction
-/// instructions of its filters.
+/// Print the definition file of a pending publish, the redaction
+/// instructions of its filters, or the problems the file has.
 fn show(args: ShowArgs) -> Result<(), CliError> {
     let fail = |e: String| CliError::message(format!("gage publish show: {e}"));
     let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
@@ -998,20 +1010,57 @@ fn show(args: ShowArgs) -> Result<(), CliError> {
         .store()
         .get(&args.session)
         .map_err(|e| fail(e.to_string()))?;
+    let path = publisher.store().definition_file(&pending.id);
+    if args.check {
+        return match publisher.definition(&pending.id) {
+            Ok(_) => Ok(()),
+            Err(PublishError::Definition(problems)) => {
+                for problem in &problems {
+                    eprintln!("{}", diagnostic(&path, problem));
+                }
+                Err(CliError::exit(1))
+            }
+            Err(e) => Err(fail(e.to_string())),
+        };
+    }
     if args.instructions {
         let definition = publisher
             .definition(&pending.id)
-            .map_err(|e| fail(e.to_string()))?;
+            .map_err(|e| fail(definition_failure(&path, &e)))?;
         let markdown = definition
             .instructions_markdown()
             .map_err(|e| fail(e.to_string()))?;
         print!("{markdown}");
         return Ok(());
     }
-    let path = publisher.store().definition_file(&pending.id);
     let text = fs::read_to_string(&path).map_err(|e| fail(format!("{}: {e}", path.display())))?;
     print!("{text}");
     Ok(())
+}
+
+/// A problem of the definition file at `path` in the form a compiler
+/// reports, `path:line:column: error: message`.
+fn diagnostic(path: &Path, problem: &Problem) -> String {
+    format!(
+        "{}:{}:{}: error: {}",
+        path.display(),
+        problem.line,
+        problem.column,
+        problem.message
+    )
+}
+
+/// The error of a definition read as its message, or, for a file with
+/// problems, one diagnostic per line.
+fn definition_failure(path: &Path, e: &PublishError) -> String {
+    match e {
+        PublishError::Definition(problems) => problems
+            .iter()
+            .map(|p| diagnostic(path, p))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        e => e.to_string(),
+    }
 }
 
 /// Open the definition file in the editor and rebuild when the editor
@@ -1072,11 +1121,12 @@ fn refresh_dialog(
     confirm: bool,
 ) -> Result<(), CliError> {
     let author = default_author();
+    let path = publisher.store().definition_file(&pending.id);
     dialog::run(title, || {
         dialog::step_value("Session", short_uuid(&pending.id))?;
         let mut definition = publisher
             .definition(&pending.id)
-            .map_err(|e| DialogError::Failed(e.to_string()))?;
+            .map_err(|e| DialogError::Failed(definition_failure(&path, &e)))?;
         definition.fill_authors(&author);
         definition
             .validate()
@@ -1194,9 +1244,10 @@ fn apply(args: ApplyArgs) -> Result<(), CliError> {
         .store()
         .get(&args.session)
         .map_err(|e| fail(e.to_string()))?;
+    let path = publisher.store().definition_file(&pending.id);
     let definition = publisher
         .definition(&pending.id)
-        .map_err(|e| fail(e.to_string()))?;
+        .map_err(|e| fail(definition_failure(&path, &e)))?;
     publisher
         .verify(&pending.id, args.force)
         .map_err(|e| match e {
@@ -1496,6 +1547,7 @@ mod tests {
         for argv in [
             vec!["show", "abc"],
             vec!["show", "abc", "--instructions"],
+            vec!["show", "abc", "--check"],
             vec!["edit", "abc"],
             vec!["refresh", "abc", "-y"],
             vec!["candidate", "abc", "--split-files"],
@@ -1514,6 +1566,17 @@ mod tests {
         }
         assert!(Cli::try_parse_from(["gage", "session", "publish", "list"]).is_err());
         assert!(Cli::try_parse_from(["gage", "publish", "show", "--stored", "abc"]).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "gage",
+                "publish",
+                "show",
+                "abc",
+                "--check",
+                "--instructions"
+            ])
+            .is_err()
+        );
         assert!(Cli::try_parse_from(["gage", "publish", "edit"]).is_err());
         // The former subcommands are a run's positional sessions
         let cli = Cli::try_parse_from(["gage", "publish", "status", "abc"]).unwrap();
@@ -1535,6 +1598,24 @@ mod tests {
         };
         assert_eq!(args.session, ["abc", "def"]);
         assert!(Cli::try_parse_from(["gage", "publish", "abort"]).is_err());
+    }
+
+    /// A problem renders as a compiler does, with the path.
+    #[test]
+    fn diagnostic_is_path_line_column_and_message() {
+        let problem = Problem {
+            line: 4,
+            column: 14,
+            message: "unknown reason \"bogus\"".into(),
+        };
+        assert_eq!(
+            diagnostic(Path::new("/p/abc.publish.jsonc"), &problem),
+            "/p/abc.publish.jsonc:4:14: error: unknown reason \"bogus\""
+        );
+        let e = PublishError::Definition(vec![problem.clone(), problem]);
+        assert_eq!(definition_failure(Path::new("x"), &e).lines().count(), 2);
+        let e = PublishError::Unchanged;
+        assert_eq!(definition_failure(Path::new("x"), &e), e.to_string());
     }
 
     /// `gage publish` without a subcommand is a run: its positional

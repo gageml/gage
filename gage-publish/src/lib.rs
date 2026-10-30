@@ -30,8 +30,8 @@ use gage_store::{
 };
 
 pub use definition::{
-    Allow, FilterEntry, FilterSpec, InitArgs, NAMED_FILTERS, PublishDefinition, REASONS, Reason,
-    Segment, TextEntry, format_lines, parse_lines, requires_prompt,
+    Allow, FilterEntry, FilterSpec, InitArgs, NAMED_FILTERS, Problem, PublishDefinition, REASONS,
+    Reason, Segment, TextEntry, format_lines, parse_lines, requires_prompt,
 };
 pub use derive::{Built, Candidate, Instance, InstanceKind, Span};
 pub use filter::{Audience, Filter, Pattern, Use};
@@ -48,6 +48,8 @@ pub enum PublishError {
     Edit(EditError),
     /// A spec or argument the caller gave is malformed
     Input(String),
+    /// The definition file has these problems, each at its position
+    Definition(Vec<Problem>),
     /// No driver is registered under the name the original records
     NoDriver(String),
     /// The definition has no filter or segment, or the staged content
@@ -69,6 +71,15 @@ impl fmt::Display for PublishError {
             PublishError::Edit(e) => write!(f, "{e}"),
             PublishError::Input(m) | PublishError::Refused(m) => {
                 write!(f, "{m}")
+            }
+            PublishError::Definition(problems) => {
+                for (i, p) in problems.iter().enumerate() {
+                    if i > 0 {
+                        f.write_str("\n")?;
+                    }
+                    write!(f, "{p}")?;
+                }
+                Ok(())
             }
             PublishError::NoDriver(name) => write!(f, "no driver named {name:?} is registered"),
             PublishError::Unchanged => write!(f, "no filter or segment changed the session"),
@@ -198,13 +209,6 @@ impl<'a> Publisher<'a> {
         let mut definition = self.definition(id)?;
         let authored = definition.fill_authors(author);
         definition.validate()?;
-        let original = self.original(id)?;
-        if definition.session != original.record.id {
-            return Err(PublishError::Input(format!(
-                "session {:?} is not the original {} the publish was staged from",
-                definition.session, original.record.id
-            )));
-        }
         let session = self.open_original(id)?;
         let names = definition.named_filters();
         derive::run_filters(&mut definition, &session, &names)?;
@@ -264,8 +268,8 @@ impl<'a> Publisher<'a> {
     }
 
     /// Verify that the pending publish `id` can be published: its
-    /// definition is valid, names its original, and has a filter or a
-    /// segment, its staged session passes [`check`], and the
+    /// definition reads, has an author on every redaction, and has a
+    /// filter or a segment, its staged session passes [`check`], and the
     /// definition changed the session. A definition with no filter and
     /// no segment is refused regardless of `force`; an unchanged
     /// session is refused unless `force` is set. Reads only.
@@ -274,13 +278,6 @@ impl<'a> Publisher<'a> {
     pub fn verify(&self, id: &str, force: bool) -> Result<(), PublishError> {
         let definition = self.definition(id)?;
         definition.validate()?;
-        let original = self.original(id)?;
-        if definition.session != original.record.id {
-            return Err(PublishError::Refused(format!(
-                "definition names session {:?}, not the original {} the publish was staged from",
-                definition.session, original.record.id
-            )));
-        }
         if definition.filters.is_empty() && definition.segments.is_empty() {
             return Err(PublishError::Refused(
                 "definition has no filter or segment; push the session directly to \
@@ -313,7 +310,10 @@ impl<'a> Publisher<'a> {
     }
 
     /// The definition of the pending publish `id`, as the file holds
-    /// it. A row written without an author has an empty one.
+    /// it, checked against the original it was staged from. A row
+    /// written without an author has an empty one. A file with
+    /// problems is [`PublishError::Definition`] with every problem at
+    /// its position.
     pub fn definition(&self, id: &str) -> Result<PublishDefinition, PublishError> {
         let path = self.publish.definition_file(id);
         let text = match fs::read_to_string(&path) {
@@ -325,7 +325,8 @@ impl<'a> Publisher<'a> {
             }
             Err(e) => return Err(PublishError::Io(e)),
         };
-        PublishDefinition::from_jsonc(&text)
+        let original = self.original(id)?;
+        PublishDefinition::read(&text, &original.record.id).map_err(PublishError::Definition)
     }
 
     /// Write the definition of `id` with the original's title beside

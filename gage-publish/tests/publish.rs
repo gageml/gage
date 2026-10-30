@@ -422,11 +422,13 @@ fn custom_requires_a_prompt_and_any_filter_takes_one() {
     write_definition(&publisher, &id, &definition);
     let err = publisher.refresh(&id, "user:test").unwrap_err();
     assert!(err.to_string().contains("piii"), "{err}");
-    assert_eq!(
-        publisher.definition(&id).unwrap().filters[0].name,
-        "piii",
+    let text = fs::read_to_string(publisher.store().definition_file(&id)).unwrap();
+    assert!(
+        text.contains("\"piii\""),
         "an invalid file is left as written"
     );
+    let err = publisher.definition(&id).unwrap_err();
+    assert!(matches!(err, PublishError::Definition(_)), "{err}");
 }
 
 /// The `harness-records` filter leaves out the entries the harness
@@ -579,6 +581,7 @@ fn refresh_runs_an_added_filter_and_drops_a_removed_filters_rows() {
     write_definition(&publisher, &id, &dup);
     let err = publisher.refresh(&id, "user:test").unwrap_err();
     assert!(err.to_string().contains("more than once"), "{err}");
+    write_definition(&publisher, &id, &definition);
 
     edit(&publisher, &id, |d| {
         d.filters.retain(|f| f.name != "secret");
@@ -831,12 +834,13 @@ fn refresh_reapplies_a_hand_edited_file() {
     )
     .unwrap();
     let err = publisher.refresh(&id, "session:hand").unwrap_err();
-    assert!(err.to_string().contains("redaction 1"), "{err}");
+    assert!(err.to_string().starts_with("4:14: "), "{err}");
     assert!(err.to_string().contains("bogus"), "{err}");
     assert_eq!(staged_lines(&f.publish_root, &id).len(), 2);
 
     fs::write(&path, file("  \"segments\": [[\"9-2\", \"d\", \"u\"]],")).unwrap();
     let err = publisher.refresh(&id, "session:hand").unwrap_err();
+    assert!(err.to_string().starts_with("4:16: "), "{err}");
     assert!(err.to_string().contains("9-2"), "{err}");
 
     fs::write(
@@ -845,9 +849,12 @@ fn refresh_reapplies_a_hand_edited_file() {
     )
     .unwrap();
     let err = publisher.refresh(&id, "session:hand").unwrap_err();
-    assert!(err.to_string().contains("other"), "{err}");
+    assert!(
+        err.to_string().starts_with("2:3: session \"other\""),
+        "{err}"
+    );
     let err = publisher.apply(&id, true).unwrap_err();
-    assert!(matches!(err, PublishError::Refused(_)), "{err}");
+    assert!(matches!(err, PublishError::Definition(_)), "{err}");
     assert_eq!(staged_lines(&f.publish_root, &id).len(), 2);
 }
 

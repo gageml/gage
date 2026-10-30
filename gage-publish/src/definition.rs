@@ -14,7 +14,12 @@ use std::str::FromStr;
 use std::sync::LazyLock;
 
 use gage_store::url::LineSelection;
-use jsonc_parser::ParseOptions;
+use jsonc_parser::ast;
+use jsonc_parser::common::Ranged;
+use jsonc_parser::{CollectOptions, ParseOptions};
+use jsonschema::Validator;
+use jsonschema::error::ValidationErrorKind;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -354,12 +359,76 @@ impl PublishDefinition {
         }
     }
 
-    /// The definition as the file holds it, comments and trailing
-    /// commas included.
+    /// The definition as the file holds it, or every problem the file
+    /// has, each at its line and column. `session` is the id of the
+    /// original the publish was staged from; a file naming another
+    /// session is a problem. A redaction written without an author
+    /// has an empty one and is not a problem.
+    pub fn read(text: &str, session: &str) -> Result<Self, Vec<Problem>> {
+        Self::read_checked(text, Some(session))
+    }
+
+    /// The definition as the file holds it, with no original to check
+    /// the session against. The problems are one error.
     pub fn from_jsonc(text: &str) -> Result<Self, PublishError> {
-        let value: Value = jsonc_parser::parse_to_serde_value(text, &ParseOptions::default())
-            .map_err(|e| PublishError::Input(format!("definition: {e}")))?;
-        Ok(serde_json::from_value(value)?)
+        Self::read_checked(text, None).map_err(PublishError::Definition)
+    }
+
+    /// A syntax error is the only problem reported. The schema's
+    /// problems are reported without reading further, since a row the
+    /// schema refused has no meaning to the rules.
+    fn read_checked(text: &str, session: Option<&str>) -> Result<Self, Vec<Problem>> {
+        let doc = Doc::parse(text)?;
+        let problems = doc.schema_problems();
+        if !problems.is_empty() {
+            return Err(problems);
+        }
+        let head: Head = serde_json::from_value(doc.value.clone())
+            .map_err(|e| vec![doc.problem("", e.to_string())])?;
+        let mut problems = Vec::new();
+        if let Some(expected) = session
+            && head.session != expected
+        {
+            problems.push(doc.problem(
+                "/session",
+                format!(
+                    "session {:?} is not the original {expected} the publish was staged from",
+                    head.session
+                ),
+            ));
+        }
+        let filters: Vec<FilterEntry> = doc.rows("filters", &mut problems);
+        let segments: Vec<Segment> = doc.rows("segments", &mut problems);
+        let allow: Vec<Allow> = doc.rows("allow", &mut problems);
+        let redact: Vec<TextEntry> = doc.rows("redact", &mut problems);
+        let mut seen = HashSet::new();
+        for (i, f) in filters.iter().enumerate() {
+            if let Some(message) = filter_problem(f, &mut seen) {
+                problems.push(doc.problem(&format!("/filters/{i}"), message));
+            }
+        }
+        for (i, s) in segments.iter().enumerate() {
+            if let Some(message) = segment_problem(s) {
+                problems.push(doc.problem(&format!("/segments/{i}"), message));
+            }
+        }
+        for (i, t) in redact.iter().enumerate() {
+            if let Some(message) = redaction_problem(t) {
+                problems.push(doc.problem(&format!("/redact/{i}"), message));
+            }
+        }
+        if !problems.is_empty() {
+            problems.sort_by_key(|p| (p.line, p.column));
+            return Err(problems);
+        }
+        Ok(Self {
+            session: head.session,
+            init: head.init,
+            filters,
+            segments,
+            allow,
+            redact,
+        })
     }
 
     /// The names of the filters on the list, in list order.
@@ -426,42 +495,29 @@ impl PublishDefinition {
         Ok(out)
     }
 
-    /// Check a definition as read from disk, which may have been
-    /// edited by hand: every filter is known and on the list once, a
-    /// filter that requires a prompt has one, every segment has
-    /// ordered 1-based ranges, and every redaction has a non-empty
-    /// literal, a known reason, and an author. A row is named by its
-    /// 1-based position.
+    /// Check a definition built in code or filled in after a read: the
+    /// rules the reader applies, and every redaction has an author. A
+    /// row is named by its 1-based position.
     pub fn validate(&self) -> Result<(), PublishError> {
-        let mut names = HashSet::new();
+        let mut seen = HashSet::new();
         for f in &self.filters {
-            FilterSpec::new(&f.name, f.prompt.clone())?;
-            if !names.insert(f.name.as_str()) {
-                return Err(PublishError::Input(format!(
-                    "filter {} is on the list more than once",
-                    f.name
-                )));
+            if let Some(message) = filter_problem(f, &mut seen) {
+                return Err(PublishError::Input(message));
             }
         }
         for (i, s) in self.segments.iter().enumerate() {
-            if s.lines
-                .iter()
-                .any(|(start, end)| *start == 0 || end < start)
-            {
-                return Err(PublishError::Input(format!(
-                    "segment {}: lines are 1-based and a range's end is not before its start",
-                    i + 1
-                )));
+            if let Some(message) = segment_problem(s) {
+                return Err(PublishError::Input(format!("segment {}: {message}", i + 1)));
             }
         }
         for (i, t) in self.redact.iter().enumerate() {
-            let at = |why: String| PublishError::Input(format!("redaction {}: {why}", i + 1));
-            if t.literal.is_empty() {
-                return Err(at("literal is empty".into()));
-            }
-            check_reason(&t.reason).map_err(|e| at(e.to_string()))?;
-            if t.author.is_empty() {
-                return Err(at("no author".into()));
+            let message =
+                redaction_problem(t).or_else(|| t.author.is_empty().then(|| "no author".into()));
+            if let Some(message) = message {
+                return Err(PublishError::Input(format!(
+                    "redaction {}: {message}",
+                    i + 1
+                )));
             }
         }
         Ok(())
@@ -513,6 +569,214 @@ impl PublishDefinition {
         out.push_str("}\n");
         out
     }
+}
+
+/// A problem a read found, at a 1-based line and column of the file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Problem {
+    pub line: usize,
+    pub column: usize,
+    pub message: String,
+}
+
+impl fmt::Display for Problem {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}:{}: {}", self.line, self.column, self.message)
+    }
+}
+
+/// The two document fields beside the row sections.
+#[derive(Deserialize)]
+struct Head {
+    session: String,
+    #[serde(default)]
+    init: InitArgs,
+}
+
+/// The shape of the file. The names a filter or reason may take, and
+/// what rows may say about each other, are checked in code.
+static SCHEMA: LazyLock<Validator> = LazyLock::new(|| {
+    let schema: Value = serde_json::from_str(include_str!("../schema/definition.json"))
+        .expect("schema/definition.json is fixed and valid JSON");
+    jsonschema::validator_for(&schema).expect("schema/definition.json is fixed and valid")
+});
+
+/// The shape of a row of each section, for a problem at the row.
+const ROW_SHAPES: [(&str, &str); 4] = [
+    ("filters", "a filters row is a name or [name, prompt]"),
+    ("segments", "a segments row is [lines, description, author]"),
+    ("allow", "an allow row is [text, author]"),
+    (
+        "redact",
+        "a redact row is [text, reason, author, mark] or [text, reason, mark]",
+    ),
+];
+
+fn row_shape(section: &str) -> Option<&'static str> {
+    ROW_SHAPES
+        .iter()
+        .find(|(name, _)| *name == section)
+        .map(|(_, shape)| *shape)
+}
+
+/// The shape message when `pointer` names a whole row, `/section/N`.
+fn row_shape_at(pointer: &str) -> Option<&'static str> {
+    let mut steps = pointer.split('/').skip(1);
+    let section = steps.next()?;
+    let index = steps.next()?;
+    if steps.next().is_some() || index.parse::<usize>().is_err() {
+        return None;
+    }
+    row_shape(section)
+}
+
+/// A definition file parsed to its tree, which places each problem,
+/// and to the JSON value the schema checks and the rows are read from.
+struct Doc<'a> {
+    text: &'a str,
+    root: ast::Value<'a>,
+    value: Value,
+}
+
+impl<'a> Doc<'a> {
+    fn parse(text: &'a str) -> Result<Self, Vec<Problem>> {
+        let parsed =
+            jsonc_parser::parse_to_ast(text, &CollectOptions::default(), &ParseOptions::default())
+                .map_err(|e| {
+                    vec![Problem {
+                        line: e.line_display(),
+                        column: e.column_display(),
+                        message: e.kind().to_string(),
+                    }]
+                })?;
+        let root = parsed.value.ok_or_else(|| {
+            vec![Problem {
+                line: 1,
+                column: 1,
+                message: "file has no value".into(),
+            }]
+        })?;
+        let value = Value::from(root.clone());
+        Ok(Doc { text, root, value })
+    }
+
+    /// Every way the value departs from the schema, in file order. A
+    /// problem with a whole row names the row's shape. An unknown key
+    /// is a problem at the key.
+    fn schema_problems(&self) -> Vec<Problem> {
+        let mut problems = Vec::new();
+        for e in SCHEMA.iter_errors(&self.value) {
+            let pointer = e.instance_path().to_string();
+            match e.kind() {
+                ValidationErrorKind::AdditionalProperties { unexpected } => {
+                    for key in unexpected {
+                        problems.push(
+                            self.problem(
+                                &format!("{pointer}/{key}"),
+                                format!("unknown key {key:?}"),
+                            ),
+                        );
+                    }
+                }
+                _ => {
+                    let message = match row_shape_at(&pointer) {
+                        Some(shape) => shape.to_string(),
+                        None => e.to_string(),
+                    };
+                    problems.push(self.problem(&pointer, message));
+                }
+            }
+        }
+        problems.sort_by_key(|p| (p.line, p.column));
+        problems
+    }
+
+    /// The rows of the section `key`, each read as `T`. A row that
+    /// does not read is a problem at the row: after the schema, a
+    /// segment row fails only on its lines text, which the error
+    /// quotes, and a redaction row only on an author slot that does
+    /// not fit its length, which the row's shape explains.
+    fn rows<T: DeserializeOwned>(&self, key: &str, problems: &mut Vec<Problem>) -> Vec<T> {
+        let mut rows = Vec::new();
+        let Some(Value::Array(items)) = self.value.get(key) else {
+            return rows;
+        };
+        for (i, item) in items.iter().enumerate() {
+            match serde_json::from_value(item.clone()) {
+                Ok(row) => rows.push(row),
+                Err(e) => {
+                    let message = match (key, row_shape(key)) {
+                        ("segments", _) | (_, None) => e.to_string(),
+                        (_, Some(shape)) => shape.to_string(),
+                    };
+                    problems.push(self.problem(&format!("/{key}/{i}"), message));
+                }
+            }
+        }
+        rows
+    }
+
+    /// A problem at the node `pointer` names: the key of an object
+    /// property, or the element of an array. The root, and a pointer
+    /// that resolves no further, place the problem at the last node
+    /// reached.
+    fn problem(&self, pointer: &str, message: String) -> Problem {
+        let mut node = &self.root;
+        let mut start = node.range().start;
+        for step in pointer.split('/').skip(1) {
+            let next = match node {
+                ast::Value::Object(o) => o.get(step).map(|prop| (prop.range.start, &prop.value)),
+                ast::Value::Array(a) => match step.parse::<usize>() {
+                    Ok(i) => a.elements.get(i).map(|v| (v.range().start, v)),
+                    Err(_) => None,
+                },
+                _ => None,
+            };
+            match next {
+                Some((at, value)) => {
+                    start = at;
+                    node = value;
+                }
+                None => break,
+            }
+        }
+        let before = self.text.get(..start).unwrap_or_default();
+        let line = before.matches('\n').count() + 1;
+        let column = before.rsplit('\n').next().map_or(0, |l| l.chars().count()) + 1;
+        Problem {
+            line,
+            column,
+            message,
+        }
+    }
+}
+
+/// Why `f` is not a filter the list may hold: an unknown name, a
+/// missing prompt, or a name already in `seen`.
+fn filter_problem(f: &FilterEntry, seen: &mut HashSet<String>) -> Option<String> {
+    if let Err(e) = FilterSpec::new(&f.name, f.prompt.clone()) {
+        return Some(e.to_string());
+    }
+    if !seen.insert(f.name.clone()) {
+        return Some(format!("filter {} is listed more than once", f.name));
+    }
+    None
+}
+
+fn segment_problem(s: &Segment) -> Option<String> {
+    s.lines
+        .iter()
+        .any(|(start, end)| *start == 0 || end < start)
+        .then(|| "lines are 1-based and a range's end is not before its start".into())
+}
+
+/// Why `t` is not a redaction: an empty literal or an unknown reason.
+/// A missing author is not a problem here; a refresh fills it.
+fn redaction_problem(t: &TextEntry) -> Option<String> {
+    if t.literal.is_empty() {
+        return Some("literal is empty".into());
+    }
+    check_reason(&t.reason).err().map(|e| e.to_string())
 }
 
 /// A row as one line: the elements of an array separated by a comma
@@ -740,64 +1004,127 @@ mod tests {
         );
     }
 
-    /// A missing list reads as empty, a redaction without an author is
-    /// filled by `fill_authors` and refused by `validate` until then,
-    /// and the checks name the row that is wrong by position.
+    /// A missing list reads as empty, and a redaction without an
+    /// author is filled by `fill_authors` and refused by `validate`
+    /// until then.
     #[test]
-    fn validate_names_the_bad_row() {
+    fn validate_requires_an_author() {
         let d = PublishDefinition::from_jsonc(r#"{"session": "abc", "filters": ["pii"]}"#).unwrap();
         assert_eq!(d, PublishDefinition::new("abc", &["pii".parse().unwrap()]));
         d.validate().unwrap();
-        let check = |json: &str, expect: &str| {
-            let d = PublishDefinition::from_jsonc(json).unwrap();
-            let err = d.validate().unwrap_err().to_string();
-            assert!(err.contains(expect), "{err}");
-        };
-        check(
-            r#"{"session": "abc", "filters": ["nope"]}"#,
-            "unknown filter",
-        );
-        check(
-            r#"{"session": "abc", "filters": ["custom"]}"#,
-            "requires a prompt",
-        );
-        check(
-            r#"{"session": "abc", "filters": ["pii", ["pii", "x"]]}"#,
-            "more than once",
-        );
-        check(
-            r#"{"session": "abc", "redact": [["x", "pii", "u", true], ["", "pii", "u", true]]}"#,
-            "redaction 2: literal is empty",
-        );
-        check(
-            r#"{"session": "abc", "redact": [["x", "nope", "u", true]]}"#,
-            "redaction 1: unknown reason",
-        );
-        check(
-            r#"{"session": "abc", "redact": [["x", "pii", true]]}"#,
-            "redaction 1: no author",
-        );
 
         let mut d = PublishDefinition::from_jsonc(
             r#"{"session": "abc", "redact": [["x", "pii", true], ["y", "pii", "user:me", false]]}"#,
         )
         .unwrap();
+        let err = d.validate().unwrap_err().to_string();
+        assert!(err.contains("redaction 1: no author"), "{err}");
         assert_eq!(d.fill_authors("session:s"), 1);
         assert_eq!(d.redact[0].author, "session:s");
         assert_eq!(d.redact[1].author, "user:me");
         d.validate().unwrap();
 
-        let bad_lines =
-            PublishDefinition::from_jsonc(r#"{"session": "abc", "segments": [["9-2", "d", "u"]]}"#)
-                .unwrap_err();
-        assert!(bad_lines.to_string().contains("9-2"), "{bad_lines}");
-        let pending =
-            PublishDefinition::from_jsonc(r#"{"session": "abc", "segments": [[null, "d", "u"]]}"#)
-                .unwrap();
-        pending.validate().unwrap();
-        assert!(pending.segments[0].lines.is_empty());
-        let no_session = PublishDefinition::from_jsonc(r#"{"filters": []}"#).unwrap_err();
-        assert!(no_session.to_string().contains("session"), "{no_session}");
+        let mut d = PublishDefinition::new("abc", &[]);
+        d.push_segment("d", &[(9, 2)], "u");
+        let err = d.validate().unwrap_err().to_string();
+        assert!(err.contains("segment 1: lines are 1-based"), "{err}");
+    }
+
+    /// The problems of a file are reported together, each at the line
+    /// and column of the node it concerns, in file order. The schema's
+    /// problems come first and alone: an unknown key at the key, a row
+    /// of the wrong shape at the row with the shape named, and a wrong
+    /// element at the element. A file the schema accepts then reports
+    /// what the rules find: a session other than the original, an
+    /// unknown filter, a filter without its prompt, a filter listed
+    /// twice, bad segment lines, an unknown reason, and a redaction
+    /// whose author slot does not fit its length.
+    #[test]
+    fn reader_reports_each_problem_at_its_position() {
+        let problems = |text: &str, session: &str| -> Vec<(usize, usize, String)> {
+            PublishDefinition::read(text, session)
+                .unwrap_err()
+                .into_iter()
+                .map(|p| (p.line, p.column, p.message))
+                .collect()
+        };
+        let shape = concat!(
+            "// top\n",
+            "{\n",
+            "  \"session\": \"abc\",\n",
+            "  \"filter\": [\"pii\"],\n",
+            "  \"filters\": [\"pii\", [\"custom\"]],\n",
+            "  \"segments\": [\n",
+            "    [\"1-3\", \"d\"],\n",
+            "  ],\n",
+            "  \"redact\": [\n",
+            "    [\"\", \"pii\", \"u\", true],\n",
+            "    [\"x\", \"pii\", \"u\", \"yes\"],\n",
+            "  ],\n",
+            "}\n",
+        );
+        let found = problems(shape, "abc");
+        let expect = [
+            (4, 3, "unknown key \"filter\""),
+            (5, 22, "a filters row is a name or [name, prompt]"),
+            (7, 5, "a segments row is [lines, description, author]"),
+            (10, 6, "shorter than 1 character"),
+            (11, 23, "not of type \"boolean\""),
+        ];
+        assert_eq!(found.len(), expect.len(), "{found:?}");
+        for ((line, column, message), (l, c, m)) in found.iter().zip(expect) {
+            assert_eq!((*line, *column), (l, c), "{message}");
+            assert!(message.contains(m), "{message}");
+        }
+
+        let rules = concat!(
+            "{\n",
+            "  \"session\": \"abc\",\n",
+            "  \"filters\": [\"nope\", \"custom\", \"pii\", \"pii\"],\n",
+            "  \"segments\": [[\"9-2\", \"d\", \"u\"]],\n",
+            "  \"redact\": [\n",
+            "    [\"x\", \"nope\", \"u\", true],\n",
+            "    [\"x\", \"pii\", true, true],\n",
+            "  ],\n",
+            "}\n",
+        );
+        let found = problems(rules, "xyz");
+        let expect = [
+            (2, 3, "session \"abc\" is not the original xyz"),
+            (3, 15, "unknown filter \"nope\""),
+            (3, 23, "filter custom requires a prompt"),
+            (3, 40, "filter pii is listed more than once"),
+            (4, 16, "9-2"),
+            (6, 5, "unknown reason \"nope\""),
+            (
+                7,
+                5,
+                "a redact row is [text, reason, author, mark] or [text, reason, mark]",
+            ),
+        ];
+        assert_eq!(found.len(), expect.len(), "{found:?}");
+        for ((line, column, message), (l, c, m)) in found.iter().zip(expect) {
+            assert_eq!((*line, *column), (l, c), "{message}");
+            assert!(message.contains(m), "{message}");
+        }
+
+        assert_eq!(
+            problems(r#"{"filters": []}"#, "abc"),
+            [(1, 1, "\"session\" is a required property".to_string())]
+        );
+        assert_eq!(
+            problems("", "abc"),
+            [(1, 1, "file has no value".to_string())]
+        );
+        let d = PublishDefinition::read(rules.replace("xyz", "abc").as_str(), "abc");
+        assert!(d.is_err());
+        let d = PublishDefinition::read(
+            r#"{"session": "abc", "segments": [[null, "d", "u"]], "redact": [["x", "pii", true]]}"#,
+            "abc",
+        )
+        .unwrap();
+        assert!(d.segments[0].lines.is_empty());
+        assert_eq!(d.redact[0].author, "");
     }
 
     /// The reader takes comments and trailing commas and reports a
@@ -811,7 +1138,7 @@ mod tests {
         assert_eq!(d.redact.len(), 1);
         let err = PublishDefinition::from_jsonc("{\n  \"session\": \"abc\",\n  \"redact\": [\n}")
             .unwrap_err();
-        assert!(err.to_string().contains("line 4"), "{err}");
+        assert!(err.to_string().starts_with("4:1: "), "{err}");
     }
 
     /// Lines round trip through the `"12-20,31"` form.
