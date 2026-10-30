@@ -131,7 +131,7 @@ pub struct PublishRunArgs {
     /// completion without an interactive session and prints its
     /// response. Without it, Claude Code opens an interactive session
     /// with the skill and the arguments given.
-    #[arg(short = 'P', long)]
+    #[arg(short, long)]
     print: bool,
 
     /// Skip confirmation prompt
@@ -2828,7 +2828,7 @@ mod tests {
             "pii",
             "-g",
             "The question",
-            "-P",
+            "-p",
             "-y",
         ]);
         assert_eq!(args.sessions, ["abc", "def"]);
@@ -2873,21 +2873,21 @@ mod tests {
             };
             check_run_args(&run_args)
         };
-        assert_eq!(check(&["-P", "abc", "-f", "pii"]), Ok(()));
-        assert_eq!(check(&["-P", "--days", "7", "-g", "The question"]), Ok(()));
+        assert_eq!(check(&["-p", "abc", "-f", "pii"]), Ok(()));
+        assert_eq!(check(&["-p", "--days", "7", "-g", "The question"]), Ok(()));
         assert_eq!(check(&[]), Ok(()));
         assert_eq!(check(&["abc"]), Ok(()));
         assert_eq!(check(&["-f", "pii"]), Ok(()));
         assert_eq!(
-            check(&["-P", "-f", "pii"]),
+            check(&["-p", "-f", "pii"]),
             Err("--print requires a session selection".to_string())
         );
         assert_eq!(
-            check(&["-P", "abc"]),
+            check(&["-p", "abc"]),
             Err("--print requires a filter or segment".to_string())
         );
         assert_eq!(
-            check(&["-P", "--days", "7"]),
+            check(&["-p", "--days", "7"]),
             Err("--print requires a filter or segment".to_string())
         );
     }

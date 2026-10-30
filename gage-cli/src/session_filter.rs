@@ -41,7 +41,7 @@ pub struct SessionFilterArgs {
     ///
     /// PROJECT is a project directory path (absolute, relative, or
     /// ~-prefixed) or a project slug as shown by 'gage session list'.
-    #[arg(short, long, value_name = "PROJECT", allow_hyphen_values = true)]
+    #[arg(short = 'P', long, value_name = "PROJECT", allow_hyphen_values = true)]
     pub project: Option<String>,
 
     /// Select sessions modified in past N days
