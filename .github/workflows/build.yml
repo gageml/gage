@@ -82,7 +82,7 @@ jobs:
         uses: actions/cache@v5
         with:
           key: build-${{ steps.version.outputs.version }}-${{ matrix.target }}
-          path: target/${{ matrix.target }}/release-small/${{ matrix.bin_file }}
+          path: target/${{ matrix.target }}/release/${{ matrix.bin_file }}
 
       - name: Rust
         if:
@@ -101,7 +101,7 @@ jobs:
           # commit (see gage-cli/build.rs)
           RELEASE: "1"
         run:
-          cargo build --profile release-small --target ${{ matrix.target }}
+          cargo build --release --target ${{ matrix.target }}
           --bin "$BIN"
 
       - name: Package
@@ -110,7 +110,7 @@ jobs:
         run: |
           version="${{ steps.version.outputs.version }}"
           archive="${PKGNAME}-${version}-${{ matrix.target }}.tar.gz"
-          tar -C "target/${{ matrix.target }}/release-small" -czf "$archive" "${{ matrix.bin_file }}"
+          tar -C "target/${{ matrix.target }}/release" -czf "$archive" "${{ matrix.bin_file }}"
           echo "archive=$archive" >> "$GITHUB_OUTPUT"
 
       - name: Artifact

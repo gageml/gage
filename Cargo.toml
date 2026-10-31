@@ -79,14 +79,9 @@ indexing_slicing = "warn"
 [profile.dev.package."*"]
 opt-level = 3
 
+# The distributed binary.
 [profile.release]
-debug = "line-tables-only"
-panic = "abort"
-
-# Opt-in profile for shipping a minimal binary. Slow to build.
-[profile.release-small]
-inherits = "release"
 lto = "thin"
 codegen-units = 1
 strip = true
-debug = false
+panic = "abort"
