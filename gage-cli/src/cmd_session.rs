@@ -103,7 +103,7 @@ pub enum SessionCommand {
 #[command(next_display_order = 3)]
 pub struct SessionListArgs {
     /// Filter by project (path or name)
-    #[arg(short = 'P', long, value_name = "PROJECT", allow_hyphen_values = true)]
+    #[arg(short = 'p', long, value_name = "PROJECT", allow_hyphen_values = true)]
     pub project: Option<String>,
 
     /// Show sessions modified within SINCE

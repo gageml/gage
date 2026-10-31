@@ -131,14 +131,14 @@ pub struct PublishRunArgs {
     #[arg(short = 'N', long, value_name = "TEXT")]
     notes: Option<String>,
 
-    /// Print response and exit
+    /// Run without an interactive session
     ///
-    /// Print response and exit. Claude Code runs the publish skill to
-    /// completion without an interactive session and prints its
-    /// response. Without it, Claude Code opens an interactive session
-    /// with the skill and the arguments given.
+    /// Run without an interactive session. Claude Code runs the publish
+    /// skill to completion and prints its response. Without it, Claude
+    /// Code opens an interactive session with the skill and the
+    /// arguments given.
     #[arg(short, long)]
-    print: bool,
+    batch: bool,
 
     /// Skip confirmation prompt
     #[arg(short, long)]
@@ -495,7 +495,7 @@ async fn publish_sessions(args: PublishRunArgs) -> Result<(), CliError> {
             None if prompt => prompt_notes()?,
             None => None,
         };
-        dialog::usage_notice(usage_notice(args.print))?;
+        dialog::usage_notice(usage_notice(args.batch))?;
         if !args.yes {
             let confirmed = cli::confirm("Continue?").initial_value(true).interact()?;
             if !confirmed {
@@ -508,9 +508,9 @@ async fn publish_sessions(args: PublishRunArgs) -> Result<(), CliError> {
 }
 
 /// The notice before the confirmation: an interactive session is
-/// started, or the publish runs to completion with `--print`.
-fn usage_notice(print: bool) -> &'static str {
-    if print {
+/// started, or the publish runs to completion with `--batch`.
+fn usage_notice(batch: bool) -> &'static str {
+    if batch {
         "You are about to publish sessions using the selected model. Standard token usage \
          applies."
     } else {
@@ -557,18 +557,18 @@ fn prompt_notes() -> Result<Option<String>, DialogError> {
     Ok((!text.is_empty()).then(|| text.to_string()))
 }
 
-/// The rule clap does not express: `--print` runs without a session
+/// The rule clap does not express: `--batch` runs without a session
 /// to ask in, so it needs a session selection and a filter or a
 /// segment. An interactive run takes whatever is given.
 fn check_run_args(args: &PublishRunArgs) -> Result<(), String> {
-    if !args.print {
+    if !args.batch {
         return Ok(());
     }
     if !selects_sessions(args) {
-        return Err("--print requires a session selection".to_string());
+        return Err("--batch requires a session selection".to_string());
     }
     if args.filter.is_empty() && args.segment.is_empty() {
-        return Err("--print requires a filter or segment".to_string());
+        return Err("--batch requires a filter or segment".to_string());
     }
     Ok(())
 }
@@ -1663,7 +1663,7 @@ mod tests {
             "The question",
             "-N",
             "For the blog",
-            "-p",
+            "-b",
             "-y",
         ]);
         assert_eq!(args.sessions, ["abc", "def"]);
@@ -1672,7 +1672,7 @@ mod tests {
         assert_eq!(args.filter, ["pii"]);
         assert_eq!(args.segment, ["The question"]);
         assert_eq!(args.notes.as_deref(), Some("For the blog"));
-        assert!(args.print && args.yes && !args.stored);
+        assert!(args.batch && args.yes && !args.stored);
         let args = run_args(&["-S", "--days", "7", "--filter", "secret"]);
         assert!(args.stored);
         assert_eq!(args.select.days, Some(7));
@@ -1697,17 +1697,17 @@ mod tests {
             );
         }
     }
-    /// The notice names an interactive session without `--print` and a
+    /// The notice names an interactive session without `--batch` and a
     /// publish run with it.
     #[test]
     fn usage_notice_names_the_mode() {
         assert!(usage_notice(false).starts_with("You are about to start an interactive session"));
         assert!(usage_notice(true).starts_with("You are about to publish sessions"));
     }
-    /// `--print` needs a session selection and a filter or a segment;
+    /// `--batch` needs a session selection and a filter or a segment;
     /// an interactive run needs neither.
     #[test]
-    fn print_needs_a_selection_and_a_filter_or_segment() {
+    fn batch_needs_a_selection_and_a_filter_or_segment() {
         let check = |argv: &[&str]| {
             let cli = Cli::try_parse_from([&["gage", "publish"], argv].concat()).unwrap();
             let Command::Publish(PublishArgs { run_args, .. }) = cli.command else {
@@ -1715,22 +1715,22 @@ mod tests {
             };
             check_run_args(&run_args)
         };
-        assert_eq!(check(&["-p", "abc", "-f", "pii"]), Ok(()));
-        assert_eq!(check(&["-p", "--days", "7", "-g", "The question"]), Ok(()));
+        assert_eq!(check(&["-b", "abc", "-f", "pii"]), Ok(()));
+        assert_eq!(check(&["-b", "--days", "7", "-g", "The question"]), Ok(()));
         assert_eq!(check(&[]), Ok(()));
         assert_eq!(check(&["abc"]), Ok(()));
         assert_eq!(check(&["-f", "pii"]), Ok(()));
         assert_eq!(
-            check(&["-p", "-f", "pii"]),
-            Err("--print requires a session selection".to_string())
+            check(&["-b", "-f", "pii"]),
+            Err("--batch requires a session selection".to_string())
         );
         assert_eq!(
-            check(&["-p", "abc"]),
-            Err("--print requires a filter or segment".to_string())
+            check(&["-b", "abc"]),
+            Err("--batch requires a filter or segment".to_string())
         );
         assert_eq!(
-            check(&["-p", "--days", "7"]),
-            Err("--print requires a filter or segment".to_string())
+            check(&["-b", "--days", "7"]),
+            Err("--batch requires a filter or segment".to_string())
         );
     }
     /// `apply --force` stands alone; `--force-tag` still needs `--tag`.
