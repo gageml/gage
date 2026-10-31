@@ -81,6 +81,7 @@ opt-level = 3
 
 # The distributed binary.
 [profile.release]
+opt-level = "s"
 lto = "thin"
 codegen-units = 1
 strip = true
