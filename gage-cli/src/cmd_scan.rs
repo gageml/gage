@@ -25,7 +25,7 @@ use gage_runtime::{LOG_TARGET, Output, TaskOutput};
 use gage_scan::recover::{self, Recovered};
 use gage_scan::scan_dir::scans_dir;
 use gage_scan::{CompiledScanner, Event, ScanConfig, ScanError, ScanOutput, summary_line};
-use gage_session::{Driver, ResolveSession};
+use gage_session::{Driver, HarnessSession, SkillMode, SkillSession};
 use gage_store::ScanDirLayout;
 use gage_store::{
     DatasetOrigin, DatasetStore, IssueStatus, IssueStore, SCAN_TYPE, ScanStore, SessionRecord,
@@ -628,13 +628,21 @@ impl ScanHost for StoreHost {
             .map_err(|e| e.to_string())
     }
 
-    fn start_resolve_session(&self, issue_ids: &[String]) -> io::Result<Box<dyn ResolveSession>> {
+    fn start_resolve_session(&self, issue_ids: &[String]) -> io::Result<Box<dyn HarnessSession>> {
         let driver = self
             .registry
             .default()
             .ok_or_else(|| io::Error::other("no default session driver registered"))?;
+        let session = SkillSession {
+            name: "Resolve Gage issues",
+            skill: "gage:resolve",
+            args: issue_ids,
+            model: None,
+            extra_args: &[],
+            mode: SkillMode::Interactive,
+        };
         driver
-            .start_resolve_session(issue_ids, None, &[])
+            .start_skill_session(&session)
             .map_err(|e| io::Error::other(e.to_string()))
     }
 }

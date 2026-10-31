@@ -177,21 +177,16 @@ pub trait Driver: Send + Sync {
         Ok(())
     }
 
-    /// Start an interactive session in the harness that resolves
-    /// `issue_ids`, every pending and open issue when empty, with
-    /// Gage's tools available to it. The driver verifies its own
-    /// preconditions before launching. `model` is as the user gave it;
-    /// `None` is the harness's configured model. `extra_args` pass to
-    /// the harness verbatim. The default is that the driver does not
-    /// start resolve sessions.
-    fn start_resolve_session(
+    /// Start a session in the harness that runs one of Gage's skills,
+    /// as `session` describes it, with Gage's tools available to it.
+    /// The driver verifies its own preconditions before launching.
+    /// The default is that the driver does not start skill sessions.
+    fn start_skill_session(
         &self,
-        _issue_ids: &[String],
-        _model: Option<&str>,
-        _extra_args: &[String],
-    ) -> Result<Box<dyn ResolveSession>, DriverError> {
+        _session: &SkillSession<'_>,
+    ) -> Result<Box<dyn HarnessSession>, DriverError> {
         Err(DriverError::Other(format!(
-            "driver {} does not start resolve sessions",
+            "driver {} does not start skill sessions",
             self.name()
         )))
     }
@@ -227,9 +222,40 @@ pub trait Driver: Send + Sync {
     }
 }
 
-/// A running interactive resolve session. The session owns the
-/// terminal; the caller waits for it to end.
-pub trait ResolveSession: Send {
+/// A skill session to start in a harness: the skill, its arguments,
+/// and how the harness runs it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillSession<'a> {
+    /// The session's display name in the harness
+    pub name: &'a str,
+    /// The skill as the harness invokes it, `gage:resolve`
+    pub skill: &'a str,
+    /// The skill's arguments, each one word of its invocation. A word
+    /// is quoted for the harness by the driver
+    pub args: &'a [String],
+    /// The model as the user gave it; `None` is the harness's
+    /// configured model
+    pub model: Option<&'a str>,
+    /// Arguments passed to the harness verbatim, ahead of the skill
+    pub extra_args: &'a [String],
+    pub mode: SkillMode,
+}
+
+/// How a harness runs a skill session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkillMode {
+    /// A session the user drives; the harness owns the terminal until
+    /// it ends
+    Interactive,
+    /// A run to completion with no one at the terminal: the harness
+    /// prints the response and exits, and only the tools the skill
+    /// needs are granted
+    Batch,
+}
+
+/// A running harness session. The session owns the terminal; the
+/// caller waits for it to end.
+pub trait HarnessSession: Send {
     /// Block until the session ends. Returns the exit code, or -1
     /// when the process was signaled.
     fn wait(&mut self) -> io::Result<i32>;

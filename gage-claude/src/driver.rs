@@ -23,9 +23,9 @@ use gage_core::config::{default_cache_root, plugin_marketplace_dir};
 use gage_session::{
     AgentSession, AgentSpec, AuthInfo, ContentSchema, ContentSink, ContentSource, Derivation,
     Driver, DriverError, DriverStatus, DriverTables, Entry, EntryJson, Field, HarnessInfo,
-    InstallInfo, InstallReport, InstallUi, MaintenanceOutcome, MaintenanceStatus, MessageTextHit,
-    NativeLookupError, NativeSession, ResolveSession, SessionAttrs, SessionLiveError, Source,
-    SourceOptions, StoredSession, TextDescriptor, ToolUse, split_scheme,
+    HarnessSession, InstallInfo, InstallReport, InstallUi, MaintenanceOutcome, MaintenanceStatus,
+    MessageTextHit, NativeLookupError, NativeSession, SessionAttrs, SessionLiveError, SkillSession,
+    Source, SourceOptions, StoredSession, TextDescriptor, ToolUse, split_scheme,
 };
 use serde::Deserialize;
 
@@ -39,17 +39,20 @@ use crate::model::resolve_model;
 use crate::plugin;
 use crate::preflight;
 use crate::proc::find_claude;
-use crate::resolve::resolve_command;
 use crate::session::{
     SESSION_RE, SessionInfo, delete_session, encode_project_dir, is_agent_tmp_slug, move_session,
     projects_dir,
 };
 use crate::session_reader::SessionReader;
+use crate::skill::skill_command;
 use crate::tables::{EntryTable, MessageTable, SessionTable, ToolUseTable};
 use crate::text_descriptor;
 
 /// MCP server name under which Gage registers in `.mcp.json`.
-const MCP_SERVER_NAME: &str = "gage";
+pub(crate) const MCP_SERVER_NAME: &str = "gage";
+/// The plugin's name, the first half of [`PLUGIN_ID`]. Claude Code
+/// names a plugin's MCP tools `mcp__plugin_<plugin>_<server>__<tool>`.
+pub(crate) const PLUGIN_NAME: &str = "gage";
 /// Plugin identifier Claude Code uses: `<plugin>@<marketplace>`.
 const PLUGIN_ID: &str = "gage@gage";
 
@@ -186,22 +189,18 @@ impl Driver for ClaudeDriver {
         preflight::check_auth().map_err(|e| DriverError::Other(e.to_string()))
     }
 
-    /// Start the interactive `/gage:resolve` session. The plugin must
-    /// be installed at this build's version and the user logged in.
-    /// `None` for the model passes no `--model`, so claude applies its
-    /// own model resolution; a given model has its size alias resolved.
-    fn start_resolve_session(
+    /// Start the skill session. The plugin must be installed at this
+    /// build's version and the user logged in. A given model has its
+    /// size alias resolved.
+    fn start_skill_session(
         &self,
-        issue_ids: &[String],
-        model: Option<&str>,
-        extra_args: &[String],
-    ) -> Result<Box<dyn ResolveSession>, DriverError> {
+        session: &SkillSession<'_>,
+    ) -> Result<Box<dyn HarnessSession>, DriverError> {
         preflight::check().map_err(|e| DriverError::Other(e.to_string()))?;
-        let model = model.map(resolve_model);
-        let child = resolve_command(issue_ids, model, extra_args)?
-            .spawn()
-            .map_err(DriverError::Io)?;
-        Ok(Box::new(ClaudeResolveSession(child)))
+        let model = session.model.map(resolve_model);
+        let session = SkillSession { model, ..*session };
+        let child = skill_command(&session)?.spawn().map_err(DriverError::Io)?;
+        Ok(Box::new(ClaudeHarnessSession(child)))
     }
 
     fn status(&self) -> Result<DriverStatus, DriverError> {
@@ -278,10 +277,10 @@ impl Driver for ClaudeDriver {
     }
 }
 
-/// The resolve session's `claude` process.
-struct ClaudeResolveSession(Child);
+/// The skill session's `claude` process.
+struct ClaudeHarnessSession(Child);
 
-impl ResolveSession for ClaudeResolveSession {
+impl HarnessSession for ClaudeHarnessSession {
     fn wait(&mut self) -> io::Result<i32> {
         Ok(self.0.wait()?.code().unwrap_or(-1))
     }

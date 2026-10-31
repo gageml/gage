@@ -30,7 +30,7 @@ use gage_publish::{
     Audience, Filter, FilterSpec, InitArgs as InitRecord, NAMED_FILTERS, Problem, PublishError,
     Publisher, Use, candidate,
 };
-use gage_session::{Driver, NativeSession, SourceOptions};
+use gage_session::{Driver, NativeSession, SkillMode, SkillSession, SourceOptions};
 use gage_store::url::parse_session_origin;
 use gage_store::{
     PendingPublish, PublishStore, SESSION_TYPE, SessionRecord, SessionStore, Store, StoreError,
@@ -48,9 +48,10 @@ use tabled::{
 use crate::author::resolve_author;
 use crate::cmd_note::value_cell;
 use crate::cmd_tag::TAG_HELP;
-use crate::dialog::{self, DialogError};
+use crate::dialog::{self, DialogError, DialogResult};
 use crate::error::CliError;
 use crate::human::{count, format_elapsed_ms};
+use crate::model_prompt;
 use crate::session_filter::{
     FILTER_ARG_NAMES, SessionFilterArgs, SessionLine, SessionSelect, native_session_lines,
     preview_sessions, select_sessions, stored_session_lines,
@@ -131,6 +132,12 @@ pub struct PublishRunArgs {
     #[arg(short = 'N', long, value_name = "TEXT")]
     notes: Option<String>,
 
+    /// Model for session
+    ///
+    /// If omitted, dialog prompts for a model.
+    #[arg(short, long)]
+    model: Option<String>,
+
     /// Run without an interactive session
     ///
     /// Run without an interactive session. Claude Code runs the publish
@@ -141,12 +148,18 @@ pub struct PublishRunArgs {
     batch: bool,
 
     /// Skip confirmation prompt
+    ///
+    /// Without --model, model takes its default
     #[arg(short, long)]
     yes: bool,
 
     /// Show available named filters and exit
     #[arg(long, exclusive = true)]
     list_filters: bool,
+
+    /// Additional arguments passed through to harness
+    #[arg(last = true, value_name = "ARGS")]
+    extra_args: Vec<String>,
 }
 
 /// The paragraph the `--audience` options share.
@@ -437,8 +450,9 @@ pub async fn run(args: PublishArgs) -> Result<(), CliError> {
 }
 
 /// Publish the selected sessions through Claude Code. The dialog
-/// settles the inputs; the Claude Code run is not yet implemented and
-/// the outro says so.
+/// settles the inputs and spells them as `gage publish init`
+/// arguments for the skill; the skill session runs after it, since
+/// the harness owns the terminal from then on.
 async fn publish_sessions(args: PublishRunArgs) -> Result<(), CliError> {
     let fail = |e: String| CliError::message(format!("gage publish: {e}"));
     if args.list_filters {
@@ -453,9 +467,15 @@ async fn publish_sessions(args: PublishRunArgs) -> Result<(), CliError> {
     for name in &args.filter {
         parse_filter("gage publish", "--filter", name, None)?;
     }
-    for text in &args.segment {
-        text_value("gage publish", "--segment", text).map_err(|e| fail(e.to_string()))?;
-    }
+    let segments = args
+        .segment
+        .iter()
+        .map(|text| {
+            text_value("gage publish", "--segment", text)
+                .map(|t| t.trim_end().to_string())
+                .map_err(|e| fail(e.to_string()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let notes = match &args.notes {
         Some(text) => Some(
             text_value("gage publish", "--notes", text)
@@ -466,12 +486,15 @@ async fn publish_sessions(args: PublishRunArgs) -> Result<(), CliError> {
     };
     let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
 
+    let mut setup: Option<PublishSetup> = None;
     dialog::run_async("Publish sessions", || async {
-        if selects_sessions(&args) {
-            preview_selection(&args, &store).await?;
-        }
+        let ids = if selects_sessions(&args) {
+            preview_selection(&args, &store).await?
+        } else {
+            Vec::new()
+        };
         let prompt = !args.yes;
-        let _audience = match audience {
+        let audience = match audience {
             Some(audience) => {
                 dialog::step_value("Audience", audience)?;
                 Some(audience)
@@ -479,7 +502,7 @@ async fn publish_sessions(args: PublishRunArgs) -> Result<(), CliError> {
             None if prompt => Some(prompt_audience()?),
             None => None,
         };
-        let _uses = match uses {
+        let uses = match uses {
             Some(uses) => {
                 dialog::step_value("Use", uses)?;
                 Some(uses)
@@ -487,7 +510,7 @@ async fn publish_sessions(args: PublishRunArgs) -> Result<(), CliError> {
             None if prompt => Some(prompt_use()?),
             None => None,
         };
-        let _notes = match notes {
+        let notes = match notes {
             Some(notes) => {
                 dialog::step_value("Notes", value_cell(&notes))?;
                 Some(notes)
@@ -495,6 +518,7 @@ async fn publish_sessions(args: PublishRunArgs) -> Result<(), CliError> {
             None if prompt => prompt_notes()?,
             None => None,
         };
+        let model = model_prompt::model_step(args.model.as_deref(), args.yes)?;
         dialog::usage_notice(usage_notice(args.batch))?;
         if !args.yes {
             let confirmed = cli::confirm("Continue?").initial_value(true).interact()?;
@@ -502,9 +526,85 @@ async fn publish_sessions(args: PublishRunArgs) -> Result<(), CliError> {
                 return Err(DialogError::Canceled);
             }
         }
-        Ok("TODO: run Claude Code".to_string().into())
+        let inputs = InitInputs {
+            audience,
+            uses,
+            filters: &args.filter,
+            segments: &segments,
+            notes: notes.as_deref(),
+        };
+        setup = Some(PublishSetup {
+            skill_args: skill_args(&args, &inputs, &ids),
+            model,
+        });
+        Ok(DialogResult::from(if args.batch {
+            "Publishing sessions"
+        } else {
+            "Starting publish session"
+        }))
     })
-    .await
+    .await?;
+    let Some(setup) = setup else {
+        return Ok(());
+    };
+    let session = SkillSession {
+        name: "Publish sessions",
+        skill: "gage:publish",
+        args: &setup.skill_args,
+        model: setup.model.as_deref(),
+        extra_args: &args.extra_args,
+        mode: if args.batch {
+            SkillMode::Batch
+        } else {
+            SkillMode::Interactive
+        },
+    };
+    source::run_skill_session("gage publish", &session)
+}
+
+/// What the dialog settled for the skill session
+struct PublishSetup {
+    skill_args: Vec<String>,
+    model: Option<String>,
+}
+
+/// The publish inputs the dialog settled, as the skill receives them.
+struct InitInputs<'a> {
+    audience: Option<Audience>,
+    uses: Option<Use>,
+    filters: &'a [String],
+    segments: &'a [String],
+    notes: Option<&'a str>,
+}
+
+/// The skill's arguments: the `gage publish init` options that spell
+/// the settled inputs, then the selected session ids. The source
+/// comes first, so the ids read against it; a session selection is
+/// already resolved to ids, so no selection option is passed.
+fn skill_args(args: &PublishRunArgs, inputs: &InitInputs<'_>, ids: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    if args.stored {
+        out.push("--stored".to_string());
+    } else if let Some(source) = &args.source {
+        out.extend(["--source".to_string(), source.clone()]);
+    }
+    if let Some(audience) = inputs.audience {
+        out.extend(["--audience".to_string(), audience.to_string()]);
+    }
+    if let Some(uses) = inputs.uses {
+        out.extend(["--use".to_string(), uses.to_string()]);
+    }
+    for name in inputs.filters {
+        out.extend(["--filter".to_string(), name.clone()]);
+    }
+    for text in inputs.segments {
+        out.extend(["--segment".to_string(), text.clone()]);
+    }
+    if let Some(notes) = inputs.notes {
+        out.extend(["--notes".to_string(), notes.to_string()]);
+    }
+    out.extend(ids.iter().cloned());
+    out
 }
 
 /// The notice before the confirmation: an interactive session is
@@ -579,8 +679,12 @@ fn selects_sessions(args: &PublishRunArgs) -> bool {
 }
 
 /// The `Sessions` step for a selection, after the `Source` step when
-/// the sessions are native.
-async fn preview_selection(args: &PublishRunArgs, store: &Store) -> Result<(), DialogError> {
+/// the sessions are native. Returns the selected ids: stored ids for
+/// `--stored`, native ids otherwise.
+async fn preview_selection(
+    args: &PublishRunArgs,
+    store: &Store,
+) -> Result<Vec<String>, DialogError> {
     let select = if args.stored {
         SessionSelect::Stored(store)
     } else {
@@ -597,7 +701,8 @@ async fn preview_selection(args: &PublishRunArgs, store: &Store) -> Result<(), D
     if args.stored {
         let lines =
             stored_session_lines(store, &ids).map_err(|e| DialogError::Failed(e.to_string()))?;
-        return Ok(preview_sessions(&lines, IdKind::Gage, None)?);
+        preview_sessions(&lines, IdKind::Gage, None)?;
+        return Ok(ids);
     }
     let registry = source::driver_registry();
     let (driver, spec) =
@@ -606,7 +711,8 @@ async fn preview_selection(args: &PublishRunArgs, store: &Store) -> Result<(), D
     let lines = native_session_lines(args.source.as_deref(), &ids)
         .await
         .map_err(|e| DialogError::Failed(format!("{e}")))?;
-    Ok(preview_sessions(&lines, IdKind::Native, None)?)
+    preview_sessions(&lines, IdKind::Native, None)?;
+    Ok(ids)
 }
 
 /// List the pending publish working trees, read from the file system,
@@ -1663,8 +1769,12 @@ mod tests {
             "The question",
             "-N",
             "For the blog",
+            "-m",
+            "opus",
             "-b",
             "-y",
+            "--",
+            "--verbose",
         ]);
         assert_eq!(args.sessions, ["abc", "def"]);
         assert_eq!(args.audience.as_deref(), Some("public"));
@@ -1672,6 +1782,8 @@ mod tests {
         assert_eq!(args.filter, ["pii"]);
         assert_eq!(args.segment, ["The question"]);
         assert_eq!(args.notes.as_deref(), Some("For the blog"));
+        assert_eq!(args.model.as_deref(), Some("opus"));
+        assert_eq!(args.extra_args, ["--verbose"]);
         assert!(args.batch && args.yes && !args.stored);
         let args = run_args(&["-S", "--days", "7", "--filter", "secret"]);
         assert!(args.stored);
@@ -1697,6 +1809,57 @@ mod tests {
             );
         }
     }
+    /// The skill receives the settled inputs as `gage publish init`
+    /// options, source first and ids last, with no selection option:
+    /// the selection is already resolved to ids.
+    #[test]
+    fn skill_args_spell_the_init_invocation() {
+        let run_args = |argv: &[&str]| {
+            let cli = Cli::try_parse_from([&["gage", "publish"], argv].concat()).unwrap();
+            let Command::Publish(PublishArgs { run_args, .. }) = cli.command else {
+                panic!("not a publish command");
+            };
+            run_args
+        };
+        let args = run_args(&["--source", "claude:/tmp/c", "--days", "7", "-f", "pii"]);
+        let inputs = InitInputs {
+            audience: Some(Audience::Public),
+            uses: Some(Use::Reading),
+            filters: &args.filter,
+            segments: &["The question".to_string()],
+            notes: Some("For the blog"),
+        };
+        let ids = ["n1".to_string(), "n2".to_string()];
+        assert_eq!(
+            skill_args(&args, &inputs, &ids),
+            [
+                "--source",
+                "claude:/tmp/c",
+                "--audience",
+                "public",
+                "--use",
+                "reading",
+                "--filter",
+                "pii",
+                "--segment",
+                "The question",
+                "--notes",
+                "For the blog",
+                "n1",
+                "n2",
+            ]
+        );
+        let args = run_args(&["-S"]);
+        let inputs = InitInputs {
+            audience: None,
+            uses: None,
+            filters: &[],
+            segments: &[],
+            notes: None,
+        };
+        assert_eq!(skill_args(&args, &inputs, &[]), ["--stored"]);
+    }
+
     /// The notice names an interactive session without `--batch` and a
     /// publish run with it.
     #[test]

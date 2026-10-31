@@ -1,6 +1,8 @@
-//! The "Model" prompt of the resolve dialog.
+//! The "Model" step and prompt of a dialog that starts a harness
+//! session.
 
 use cliclack as cli;
+use console::style;
 
 use crate::dialog::DialogError;
 
@@ -59,3 +61,21 @@ fn model_entries() -> (Entry, Entry, Entry, Entry, Entry, Entry) {
 const CUSTOM: &str = "\0custom";
 /// Select sentinel for the default entry of the model prompt.
 const DEFAULT: &str = "\0default";
+
+/// The "Model" step of a dialog that starts a harness session: the
+/// given model is shown, `yes` without one takes the harness's
+/// default, and otherwise the ranked prompt asks. `None` is the
+/// default model.
+pub fn model_step(given: Option<&str>, yes: bool) -> Result<Option<String>, DialogError> {
+    match given {
+        Some(model) => {
+            cli::log::step(format!("Model\n{}", style(model).dim()))?;
+            Ok(Some(model.to_string()))
+        }
+        None if yes => {
+            cli::log::step(format!("Model\n{}", style("Default").dim()))?;
+            Ok(None)
+        }
+        None => prompt_model_ranked(),
+    }
+}

@@ -4,8 +4,8 @@
 use anyhow::Context;
 use clap::Args;
 use cliclack as cli;
-use console::style;
 use gage_core::uuid::short_uuid;
+use gage_session::{SkillMode, SkillSession};
 use gage_store::{IssueFull, IssueStore, Store};
 
 use crate::dialog::{self, DialogError, DialogResult};
@@ -45,19 +45,15 @@ pub fn run(args: ResolveArgs) -> Result<(), CliError> {
     let Some(setup) = session else {
         return Ok(());
     };
-    let driver = source::default_driver("gage resolve")?;
-    let mut session = driver
-        .start_resolve_session(&setup.ids, setup.model.as_deref(), &args.extra_args)
-        .context("gage resolve")?;
-    let code = session
-        .wait()
-        .context("gage resolve: waiting for the session")?;
-    if code != 0 {
-        return Err(CliError::message(format!(
-            "gage resolve: session exited with status {code}"
-        )));
-    }
-    Ok(())
+    let session = SkillSession {
+        name: "Resolve Gage issues",
+        skill: "gage:resolve",
+        args: &setup.ids,
+        model: setup.model.as_deref(),
+        extra_args: &args.extra_args,
+        mode: SkillMode::Interactive,
+    };
+    source::run_skill_session("gage resolve", &session)
 }
 
 /// What the dialog settled for the session
@@ -103,17 +99,7 @@ fn run_dialog(
         )?;
     }
 
-    let model = match &args.model {
-        Some(m) => {
-            cli::log::step(format!("Model\n{}", style(m).dim()))?;
-            Some(m.clone())
-        }
-        None if args.yes => {
-            cli::log::step(format!("Model\n{}", style("Default").dim()))?;
-            None
-        }
-        None => model_prompt::prompt_model_ranked()?,
-    };
+    let model = model_prompt::model_step(args.model.as_deref(), args.yes)?;
 
     dialog::usage_notice(
         "You are about to start an interactive session to resolve issues. \

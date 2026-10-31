@@ -23,7 +23,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use gage_core::stopwatch::Stopwatch;
 use gage_core::style::SPINNER_FRAMES;
 use gage_core::task::{task_display, task_name_display};
-use gage_session::ResolveSession;
+use gage_session::HarnessSession;
 use gage_store::url::{self, LineSelection};
 use gage_store::{IssueStatus, StatusReason};
 use ratatui::buffer::Buffer;
@@ -80,7 +80,7 @@ pub trait ScanHost: Send + Sync {
     /// Start the interactive resolve session for `issue_ids` in the
     /// default driver's harness; the session owns the terminal until
     /// it ends
-    fn start_resolve_session(&self, issue_ids: &[String]) -> io::Result<Box<dyn ResolveSession>>;
+    fn start_resolve_session(&self, issue_ids: &[String]) -> io::Result<Box<dyn HarnessSession>>;
 }
 
 /// One row of the open-scan picker.
@@ -3715,7 +3715,7 @@ mod tests {
         fn start_resolve_session(
             &self,
             _issue_ids: &[String],
-        ) -> io::Result<Box<dyn ResolveSession>> {
+        ) -> io::Result<Box<dyn HarnessSession>> {
             Err(io::Error::other("no host"))
         }
     }
@@ -3763,7 +3763,7 @@ mod tests {
         fn start_resolve_session(
             &self,
             issue_ids: &[String],
-        ) -> io::Result<Box<dyn ResolveSession>> {
+        ) -> io::Result<Box<dyn HarnessSession>> {
             NullHost.start_resolve_session(issue_ids)
         }
     }

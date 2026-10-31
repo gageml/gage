@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use gage_registry::driver::DriverRegistry;
-use gage_session::{Driver, Source, SourceOptions};
+use gage_session::{Driver, SkillSession, Source, SourceOptions};
 
 use crate::error::CliError;
 
@@ -60,4 +60,23 @@ pub fn open_source(source: &str, label: &str) -> Result<Box<dyn Source>, CliErro
         .open_source(&SourceOptions::new(source))
         .with_context(|| format!("{label}: {source}"))
         .map_err(CliError::from)
+}
+
+/// Start `session` in the default driver's harness and wait for it to
+/// end. The harness owns the terminal until then. A non-zero exit is
+/// the error `<command>: session exited with status <code>`.
+pub fn run_skill_session(command: &str, session: &SkillSession<'_>) -> Result<(), CliError> {
+    let driver = default_driver(command)?;
+    let mut running = driver
+        .start_skill_session(session)
+        .context(command.to_string())?;
+    let code = running
+        .wait()
+        .with_context(|| format!("{command}: waiting for the session"))?;
+    if code != 0 {
+        return Err(CliError::message(format!(
+            "{command}: session exited with status {code}"
+        )));
+    }
+    Ok(())
 }

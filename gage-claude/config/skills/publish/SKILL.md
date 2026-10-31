@@ -21,9 +21,24 @@ of four types of changes:
 
 - Dropped session entries
 - Dropped entry values
-- Redacted text
+- Redacted text with optional `[REDACTED]` marker
+- Dropped session attributes
 
-Published sessions do not contain new content apart from redaction markers. They
-are strictly subsets of the original.
+Changes are limited to data removal only. Session content is not otherwise
+changed.
 
-Your task is to help the user publish one or more sessions.
+A published session is structurally different from original sessions in two
+ways:
+
+- `origin` attribute is in the form `session:<ID>`
+- `changes.json` file records changes from original
+
+## Publish overview
+
+1. Identify sessions to publish
+2. Understand the audience and intended use of each published session
+3. Run `gage publish init <SESSION>` for each session with an initial set of
+   options
+4. Identify text to redact for each session
+5. Finalize the publish definition by adding text redaction
+6. Apply the publish command to add each session to the store
