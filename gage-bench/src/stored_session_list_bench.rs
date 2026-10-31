@@ -14,10 +14,12 @@
 //! Every scenario measures three queries against the store:
 //!
 //! - `count` — `SELECT COUNT(*) FROM session`. Served by the index.
-//! - `list_light` — `SELECT id, mtime FROM session ORDER BY mtime DESC
-//!   LIMIT n`. Served by the index.
-//! - `list_full` — adds `session_type`, `title`, `model`, `size`,
-//!   `message_count`, which read the top `n` objects.
+//! - `list_light` — `SELECT id, modified FROM session ORDER BY modified
+//!   DESC LIMIT n`. Served by the index.
+//! - `list_full` — adds `session_type`, `size`, and the `title`,
+//!   `model`, and `message_count` read from the `summary` JSON, which
+//!   read the top `n` objects. The columns are those `gage session
+//!   list --stored` selects.
 //!
 //! Metrics are named `<scenario>.<query>`; `<scenario>.open` times
 //! `Store::open`, which reconciles the index.
@@ -180,7 +182,8 @@ fn run_queries(
     )?;
     let count_total = first_int64(&count).unwrap_or(0).max(0) as u64;
 
-    let light_sql = format!("SELECT id, mtime FROM session ORDER BY mtime DESC LIMIT {limit}");
+    let light_sql =
+        format!("SELECT id, modified FROM session ORDER BY modified DESC LIMIT {limit}");
     let light = time_query(
         &format!("{scenario}.list_light"),
         rt,
@@ -191,8 +194,10 @@ fn run_queries(
     let list_light_rows: u64 = light.iter().map(|b| b.num_rows() as u64).sum();
 
     let full_sql = format!(
-        "SELECT id, session_type, title, model, size, message_count, mtime \
-         FROM session ORDER BY mtime DESC LIMIT {limit}"
+        "SELECT id, session_type, json_extract(summary, '$.title') AS title, \
+         json_extract(summary, '$.model') AS model, size, \
+         CAST(json_extract(summary, '$.message_count') AS BIGINT) AS message_count, modified \
+         FROM session ORDER BY modified DESC LIMIT {limit}"
     );
     let full = time_query(
         &format!("{scenario}.list_full"),

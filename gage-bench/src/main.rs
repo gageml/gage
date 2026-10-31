@@ -63,6 +63,10 @@ struct StoredSessionListArgs {
     /// Keep the run directory instead of deleting it on success
     #[arg(long)]
     keep: bool,
+
+    /// Print results without saving them
+    #[arg(long)]
+    no_save: bool,
 }
 
 #[derive(Args, Debug)]
@@ -128,6 +132,10 @@ struct StoreArgs {
     /// Keep the run directory instead of deleting it on success
     #[arg(long)]
     keep: bool,
+
+    /// Print results without saving them
+    #[arg(long)]
+    no_save: bool,
 }
 
 fn main() -> ExitCode {
@@ -170,7 +178,7 @@ fn stored_session_list(args: StoredSessionListArgs) -> ExitCode {
     };
 
     let stamp = Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
-    let run_dir = std::env::temp_dir().join(format!("gage-bench-{stamp}"));
+    let run_dir = std::env::temp_dir().join(format!("gage-bench-{stamp}-{}", std::process::id()));
     if let Err(e) = std::fs::create_dir_all(&run_dir) {
         eprintln!("gage-bench: create {}: {e}", run_dir.display());
         return ExitCode::from(1);
@@ -197,15 +205,17 @@ fn stored_session_list(args: StoredSessionListArgs) -> ExitCode {
         report::print_comparison(baseline, &results);
     }
 
-    let saved = match results.save() {
-        Ok(path) => path,
-        Err(e) => {
-            eprintln!("gage-bench: save results: {e}");
-            return ExitCode::from(1);
-        }
-    };
-    println!();
-    println!("Results: {}", saved.display());
+    if !args.no_save {
+        let saved = match results.save() {
+            Ok(path) => path,
+            Err(e) => {
+                eprintln!("gage-bench: save results: {e}");
+                return ExitCode::from(1);
+            }
+        };
+        println!();
+        println!("Results: {}", saved.display());
+    }
     if args.keep {
         println!("Run dir: {}", run_dir.display());
     } else if let Err(e) = std::fs::remove_dir_all(&run_dir) {
@@ -240,7 +250,7 @@ fn store(args: StoreArgs) -> ExitCode {
     };
 
     let stamp = Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
-    let run_dir = std::env::temp_dir().join(format!("gage-bench-{stamp}"));
+    let run_dir = std::env::temp_dir().join(format!("gage-bench-{stamp}-{}", std::process::id()));
     let home = run_dir.join("home");
     if let Err(e) = std::fs::create_dir_all(&home) {
         eprintln!("gage-bench: create {}: {e}", home.display());
@@ -269,15 +279,17 @@ fn store(args: StoreArgs) -> ExitCode {
         report::print_comparison(baseline, &results);
     }
 
-    let saved = match results.save() {
-        Ok(path) => path,
-        Err(e) => {
-            eprintln!("gage-bench: save results: {e}");
-            return ExitCode::from(1);
-        }
-    };
-    println!();
-    println!("Results: {}", saved.display());
+    if !args.no_save {
+        let saved = match results.save() {
+            Ok(path) => path,
+            Err(e) => {
+                eprintln!("gage-bench: save results: {e}");
+                return ExitCode::from(1);
+            }
+        };
+        println!();
+        println!("Results: {}", saved.display());
+    }
     if args.keep {
         println!("Store: {}", home.join("store.git").display());
     } else if let Err(e) = std::fs::remove_dir_all(&home) {
