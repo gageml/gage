@@ -221,13 +221,13 @@ pub async fn main(args: BackupArgs) -> Result<(), CliError> {
     }
     if !args.prune && !diff.remote_only.is_empty() {
         println!(
-            "{} on {remote} not in store; delete them: gage backup --prune {remote}",
+            "{} on {remote} not in store (delete with 'gage backup --prune {remote}')",
             count(diff.remote_only.len(), "ref")
         );
     }
     if !args.force && !diff.diverged.is_empty() {
         return Err(CliError::message(format!(
-            "gage backup: {} on {remote} diverge from store and were not sent; replace them: gage backup --force {remote}",
+            "gage backup: {} on {remote} diverge from store and were not sent (replace with 'gage backup --force {remote}')",
             count(diff.diverged.len(), "ref")
         )));
     }
@@ -338,13 +338,13 @@ fn effect_lines(force: usize, delete: usize, remote: &str) -> Vec<String> {
     let mut lines = Vec::new();
     if force > 0 {
         lines.push(format!(
-            "Replacing {} on {remote} discards the remote's copy of each; content the store does not have is lost",
+            "Replacing {} on {remote} - this cannot be undone",
             count(force, "ref")
         ));
     }
     if delete > 0 {
         lines.push(format!(
-            "Deleting {} from {remote} removes objects and tags the store does not have; nothing restores them",
+            "Deleting {} from {remote} - this cannot be undone",
             count(delete, "ref")
         ));
     }
@@ -424,15 +424,11 @@ mod tests {
         assert!(effect_lines(0, 0, "github").is_empty());
         assert_eq!(
             effect_lines(1, 0, "github"),
-            vec![
-                "Replacing 1 ref on github discards the remote's copy of each; content the store does not have is lost"
-            ]
+            vec!["Replacing 1 ref on github - this cannot be undone"]
         );
         assert_eq!(
             effect_lines(0, 2, "github"),
-            vec![
-                "Deleting 2 refs from github removes objects and tags the store does not have; nothing restores them"
-            ]
+            vec!["Deleting 2 refs from github - this cannot be undone"]
         );
         assert_eq!(effect_lines(3, 2, "github").len(), 2);
     }
