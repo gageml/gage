@@ -437,9 +437,9 @@ fn stored_drivers(registry: &DriverRegistry, rows: &[Row]) -> anyhow::Result<Vec
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Listing {
     /// A native source: Native Id, Project, Title, Model, Size,
-    /// Messages, Modified
+    /// Msgs, Modified
     Native,
-    /// The store: Id, Project, Title, Type, Model, Size, Messages,
+    /// The store: Id, Project, Title, Type, Model, Size, Msgs,
     /// Created
     Stored,
     /// A dataset's members, the stored columns in member order
@@ -673,18 +673,18 @@ fn render_table(rows: &[Row], drivers: &[Arc<dyn Driver>], listing: Listing, ful
             "Title",
             "Model",
             "Size",
-            "Messages",
+            "Msgs",
             "Modified",
         ],
         Listing::Stored | Listing::Dataset => vec![
-            "Id", "Project", "Title", "Type", "Model", "Size", "Messages", "Created",
+            "Id", "Project", "Title", "Type", "Model", "Size", "Msgs", "Created",
         ],
     }
     .into_iter()
     .map(String::from)
     .collect();
     let col_count = header.len();
-    // Messages is the second column from the right
+    // Msgs is the second column from the right
     let messages_col = col_count - 2;
 
     let mut table = Table::from_iter(std::iter::once(header).chain(table_rows));
