@@ -1113,7 +1113,9 @@ fn refresh(args: RefreshArgs) -> Result<(), CliError> {
 /// The dialog that rebuilds `pending` from its definition: the
 /// definition is read and checked, its counts shown, the rebuild
 /// confirmed when `confirm` is set, and every redaction that matches
-/// nothing reported by its position.
+/// nothing reported by its position. A definition with problems ends
+/// the dialog, and the problems follow it one per line as `show
+/// --check` prints them.
 fn refresh_dialog(
     title: &str,
     publisher: &Publisher<'_>,
@@ -1122,11 +1124,19 @@ fn refresh_dialog(
 ) -> Result<(), CliError> {
     let author = default_author();
     let path = publisher.store().definition_file(&pending.id);
-    dialog::run(title, || {
+    let mut problems = Vec::new();
+    let result = dialog::run(title, || {
         dialog::step_value("Session", short_uuid(&pending.id))?;
-        let mut definition = publisher
-            .definition(&pending.id)
-            .map_err(|e| DialogError::Failed(definition_failure(&path, &e)))?;
+        let mut definition = publisher.definition(&pending.id).map_err(|e| match e {
+            PublishError::Definition(found) => {
+                problems = found;
+                DialogError::Failed(format!(
+                    "Publish definition for {} has errors",
+                    short_uuid(&pending.id)
+                ))
+            }
+            e => DialogError::Failed(e.to_string()),
+        })?;
         definition.fill_authors(&author);
         definition
             .validate()
@@ -1158,7 +1168,11 @@ fn refresh_dialog(
             count(refreshed.instances, "instance")
         )
         .into())
-    })
+    });
+    for problem in &problems {
+        eprintln!("{}", diagnostic(&path, problem));
+    }
+    result
 }
 
 /// List the text values open to redaction, one per line where the
