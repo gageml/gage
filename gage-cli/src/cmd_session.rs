@@ -206,6 +206,13 @@ pub struct SessionViewArgs {
     /// session target carries; the view opens at the first line
     pub session: Option<String>,
 
+    #[command(flatten)]
+    pub view: ViewOptionArgs,
+}
+
+/// The view options every session view command takes
+#[derive(Args)]
+pub struct ViewOptionArgs {
     /// View options
     ///
     /// Comma separated list of the following values:
@@ -224,14 +231,6 @@ pub struct SessionViewArgs {
     /// A leading "!" turns an option off, as in "!user"
     #[arg(short = 'v', long, verbatim_doc_comment)]
     pub options: Option<String>,
-
-    /// View pending publish sessions
-    ///
-    /// View pending publish sessions: sessions staged by gage publish
-    /// and not yet applied. Picker lists pending sessions only. Does
-    /// not combine with --source or --stored
-    #[arg(short = 'P', long)]
-    pub publish: bool,
 }
 
 #[derive(Args)]
@@ -1720,37 +1719,63 @@ pub async fn view(
     stored: bool,
     args: SessionViewArgs,
 ) -> Result<(), CliError> {
-    if args.publish && (stored || source.is_some()) {
-        return Err(CliError::message(
-            "gage session view: --publish does not apply with --source or --stored; pending \
-             publish sessions are staged outside any source",
-        ));
-    }
-    if !io::stdout().is_terminal() {
-        return Err(CliError::message(
-            "gage session view: standard output is not a terminal; read sessions with gage \
-             query (tables session, message, tool_use)",
-        ));
-    }
-    let options = ViewOptions::parse(args.options.as_deref().unwrap_or_default())
-        .map_err(|e| anyhow!("gage session view: {e}"))?;
-    let (prefix, line) = match args.session.as_deref() {
-        Some(arg) => {
-            let (prefix, line) =
-                split_view_target(arg).map_err(|e| anyhow!("gage session view: {e}"))?;
-            (Some(prefix), line)
-        }
-        None => (None, None),
-    };
+    let command = "gage session view";
+    let (prefix, line, options) =
+        view_target(command, "gage query", args.session.as_deref(), &args.view)?;
     // No session arg: the view opens with its session picker dialog.
-    let result = if args.publish {
-        view_pending(prefix, line, options).await
-    } else if stored {
+    let result = if stored {
         view_stored(prefix, line, options).await
     } else {
         view_native(source.as_deref(), prefix, line, options).await
     };
-    result.map_err(|e| anyhow!("gage session view: {e}").into())
+    result.map_err(|e| anyhow!("{command}: {e}").into())
+}
+
+/// View a pending publish session, for `gage publish view`. A prefix
+/// resolves against the pending publishes alone, and the picker lists
+/// them alone.
+pub async fn view_pending(session: Option<&str>, view: &ViewOptionArgs) -> Result<(), CliError> {
+    let command = "gage publish view";
+    let (prefix, line, options) = view_target(command, "gage publish query", session, view)?;
+    let result = async {
+        let store = Store::open(&gage_store::store_path())?;
+        let id = match prefix {
+            Some(prefix) => Some(PublishStore::from(&store).get(prefix)?.id),
+            None => None,
+        };
+        let backend = Backend::pending(Arc::new(Mutex::new(store)), publish_root()).await;
+        session_view::run(backend, id.as_deref(), line, options).await
+    }
+    .await;
+    result.map_err(|e: Box<dyn Error>| anyhow!("{command}: {e}").into())
+}
+
+/// What a view command opens: the session prefix, the first line of
+/// its `:LINES` suffix, and the parsed view options. Fails when
+/// standard output is not a terminal, naming `query_command` as the
+/// way to read the same sessions.
+fn view_target<'a>(
+    command: &str,
+    query_command: &str,
+    session: Option<&'a str>,
+    view: &ViewOptionArgs,
+) -> Result<(Option<&'a str>, Option<u32>, ViewOptions), CliError> {
+    if !io::stdout().is_terminal() {
+        return Err(CliError::message(format!(
+            "{command}: standard output is not a terminal; read sessions with {query_command} \
+             (tables session, message, tool_use)"
+        )));
+    }
+    let options = ViewOptions::parse(view.options.as_deref().unwrap_or_default())
+        .map_err(|e| anyhow!("{command}: {e}"))?;
+    let (prefix, line) = match session {
+        Some(arg) => {
+            let (prefix, line) = split_view_target(arg).map_err(|e| anyhow!("{command}: {e}"))?;
+            (Some(prefix), line)
+        }
+        None => (None, None),
+    };
+    Ok((prefix, line, options))
 }
 
 /// Split a view target into its session prefix and the first line of
@@ -1780,22 +1805,6 @@ async fn view_stored(
         None => None,
     };
     let backend = Backend::stored(store).await;
-    session_view::run(backend, id.as_deref(), line, options).await
-}
-
-/// View a pending publish session. A prefix resolves against the
-/// pending publishes alone, and the picker lists them alone.
-async fn view_pending(
-    prefix: Option<&str>,
-    line: Option<u32>,
-    options: ViewOptions,
-) -> Result<(), Box<dyn Error>> {
-    let store = Store::open(&gage_store::store_path())?;
-    let id = match prefix {
-        Some(prefix) => Some(PublishStore::from(&store).get(prefix)?.id),
-        None => None,
-    };
-    let backend = Backend::pending(Arc::new(Mutex::new(store)), publish_root()).await;
     session_view::run(backend, id.as_deref(), line, options).await
 }
 
@@ -1844,28 +1853,6 @@ fn warm_picker_sessions(source: &dyn Source) -> Result<(), Box<dyn Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// `--publish` names a source of its own, so it is refused with
-    /// `--source` or `--stored` before anything is opened.
-    #[tokio::test]
-    async fn view_refuses_publish_with_a_source_or_stored() {
-        let args = || SessionViewArgs {
-            session: None,
-            options: None,
-            publish: true,
-        };
-        for (source, stored) in [(Some("claude:".to_string()), false), (None, true)] {
-            let Err(CliError::Exit { message, .. }) = view(source, stored, args()).await else {
-                panic!("--publish was accepted with another source");
-            };
-            assert!(
-                message
-                    .as_deref()
-                    .is_some_and(|m| m.contains("--publish does not apply")),
-                "{message:?}"
-            );
-        }
-    }
 
     /// One placed native session names its stored id; a dataset add
     /// names the dataset; more than one keeps the closing line. The

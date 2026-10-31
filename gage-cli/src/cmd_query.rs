@@ -12,6 +12,22 @@ use crate::error::CliError;
 
 #[derive(Args)]
 pub struct QueryArgs {
+    /// Query within scan (ID or prefix)
+    ///
+    /// Scan ID (or prefix). The session tables hold the scan's
+    /// sessions at the versions it read, and the scan tables hold
+    /// only that scan's tasks, notes, and issues
+    #[arg(long, value_name = "SCAN")]
+    scan: Option<String>,
+
+    #[command(flatten)]
+    run: QueryRunArgs,
+}
+
+/// The query options every query command takes: what to run and how
+/// to print it. A command adds its own scope options.
+#[derive(Args)]
+pub struct QueryRunArgs {
     /// SQL to execute, or a .sql file to run
     ///
     /// May be given multiple times; statements run in order. A value
@@ -43,14 +59,6 @@ pub struct QueryArgs {
     #[arg(long)]
     stats: bool,
 
-    /// Query within scan (ID or prefix)
-    ///
-    /// Scan ID (or prefix). The session tables hold the scan's
-    /// sessions at the versions it read, and the scan tables hold
-    /// only that scan's tasks, notes, and issues
-    #[arg(long, value_name = "SCAN")]
-    scan: Option<String>,
-
     /// Include system columns
     ///
     /// Columns Gage uses to display and address rows, such as
@@ -58,23 +66,9 @@ pub struct QueryArgs {
     /// option includes them.
     #[arg(long)]
     system: bool,
-
-    /// Query pending publish sessions
-    ///
-    /// Query pending publish sessions: sessions staged by gage publish
-    /// and not yet applied. Session tables hold them and nothing else;
-    /// no other store table is present. Does not combine with --scan
-    #[arg(short = 'P', long)]
-    publish: bool,
 }
 
 pub async fn main(args: QueryArgs) -> Result<(), CliError> {
-    if args.publish && args.scan.is_some() {
-        return Err(CliError::message(
-            "gage query: --publish does not apply with --scan; pending publish sessions are \
-             members of no scan",
-        ));
-    }
     let store = Store::open(&gage_store::store_path()).context("gage query")?;
     let scope = match &args.scan {
         Some(prefix) => {
@@ -89,9 +83,24 @@ pub async fn main(args: QueryArgs) -> Result<(), CliError> {
     if let Some(scope) = scope {
         builder = builder.scope(scope);
     }
-    if args.publish {
-        builder = builder.publish(publish_root());
-    }
+    run("gage query", builder, &args.run).await
+}
+
+/// Query the pending publish sessions. The context holds the session
+/// tables over the pending set and nothing else.
+pub async fn publish(args: QueryRunArgs) -> Result<(), CliError> {
+    let store = Store::open(&gage_store::store_path()).context("gage publish query")?;
+    let builder = ContextBuilder::new(Some(Arc::new(Mutex::new(store)))).publish(publish_root());
+    run("gage publish query", builder, &args).await
+}
+
+/// Build the context `builder` describes and run the statements, or
+/// the REPL when there are none.
+async fn run(
+    command: &str,
+    mut builder: ContextBuilder,
+    args: &QueryRunArgs,
+) -> Result<(), CliError> {
     if !args.system {
         builder = builder.skip_system_cols();
     }
@@ -107,7 +116,7 @@ pub async fn main(args: QueryArgs) -> Result<(), CliError> {
         )
         .await
     } else {
-        let statements = statements(&args.sql).context("gage query")?;
+        let statements = statements(&args.sql).context(command.to_string())?;
         let mut result = Ok(());
         for sql in &statements {
             result = exec_command(&ctx, sql, args.format).await;
@@ -156,31 +165,6 @@ fn split_statements(text: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// `--publish` and `--scan` each fix the scope, so both together
-    /// are refused before the store is opened.
-    #[tokio::test]
-    async fn publish_is_refused_with_a_scan() {
-        let args = QueryArgs {
-            sql: vec!["SELECT 1".into()],
-            format: PrintFormat::Table,
-            quiet: false,
-            timing: false,
-            stats: false,
-            scan: Some("abc".into()),
-            system: false,
-            publish: true,
-        };
-        let Err(CliError::Exit { message, .. }) = main(args).await else {
-            panic!("--publish was accepted with --scan");
-        };
-        assert!(
-            message
-                .as_deref()
-                .is_some_and(|m| m.contains("--publish does not apply with --scan")),
-            "{message:?}"
-        );
-    }
 
     #[test]
     fn a_file_splits_on_semicolons_and_drops_comment_lines() {

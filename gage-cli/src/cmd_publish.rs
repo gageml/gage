@@ -47,6 +47,8 @@ use tabled::{
 
 use crate::author::resolve_author;
 use crate::cmd_note::value_cell;
+use crate::cmd_query::{self, QueryRunArgs};
+use crate::cmd_session::{self, ViewOptionArgs};
 use crate::cmd_tag::TAG_HELP;
 use crate::dialog::{self, DialogError, DialogResult};
 use crate::error::CliError;
@@ -188,6 +190,20 @@ pub enum PublishCommand {
     /// List pending publish sessions
     List,
 
+    /// View a pending publish session
+    ///
+    /// View a pending publish session. Opens session view on staged
+    /// session, as gage session view does. Without SESSION, a picker
+    /// lists pending publish sessions.
+    View(ViewArgs),
+
+    /// Query pending publish sessions
+    ///
+    /// Query pending publish sessions with SQL, as gage query does.
+    /// Tables session, entry, message, tool_use, and filtered hold
+    /// staged sessions and nothing else; no other table is present.
+    Query(QueryRunArgs),
+
     /// Show definition of a pending publish
     ///
     /// Show definition of a pending publish. Prints definition file.
@@ -322,6 +338,21 @@ const FILTER_HELP: &str = "A filter name; see --list-filters. Filter names are \
 file. A filter given here is added to those --audience and --use select.";
 
 #[derive(Args)]
+pub struct ViewArgs {
+    /// Pending publish session to view (ID or prefix)
+    ///
+    /// A trailing ":LINES" opens the view at a session line, as
+    /// "7260:2956". LINES is a line ("42"), a range ("10-20"), or a
+    /// comma-separated list of them ("10-20,42"); the view opens at
+    /// the first line
+    #[arg(value_name = "SESSION")]
+    session: Option<String>,
+
+    #[command(flatten)]
+    view: ViewOptionArgs,
+}
+
+#[derive(Args)]
 pub struct ShowArgs {
     /// Pending publish session to show (ID or prefix)
     #[arg(value_name = "SESSION")]
@@ -440,6 +471,10 @@ pub async fn run(args: PublishArgs) -> Result<(), CliError> {
     match command {
         PublishCommand::Init(args) => init(*args).await,
         PublishCommand::List => list(),
+        PublishCommand::View(args) => {
+            cmd_session::view_pending(args.session.as_deref(), &args.view).await
+        }
+        PublishCommand::Query(args) => cmd_query::publish(args).await,
         PublishCommand::Show(args) => show(args),
         PublishCommand::Edit(args) => edit(args),
         PublishCommand::Refresh(args) => refresh(args),
@@ -1680,10 +1715,39 @@ mod tests {
                 "/tmp/c",
             ],
             vec!["apply", "abc", "--tag", "x"],
+            vec!["view"],
+            vec!["query"],
+            vec!["query", "SELECT 1", "-f", "json", "--system"],
         ] {
             Cli::try_parse_from([&["gage", "publish"], &argv[..]].concat())
                 .unwrap_or_else(|e| panic!("{argv:?}: {e}"));
         }
+        // The view and query wrappers take the view and query options
+        // and no scope option of their own
+        let cli =
+            Cli::try_parse_from(["gage", "publish", "view", "abc:12", "-v", "tools"]).unwrap();
+        let Command::Publish(PublishArgs {
+            command: Some(PublishCommand::View(view)),
+            ..
+        }) = cli.command
+        else {
+            panic!("expected publish view");
+        };
+        assert_eq!(view.session.as_deref(), Some("abc:12"));
+        assert_eq!(view.view.options.as_deref(), Some("tools"));
+        for argv in [
+            vec!["view", "-P"],
+            vec!["view", "--stored"],
+            vec!["query", "--scan", "abc"],
+            vec!["query", "-P"],
+        ] {
+            assert!(
+                Cli::try_parse_from([&["gage", "publish"], &argv[..]].concat()).is_err(),
+                "{argv:?} parsed"
+            );
+        }
+        assert!(Cli::try_parse_from(["gage", "query", "-P"]).is_err());
+        assert!(Cli::try_parse_from(["gage", "session", "view", "-P"]).is_err());
         assert!(Cli::try_parse_from(["gage", "session", "publish", "list"]).is_err());
         assert!(Cli::try_parse_from(["gage", "publish", "show", "--stored", "abc"]).is_err());
         assert!(
