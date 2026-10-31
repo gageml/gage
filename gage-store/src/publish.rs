@@ -14,7 +14,6 @@
 //! deletes it with the definition; abort deletes both and writes
 //! nothing.
 
-use std::ffi::OsStr;
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
@@ -33,13 +32,6 @@ const PUBLISH_DIR: &str = "publish";
 const ATTRS_FILE: &str = "attrs.json";
 pub(crate) const FILTERED_FILE: &str = "filtered.json";
 const DEFINITION_SUFFIX: &str = ".publish.jsonc";
-
-/// Whether the data layer includes pending publish working trees in
-/// the session tables, set by `GAGE_SHOW_PUBLISHING=1`. Only the
-/// exact value `1` turns it on.
-pub fn show_publishing() -> bool {
-    std::env::var_os("GAGE_SHOW_PUBLISHING").as_deref() == Some(OsStr::new("1"))
-}
 
 /// One pending publish working tree, read from its staging directory.
 #[derive(Debug, Clone, PartialEq)]

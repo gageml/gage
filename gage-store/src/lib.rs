@@ -100,7 +100,7 @@ pub use note::{
 pub use object::SHORT_PREFIX_SET_SIZE;
 pub use publish::{
     FilteredKind, FilteredRecord, PendingPublish, PublishDirLayout, PublishInit, PublishStore,
-    format_filtered, parse_filtered, publish_root, show_publishing,
+    format_filtered, parse_filtered, publish_root,
 };
 pub use query::{
     LinkKind, NoteDocRow, ScanSource, ScopedIssue, ScopedNote, StoredNoteTable, StoredSessionTable,

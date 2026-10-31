@@ -45,8 +45,13 @@ enum Kind {
         spec: String,
         driver: Arc<dyn Driver>,
     },
-    /// The store: sessions are objects and notes target them
-    Stored { store: Arc<Mutex<Store>> },
+    /// The store: sessions are objects and notes target them. With
+    /// `pending`, the sessions are the pending publish working trees,
+    /// which are not objects and take no notes.
+    Stored {
+        store: Arc<Mutex<Store>>,
+        pending: bool,
+    },
 }
 
 /// Width the picker gives a project name
@@ -95,7 +100,27 @@ impl Backend {
     pub async fn shared(store: Arc<Mutex<Store>>) -> Backend {
         Backend {
             ctx: ContextBuilder::new(Some(Arc::clone(&store))).build().await,
-            kind: Kind::Stored { store },
+            kind: Kind::Stored {
+                store,
+                pending: false,
+            },
+            registry: Arc::new(DriverRegistry::builtin()),
+        }
+    }
+
+    /// Over the pending publish working trees under `publish_root`.
+    /// The picker lists them and nothing else, and no note is read or
+    /// written.
+    pub async fn pending(store: Arc<Mutex<Store>>, publish_root: impl Into<PathBuf>) -> Backend {
+        Backend {
+            ctx: ContextBuilder::new(Some(Arc::clone(&store)))
+                .publish(publish_root)
+                .build()
+                .await,
+            kind: Kind::Stored {
+                store,
+                pending: true,
+            },
             registry: Arc::new(DriverRegistry::builtin()),
         }
     }
@@ -106,8 +131,14 @@ impl Backend {
     }
 
     /// True when notes can be read and written: the store backend
+    /// over stored sessions
     pub fn supports_notes(&self) -> bool {
-        matches!(self.kind, Kind::Stored { .. })
+        matches!(self.kind, Kind::Stored { pending: false, .. })
+    }
+
+    /// True over the pending publish working trees
+    fn is_pending(&self) -> bool {
+        matches!(self.kind, Kind::Stored { pending: true, .. })
     }
 
     pub async fn load(&self, session_id: &str) -> Result<Document, Box<dyn Error>> {
@@ -121,10 +152,14 @@ impl Backend {
         let turns = self.load_turns(session_id, &entries).await?;
         let tool_uses = self.load_tool_uses(session_id).await?;
         // A native session is never a publish, and its context has no
-        // `filtered` relation
+        // `filtered` relation. A pending publish has redactions, and
+        // its context has no `note` relation.
         let (notes, redactions) = match self.kind {
             Kind::Native { .. } => (Vec::new(), Vec::new()),
-            Kind::Stored { .. } => (
+            Kind::Stored { pending: true, .. } => {
+                (Vec::new(), self.load_redactions(session_id).await?)
+            }
+            Kind::Stored { pending: false, .. } => (
                 self.load_notes(session_id).await?,
                 self.load_redactions(session_id).await?,
             ),
@@ -154,11 +189,10 @@ impl Backend {
             .transpose()?
             .unwrap_or(Value::Null);
         nest_summary(&mut value);
-        let pending = row.is_some_and(is_pending_publish);
         Ok(Session {
             id: session_id.to_string(),
             value,
-            pending,
+            pending: self.is_pending(),
         })
     }
 
@@ -509,9 +543,15 @@ impl Backend {
 
     fn store(&self) -> Result<MutexGuard<'_, Store>, Box<dyn Error>> {
         match &self.kind {
-            Kind::Stored { store } => Ok(store
+            Kind::Stored {
+                store,
+                pending: false,
+            } => Ok(store
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())),
+            Kind::Stored { pending: true, .. } => {
+                Err("notes cannot target a pending publish session".into())
+            }
             Kind::Native { .. } => Err("notes require a stored session".into()),
         }
     }
@@ -639,18 +679,6 @@ fn target_lines(target: &str) -> Result<(Option<u32>, Option<u32>), Box<dyn Erro
     Ok((Some(start), (start != end).then_some(end)))
 }
 
-/// The row's non-system columns as a JSON object, for the YAML pane.
-/// Whether the session row's first entry is a pending publish working
-/// tree: its `locator` is the staging directory, where a stored
-/// session's is `git:<commit>`. A row without a locator is not pending.
-fn is_pending_publish(batch: &RecordBatch) -> bool {
-    let Ok(idx) = batch.schema().index_of("locator") else {
-        return false;
-    };
-    let locators = column::<StringArray>(batch, idx);
-    locators.is_valid(0) && !locators.value(0).starts_with("git:")
-}
-
 /// Replace the row's `summary` text with the JSON object it holds, so
 /// the pane's YAML nests its keys. The stored `summary` column is a
 /// text column that carries a JSON object; a value that does not
@@ -713,7 +741,7 @@ fn sql_str(s: &str) -> String {
 #[cfg(test)]
 pub(crate) mod tests {
     use gage_session::SourceOptions;
-    use gage_store::SessionStore;
+    use gage_store::{PublishStore, SessionStore};
     use tempfile::TempDir;
 
     use super::*;
@@ -983,32 +1011,42 @@ pub(crate) mod tests {
         assert_eq!(recent[0].project, "-w-proj");
     }
 
-    /// A pending publish row locates its staging directory; a stored
-    /// row locates a commit; a row without a locator is not pending.
-    #[test]
-    fn pending_publish_is_told_by_the_locator() {
-        use datafusion::arrow::datatypes::{DataType, Field, Schema};
-        let with = |locator: &str| {
-            let schema = Arc::new(Schema::new(vec![
-                Field::new("id", DataType::Utf8, false),
-                Field::new("locator", DataType::Utf8, false),
-            ]));
-            RecordBatch::try_new(
-                schema,
-                vec![
-                    Arc::new(StringArray::from(vec!["s1"])),
-                    Arc::new(StringArray::from(vec![locator])),
-                ],
-            )
-            .unwrap()
-        };
-        assert!(is_pending_publish(&with("/home/u/.gage/publish/s1")));
-        assert!(!is_pending_publish(&with("git:0123abcd")));
-        let without = RecordBatch::try_new(
-            Arc::new(Schema::new(vec![Field::new("id", DataType::Utf8, false)])),
-            vec![Arc::new(StringArray::from(vec!["s1"]))],
+    /// The pending backend lists the publish working trees and not the
+    /// stored sessions, loads a pending session with its redactions,
+    /// marks it pending, and takes no notes.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pending_backend_loads_publish_working_trees_without_notes() {
+        let f = fixture();
+        let publish_root = f.cache_root.join("publish");
+        let original = SessionStore::from(&f.store).get(&f.session_id).unwrap();
+        let publish = PublishStore::with_root(&f.store, &publish_root);
+        let pending = publish.init(&original).unwrap();
+        std::fs::write(
+            publish.layout(&pending.id).filtered_file(),
+            r#"{"text": [[1, "/message/content", 6, 11, "pii", "filter:pii"]]}"#,
         )
         .unwrap();
-        assert!(!is_pending_publish(&without));
+
+        let backend = Backend::pending(Arc::new(Mutex::new(f.store)), &publish_root).await;
+        assert!(!backend.supports_notes());
+        assert!(!backend.is_native());
+
+        let recent = backend.list_recent(10, 0).await.unwrap();
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].id, pending.id);
+
+        let doc = backend.load(&pending.id).await.unwrap();
+        assert!(doc.session.pending);
+        assert_eq!(doc.entries.len(), 2);
+        assert_eq!(doc.entries[0].message_text.as_deref(), Some("hello there"));
+        assert_eq!(doc.redactions.len(), 1);
+        assert!(doc.notes.is_empty());
+        let origin = doc.session.value["origin"].as_str().unwrap();
+        assert!(origin.starts_with("session:"), "{origin}");
+
+        let err = backend
+            .add_note(&pending.id, None, "comment", "x".into(), "user:t")
+            .unwrap_err();
+        assert!(err.to_string().contains("pending"), "{err}");
     }
 }

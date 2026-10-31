@@ -91,10 +91,12 @@ use crate::text::{
 /// Composes a query context. `store` backs the store tables when
 /// present; without it, they are absent and only the native discovery
 /// functions are available. A store-backed context has store scope,
-/// every live object, unless a [`ScanScope`] narrows it to one scan.
+/// every live object, unless a [`ScanScope`] narrows it to one scan
+/// or [`publish`](Self::publish) narrows it to the pending publishes.
 pub struct ContextBuilder {
     store: Option<Arc<Mutex<Store>>>,
     scope: Option<ScanScope>,
+    publish_root: Option<PathBuf>,
     skip_system_cols: bool,
     show_agents: bool,
     cache_root: Option<PathBuf>,
@@ -105,6 +107,7 @@ impl ContextBuilder {
         Self {
             store,
             scope: None,
+            publish_root: None,
             skip_system_cols: false,
             show_agents: false,
             cache_root: None,
@@ -126,6 +129,15 @@ impl ContextBuilder {
     /// record.
     pub fn scope(mut self, scope: ScanScope) -> Self {
         self.scope = Some(scope);
+        self
+    }
+
+    /// Scope the context to the pending publishes under
+    /// `publish_root`: the session tables serve the publish working
+    /// trees and nothing else, and no other store table is present.
+    /// Takes precedence over a scan scope.
+    pub fn publish(mut self, publish_root: impl Into<PathBuf>) -> Self {
+        self.publish_root = Some(publish_root.into());
         self
     }
 
@@ -151,7 +163,8 @@ impl ContextBuilder {
     /// base tables lose their system columns, while the views keep
     /// reading the link tables they were planned over. A scan-scoped
     /// context registers the scan's tables, with the relations as
-    /// tables rather than views.
+    /// tables rather than views. A publish-scoped context registers
+    /// the session tables alone.
     pub async fn build(self) -> SessionContext {
         let ctx = new_context(
             self.skip_system_cols,
@@ -162,6 +175,9 @@ impl ContextBuilder {
             register_blame_functions(&ctx, None, self.show_agents, self.cache_root);
             return ctx;
         };
+        if let Some(root) = self.publish_root {
+            return build_publish_scope(ctx, store, root, self.skip_system_cols);
+        }
         if let Some(scope) = self.scope {
             return build_scan_scope(ctx, store, scope, self.skip_system_cols);
         }
@@ -256,6 +272,61 @@ impl ContextBuilder {
         }
         ctx
     }
+}
+
+/// Register the publish scope's tables: `session` over the pending
+/// publish working trees under `publish_root`, and `entry`,
+/// `message`, `tool_use`, and `filtered` over the same set. Notes,
+/// issues, and the other store tables are absent, since a pending
+/// publish is not a store object and nothing targets it.
+fn build_publish_scope(
+    ctx: SessionContext,
+    store: Arc<Mutex<Store>>,
+    publish_root: PathBuf,
+    skip_system_cols: bool,
+) -> SessionContext {
+    let sessions = Arc::new(SessionSet::pending(
+        Arc::clone(&store),
+        publish_root.clone(),
+    ));
+    let tables: [(&str, Arc<dyn TableProvider>); 5] = [
+        (
+            "session",
+            Arc::new(StoredSessionTable::pending(store, publish_root)),
+        ),
+        (
+            "entry",
+            Arc::new(StoredRowsTable::new(RowKind::Entry, Arc::clone(&sessions))),
+        ),
+        (
+            "message",
+            Arc::new(StoredRowsTable::new(
+                RowKind::Message,
+                Arc::clone(&sessions),
+            )),
+        ),
+        (
+            "tool_use",
+            Arc::new(StoredRowsTable::new(
+                RowKind::ToolUse,
+                Arc::clone(&sessions),
+            )),
+        ),
+        (
+            "filtered",
+            Arc::new(StoredRowsTable::new(RowKind::Filtered, sessions)),
+        ),
+    ];
+    for (name, table) in tables {
+        let table: Arc<dyn TableProvider> = if skip_system_cols {
+            Arc::new(SkipSystemCols::new(table))
+        } else {
+            table
+        };
+        ctx.register_table(name, table)
+            .expect("register publish tables on a fresh context");
+    }
+    ctx
 }
 
 /// Register one scan's tables: `session` at the members' linked

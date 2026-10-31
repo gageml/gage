@@ -12,8 +12,10 @@
 //! applied to the index rows before any object is read.
 
 use std::any::Any;
+use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::fmt::{self, Formatter};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -43,7 +45,9 @@ use gage_session::filter::{self, IdFilter};
 use gage_session::system;
 
 use super::batch::readable;
-use crate::{Order, SESSION_TYPE, SelectedTip, SessionStore, Store, StoreError};
+use crate::{
+    Order, PendingPublish, PublishStore, SESSION_TYPE, SelectedTip, SessionStore, Store, StoreError,
+};
 
 /// Columns read from the object's `attrs.json` rather than the index.
 /// A projection touching none of these never opens an object.
@@ -112,12 +116,25 @@ fn stored_session_schema() -> SchemaRef {
 /// versions, the rows are those versions in the order given, which is
 /// how a dataset or scan scope lists its members. A fixed version
 /// carries its markers, so a row costs no read until an attrs column
-/// is projected.
+/// is projected. Over pending publishes, the rows are the working
+/// trees under a publish root, read from the file system on each
+/// scan.
 #[derive(Debug, Clone)]
 pub struct StoredSessionTable {
     store: Arc<Mutex<Store>>,
     schema: SchemaRef,
-    versions: Option<Vec<SelectedTip>>,
+    rows: Rows,
+}
+
+/// Which sessions the table serves.
+#[derive(Debug, Clone)]
+enum Rows {
+    /// Every live session at its tip
+    Live,
+    /// Exactly these versions, in this order
+    Versions(Vec<SelectedTip>),
+    /// The pending publish working trees under this publish root
+    Pending(PathBuf),
 }
 
 impl StoredSessionTable {
@@ -125,7 +142,7 @@ impl StoredSessionTable {
         Self {
             store,
             schema: stored_session_schema(),
-            versions: None,
+            rows: Rows::Live,
         }
     }
 
@@ -135,7 +152,19 @@ impl StoredSessionTable {
         Self {
             store,
             schema: stored_session_schema(),
-            versions: Some(versions),
+            rows: Rows::Versions(versions),
+        }
+    }
+
+    /// The table over the pending publish working trees under
+    /// `publish_root`, newest modified first. A pending session has
+    /// no commit: its `locator` is its staging directory and its
+    /// `created` is its `modified`.
+    pub fn pending(store: Arc<Mutex<Store>>, publish_root: impl Into<PathBuf>) -> Self {
+        Self {
+            store,
+            schema: stored_session_schema(),
+            rows: Rows::Pending(publish_root.into()),
         }
     }
 }
@@ -185,7 +214,7 @@ impl TableProvider for StoredSessionTable {
         };
         Ok(Arc::new(StoredSessionExec::new(
             Arc::clone(&self.store),
-            self.versions.clone(),
+            self.rows.clone(),
             self.schema.clone(),
             projected_schema,
             projection.cloned(),
@@ -236,7 +265,7 @@ fn timestamp_literal_ms(expr: &Expr) -> Option<i64> {
 #[derive(Clone)]
 struct StoredSessionExec {
     store: Arc<Mutex<Store>>,
-    versions: Option<Vec<SelectedTip>>,
+    rows: Rows,
     full_schema: SchemaRef,
     projected_schema: SchemaRef,
     projection: Option<Vec<usize>>,
@@ -257,7 +286,7 @@ impl fmt::Debug for StoredSessionExec {
 impl StoredSessionExec {
     fn new(
         store: Arc<Mutex<Store>>,
-        versions: Option<Vec<SelectedTip>>,
+        rows: Rows,
         full_schema: SchemaRef,
         projected_schema: SchemaRef,
         projection: Option<Vec<usize>>,
@@ -265,7 +294,7 @@ impl StoredSessionExec {
         limit: Option<usize>,
     ) -> Self {
         // Only the index-served rows come newest modified first
-        let equivalence = if versions.is_none() {
+        let equivalence = if matches!(rows, Rows::Live) {
             modified_desc_eq_properties(&projected_schema)
         } else {
             EquivalenceProperties::new(projected_schema.clone())
@@ -278,7 +307,7 @@ impl StoredSessionExec {
         );
         Self {
             store,
-            versions,
+            rows,
             full_schema,
             projected_schema,
             projection,
@@ -307,26 +336,39 @@ impl StoredSessionExec {
         let sessions = SessionStore::from(&*store);
 
         // The rows to filter: every live session newest modified first,
-        // or the given versions in the given order. Neither reads an
-        // object.
-        let all: Vec<SelectedTip> = match &self.versions {
-            None => sessions
-                .query()
-                .order(Order::ModifiedDesc)
-                .tips()
-                .map_err(external)?,
-            Some(versions) => versions.clone(),
+        // the given versions in the given order, or the pending
+        // publishes newest modified first. None reads an object.
+        let (all, mut pending): (Vec<SelectedTip>, Vec<PendingPublish>) = match &self.rows {
+            Rows::Live => (
+                sessions
+                    .query()
+                    .order(Order::ModifiedDesc)
+                    .tips()
+                    .map_err(external)?,
+                Vec::new(),
+            ),
+            Rows::Versions(versions) => (versions.clone(), Vec::new()),
+            Rows::Pending(root) => {
+                let mut pending = PublishStore::with_root(&store, root)
+                    .list()
+                    .map_err(external)?;
+                pending.sort_by_key(|p| Reverse(p.modified_ms));
+                (Vec::new(), pending)
+            }
         };
         // id_prefix is unique within the short-prefix set of sessions,
-        // where a session prefix resolves first, plus the fixed rows
+        // where a session prefix resolves first, plus the fixed and
+        // pending rows
         let mut peers = store
             .short_prefix_ids(Some(SESSION_TYPE))
             .map_err(external)?;
-        if self.versions.is_some() {
-            for tip in &all {
-                if !peers.contains(&tip.id) {
-                    peers.push(tip.id.clone());
-                }
+        for id in all
+            .iter()
+            .map(|t| &t.id)
+            .chain(pending.iter().map(|p| &p.id))
+        {
+            if !peers.contains(id) {
+                peers.push(id.clone());
             }
         }
         let prefix_len = unique_prefix_lens(peers);
@@ -336,16 +378,19 @@ impl StoredSessionExec {
             .into_iter()
             .filter(|t| since.is_none_or(|ms| t.modified_ms.is_some_and(|m| m >= ms)))
             .collect();
+        pending.retain(|p| since.is_none_or(|ms| p.modified_ms >= ms));
         let id_filter = IdFilter::new(&self.filters, "id")?;
         if let Some(f) = &id_filter {
             tips = f.retain(tips, |t| t.id.as_str())?;
+            pending = f.retain(pending, |p| p.id.as_str())?;
         }
         if let Some(n) = self.limit {
             tips.truncate(n);
+            pending.truncate(n);
         }
 
         let needs_attrs = self.projection_needs_attrs();
-        let len = tips.len();
+        let len = tips.len() + pending.len();
         let mut ids = StringBuilder::with_capacity(len, len * 26);
         let mut id_displays = StringBuilder::with_capacity(len, len * 8);
         let mut id_prefixes = StringBuilder::with_capacity(len, len * 4);
@@ -404,34 +449,27 @@ impl StoredSessionExec {
             projects.append_option(attrs.project.as_deref());
         }
 
-        // Pending publish working trees join the store-wide listing
-        // only under `GAGE_SHOW_PUBLISHING=1`. They are not members of
-        // any scan or dataset, so the fixed-version scopes never show
-        // them. They respect the same id filter and modified bound as
-        // the stored rows.
-        if self.versions.is_none() && crate::publish::show_publishing() {
-            let mut pending = crate::PublishStore::from(&*store)
-                .list()
-                .map_err(external)?;
-            if let Some(f) = &id_filter {
-                pending = f.retain(pending, |p| p.id.as_str())?;
-            }
-            pending.retain(|p| since.is_none_or(|ms| p.modified_ms >= ms));
-            for p in &pending {
-                ids.append_value(&p.id);
-                projects.append_option(p.attrs.project.as_deref());
-                modifieds.append_value(p.modified_ms);
-                createds.append_value(p.modified_ms);
-                session_types.append_value(&p.attrs.session_type);
-                drivers.append_value(&p.attrs.driver);
-                content_formats.append_value(&p.attrs.content_format);
-                sizes.append_value(p.attrs.size as i64);
-                origins.append_value(&p.attrs.origin);
-                summaries.append_value(summary_json(&p.attrs.summary)?);
-                id_displays.append_value(short_uuid(&p.id));
-                id_prefixes.append_value(short_uuid(&p.id));
-                locators.append_value(p.root.display().to_string());
-            }
+        // A pending publish has no commit: its id prefix is unique
+        // among the peers, its locator is its staging directory, and
+        // its created is its modified
+        for p in &pending {
+            ids.append_value(&p.id);
+            id_displays.append_value(short_uuid(&p.id));
+            let n = prefix_len
+                .get(&p.id)
+                .copied()
+                .expect("prefix set covers every pending publish");
+            id_prefixes.append_value(p.id.chars().take(n).collect::<String>());
+            locators.append_value(p.root.display().to_string());
+            modifieds.append_value(p.modified_ms);
+            createds.append_value(p.modified_ms);
+            session_types.append_value(&p.attrs.session_type);
+            drivers.append_value(&p.attrs.driver);
+            content_formats.append_value(&p.attrs.content_format);
+            sizes.append_value(p.attrs.size as i64);
+            origins.append_value(&p.attrs.origin);
+            summaries.append_value(summary_json(&p.attrs.summary)?);
+            projects.append_option(p.attrs.project.as_deref());
         }
 
         let batch = RecordBatch::try_new(
@@ -548,7 +586,7 @@ impl ExecutionPlan for StoredSessionExec {
     fn with_fetch(&self, limit: Option<usize>) -> Option<Arc<dyn ExecutionPlan>> {
         Some(Arc::new(StoredSessionExec::new(
             Arc::clone(&self.store),
-            self.versions.clone(),
+            self.rows.clone(),
             self.full_schema.clone(),
             self.projected_schema.clone(),
             self.projection.clone(),
@@ -581,19 +619,11 @@ mod tests {
     use crate::test_support::open_store;
     use crate::{PublishStore, SessionStore};
 
-    /// Serializes the tests that build a `session` table, because the
-    /// pending-publish test mutates `GAGE_HOME` and
-    /// `GAGE_SHOW_PUBLISHING`, which are process-global. A holder of
-    /// this lock sees the env clean, since the mutating test restores
-    /// both before it releases.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
     /// The store-bound `session` table projects one row per live
     /// session, reading `native_id` and `project` from each object's
     /// attrs.
     #[tokio::test]
     async fn session_table_projects_stored_sessions() {
-        let _env = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         let (store, _fsck) = open_store(tmp.path());
         {
@@ -643,7 +673,6 @@ mod tests {
     /// driver reported them.
     #[tokio::test]
     async fn session_table_projects_summary_json() {
-        let _env = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         let (store, _fsck) = open_store(tmp.path());
         {
@@ -700,20 +729,14 @@ mod tests {
         out
     }
 
-    /// With `GAGE_SHOW_PUBLISHING=1`, a pending publish working tree
-    /// joins the store-wide listing and respects an id filter; with it
-    /// unset it is absent.
+    /// The pending table lists the publish working trees under its
+    /// root, newest modified first, with an id prefix unique among the
+    /// stored sessions; it lists no stored session, and the store-wide
+    /// table lists no pending publish. Both respect an id filter.
     #[tokio::test]
-    async fn session_table_includes_pending_publishes_under_env() {
-        let _env = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    async fn pending_table_lists_publish_working_trees_only() {
         let tmp = tempfile::tempdir().unwrap();
-        // SAFETY: env mutation is serialized by ENV_LOCK and both vars
-        // are restored before the lock is released.
-        unsafe {
-            std::env::set_var("GAGE_HOME", tmp.path());
-            std::env::remove_var("GAGE_SHOW_PUBLISHING");
-        }
-
+        let publish_root = tmp.path().join("publish");
         let (store, _fsck) = open_store(tmp.path());
         let mut session = fake("orig", &[("session.jsonl", "hello\n")]);
         let outcome = SessionStore::from(&store)
@@ -722,34 +745,54 @@ mod tests {
         let original = SessionStore::from(&store)
             .at_commit(&outcome.commit_sha)
             .unwrap();
-        let pending = PublishStore::from(&store).init(&original).unwrap();
+        let publish = PublishStore::with_root(&store, &publish_root);
+        let first = publish.init(&original).unwrap();
+        let second = publish.init(&original).unwrap();
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(90);
+        std::fs::File::options()
+            .write(true)
+            .open(publish.layout(&second.id).attrs_file())
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+        let first_root = publish.layout(&first.id).root().display().to_string();
 
+        let store = Arc::new(Mutex::new(store));
         let ctx = SessionContext::new();
         ctx.register_table(
             "session",
-            Arc::new(StoredSessionTable::new(Arc::new(Mutex::new(store)))),
+            Arc::new(StoredSessionTable::new(Arc::clone(&store))),
+        )
+        .unwrap();
+        ctx.register_table(
+            "pending",
+            Arc::new(StoredSessionTable::pending(store, &publish_root)),
         )
         .unwrap();
 
-        // Absent until the env opts in.
-        let hidden = ids(&ctx, "SELECT id FROM session").await;
-        assert!(!hidden.contains(&pending.id), "{hidden:?}");
+        let stored = ids(&ctx, "SELECT id FROM session").await;
+        assert_eq!(stored, vec![original.id.clone()]);
 
-        unsafe { std::env::set_var("GAGE_SHOW_PUBLISHING", "1") };
-        let shown = ids(&ctx, "SELECT id FROM session ORDER BY id").await;
-        assert!(shown.contains(&pending.id), "{shown:?}");
-        assert!(shown.contains(&original.id), "{shown:?}");
+        let pending = ids(&ctx, "SELECT id FROM pending").await;
+        assert_eq!(pending, vec![second.id.clone(), first.id.clone()]);
 
         let one = ids(
             &ctx,
-            &format!("SELECT id FROM session WHERE id = '{}'", pending.id),
+            &format!("SELECT id FROM pending WHERE id = '{}'", first.id),
         )
         .await;
-        assert_eq!(one, vec![pending.id.clone()]);
+        assert_eq!(one, vec![first.id.clone()]);
 
-        unsafe {
-            std::env::remove_var("GAGE_SHOW_PUBLISHING");
-            std::env::remove_var("GAGE_HOME");
-        }
+        let prefixes = ids(&ctx, "SELECT id_prefix FROM pending ORDER BY modified DESC").await;
+        assert!(second.id.starts_with(&prefixes[0]), "{prefixes:?}");
+        assert!(first.id.starts_with(&prefixes[1]), "{prefixes:?}");
+        assert_ne!(prefixes[0], prefixes[1]);
+
+        let locator = ids(
+            &ctx,
+            &format!("SELECT locator FROM pending WHERE id = '{}'", first.id),
+        )
+        .await;
+        assert_eq!(locator, vec![first_root]);
     }
 }

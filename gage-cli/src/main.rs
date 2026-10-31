@@ -481,6 +481,7 @@ async fn run_mcp() -> anyhow::Result<()> {
         gage: vec![
             GageTool::Query(QueryConfig {
                 context: Arc::new(context),
+                store: Some(Arc::clone(&writer.store)),
             }),
             GageTool::IssueWrite(IssueWriteConfig::with_store(
                 writer.clone(),

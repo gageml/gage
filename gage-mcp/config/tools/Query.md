@@ -13,6 +13,10 @@ description = "Cursor of a result an earlier call returned, to read one of its p
 type = "integer"
 description = "Page of the cursor's result to return, starting at 1 (default 1). Goes with cursor."
 
+[parameters.publish]
+type = "boolean"
+description = "Run sql over pending publish sessions instead: sessions staged by gage publish and not yet applied. session, entry, message, tool_use, and filtered hold them and nothing else; no other table is present. Goes with sql."
+
 [annotations]
 read_only_hint = true
 idempotent_hint = true

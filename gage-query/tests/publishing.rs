@@ -1,9 +1,7 @@
-//! `GAGE_SHOW_PUBLISHING=1` includes a pending publish working tree in
+//! A publish-scoped context serves a pending publish working tree in
 //! the `session`, `entry`, `message`, `tool_use`, and `filtered`
-//! tables, and a rebuilt working tree is re-read by the
-//! same context. The test
-//! runs in its own process, so its environment mutation does not race
-//! the library tests.
+//! tables, and nothing else; a rebuilt working tree is re-read by the
+//! same context.
 
 use std::sync::{Arc, Mutex};
 
@@ -40,14 +38,9 @@ async fn strings(ctx: &SessionContext, sql: &str) -> Vec<String> {
 }
 
 #[tokio::test]
-async fn pending_publish_appears_in_row_tables_under_env() {
+async fn publish_scope_serves_pending_publishes_in_the_session_tables() {
     let home = tempfile::tempdir().unwrap();
-    // SAFETY: this integration test owns its process; no other test
-    // reads these variables concurrently. Both are removed at the end.
-    unsafe {
-        std::env::set_var("GAGE_HOME", home.path());
-        std::env::set_var("GAGE_SHOW_PUBLISHING", "1");
-    }
+    let publish_root = home.path().join("publish");
 
     let claude_root = tempfile::tempdir().unwrap();
     let native_id = "11111111-2222-3333-4444-555555555555";
@@ -72,16 +65,37 @@ async fn pending_publish_appears_in_row_tables_under_env() {
     let original = SessionStore::from(&store)
         .at_commit(&outcome.commit_sha)
         .unwrap();
-    let pending = PublishStore::from(&store).init(&original).unwrap();
-    let layout = PublishStore::from(&store).layout(&pending.id);
+    let publish = PublishStore::with_root(&store, &publish_root);
+    let pending = publish.init(&original).unwrap();
+    let layout = publish.layout(&pending.id);
 
-    let ctx = ContextBuilder::new(Some(Arc::new(Mutex::new(store))))
+    let store = Arc::new(Mutex::new(store));
+    let ctx = ContextBuilder::new(Some(Arc::clone(&store)))
+        .publish(&publish_root)
         .build()
         .await;
     let id = &pending.id;
 
-    let sess = strings(&ctx, &format!("SELECT id FROM session WHERE id = '{id}'")).await;
+    // The scope holds the pending publish and not its stored original
+    let sess = strings(&ctx, "SELECT id FROM session").await;
     assert_eq!(sess, vec![id.clone()], "pending session row");
+    let tables = strings(&ctx, "SHOW TABLES").await;
+    assert!(!tables.is_empty());
+    for absent in ["note", "issue", "dataset", "scan"] {
+        let names = strings(
+            &ctx,
+            &format!(
+                "SELECT table_name FROM information_schema.tables WHERE table_name = '{absent}'"
+            ),
+        )
+        .await;
+        assert!(names.is_empty(), "{absent} is not a publish scope table");
+    }
+
+    // The store-wide context does not hold it
+    let wide = ContextBuilder::new(Some(store)).build().await;
+    let stored = strings(&wide, "SELECT id FROM session").await;
+    assert_eq!(stored, vec![original.id.clone()], "store-wide rows");
 
     let types = strings(
         &ctx,
@@ -155,9 +169,4 @@ async fn pending_publish_appears_in_row_tables_under_env() {
         ["text /message/content pii"],
         "rebuilt records are re-read"
     );
-
-    unsafe {
-        std::env::remove_var("GAGE_SHOW_PUBLISHING");
-        std::env::remove_var("GAGE_HOME");
-    }
 }

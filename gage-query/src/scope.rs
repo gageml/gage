@@ -1,12 +1,15 @@
 //! What a context is scoped to, and how session rows are reached.
 //!
-//! A context has store scope or scan scope. Store scope is every
-//! live object in the store. Scan scope, a [`ScanScope`], is one
-//! scan's objects: its dataset's sessions at the commits the scan
-//! links, the notes it wrote or carried, the issues it wrote, and the
-//! relations among them. The scan is an active one, named by its scan
-//! directory, or a stored one, named by id; the tables read either
-//! source on each query.
+//! A context has store scope, scan scope, or publish scope. Store
+//! scope is every live object in the store. Scan scope, a
+//! [`ScanScope`], is one scan's objects: its dataset's sessions at the
+//! commits the scan links, the notes it wrote or carried, the issues
+//! it wrote, and the relations among them. The scan is an active one,
+//! named by its scan directory, or a stored one, named by id; the
+//! tables read either source on each query. Publish scope is the
+//! pending publish working trees under a publish root, read from the
+//! file system on each query, so a rebuilt working tree is served on
+//! the next read.
 //!
 //! The core knows the store's layout, so it resolves the session set
 //! and plans every read. The driver that wrote a session is the only
@@ -14,6 +17,7 @@
 //! from [`Driver::read_stored`] on that driver, normalized into
 //! [`gage_session::Entry`] values the core turns into a batch.
 
+use std::cmp::Reverse;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -25,7 +29,7 @@ use gage_session::filter::IdFilter;
 use gage_session::{ContentSource, Driver, StoredSession, tool_use_batch};
 use gage_store::{
     DirContentSource, Order, PendingPublish, PublishDirLayout, PublishStore, ScanDirLayout,
-    ScanSource, SelectedTip, SessionRecord, SessionStore, Store, StoreError, show_publishing,
+    ScanSource, SelectedTip, SessionRecord, SessionStore, Store, StoreError,
 };
 
 /// One scan's objects, as a context is scoped to them.
@@ -182,11 +186,22 @@ impl StoredSessionRef {
 }
 
 /// The sessions the row tables serve: every live session at its tip
-/// in store scope, or the fixed versions of a scan scope's members.
+/// in store scope, the fixed versions of a scan scope's members, or
+/// the pending publishes of a publish scope.
 pub struct SessionSet {
     store: Arc<Mutex<Store>>,
     drivers: DriverRegistry,
-    fixed: Option<Vec<StoredSessionRef>>,
+    members: Members,
+}
+
+enum Members {
+    /// Every live session at its tip
+    All,
+    /// Exactly these sessions, each at the version it names
+    Fixed(Vec<StoredSessionRef>),
+    /// The pending publish working trees under this publish root,
+    /// listed on each read
+    Pending(PathBuf),
 }
 
 impl SessionSet {
@@ -195,7 +210,7 @@ impl SessionSet {
         Self {
             store,
             drivers: DriverRegistry::builtin(),
-            fixed: None,
+            members: Members::All,
         }
     }
 
@@ -204,27 +219,58 @@ impl SessionSet {
         Self {
             store,
             drivers: DriverRegistry::builtin(),
-            fixed: Some(sessions),
+            members: Members::Fixed(sessions),
         }
     }
 
-    /// The versions of a fixed set, in order; `None` store-wide.
+    /// The pending publish working trees under `publish_root`.
+    pub(crate) fn pending(store: Arc<Mutex<Store>>, publish_root: PathBuf) -> Self {
+        Self {
+            store,
+            drivers: DriverRegistry::builtin(),
+            members: Members::Pending(publish_root),
+        }
+    }
+
+    /// The versions of a fixed set, in order; `None` for any other
+    /// set.
     pub(crate) fn fixed_versions(&self) -> Option<Vec<SelectedTip>> {
-        self.fixed
-            .as_ref()
-            .map(|refs| refs.iter().map(StoredSessionRef::as_version).collect())
+        match &self.members {
+            Members::Fixed(refs) => Some(refs.iter().map(StoredSessionRef::as_version).collect()),
+            Members::All | Members::Pending(_) => None,
+        }
     }
 
     /// The set's sessions, narrowed by the `session_id` predicates in
     /// `filters`. A store-wide set lists every live session newest
-    /// modified first; a fixed set keeps its own order.
+    /// modified first; a fixed set keeps its own order; a pending set
+    /// lists the working trees newest modified first, re-read so a
+    /// rebuild changes each one's cache key.
     pub(crate) fn sessions(&self, filters: &[Expr]) -> Result<Vec<StoredSessionRef>> {
-        if let Some(fixed) = &self.fixed {
-            let mut sessions = fixed.clone();
-            if let Some(id_filter) = IdFilter::new(filters, "session_id")? {
-                sessions = id_filter.retain(sessions, |s| s.id.as_str())?;
+        match &self.members {
+            Members::Fixed(fixed) => {
+                let mut sessions = fixed.clone();
+                if let Some(id_filter) = IdFilter::new(filters, "session_id")? {
+                    sessions = id_filter.retain(sessions, |s| s.id.as_str())?;
+                }
+                return Ok(sessions);
             }
-            return Ok(sessions);
+            Members::Pending(root) => {
+                let store = self.lock();
+                let mut pending = PublishStore::with_root(&store, root)
+                    .list()
+                    .map_err(external)?;
+                pending.sort_by_key(|p| Reverse(p.modified_ms));
+                let mut sessions: Vec<StoredSessionRef> = pending
+                    .into_iter()
+                    .map(StoredSessionRef::from_pending)
+                    .collect();
+                if let Some(id_filter) = IdFilter::new(filters, "session_id")? {
+                    sessions = id_filter.retain(sessions, |s| s.id.as_str())?;
+                }
+                return Ok(sessions);
+            }
+            Members::All => {}
         }
         let store = self.lock();
         let sessions = SessionStore::from(&*store);
@@ -236,30 +282,12 @@ impl SessionSet {
         if let Some(id_filter) = IdFilter::new(filters, "session_id")? {
             tips = id_filter.retain(tips, |t| t.id.as_str())?;
         }
-        let mut refs: Vec<StoredSessionRef> = tips
-            .into_iter()
+        tips.into_iter()
             .map(|tip| {
                 let record = sessions.at_commit(&tip.sha).map_err(external)?;
                 StoredSessionRef::from_record(record)
             })
-            .collect::<Result<Vec<_>>>()?;
-        // Pending publish working trees join the store-wide set only
-        // under `GAGE_SHOW_PUBLISHING=1`, respecting the same
-        // `session_id` filter. A fixed set, a scan or dataset scope,
-        // never includes them.
-        if show_publishing() {
-            let mut pending: Vec<StoredSessionRef> = PublishStore::from(&*store)
-                .list()
-                .map_err(external)?
-                .into_iter()
-                .map(StoredSessionRef::from_pending)
-                .collect();
-            if let Some(id_filter) = IdFilter::new(filters, "session_id")? {
-                pending = id_filter.retain(pending, |s| s.id.as_str())?;
-            }
-            refs.extend(pending);
-        }
-        Ok(refs)
+            .collect()
     }
 
     /// The derived batch of `session`, read through its driver on

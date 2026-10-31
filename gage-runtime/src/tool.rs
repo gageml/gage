@@ -720,6 +720,7 @@ pub(crate) async fn consume(
                 let context = ctx.query_tool_context(&query.scope).await?;
                 spec.gage.push(GageTool::Query(QueryConfig {
                     context: Arc::new(context),
+                    store: None,
                 }));
             }
             ToolKind::Gage(GageConfig::IssueWrite(config)) => {

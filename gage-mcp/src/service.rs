@@ -112,10 +112,13 @@ pub struct IssuesFreeConfig {
     pub session_live: SessionLiveFn,
 }
 
-/// The `Query` tool's data: the DataFusion context its SQL runs on
+/// The `Query` tool's data: the DataFusion context its SQL runs on,
+/// and the store a `publish` call scopes a fresh context to. `None`
+/// where pending publishes are not readable, as in a scan's tool.
 #[derive(Clone)]
 pub struct QueryConfig {
     pub context: Arc<SessionContext>,
+    pub store: Option<Arc<Mutex<Store>>>,
 }
 
 /// The `IssueWrite` tool's data: the callback that writes the issue.
@@ -392,6 +395,7 @@ mod tests {
         let spec = ToolSpec {
             gage: vec![GageTool::Query(QueryConfig {
                 context: Arc::new(SessionContext::new()),
+                store: None,
             })],
             custom: vec![CustomToolDef {
                 name: "secret".into(),

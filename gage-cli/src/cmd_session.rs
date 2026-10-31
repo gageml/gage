@@ -22,7 +22,7 @@ use gage_session::{Driver, NativeLookupError, SessionLiveError, Source, SourceOp
 use gage_store::url::LineSelection;
 use gage_store::{
     DatasetStore, PublishStore, SESSION_TYPE, SessionRecord, SessionStore, Store, StoreError,
-    TagStore, show_publishing,
+    TagStore, publish_root,
 };
 use gage_tui::session::{Backend, picker_page_size};
 use gage_tui::{ViewOptions, session_view};
@@ -224,6 +224,14 @@ pub struct SessionViewArgs {
     /// A leading "!" turns an option off, as in "!user"
     #[arg(short = 'v', long, verbatim_doc_comment)]
     pub options: Option<String>,
+
+    /// View pending publish sessions
+    ///
+    /// View pending publish sessions: sessions staged by gage publish
+    /// and not yet applied. Picker lists pending sessions only. Does
+    /// not combine with --source or --stored
+    #[arg(short = 'P', long)]
+    pub publish: bool,
 }
 
 #[derive(Args)]
@@ -1712,6 +1720,12 @@ pub async fn view(
     stored: bool,
     args: SessionViewArgs,
 ) -> Result<(), CliError> {
+    if args.publish && (stored || source.is_some()) {
+        return Err(CliError::message(
+            "gage session view: --publish does not apply with --source or --stored; pending \
+             publish sessions are staged outside any source",
+        ));
+    }
     if !io::stdout().is_terminal() {
         return Err(CliError::message(
             "gage session view: standard output is not a terminal; read sessions with gage \
@@ -1729,7 +1743,9 @@ pub async fn view(
         None => (None, None),
     };
     // No session arg: the view opens with its session picker dialog.
-    let result = if stored {
+    let result = if args.publish {
+        view_pending(prefix, line, options).await
+    } else if stored {
         view_stored(prefix, line, options).await
     } else {
         view_native(source.as_deref(), prefix, line, options).await
@@ -1760,47 +1776,27 @@ async fn view_stored(
 ) -> Result<(), Box<dyn Error>> {
     let store = Store::open(&gage_store::store_path())?;
     let id = match prefix {
-        Some(prefix) => Some(resolve_view_target(&store, prefix)?),
+        Some(prefix) => Some(SessionStore::from(&store).get(prefix)?.id),
         None => None,
     };
     let backend = Backend::stored(store).await;
     session_view::run(backend, id.as_deref(), line, options).await
 }
 
-/// Resolve a view target to a session id. A stored session resolves
-/// through the store; when `GAGE_SHOW_PUBLISHING` is set, a prefix
-/// that matches no stored session is resolved against the pending
-/// publish working trees, so a publish in progress can be viewed.
-fn resolve_view_target(store: &Store, prefix: &str) -> Result<String, Box<dyn Error>> {
-    match SessionStore::from(store).get(prefix) {
-        Ok(record) => Ok(record.id),
-        Err(stored_err) => {
-            if show_publishing() {
-                let ids: Vec<String> = PublishStore::from(store)
-                    .list()?
-                    .into_iter()
-                    .map(|p| p.id)
-                    .collect();
-                if let Some(id) = pick_pending(prefix, &ids)? {
-                    return Ok(id);
-                }
-            }
-            Err(stored_err.into())
-        }
-    }
-}
-
-/// The one pending session id that starts with `prefix`: `None` when
-/// none match, an error when more than one does.
-fn pick_pending(prefix: &str, ids: &[String]) -> Result<Option<String>, String> {
-    let mut matches = ids.iter().filter(|id| id.starts_with(prefix));
-    let first = matches.next().cloned();
-    if first.is_some() && matches.next().is_some() {
-        return Err(format!(
-            "ambiguous id prefix {prefix}: matches more than one pending publish session"
-        ));
-    }
-    Ok(first)
+/// View a pending publish session. A prefix resolves against the
+/// pending publishes alone, and the picker lists them alone.
+async fn view_pending(
+    prefix: Option<&str>,
+    line: Option<u32>,
+    options: ViewOptions,
+) -> Result<(), Box<dyn Error>> {
+    let store = Store::open(&gage_store::store_path())?;
+    let id = match prefix {
+        Some(prefix) => Some(PublishStore::from(&store).get(prefix)?.id),
+        None => None,
+    };
+    let backend = Backend::pending(Arc::new(Mutex::new(store)), publish_root()).await;
+    session_view::run(backend, id.as_deref(), line, options).await
 }
 
 async fn view_native(
@@ -1848,6 +1844,28 @@ fn warm_picker_sessions(source: &dyn Source) -> Result<(), Box<dyn Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `--publish` names a source of its own, so it is refused with
+    /// `--source` or `--stored` before anything is opened.
+    #[tokio::test]
+    async fn view_refuses_publish_with_a_source_or_stored() {
+        let args = || SessionViewArgs {
+            session: None,
+            options: None,
+            publish: true,
+        };
+        for (source, stored) in [(Some("claude:".to_string()), false), (None, true)] {
+            let Err(CliError::Exit { message, .. }) = view(source, stored, args()).await else {
+                panic!("--publish was accepted with another source");
+            };
+            assert!(
+                message
+                    .as_deref()
+                    .is_some_and(|m| m.contains("--publish does not apply")),
+                "{message:?}"
+            );
+        }
+    }
 
     /// One placed native session names its stored id; a dataset add
     /// names the dataset; more than one keeps the closing line. The
@@ -1924,26 +1942,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             [("a1", Some("Fix the duck")), ("b2", None)]
         );
-    }
-
-    #[test]
-    fn pick_pending_resolves_a_unique_prefix() {
-        let ids = vec!["abc123".to_string(), "def456".to_string()];
-        assert_eq!(
-            pick_pending("abc", &ids).unwrap().as_deref(),
-            Some("abc123")
-        );
-        assert_eq!(
-            pick_pending("def456", &ids).unwrap().as_deref(),
-            Some("def456")
-        );
-        assert_eq!(pick_pending("zzz", &ids).unwrap(), None);
-    }
-
-    #[test]
-    fn pick_pending_rejects_an_ambiguous_prefix() {
-        let ids = vec!["abc1".to_string(), "abc2".to_string()];
-        assert!(pick_pending("abc", &ids).is_err());
     }
 
     fn hit(line: i64, score: f32, timestamp_ms: Option<i64>) -> Hit {

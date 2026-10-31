@@ -26,7 +26,8 @@ use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::prelude::SessionContext;
 use gage_core::config::default_cache_root;
 use gage_core::uuid::new_uuid;
-use gage_query::write_yaml_capped;
+use gage_query::{ContextBuilder, write_yaml_capped};
+use gage_store::publish_root;
 use rmcp::ErrorData as McpError;
 use rmcp::handler::server::router::tool::ToolRoute;
 use rmcp::handler::server::tool::ToolCallContext;
@@ -34,6 +35,7 @@ use rmcp::model::{CallToolResult, JsonObject};
 use serde_json::json;
 
 use crate::server::GageServer;
+use crate::service::QueryConfig;
 use crate::tool::{
     MAX_DESCRIPTION_BYTES, ToolDef, build_tool_meta, description_byte_len, domain_error, success,
 };
@@ -81,23 +83,60 @@ fn handle(
                 None,
             ));
         };
-        execute(&config.context, &QueryCache::new(), request).await
+        let context = context_for(config, &request, &publish_root()).await?;
+        execute(&context, &QueryCache::new(), request).await
     })
 }
 
-/// One call: run new SQL, or read a page of a written result.
+/// The context `request` runs on: the configured one, or for a
+/// `publish` call a fresh one scoped to the pending publishes under
+/// `publish_root`, built on each call so the set is current. A
+/// `publish` call where the configuration names no store is refused.
+async fn context_for(
+    config: &QueryConfig,
+    request: &QueryRequest<'_>,
+    publish_root: &Path,
+) -> Result<Arc<SessionContext>, McpError> {
+    if !matches!(request, QueryRequest::PublishSql(_)) {
+        return Ok(Arc::clone(&config.context));
+    }
+    let Some(store) = &config.store else {
+        return Err(McpError::invalid_params(
+            "`publish` does not apply here: pending publish sessions are not readable in this \
+             context",
+            None,
+        ));
+    };
+    let context = ContextBuilder::new(Some(Arc::clone(store)))
+        .publish(publish_root)
+        .skip_system_cols()
+        .build()
+        .await;
+    Ok(Arc::new(context))
+}
+
+/// One call: run new SQL over the sessions in scope or over the
+/// pending publishes, or read a page of a written result.
 #[derive(Debug, PartialEq, Eq)]
 pub enum QueryRequest<'a> {
     Sql(&'a str),
+    PublishSql(&'a str),
     Page { cursor: &'a str, page: usize },
 }
 
 /// Exactly one of `sql` and `cursor` is given; `page` goes with
-/// `cursor` and defaults to 1.
+/// `cursor` and defaults to 1; `publish` goes with `sql`.
 pub fn parse_request(params: &JsonObject) -> Result<QueryRequest<'_>, McpError> {
     let sql = params.get("sql").and_then(|v| v.as_str());
     let cursor = params.get("cursor").and_then(|v| v.as_str());
     let page = params.get("page").and_then(|v| v.as_u64());
+    let publish = params.get("publish").and_then(|v| v.as_bool());
+    if publish.is_some() && sql.is_none() {
+        return Err(McpError::invalid_params(
+            "`publish` applies to `sql`, not `cursor`",
+            None,
+        ));
+    }
     match (sql, cursor) {
         (Some(_), Some(_)) => Err(McpError::invalid_params(
             "give `sql` or `cursor`, not both",
@@ -109,6 +148,7 @@ pub fn parse_request(params: &JsonObject) -> Result<QueryRequest<'_>, McpError> 
                 "`page` applies to `cursor`, not `sql`",
                 None,
             )),
+            None if publish == Some(true) => Ok(QueryRequest::PublishSql(sql)),
             None => Ok(QueryRequest::Sql(sql)),
         },
         (None, Some(cursor)) => match page {
@@ -144,7 +184,7 @@ async fn execute_with_cap(
 ) -> Result<CallToolResult, McpError> {
     cache.sweep();
     match request {
-        QueryRequest::Sql(sql) => {
+        QueryRequest::Sql(sql) | QueryRequest::PublishSql(sql) => {
             let df = match context.sql(sql).await {
                 Ok(df) => df,
                 Err(e) => return Ok(domain_error(format!("SQL error: {e}"))),
@@ -675,5 +715,99 @@ mod tests {
         assert_eq!(properties["sql"]["type"], "string");
         assert_eq!(properties["cursor"]["type"], "string");
         assert_eq!(properties["page"]["type"], "integer");
+        assert_eq!(properties["publish"]["type"], "boolean");
+    }
+
+    /// `publish` goes with `sql`: true selects the pending publishes,
+    /// false or absent the configured scope, and with a cursor it is
+    /// an invalid request.
+    #[test]
+    fn parse_request_reads_publish_with_sql() {
+        let object = |v: serde_json::Value| match v {
+            serde_json::Value::Object(o) => o,
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            parse_request(&object(json!({"sql": "SELECT 1", "publish": true}))).unwrap(),
+            QueryRequest::PublishSql("SELECT 1")
+        );
+        assert_eq!(
+            parse_request(&object(json!({"sql": "SELECT 1", "publish": false}))).unwrap(),
+            QueryRequest::Sql("SELECT 1")
+        );
+        let e = parse_request(&object(json!({"cursor": "c", "publish": true}))).unwrap_err();
+        assert_eq!(e.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+    }
+
+    /// A `publish` call runs on a fresh context over the pending
+    /// publishes, which has the session tables and no other store
+    /// table; any other call runs on the configured context. Without
+    /// a store the `publish` call is refused.
+    #[tokio::test]
+    async fn publish_calls_run_on_a_pending_scoped_context() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("store.git");
+        gage_store::init(&path).unwrap();
+        let store = Arc::new(std::sync::Mutex::new(
+            gage_store::Store::open(&path).unwrap(),
+        ));
+        let configured = Arc::new(context());
+        let config = QueryConfig {
+            context: Arc::clone(&configured),
+            store: Some(store),
+        };
+        let publish_root = dir.path().join("publish");
+
+        let same = context_for(&config, &QueryRequest::Sql("SELECT 1"), &publish_root)
+            .await
+            .unwrap();
+        assert!(Arc::ptr_eq(&same, &configured));
+
+        let scoped = context_for(
+            &config,
+            &QueryRequest::PublishSql("SELECT 1"),
+            &publish_root,
+        )
+        .await
+        .unwrap();
+        assert!(!Arc::ptr_eq(&scoped, &configured));
+        let names = |sql: &str| {
+            let scoped = Arc::clone(&scoped);
+            let sql = sql.to_string();
+            async move {
+                let batches = scoped.sql(&sql).await.unwrap().collect().await.unwrap();
+                batches.iter().map(|b| b.num_rows()).sum::<usize>()
+            }
+        };
+        assert_eq!(names("SELECT id FROM session").await, 0);
+        assert_eq!(
+            names("SELECT table_name FROM information_schema.tables WHERE table_name = 'note'")
+                .await,
+            0
+        );
+        assert_eq!(
+            names(
+                "SELECT table_name FROM information_schema.tables \
+                 WHERE table_name IN ('session', 'entry', 'message', 'tool_use', 'filtered')"
+            )
+            .await,
+            5
+        );
+
+        let without = QueryConfig {
+            context: configured,
+            store: None,
+        };
+        let refused = context_for(
+            &without,
+            &QueryRequest::PublishSql("SELECT 1"),
+            &publish_root,
+        )
+        .await
+        .map(|_| ());
+        let Err(e) = refused else {
+            panic!("a publish call without a store was accepted");
+        };
+        assert_eq!(e.code, rmcp::model::ErrorCode::INVALID_PARAMS);
     }
 }
