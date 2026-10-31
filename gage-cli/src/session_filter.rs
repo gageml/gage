@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use clap::Args;
+use cliclack as cli;
 use console::{Term, style, truncate_str};
 use datafusion::arrow::array::{Array, StringArray};
 use datafusion::prelude::SessionContext;
@@ -25,7 +26,7 @@ use gage_session::SourceOptions;
 use gage_store::{PendingPublish, SessionRecord, SessionStore, Store, StoreError};
 use rand::seq::SliceRandom;
 
-use crate::dialog;
+use crate::dialog::{self, DialogError};
 use crate::human::count;
 use crate::source;
 
@@ -119,6 +120,28 @@ impl fmt::Display for SessionSelectError {
 }
 
 impl std::error::Error for SessionSelectError {}
+
+impl SessionSelectError {
+    /// Fail a dialog with this error. The outro is one line: a single
+    /// lookup error is the outro itself, and several are logged one
+    /// per line first and counted in the outro.
+    pub fn into_dialog_error(self) -> DialogError {
+        match self {
+            Self::Lookup(errors) if errors.len() > 1 => {
+                for e in &errors {
+                    if let Err(e) = cli::log::error(e) {
+                        return e.into();
+                    }
+                }
+                DialogError::Failed(format!(
+                    "{} did not resolve",
+                    count(errors.len(), "session")
+                ))
+            }
+            other => DialogError::Failed(other.to_string()),
+        }
+    }
+}
 
 impl SessionFilterArgs {
     /// True when the caller supplied no filter axis — every field
@@ -577,9 +600,9 @@ mod tests {
     };
 
     use super::{
-        DIALOG_GUTTER, MIN_PREVIEW_WIDTH, PREVIEW_SESSIONS, RIGHT_MARGIN, SessionFilterArgs,
-        SessionLine, SessionSelect, SessionSelectError, preview_width, project_path_candidate,
-        resolve_project_slug, select_sessions, session_lines,
+        DIALOG_GUTTER, DialogError, MIN_PREVIEW_WIDTH, PREVIEW_SESSIONS, RIGHT_MARGIN,
+        SessionFilterArgs, SessionLine, SessionSelect, SessionSelectError, preview_width,
+        project_path_candidate, resolve_project_slug, select_sessions, session_lines,
     };
 
     fn attrs(title: Option<&str>) -> SessionAttrsRecord {
@@ -784,6 +807,30 @@ mod tests {
     #[test]
     fn relative_path_resolves_against_cwd() {
         assert_eq!(path("proj"), Path::new("/work/proj"));
+    }
+
+    #[test]
+    fn one_lookup_error_is_the_outro_and_several_are_counted() {
+        fn failed(e: SessionSelectError) -> String {
+            let DialogError::Failed(msg) = e.into_dialog_error() else {
+                panic!("a selection error fails the dialog");
+            };
+            msg
+        }
+        let lookup = |prefixes: &[&str]| {
+            SessionSelectError::Lookup(
+                prefixes
+                    .iter()
+                    .map(|p| format!("no native session matches {p}"))
+                    .collect(),
+            )
+        };
+        assert_eq!(failed(lookup(&["a"])), "no native session matches a");
+        assert_eq!(failed(lookup(&["a", "b"])), "2 sessions did not resolve");
+        assert_eq!(
+            failed(SessionSelectError::Setup("x: unreadable".to_string())),
+            "x: unreadable"
+        );
     }
 
     /// Write a one-message Claude session `id` under `project` in

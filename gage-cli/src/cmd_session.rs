@@ -42,8 +42,8 @@ use crate::dialog::{self, DialogError, DialogResult};
 use crate::error::CliError;
 use crate::human::{count, format_elapsed_ms};
 use crate::session_filter::{
-    FILTER_ARG_NAMES, SessionFilterArgs, SessionLine, SessionSelect, native_session_lines,
-    preview_sessions, select_sessions,
+    FILTER_ARG_NAMES, SessionFilterArgs, SessionLine, SessionSelect, SessionSelectError,
+    native_session_lines, preview_sessions, select_sessions,
 };
 use crate::size_limit::SizeLimitArgs;
 use crate::source;
@@ -806,7 +806,7 @@ async fn add_dialog(
             let selected =
                 select_sessions(SessionSelect::Stored(&store), &args.sessions, &args.filter)
                     .await
-                    .map_err(|e| DialogError::Failed(format!("{e}")))?;
+                    .map_err(SessionSelectError::into_dialog_error)?;
             if selected.is_empty() {
                 return Err(DialogError::Failed(
                     "No sessions matched the selection".to_string(),
@@ -835,7 +835,7 @@ async fn add_dialog(
                 &args.filter,
             )
             .await
-            .map_err(|e| DialogError::Failed(format!("{e}")))?;
+            .map_err(SessionSelectError::into_dialog_error)?;
             if selected.is_empty() {
                 return Err(DialogError::Failed(
                     "No sessions matched the selection".to_string(),

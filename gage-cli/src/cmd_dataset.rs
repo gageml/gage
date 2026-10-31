@@ -29,8 +29,8 @@ use crate::dialog::{self, DialogError, DialogResult};
 use crate::error::CliError;
 use crate::human::{count, format_elapsed_ms};
 use crate::session_filter::{
-    FILTER_ARG_NAMES, SessionFilterArgs, SessionSelect, native_session_lines, preview_sessions,
-    select_sessions,
+    FILTER_ARG_NAMES, SessionFilterArgs, SessionSelect, SessionSelectError, native_session_lines,
+    preview_sessions, select_sessions,
 };
 use crate::size_limit::SizeLimitArgs;
 use crate::source::SOURCE_HELP;
@@ -178,7 +178,7 @@ async fn add_dialog(args: &DatasetAddArgs, store: &Store) -> Result<DialogResult
             &args.filter,
         )
         .await
-        .map_err(|e| DialogError::Failed(format!("{e}")))?;
+        .map_err(SessionSelectError::into_dialog_error)?;
         dialog::step_value(
             "Source",
             crate::source::describe_source(driver.as_ref(), &spec),

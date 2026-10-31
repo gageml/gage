@@ -65,8 +65,8 @@ use crate::human::{count, format_duration, format_elapsed_ms};
 use crate::scanner_attach;
 use crate::scanner_spec::{self, ResolvedSpec};
 use crate::session_filter::{
-    FILTER_ARG_NAMES, SessionFilterArgs, SessionSelect, native_session_lines, preview_sessions,
-    select_sessions, stored_session_lines,
+    FILTER_ARG_NAMES, SessionFilterArgs, SessionSelect, SessionSelectError, native_session_lines,
+    preview_sessions, select_sessions, stored_session_lines,
 };
 use crate::source;
 use crate::style::{self as s, IdKind};
@@ -2079,7 +2079,7 @@ async fn resolve_dataset_plan(
     };
     let ids = select_sessions(select, &args.sessions, &args.filter)
         .await
-        .map_err(|e| DialogError::Failed(format!("{e}")))?;
+        .map_err(SessionSelectError::into_dialog_error)?;
     let selected = if args.stored {
         Selected::Stored { ids }
     } else {

@@ -128,12 +128,22 @@ pub struct AuthStatus {
 
 /// Return the parsed output of `claude auth status --json`.
 pub fn auth_status() -> Result<AuthStatus, PreflightError> {
-    let output = run_claude(&["auth", "status", "--json"])?;
-    serde_json::from_slice(&output.stdout).map_err(|e| {
-        PreflightError::Other(format!(
+    let args = ["auth", "status", "--json"];
+    let output = spawn_claude(&args)?;
+    parse_auth_status(&args, &output)
+}
+
+/// `claude auth status` exits 1 when logged out but still writes the
+/// status JSON to stdout, so the body is parsed before the exit status
+/// is consulted.
+fn parse_auth_status(args: &[&str], output: &Output) -> Result<AuthStatus, PreflightError> {
+    match serde_json::from_slice(&output.stdout) {
+        Ok(status) => Ok(status),
+        Err(e) if output.status.success() => Err(PreflightError::Other(format!(
             "Could not parse `claude auth status --json` output: {e}"
-        ))
-    })
+        ))),
+        Err(_) => Err(exit_error(args, output)),
+    }
 }
 
 /// Verify the user is logged in to Claude.
@@ -146,6 +156,14 @@ pub fn check_auth() -> Result<(), PreflightError> {
 }
 
 fn run_claude(args: &[&str]) -> Result<Output, PreflightError> {
+    let output = spawn_claude(args)?;
+    if !output.status.success() {
+        return Err(exit_error(args, &output));
+    }
+    Ok(output)
+}
+
+fn spawn_claude(args: &[&str]) -> Result<Output, PreflightError> {
     let bin = find_claude().map_err(|e| match e.kind() {
         io::ErrorKind::NotFound => PreflightError::Other(
             "The `claude` CLI was not found on PATH. Install Claude Code and try again."
@@ -153,16 +171,85 @@ fn run_claude(args: &[&str]) -> Result<Output, PreflightError> {
         ),
         _ => PreflightError::Other(format!("Locating `claude` failed: {e}")),
     })?;
-    let output = Command::new(&bin).args(args).output().map_err(|e| {
+    Command::new(&bin).args(args).output().map_err(|e| {
         PreflightError::Other(format!("Failed to run `claude {}`: {e}", args.join(" ")))
-    })?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(PreflightError::Other(format!(
-            "`claude {}` exited with {}: {stderr}",
-            args.join(" "),
-            output.status,
-        )));
+    })
+}
+
+/// The CLI reports some failures on stdout with an empty stderr, so
+/// stdout is the detail when stderr has nothing.
+fn exit_error(args: &[&str], output: &Output) -> PreflightError {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let detail = if stderr.is_empty() {
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    } else {
+        stderr
+    };
+    PreflightError::Other(format!(
+        "`claude {}` exited with {}: {detail}",
+        args.join(" "),
+        output.status,
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ARGS: &[&str] = &["auth", "status", "--json"];
+
+    fn sh(script: &str) -> Output {
+        Command::new("sh").arg("-c").arg(script).output().unwrap()
     }
-    Ok(output)
+
+    #[test]
+    fn auth_status_parses_logged_out_body_on_nonzero_exit() {
+        let output = sh(r#"echo '{"loggedIn": false, "authMethod": "none"}'; exit 1"#);
+        let status = parse_auth_status(ARGS, &output).unwrap();
+        assert!(!status.logged_in);
+        assert_eq!(status.auth_method.as_deref(), Some("none"));
+    }
+
+    #[test]
+    fn auth_status_parses_logged_in_body_on_zero_exit() {
+        let output = sh(r#"echo '{"loggedIn": true, "email": "a@b.c"}'"#);
+        let status = parse_auth_status(ARGS, &output).unwrap();
+        assert!(status.logged_in);
+        assert_eq!(status.email.as_deref(), Some("a@b.c"));
+    }
+
+    #[test]
+    fn auth_status_reports_parse_error_on_zero_exit() {
+        let output = sh("echo garbage");
+        let err = parse_auth_status(ARGS, &output).unwrap_err();
+        assert!(err.to_string().starts_with("Could not parse"), "{err}");
+    }
+
+    #[test]
+    fn auth_status_reports_exit_when_body_does_not_parse() {
+        let output = sh("echo garbage; exit 1");
+        let err = parse_auth_status(ARGS, &output).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "`claude auth status --json` exited with exit status: 1: garbage"
+        );
+    }
+
+    #[test]
+    fn exit_error_prefers_stderr() {
+        let output = sh("echo out; echo err >&2; exit 2");
+        assert_eq!(
+            exit_error(ARGS, &output).to_string(),
+            "`claude auth status --json` exited with exit status: 2: err"
+        );
+    }
+
+    #[test]
+    fn exit_error_falls_back_to_stdout_when_stderr_is_empty() {
+        let output = sh("echo out; exit 2");
+        assert_eq!(
+            exit_error(ARGS, &output).to_string(),
+            "`claude auth status --json` exited with exit status: 2: out"
+        );
+    }
 }
