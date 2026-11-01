@@ -23,7 +23,7 @@ use gage_registry::driver::DriverRegistry;
 use gage_session::Driver;
 use gage_session::is_system;
 use gage_store::url::{self, LineSelection};
-use gage_store::{FilteredKind, NoteEdit, NoteFull, NoteInput, NoteStore, NoteValue, Store};
+use gage_store::{ChangeKind, NoteEdit, NoteFull, NoteInput, NoteStore, NoteValue, Store};
 use ratatui::crossterm::terminal;
 use serde_json::Value;
 
@@ -281,7 +281,7 @@ impl Backend {
             .collect())
     }
 
-    /// The records of a stored session's `filtered.json`, in original
+    /// The records of a stored session's `changes.json`, in original
     /// line order; none for a session that is not a publish.
     async fn load_redactions(&self, session_id: &str) -> Result<Vec<Redaction>, Box<dyn Error>> {
         let sql = format!(
@@ -302,10 +302,10 @@ impl Backend {
             let authors = column::<StringArray>(batch, 7);
             for i in 0..batch.num_rows() {
                 let kind = match kinds.value(i) {
-                    "line" => FilteredKind::Line,
-                    "value" => FilteredKind::Value,
-                    "text" => FilteredKind::Text,
-                    "attr" => FilteredKind::Attr,
+                    "line" => ChangeKind::Line,
+                    "value" => ChangeKind::Value,
+                    "text" => ChangeKind::Text,
+                    "attr" => ChangeKind::Attr,
                     other => return Err(format!("unknown filtered kind {other:?}").into()),
                 };
                 let line_at = |col: &Int64Array| -> Result<Option<u32>, Box<dyn Error>> {
@@ -1022,8 +1022,8 @@ pub(crate) mod tests {
         let publish = PublishStore::with_root(&f.store, &publish_root);
         let pending = publish.init(&original).unwrap();
         std::fs::write(
-            publish.layout(&pending.id).filtered_file(),
-            r#"{"text": [[1, "/message/content", 6, 11, "pii", "filter:pii"]]}"#,
+            publish.layout(&pending.id).changes_file(),
+            r#"[["text", 1, "/message/content", 6, 11, "pii", "filter:pii"]]"#,
         )
         .unwrap();
 

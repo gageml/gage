@@ -4,7 +4,7 @@
 //! `publish/<session id>/`, named by the new session's object id.
 //! The directory holds the derived session's final tree layout:
 //! `attrs.json` with `origin`, the `files.d` content, and
-//! `filtered.json`. It is the same shape an added session's tree has,
+//! `changes.json`. It is the same shape an added session's tree has,
 //! so one decoder serves both the staged directory and a committed
 //! session, the way a scan directory mirrors a stored scan. Beside it,
 //! `publish/<session id>.publish.jsonc` is the publish definition: the
@@ -30,7 +30,7 @@ use crate::{SessionRecord, SessionStore, Store, StoreError};
 
 const PUBLISH_DIR: &str = "publish";
 const ATTRS_FILE: &str = "attrs.json";
-pub(crate) const FILTERED_FILE: &str = "filtered.json";
+pub(crate) const CHANGES_FILE: &str = "changes.json";
 const DEFINITION_SUFFIX: &str = ".publish.jsonc";
 
 /// One pending publish working tree, read from its staging directory.
@@ -41,7 +41,7 @@ pub struct PendingPublish {
     pub attrs: SessionAttrsRecord,
     pub root: PathBuf,
     /// UNIX time millis of the working tree's last change: the newest
-    /// mtime of the directory, `attrs.json`, and `filtered.json`. A
+    /// mtime of the directory, `attrs.json`, and `changes.json`. A
     /// rebuild rewrites the two files in place, which leaves the
     /// directory's own mtime alone, so the files are what move it.
     pub modified_ms: i64,
@@ -83,24 +83,24 @@ impl PublishDirLayout {
         self.root.join(FILES_TREE)
     }
 
-    pub fn filtered_file(&self) -> PathBuf {
-        self.root.join(FILTERED_FILE)
+    pub fn changes_file(&self) -> PathBuf {
+        self.root.join(CHANGES_FILE)
     }
 
-    /// The records of the staged `filtered.json`.
-    pub fn read_filtered(&self) -> Result<Vec<FilteredRecord>, StoreError> {
-        let bytes = fs::read(self.filtered_file()).map_err(StoreError::ReadContent)?;
-        parse_filtered(&bytes)
+    /// The records of the staged `changes.json`.
+    pub fn read_changes(&self) -> Result<Vec<ChangeRecord>, StoreError> {
+        let bytes = fs::read(self.changes_file()).map_err(StoreError::ReadContent)?;
+        parse_changes(&bytes)
     }
 }
 
-/// One rule of a session's `filtered.json`: what its publish applied
+/// One change of a session's `changes.json`: what its publish applied
 /// to the original. Every line number is the original's; the derived
 /// session's lines are renumbered around the dropped ones. Span
 /// offsets are positions in the published text.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FilteredRecord {
-    pub kind: FilteredKind,
+pub struct ChangeRecord {
+    pub kind: ChangeKind,
     /// The original line, 1-based: the first dropped line of a `Line`
     /// record, the line of a `Text` record. A `Value` or `Attr` record
     /// is on no line and carries 0.
@@ -121,7 +121,7 @@ pub struct FilteredRecord {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FilteredKind {
+pub enum ChangeKind {
     /// One or more lines were left out of the derived session.
     Line,
     /// Every value a JSONPath selects was left out of its entry.
@@ -133,65 +133,65 @@ pub enum FilteredKind {
     Attr,
 }
 
-impl FilteredKind {
+impl ChangeKind {
+    /// The tag that opens a record of this kind.
     pub fn as_str(self) -> &'static str {
         match self {
-            FilteredKind::Line => "line",
-            FilteredKind::Value => "value",
-            FilteredKind::Text => "text",
-            FilteredKind::Attr => "attr",
+            ChangeKind::Line => "line",
+            ChangeKind::Value => "value",
+            ChangeKind::Text => "text",
+            ChangeKind::Attr => "attr",
+        }
+    }
+
+    /// The kind a record's tag names; `None` for a tag this build does
+    /// not know.
+    fn from_tag(tag: &str) -> Option<ChangeKind> {
+        match tag {
+            "line" => Some(ChangeKind::Line),
+            "value" => Some(ChangeKind::Value),
+            "text" => Some(ChangeKind::Text),
+            "attr" => Some(ChangeKind::Attr),
+            _ => None,
         }
     }
 }
 
-/// The lists of `filtered.json` in file order, each holding the
-/// records of one kind.
-const FILTERED_LISTS: [(&str, FilteredKind); 4] = [
-    ("lines", FilteredKind::Line),
-    ("values", FilteredKind::Value),
-    ("text", FilteredKind::Text),
-    ("attrs", FilteredKind::Attr),
-];
-
-/// Decode the `filtered.json` text: an object whose `lines`, `values`,
-/// `text`, and `attrs` lists hold the records of each kind as
-/// `[line or [line, line_end], reason, author]`,
-/// `[path, reason, author]`,
-/// `[line, pointer, span_start, span_end, reason, author]`, and
-/// `[name, reason, author]`. A missing list is empty, and a key this
-/// build does not know is passed over. Records come back list by list
-/// in file order.
-pub fn parse_filtered(bytes: &[u8]) -> Result<Vec<FilteredRecord>, StoreError> {
+/// Decode the `changes.json` text: a list of records, each a list
+/// whose first element names its kind:
+/// `["line", line or [line, line_end], reason, author]`,
+/// `["value", path, reason, author]`,
+/// `["text", line, pointer, span_start, span_end, reason, author]`,
+/// and `["attr", name, reason, author]`. A record whose tag this build
+/// does not know is passed over. Records come back in file order.
+pub fn parse_changes(bytes: &[u8]) -> Result<Vec<ChangeRecord>, StoreError> {
     let value: Value = serde_json::from_slice(bytes)
-        .map_err(|e| StoreError::Parse(format!("{FILTERED_FILE}: {e}")))?;
-    let Some(object) = value.as_object() else {
+        .map_err(|e| StoreError::Parse(format!("{CHANGES_FILE}: {e}")))?;
+    let Some(records) = value.as_array() else {
         return Err(StoreError::Parse(format!(
-            "{FILTERED_FILE}: expected an object of record lists"
+            "{CHANGES_FILE}: expected a list of records"
         )));
     };
     let mut out = Vec::new();
-    for (key, kind) in FILTERED_LISTS {
-        let Some(list) = object.get(key) else {
+    for (i, record) in records.iter().enumerate() {
+        let at = |e: String| StoreError::Parse(format!("{CHANGES_FILE} record {i}: {e}"));
+        let fields = record
+            .as_array()
+            .ok_or_else(|| at("expected a list".to_string()))?;
+        let tag = fields
+            .first()
+            .and_then(Value::as_str)
+            .ok_or_else(|| at("field 0 is not a kind tag".to_string()))?;
+        let Some(kind) = ChangeKind::from_tag(tag) else {
             continue;
         };
-        let Some(records) = list.as_array() else {
-            return Err(StoreError::Parse(format!(
-                "{FILTERED_FILE}: {key} is not an array"
-            )));
-        };
-        for (i, record) in records.iter().enumerate() {
-            out.push(parse_filtered_record(kind, record).map_err(|e| {
-                StoreError::Parse(format!("{FILTERED_FILE} {key} record {i}: {e}"))
-            })?);
-        }
+        out.push(parse_change(kind, fields).map_err(at)?);
     }
     Ok(out)
 }
 
-fn parse_filtered_record(kind: FilteredKind, record: &Value) -> Result<FilteredRecord, String> {
-    let fields = record
-        .as_array()
-        .ok_or_else(|| "expected an array".to_string())?;
+/// Decode the fields of one record of `kind`, tag included.
+fn parse_change(kind: ChangeKind, fields: &[Value]) -> Result<ChangeRecord, String> {
     let field = |i: usize| fields.get(i).ok_or_else(|| format!("missing field {i}"));
     let text = |i: usize| {
         field(i)?
@@ -218,9 +218,9 @@ fn parse_filtered_record(kind: FilteredKind, record: &Value) -> Result<FilteredR
         }
     };
     let record = match kind {
-        FilteredKind::Line => {
-            expect(3)?;
-            let (line, line_end) = match field(0)? {
+        ChangeKind::Line => {
+            expect(4)?;
+            let (line, line_end) = match field(1)? {
                 Value::Array(pair) => match pair.as_slice() {
                     [start, end] => {
                         let line = line_of(start, "range start")?;
@@ -230,104 +230,91 @@ fn parse_filtered_record(kind: FilteredKind, record: &Value) -> Result<FilteredR
                         }
                         (line, line_end)
                     }
-                    _ => return Err("field 0 is not a line or a range".to_string()),
+                    _ => return Err("field 1 is not a line or a range".to_string()),
                 },
                 single => {
-                    let line = line_of(single, "field 0")?;
+                    let line = line_of(single, "field 1")?;
                     (line, line)
                 }
             };
-            FilteredRecord {
+            ChangeRecord {
                 kind,
                 line,
                 line_end: Some(line_end),
                 reference: None,
                 span_start: None,
                 span_end: None,
-                reason: text(1)?,
-                author: text(2)?,
+                reason: text(2)?,
+                author: text(3)?,
             }
         }
-        FilteredKind::Value | FilteredKind::Attr => {
-            expect(3)?;
-            FilteredRecord {
+        ChangeKind::Value | ChangeKind::Attr => {
+            expect(4)?;
+            ChangeRecord {
                 kind,
                 line: 0,
                 line_end: None,
-                reference: Some(text(0)?),
+                reference: Some(text(1)?),
                 span_start: None,
                 span_end: None,
-                reason: text(1)?,
-                author: text(2)?,
+                reason: text(2)?,
+                author: text(3)?,
             }
         }
-        FilteredKind::Text => {
-            expect(6)?;
-            let (span_start, span_end) = (offset(2)?, offset(3)?);
+        ChangeKind::Text => {
+            expect(7)?;
+            let (span_start, span_end) = (offset(3)?, offset(4)?);
             if span_end < span_start {
                 return Err("span end is before its start".to_string());
             }
-            FilteredRecord {
+            ChangeRecord {
                 kind,
-                line: line_of(field(0)?, "field 0")?,
+                line: line_of(field(1)?, "field 1")?,
                 line_end: None,
-                reference: Some(text(1)?),
+                reference: Some(text(2)?),
                 span_start: Some(span_start),
                 span_end: Some(span_end),
-                reason: text(4)?,
-                author: text(5)?,
+                reason: text(5)?,
+                author: text(6)?,
             }
         }
     };
     Ok(record)
 }
 
-/// Encode `records` as the `filtered.json` text: each list in file
-/// order with one record per line, in the order the records are
-/// given, so the file reads as the design shows it.
-pub fn format_filtered(records: &[FilteredRecord]) -> String {
-    let mut out = String::from("{\n");
-    for (n, (key, kind)) in FILTERED_LISTS.iter().enumerate() {
-        let of_kind: Vec<Value> = records
-            .iter()
-            .filter(|r| r.kind == *kind)
-            .map(filtered_value)
-            .collect();
-        out.push_str(&format!("  \"{key}\": ["));
-        for (i, value) in of_kind.iter().enumerate() {
-            out.push_str("\n    ");
-            out.push_str(&value.to_string());
-            if i + 1 < of_kind.len() {
-                out.push(',');
-            } else {
-                out.push_str("\n  ");
-            }
-        }
-        out.push(']');
-        out.push_str(if n + 1 < FILTERED_LISTS.len() {
-            ",\n"
+/// Encode `records` as the `changes.json` text: one record per line in
+/// the order the records are given.
+pub fn format_changes(records: &[ChangeRecord]) -> String {
+    let mut out = String::from("[");
+    for (i, record) in records.iter().enumerate() {
+        out.push_str("\n  ");
+        out.push_str(&change_value(record).to_string());
+        if i + 1 < records.len() {
+            out.push(',');
         } else {
-            "\n"
-        });
+            out.push('\n');
+        }
     }
-    out.push_str("}\n");
+    out.push_str("]\n");
     out
 }
 
-/// One record as its list holds it.
-fn filtered_value(r: &FilteredRecord) -> Value {
+/// One record as the list holds it, opened by its kind's tag.
+fn change_value(r: &ChangeRecord) -> Value {
+    let tag = r.kind.as_str();
     match r.kind {
-        FilteredKind::Line => {
+        ChangeKind::Line => {
             let end = r.line_end.unwrap_or(r.line);
             let lines = if end == r.line {
                 json!(r.line)
             } else {
                 json!([r.line, end])
             };
-            json!([lines, r.reason, r.author])
+            json!([tag, lines, r.reason, r.author])
         }
-        FilteredKind::Value | FilteredKind::Attr => json!([r.reference, r.reason, r.author]),
-        FilteredKind::Text => json!([
+        ChangeKind::Value | ChangeKind::Attr => json!([tag, r.reference, r.reason, r.author]),
+        ChangeKind::Text => json!([
+            tag,
             r.line,
             r.reference,
             r.span_start,
@@ -387,7 +374,7 @@ impl<'a> PublishStore<'a> {
     /// Start a publish of `original`, a stored session. Generates the
     /// new session id, creates the staging directory, copies
     /// `original`'s content into `files.d`, writes `attrs.json` with
-    /// `origin` naming `original` and an empty `filtered.json`.
+    /// `origin` naming `original` and an empty `changes.json`.
     /// Returns the new id. The definition beside the directory is the
     /// publish engine's to write. No store object is written.
     pub fn init(&self, original: &SessionRecord) -> Result<PublishInit, StoreError> {
@@ -432,7 +419,7 @@ impl<'a> PublishStore<'a> {
             serde_json::to_vec(&value).map_err(|e| StoreError::Parse(format!("{e}")))?;
         attrs_bytes.push(b'\n');
         fs::write(layout.attrs_file(), &attrs_bytes).map_err(StoreError::ReadContent)?;
-        fs::write(layout.filtered_file(), format_filtered(&[])).map_err(StoreError::ReadContent)?;
+        fs::write(layout.changes_file(), format_changes(&[])).map_err(StoreError::ReadContent)?;
 
         Ok(PublishInit { id, origin })
     }
@@ -466,7 +453,7 @@ impl<'a> PublishStore<'a> {
 
     /// Commit the staged directory of the pending publish `id` as a
     /// new session object, as it stands: `attrs.json` as the attrs,
-    /// `filtered.json` as a root blob, `files.d` as the content
+    /// `changes.json` as a root blob, `files.d` as the content
     /// subtree. The object's ref must not exist. The staging
     /// directory and the definition are deleted afterward. Returns the
     /// commit SHA. Nothing in the staged content is checked here; the
@@ -487,7 +474,7 @@ impl<'a> PublishStore<'a> {
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| StoreError::Parse(format!("publish attrs {id}: no origin")))?
             .to_string();
-        let filtered = read(&layout.filtered_file())?;
+        let changes = read(&layout.changes_file())?;
         let files_tree =
             import_opaque_tree(self.store.path(), &layout.files_dir())?.ok_or_else(|| {
                 StoreError::Parse(format!(
@@ -500,7 +487,7 @@ impl<'a> PublishStore<'a> {
             attrs: Some(attrs),
             ..ObjectTree::default()
         };
-        tree.blobs.insert(FILTERED_FILE.to_string(), filtered);
+        tree.blobs.insert(CHANGES_FILE.to_string(), changes);
         tree.subtrees.insert(FILES_TREE.to_string(), files_tree);
         let message = format!("session publish: {origin}");
         let commit_sha = self
@@ -561,7 +548,7 @@ impl<'a> PublishStore<'a> {
             let Some(id) = layout.id().map(String::from) else {
                 continue;
             };
-            let modified_ms = [dir.clone(), layout.attrs_file(), layout.filtered_file()]
+            let modified_ms = [dir.clone(), layout.attrs_file(), layout.changes_file()]
                 .iter()
                 .map(|p| mtime_ms(p))
                 .max()
@@ -593,7 +580,7 @@ mod tests {
     use super::*;
     use crate::test_support::open_store;
 
-    /// A rebuild rewrites `filtered.json` in place without touching the
+    /// A rebuild rewrites `changes.json` in place without touching the
     /// directory, so the listing's `modified_ms` follows the file.
     #[test]
     fn modified_follows_the_newest_file_in_the_working_tree() {
@@ -611,11 +598,11 @@ mod tests {
         let before = publish.list().unwrap()[0].modified_ms;
 
         let later = std::time::SystemTime::now() + std::time::Duration::from_secs(90);
-        let filtered = fs::File::options()
+        let changes = fs::File::options()
             .write(true)
-            .open(publish.layout(&init.id).filtered_file())
+            .open(publish.layout(&init.id).changes_file())
             .unwrap();
-        filtered.set_modified(later).unwrap();
+        changes.set_modified(later).unwrap();
 
         let after = publish.list().unwrap()[0].modified_ms;
         assert!(after > before, "{before} -> {after}");
@@ -658,10 +645,7 @@ mod tests {
         assert_eq!(attrs.native_mtime, 0);
         assert_eq!(attrs.native_size, 0);
 
-        assert_eq!(
-            fs::read_to_string(layout.filtered_file()).unwrap(),
-            "{\n  \"lines\": [],\n  \"values\": [],\n  \"text\": [],\n  \"attrs\": []\n}\n"
-        );
+        assert_eq!(fs::read_to_string(layout.changes_file()).unwrap(), "[]\n");
         let staged = fs::read_to_string(layout.files_dir().join("session.jsonl")).unwrap();
         assert_eq!(staged, "hello\nworld\n");
     }
@@ -732,7 +716,7 @@ mod tests {
     }
 
     /// `apply` commits the staged directory as it stands, with
-    /// `filtered.json` as a root blob beside the session's usual
+    /// `changes.json` as a root blob beside the session's usual
     /// entries, and deletes the staging directory and the definition.
     /// A second apply is `ObjectNotFound`.
     #[test]
@@ -751,8 +735,8 @@ mod tests {
         let init = publish.init(&original).unwrap();
         let layout = publish.layout(&init.id);
         fs::write(layout.files_dir().join("session.jsonl"), "hello\n").unwrap();
-        let filtered = "{\n  \"lines\": [\n    [2,\"scope\",\"user:test\"]\n  ]\n}\n";
-        fs::write(layout.filtered_file(), filtered).unwrap();
+        let changes = "[\n  [\"line\",2,\"scope\",\"user:test\"]\n]\n";
+        fs::write(layout.changes_file(), changes).unwrap();
         fs::write(publish.definition_file(&init.id), b"{}\n").unwrap();
         let staged_attrs = fs::read_to_string(layout.attrs_file()).unwrap();
 
@@ -768,9 +752,9 @@ mod tests {
             listing.lines().collect::<Vec<_>>(),
             vec![
                 "attrs.json",
+                "changes.json",
                 "created",
                 "files.d",
-                "filtered.json",
                 "id",
                 "modified",
                 "type"
@@ -785,7 +769,7 @@ mod tests {
         };
         assert_eq!(cat("type"), "gage::session 1\n");
         assert_eq!(cat("attrs.json"), staged_attrs);
-        assert_eq!(cat("filtered.json"), filtered);
+        assert_eq!(cat("changes.json"), changes);
         assert_eq!(cat("files.d/session.jsonl"), "hello\n");
 
         let published = SessionStore::from(&store).at_commit(&commit).unwrap();
@@ -842,32 +826,35 @@ mod tests {
         }
     }
 
-    /// The record parser reads every list with its fields in the
-    /// positions the design gives them, a missing list is empty, and a
-    /// malformed record is named by its list and position.
+    /// The record parser reads every kind with its fields in the
+    /// positions the design gives them, in file order, a record with an
+    /// unknown tag is passed over, and a malformed record is named by
+    /// its position.
     #[test]
-    fn parse_filtered_reads_every_record_kind() {
+    fn parse_changes_reads_every_record_kind() {
         let text = concat!(
-            "{\n",
-            r#"  "lines": [[[1, 4], "scope", "session:abc"], [7, "scope", "user:t"]],"#,
+            "[\n",
+            r#"  ["line", [1, 4], "scope", "session:abc"],"#,
             "\n",
-            r#"  "values": [["$.cwd", "system", "filter:system"]],"#,
+            r#"  ["line", 7, "scope", "user:t"],"#,
             "\n",
-            r#"  "text": [[5, "/message/content", 4, 14, "pii", "filter:pii"]],"#,
+            r#"  ["value", "$.cwd", "system", "filter:system"],"#,
             "\n",
-            r#"  "attrs": [["project", "system", "filter:system"]],"#,
+            r#"  ["text", 5, "/message/content", 4, 14, "pii", "filter:pii"],"#,
             "\n",
-            r#"  "later": 1"#,
-            "\n}\n",
+            r#"  ["attr", "project", "system", "filter:system"],"#,
+            "\n",
+            r#"  ["later", 1]"#,
+            "\n]\n",
         );
-        let records = parse_filtered(text.as_bytes()).unwrap();
+        let records = parse_changes(text.as_bytes()).unwrap();
         let record =
             |kind, line, line_end, reference: Option<&str>, span, reason: &str, author: &str| {
                 let (span_start, span_end) = match span {
                     Some((start, end)) => (Some(start), Some(end)),
                     None => (None, None),
                 };
-                FilteredRecord {
+                ChangeRecord {
                     kind,
                     line,
                     line_end,
@@ -882,7 +869,7 @@ mod tests {
             records,
             [
                 record(
-                    FilteredKind::Line,
+                    ChangeKind::Line,
                     1,
                     Some(4),
                     None,
@@ -890,17 +877,9 @@ mod tests {
                     "scope",
                     "session:abc"
                 ),
+                record(ChangeKind::Line, 7, Some(7), None, None, "scope", "user:t"),
                 record(
-                    FilteredKind::Line,
-                    7,
-                    Some(7),
-                    None,
-                    None,
-                    "scope",
-                    "user:t"
-                ),
-                record(
-                    FilteredKind::Value,
+                    ChangeKind::Value,
                     0,
                     None,
                     Some("$.cwd"),
@@ -909,7 +888,7 @@ mod tests {
                     "filter:system"
                 ),
                 record(
-                    FilteredKind::Text,
+                    ChangeKind::Text,
                     5,
                     None,
                     Some("/message/content"),
@@ -918,7 +897,7 @@ mod tests {
                     "filter:pii"
                 ),
                 record(
-                    FilteredKind::Attr,
+                    ChangeKind::Attr,
                     0,
                     None,
                     Some("project"),
@@ -928,42 +907,48 @@ mod tests {
                 ),
             ]
         );
-        assert!(parse_filtered(b"{}\n").unwrap().is_empty());
+        assert!(parse_changes(b"[]\n").unwrap().is_empty());
         assert!(
-            parse_filtered(format_filtered(&[]).as_bytes())
+            parse_changes(format_changes(&[]).as_bytes())
                 .unwrap()
                 .is_empty()
         );
         assert_eq!(
-            parse_filtered(format_filtered(&records).as_bytes()).unwrap(),
+            parse_changes(format_changes(&records).as_bytes()).unwrap(),
             records
         );
 
-        let bad = parse_filtered(br#"{"lines": [[1, "scope", "a"]], "text": [[2, "/p", "x"]]}"#)
-            .unwrap_err();
+        let bad =
+            parse_changes(br#"[["line", 1, "scope", "a"], ["text", 2, "/p", "x"]]"#).unwrap_err();
         assert!(
-            matches!(bad, StoreError::Parse(ref m) if m.contains("text record 0") && m.contains("expected 6 fields")),
+            matches!(bad, StoreError::Parse(ref m) if m.contains("record 1") && m.contains("expected 7 fields")),
             "{bad}"
         );
-        let reversed = parse_filtered(br#"{"lines": [[[4, 1], "scope", "a"]]}"#).unwrap_err();
+        let reversed = parse_changes(br#"[["line", [4, 1], "scope", "a"]]"#).unwrap_err();
         assert!(
             matches!(reversed, StoreError::Parse(ref m) if m.contains("before its start")),
             "{reversed}"
         );
-        let array = parse_filtered(b"[]\n").unwrap_err();
+        let untagged = parse_changes(br#"[[1, "scope", "a"]]"#).unwrap_err();
         assert!(
-            matches!(array, StoreError::Parse(ref m) if m.contains("expected an object")),
-            "{array}"
+            matches!(untagged, StoreError::Parse(ref m) if m.contains("record 0") && m.contains("not a kind tag")),
+            "{untagged}"
+        );
+        let object = parse_changes(b"{}\n").unwrap_err();
+        assert!(
+            matches!(object, StoreError::Parse(ref m) if m.contains("expected a list")),
+            "{object}"
         );
     }
 
-    /// The writer puts one record per line under its list, and a
-    /// single dropped line is a bare number where a run is a pair.
+    /// The writer puts one record per line in the order given, each
+    /// opened by its tag, and a single dropped line is a bare number
+    /// where a run is a pair.
     #[test]
-    fn format_filtered_writes_one_record_per_line() {
+    fn format_changes_writes_one_record_per_line() {
         let records = [
-            FilteredRecord {
-                kind: FilteredKind::Line,
+            ChangeRecord {
+                kind: ChangeKind::Line,
                 line: 2,
                 line_end: Some(2),
                 reference: None,
@@ -972,8 +957,8 @@ mod tests {
                 reason: "scope".into(),
                 author: "user:t".into(),
             },
-            FilteredRecord {
-                kind: FilteredKind::Line,
+            ChangeRecord {
+                kind: ChangeKind::Line,
                 line: 4,
                 line_end: Some(6),
                 reference: None,
@@ -982,8 +967,8 @@ mod tests {
                 reason: "scope".into(),
                 author: "user:t".into(),
             },
-            FilteredRecord {
-                kind: FilteredKind::Text,
+            ChangeRecord {
+                kind: ChangeKind::Text,
                 line: 1,
                 line_end: None,
                 reference: Some("/message/content".into()),
@@ -994,27 +979,22 @@ mod tests {
             },
         ];
         assert_eq!(
-            format_filtered(&records),
+            format_changes(&records),
             concat!(
-                "{\n",
-                "  \"lines\": [\n",
-                "    [2,\"scope\",\"user:t\"],\n",
-                "    [[4,6],\"scope\",\"user:t\"]\n",
-                "  ],\n",
-                "  \"values\": [],\n",
-                "  \"text\": [\n",
-                "    [1,\"/message/content\",6,16,\"pii\",\"filter:pii\"]\n",
-                "  ],\n",
-                "  \"attrs\": []\n",
-                "}\n",
+                "[\n",
+                "  [\"line\",2,\"scope\",\"user:t\"],\n",
+                "  [\"line\",[4,6],\"scope\",\"user:t\"],\n",
+                "  [\"text\",1,\"/message/content\",6,16,\"pii\",\"filter:pii\"]\n",
+                "]\n",
             )
         );
+        assert_eq!(format_changes(&[]), "[]\n");
     }
 
     /// A committed publish serves its records through the session
     /// store; a session added from a native source has none.
     #[test]
-    fn filtered_reads_the_committed_blob() {
+    fn changes_reads_the_committed_blob() {
         let tmp = tempfile::tempdir().unwrap();
         let (store, _fsck) = open_store(tmp.path());
         let mut session = crate::session::tests::fake("s1", &[("session.jsonl", "a\nb\nc\n")]);
@@ -1029,22 +1009,22 @@ mod tests {
         let layout = publish.layout(&init.id);
         fs::write(layout.files_dir().join("session.jsonl"), "a\nc\n").unwrap();
         fs::write(
-            layout.filtered_file(),
-            r#"{"lines": [[2, "scope", "user:t"]], "text": [[3, "/text", 0, 10, "pii", "filter:pii"]]}"#,
+            layout.changes_file(),
+            r#"[["line", 2, "scope", "user:t"], ["text", 3, "/text", 0, 10, "pii", "filter:pii"]]"#,
         )
         .unwrap();
-        let staged = layout.read_filtered().unwrap();
+        let staged = layout.read_changes().unwrap();
         assert_eq!(staged.len(), 2);
 
         let commit = publish.apply(&init.id).unwrap();
-        let committed = SessionStore::from(&store).filtered(&commit).unwrap();
+        let committed = SessionStore::from(&store).changes(&commit).unwrap();
         assert_eq!(committed, staged);
-        assert_eq!(committed[0].kind, FilteredKind::Line);
+        assert_eq!(committed[0].kind, ChangeKind::Line);
         assert_eq!((committed[0].line, committed[0].line_end), (2, Some(2)));
         assert_eq!(committed[1].reference.as_deref(), Some("/text"));
 
         let none = SessionStore::from(&store)
-            .filtered(&outcome.commit_sha)
+            .changes(&outcome.commit_sha)
             .unwrap();
         assert!(none.is_empty());
     }

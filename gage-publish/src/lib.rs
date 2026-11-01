@@ -5,7 +5,7 @@
 //! gage-store stages the directory and knows where the definition file
 //! lives; this crate reads and writes the definition, expands it to
 //! instances over the original's text values, and writes the staged
-//! content and `filtered.json` through the session's driver. The
+//! content and `changes.json` through the session's driver. The
 //! definition is edited by hand, and a refresh rebuilds the staged
 //! session from the original plus the full definition. The original
 //! is named by the staged `attrs.json`.

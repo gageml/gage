@@ -13,7 +13,7 @@
 //! ([`scope`]), and the driver that wrote each session deserializes
 //! its bytes into normalized rows the core turns into batches
 //! ([`rows`], [`stored_rows`]). `filtered` is the records of a
-//! published session's `filtered.json`, over the same session set
+//! published session's `changes.json`, over the same session set
 //! ([`filtered`]).
 //! `note` is one row per live note object, from
 //! [`gage_store::StoredNoteTable`]. `issue` is one row per live issue
@@ -1151,7 +1151,7 @@ mod tests {
         assert_eq!(native_rows, ["Edit", "Read"]);
     }
 
-    /// `filtered` reads a published session's `filtered.json`: one
+    /// `filtered` reads a published session's `changes.json`: one
     /// row per record with the record's fields in the table's columns,
     /// under the scope's session filter and the `line` filter. The
     /// original session has no rows.
@@ -1201,13 +1201,13 @@ mod tests {
                 .collect();
             std::fs::write(&staged, format!("{}\n{}\n", lines[0], lines[2])).unwrap();
             std::fs::write(
-                layout.filtered_file(),
+                layout.changes_file(),
                 concat!(
-                    "{\n",
-                    r#"  "lines": [[2, "scope", "user:t"]],"#,
+                    "[\n",
+                    r#"  ["line", 2, "scope", "user:t"],"#,
                     "\n",
-                    r#"  "text": [[1, "/message/content", 6, 16, "pii", "filter:pii"]]"#,
-                    "\n}\n",
+                    r#"  ["text", 1, "/message/content", 6, 16, "pii", "filter:pii"]"#,
+                    "\n]\n",
                 ),
             )
             .unwrap();

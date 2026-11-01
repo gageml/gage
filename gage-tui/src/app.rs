@@ -12,7 +12,7 @@ use std::io;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use gage_store::{FilteredKind, NoteValue};
+use gage_store::{ChangeKind, NoteValue};
 use ratatui::DefaultTerminal;
 use ratatui::Frame;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -1706,13 +1706,13 @@ fn draw_dropped(frame: &mut Frame, doc: &Document, dropped: &Dropped, area: Rect
 fn redaction_line(r: &Redaction) -> Line<'static> {
     let reference = r.reference.clone().unwrap_or_default();
     let location = match r.kind {
-        FilteredKind::Line => format!("lines {}", line_range(r.line, r.line_end.unwrap_or(r.line))),
-        FilteredKind::Text => match (r.span_start, r.span_end) {
+        ChangeKind::Line => format!("lines {}", line_range(r.line, r.line_end.unwrap_or(r.line))),
+        ChangeKind::Text => match (r.span_start, r.span_end) {
             (Some(start), Some(end)) => format!("{reference} {start}-{end}"),
             _ => reference,
         },
-        FilteredKind::Value => format!("values {reference}"),
-        FilteredKind::Attr => format!("attr {reference}"),
+        ChangeKind::Value => format!("values {reference}"),
+        ChangeKind::Attr => format!("attr {reference}"),
     };
     Line::from(vec![
         Span::raw(location),
@@ -2150,7 +2150,7 @@ mod tests {
         doc.entries[0].message_text = Some("hello [REDACTED]".into());
         doc.redactions = vec![
             Redaction {
-                kind: FilteredKind::Text,
+                kind: ChangeKind::Text,
                 line: 1,
                 line_end: None,
                 reference: Some("/message/content".into()),
@@ -2160,7 +2160,7 @@ mod tests {
                 author: "filter:pii".into(),
             },
             Redaction {
-                kind: FilteredKind::Line,
+                kind: ChangeKind::Line,
                 line: 2,
                 line_end: Some(3),
                 reference: None,

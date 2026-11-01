@@ -119,7 +119,7 @@ async fn publish_scope_serves_pending_publishes_in_the_session_tables() {
     .await;
     assert_eq!(tools, ["Bash"], "tool_use");
 
-    // A rebuild rewrites the staged content and `filtered.json` in
+    // A rebuild rewrites the staged content and `changes.json` in
     // place. The row cache keys a pending session by its working tree's
     // modified time, so the same context serves the new content on the
     // next query, which is what the session view's reload relies on.
@@ -139,14 +139,14 @@ async fn publish_scope_serves_pending_publishes_in_the_session_tables() {
         .replace("hello there", "hello [REDACTED]");
     std::fs::write(&staged, rewritten).unwrap();
     std::fs::write(
-        layout.filtered_file(),
-        r#"{"text": [[1, "/message/content", 6, 16, "pii", "filter:pii"]]}"#,
+        layout.changes_file(),
+        r#"[["text", 1, "/message/content", 6, 16, "pii", "filter:pii"]]"#,
     )
     .unwrap();
     let later = std::time::SystemTime::now() + std::time::Duration::from_secs(90);
     std::fs::File::options()
         .write(true)
-        .open(layout.filtered_file())
+        .open(layout.changes_file())
         .unwrap()
         .set_modified(later)
         .unwrap();

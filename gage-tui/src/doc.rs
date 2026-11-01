@@ -5,7 +5,7 @@
 //! plus a `yaml()` serializer. The two follow the same pattern so the body
 //! pane renders them through the same highlighter path.
 
-use gage_store::{FilteredKind, NoteValue};
+use gage_store::{ChangeKind, NoteValue};
 use serde_json::Value;
 
 pub struct Document {
@@ -19,17 +19,17 @@ pub struct Document {
     /// yields them, which is the order of the calls in the session
     pub tool_uses: Vec<ToolUse>,
     pub notes: Vec<Note>,
-    /// The records of a published session's `filtered.json`, in
+    /// The records of a published session's `changes.json`, in
     /// original line order; empty for a session that is not a publish
     pub redactions: Vec<Redaction>,
 }
 
-/// One record of a published session's `filtered.json`. Its lines
+/// One record of a published session's `changes.json`. Its lines
 /// are the original session's; [`Document::original_line`] maps an
 /// entry of the derived session back to them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Redaction {
-    pub kind: FilteredKind,
+    pub kind: ChangeKind,
     pub line: u32,
     pub line_end: Option<u32>,
     pub reference: Option<String>,
@@ -43,8 +43,8 @@ impl Redaction {
     /// The original lines a `Line` record dropped, inclusive.
     fn dropped_lines(&self) -> Option<(u32, u32)> {
         match self.kind {
-            FilteredKind::Line => Some((self.line, self.line_end.unwrap_or(self.line))),
-            FilteredKind::Value | FilteredKind::Text | FilteredKind::Attr => None,
+            ChangeKind::Line => Some((self.line, self.line_end.unwrap_or(self.line))),
+            ChangeKind::Value | ChangeKind::Text | ChangeKind::Attr => None,
         }
     }
 }
@@ -122,7 +122,7 @@ impl Document {
         };
         self.redactions
             .iter()
-            .filter(|r| r.kind == FilteredKind::Text && r.line == line)
+            .filter(|r| r.kind == ChangeKind::Text && r.line == line)
             .collect()
     }
 
@@ -328,14 +328,14 @@ mod tests {
 
     use super::*;
 
-    fn redaction(kind: FilteredKind, line: u32, line_end: Option<u32>) -> Redaction {
+    fn redaction(kind: ChangeKind, line: u32, line_end: Option<u32>) -> Redaction {
         Redaction {
             kind,
             line,
             line_end,
-            reference: (kind != FilteredKind::Line).then(|| "/message/content".to_string()),
-            span_start: (kind == FilteredKind::Text).then_some(0),
-            span_end: (kind == FilteredKind::Text).then_some(10),
+            reference: (kind != ChangeKind::Line).then(|| "/message/content".to_string()),
+            span_start: (kind == ChangeKind::Text).then_some(0),
+            span_end: (kind == ChangeKind::Text).then_some(10),
             reason: "pii".to_string(),
             author: "filter:pii".to_string(),
         }
@@ -365,14 +365,14 @@ mod tests {
             tool_uses: Vec::new(),
             notes: Vec::new(),
             redactions: vec![
-                redaction(FilteredKind::Text, 1, None),
-                redaction(FilteredKind::Line, 2, Some(3)),
-                redaction(FilteredKind::Line, 3, Some(3)),
-                redaction(FilteredKind::Text, 5, None),
-                redaction(FilteredKind::Line, 6, None),
-                redaction(FilteredKind::Line, 9, Some(10)),
-                redaction(FilteredKind::Value, 0, None),
-                redaction(FilteredKind::Attr, 0, None),
+                redaction(ChangeKind::Text, 1, None),
+                redaction(ChangeKind::Line, 2, Some(3)),
+                redaction(ChangeKind::Line, 3, Some(3)),
+                redaction(ChangeKind::Text, 5, None),
+                redaction(ChangeKind::Line, 6, None),
+                redaction(ChangeKind::Line, 9, Some(10)),
+                redaction(ChangeKind::Value, 0, None),
+                redaction(ChangeKind::Attr, 0, None),
             ],
         }
     }
@@ -407,12 +407,12 @@ mod tests {
     #[test]
     fn records_are_found_by_original_line() {
         let doc = derived();
-        let kinds = |index: usize| -> Vec<FilteredKind> {
+        let kinds = |index: usize| -> Vec<ChangeKind> {
             doc.entry_redactions(index).iter().map(|r| r.kind).collect()
         };
-        assert_eq!(kinds(0), [FilteredKind::Text]);
+        assert_eq!(kinds(0), [ChangeKind::Text]);
         assert_eq!(kinds(1), []);
-        assert_eq!(kinds(2), [FilteredKind::Text]);
+        assert_eq!(kinds(2), [ChangeKind::Text]);
         let first_run = &doc.dropped()[0];
         let lines: Vec<(u32, Option<u32>)> = doc
             .dropped_redactions(first_run)

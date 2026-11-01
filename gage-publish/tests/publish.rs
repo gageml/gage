@@ -1,6 +1,6 @@
 //! The publish engine over a Claude session added to a temporary
 //! store: filters at init, the definition edited by hand and
-//! refreshed, and the staged content and `filtered.json` they
+//! refreshed, and the staged content and `changes.json` they
 //! produce.
 
 use std::fs;
@@ -11,9 +11,7 @@ use gage_publish::{
 };
 use gage_registry::driver::DriverRegistry;
 use gage_session::SourceOptions;
-use gage_store::{
-    FilteredKind, FilteredRecord, SessionRecord, SessionStore, Store, parse_filtered,
-};
+use gage_store::{ChangeKind, ChangeRecord, SessionRecord, SessionStore, Store, parse_changes};
 use serde_json::Value;
 
 const SESSION: &str = concat!(
@@ -125,8 +123,8 @@ fn staged_summary(root: &std::path::Path, id: &str) -> Value {
     staged_attrs(root, id)["summary"].clone()
 }
 
-fn filtered(root: &std::path::Path, id: &str) -> Vec<FilteredRecord> {
-    parse_filtered(&fs::read(root.join(id).join("filtered.json")).unwrap()).unwrap()
+fn changes(root: &std::path::Path, id: &str) -> Vec<ChangeRecord> {
+    parse_changes(&fs::read(root.join(id).join("changes.json")).unwrap()).unwrap()
 }
 
 /// Stage `filters` over the fixture's original with no segment.
@@ -230,16 +228,16 @@ fn init_runs_the_named_filters_and_records_their_instances() {
         lines[0]
     );
 
-    let records = filtered(&f.publish_root, &id);
+    let records = changes(&f.publish_root, &id);
     assert!(
         records
             .iter()
-            .any(|r| r.kind == FilteredKind::Text && r.author == "filter:pii"),
+            .any(|r| r.kind == ChangeKind::Text && r.author == "filter:pii"),
         "{records:#?}"
     );
     // The span in the command sits after "echo " in the published value
     assert!(
-        records.iter().any(|r| r.kind == FilteredKind::Text
+        records.iter().any(|r| r.kind == ChangeKind::Text
             && r.reference.as_deref() == Some("/message/content/0/input/command")
             && (r.span_start, r.span_end) == (Some(5), Some(15))),
         "{records:#?}"
@@ -333,8 +331,8 @@ fn refresh_applies_redact_rows_and_reports_an_unmatched_row() {
         lines[4]
     );
 
-    let records = filtered(&f.publish_root, &id);
-    assert!(records.iter().all(|r| r.kind == FilteredKind::Text));
+    let records = changes(&f.publish_root, &id);
+    assert!(records.iter().all(|r| r.kind == ChangeKind::Text));
     // Span offsets are positions in the published value: the marker in
     // the cwd, and an empty span where "fucking " was removed
     let span = |pointer: &str| {
@@ -360,7 +358,7 @@ fn refresh_applies_redact_rows_and_reports_an_unmatched_row() {
         line.contains(r#""cwd":"/home//proj""#),
         "removed without a mark: {line}"
     );
-    let records = filtered(&f.publish_root, &id);
+    let records = changes(&f.publish_root, &id);
     assert!(
         records.iter().all(|r| r.reason == "privacy"),
         "{records:#?}"
@@ -450,10 +448,10 @@ fn harness_records_filter_leaves_out_run_records_and_descriptive_fields() {
         !lines.iter().any(|l| l.contains("api-request")),
         "{lines:#?}"
     );
-    let records = filtered(&f.publish_root, &id);
+    let records = changes(&f.publish_root, &id);
     let dropped: Vec<(u32, Option<u32>, &str, &str)> = records
         .iter()
-        .filter(|r| r.kind == FilteredKind::Line)
+        .filter(|r| r.kind == ChangeKind::Line)
         .map(|r| (r.line, r.line_end, r.reason.as_str(), r.author.as_str()))
         .collect();
     assert_eq!(
@@ -470,14 +468,14 @@ fn harness_records_filter_leaves_out_run_records_and_descriptive_fields() {
     );
     let values: Vec<&str> = records
         .iter()
-        .filter(|r| r.kind == FilteredKind::Value)
+        .filter(|r| r.kind == ChangeKind::Value)
         .map(|r| r.reference.as_deref().unwrap())
         .collect();
     assert!(values.contains(&"$.message.usage"), "{values:?}");
     assert!(
         records
             .iter()
-            .filter(|r| r.kind == FilteredKind::Value)
+            .filter(|r| r.kind == ChangeKind::Value)
             .all(|r| r.reason == "harness-records" && r.author == "filter:harness-records")
     );
     let summary = staged_summary(&f.publish_root, &id);
@@ -509,10 +507,10 @@ fn harness_context_filter_leaves_out_context_entries_and_nothing_else() {
     assert!(lines[0].contains("\"content\":\"Hello\""), "{}", lines[0]);
     assert!(lines[1].contains("\"usage\""), "{}", lines[1]);
     assert!(lines[2].contains("\"api-request\""), "{}", lines[2]);
-    let records = filtered(&f.publish_root, &id);
+    let records = changes(&f.publish_root, &id);
     let dropped: Vec<(u32, Option<u32>, &str, &str)> = records
         .iter()
-        .filter(|r| r.kind == FilteredKind::Line)
+        .filter(|r| r.kind == ChangeKind::Line)
         .map(|r| (r.line, r.line_end, r.reason.as_str(), r.author.as_str()))
         .collect();
     assert_eq!(
@@ -520,7 +518,7 @@ fn harness_context_filter_leaves_out_context_entries_and_nothing_else() {
         [(2, Some(5), "harness-context", "filter:harness-context")]
     );
     assert!(
-        records.iter().all(|r| r.kind == FilteredKind::Line),
+        records.iter().all(|r| r.kind == ChangeKind::Line),
         "{records:#?}"
     );
     publisher.check(&id).unwrap();
@@ -805,10 +803,10 @@ fn refresh_reapplies_a_hand_edited_file() {
     assert_eq!(lines.len(), 2, "{lines:#?}");
     assert!(lines[0].contains(r#""uuid":"a1""#), "{}", lines[0]);
     assert!(lines[1].contains(r#""uuid":"a2""#), "{}", lines[1]);
-    let records = filtered(&f.publish_root, &id);
+    let records = changes(&f.publish_root, &id);
     let dropped: Vec<(u32, Option<u32>, &str, &str)> = records
         .iter()
-        .filter(|r| r.kind == FilteredKind::Line)
+        .filter(|r| r.kind == ChangeKind::Line)
         .map(|r| (r.line, r.line_end, r.reason.as_str(), r.author.as_str()))
         .collect();
     assert_eq!(
@@ -873,11 +871,11 @@ fn segments_drop_the_lines_outside_them() {
 
     edit(&publisher, &id, |d| d.segments[0].lines = vec![(2, 3)]);
     assert_eq!(staged_lines(&f.publish_root, &id).len(), 2);
-    let records = filtered(&f.publish_root, &id);
+    let records = changes(&f.publish_root, &id);
     assert_eq!(
         records
             .iter()
-            .filter(|r| r.kind == FilteredKind::Line)
+            .filter(|r| r.kind == ChangeKind::Line)
             .count(),
         2,
         "{records:#?}"
@@ -1237,10 +1235,10 @@ fn system_filter_leaves_out_system_values_and_drops_the_project_attribute() {
     );
     assert!(lines[3].contains("at [REDACTED]/a.txt"), "{}", lines[3]);
 
-    let records = filtered(&f.publish_root, &id);
-    let attrs: Vec<&FilteredRecord> = records
+    let records = changes(&f.publish_root, &id);
+    let attrs: Vec<&ChangeRecord> = records
         .iter()
-        .filter(|r| r.kind == FilteredKind::Attr)
+        .filter(|r| r.kind == ChangeKind::Attr)
         .collect();
     assert_eq!(attrs.len(), 1, "{records:#?}");
     assert_eq!(attrs[0].reference.as_deref(), Some("project"));
@@ -1250,9 +1248,9 @@ fn system_filter_leaves_out_system_values_and_drops_the_project_attribute() {
     );
     // One value rule per path, on no line, however many values it
     // selects; no text record is on a left-out value
-    let values: Vec<&FilteredRecord> = records
+    let values: Vec<&ChangeRecord> = records
         .iter()
-        .filter(|r| r.kind == FilteredKind::Value)
+        .filter(|r| r.kind == ChangeKind::Value)
         .collect();
     assert_eq!(values.len(), 5, "{records:#?}");
     assert!(
@@ -1270,10 +1268,10 @@ fn system_filter_leaves_out_system_values_and_drops_the_project_attribute() {
     assert!(
         !records
             .iter()
-            .any(|r| r.kind == FilteredKind::Text && r.reference.as_deref() == Some("/cwd")),
+            .any(|r| r.kind == ChangeKind::Text && r.reference.as_deref() == Some("/cwd")),
         "{records:#?}"
     );
-    let pii_on_5: Vec<&FilteredRecord> = records
+    let pii_on_5: Vec<&ChangeRecord> = records
         .iter()
         .filter(|r| r.line == 5 && r.author == "filter:pii")
         .collect();
@@ -1316,11 +1314,11 @@ fn system_filter_leaves_out_system_values_and_drops_the_project_attribute() {
         "{}",
         lines[1]
     );
-    let records = filtered(&f.publish_root, &id);
+    let records = changes(&f.publish_root, &id);
     assert!(
         !records
             .iter()
-            .any(|r| r.kind == FilteredKind::Attr || r.kind == FilteredKind::Value),
+            .any(|r| r.kind == ChangeKind::Attr || r.kind == ChangeKind::Value),
         "{records:#?}"
     );
 }
@@ -1381,11 +1379,11 @@ fn a_literal_inside_a_tool_input_is_a_span() {
     assert_eq!(instances_of(&publisher, &id, key), 2);
     assert_eq!(instances_of(&publisher, &id, "api03"), 2);
 
-    let records = filtered(&f.publish_root, &id);
-    let on_line = |line: u32| -> Vec<&FilteredRecord> {
+    let records = changes(&f.publish_root, &id);
+    let on_line = |line: u32| -> Vec<&ChangeRecord> {
         records
             .iter()
-            .filter(|r| r.kind == FilteredKind::Text && r.line == line)
+            .filter(|r| r.kind == ChangeKind::Text && r.line == line)
             .collect()
     };
     let spans = on_line(2);

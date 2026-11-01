@@ -1,6 +1,6 @@
 //! Derivation of the staged session: the original's text values,
 //! the expansion of a definition to instances over them, and the
-//! write of the staged content and `filtered.json`.
+//! write of the staged content and `changes.json`.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
@@ -10,7 +10,7 @@ use gage_session::{
     edit_strings,
 };
 use gage_store::{
-    DirContentSink, FilteredKind, FilteredRecord, PublishDirLayout, SummaryAttrs, format_filtered,
+    ChangeKind, ChangeRecord, DirContentSink, PublishDirLayout, SummaryAttrs, format_changes,
 };
 use regex::{Regex, RegexBuilder};
 use serde_json::{Value, json};
@@ -100,14 +100,14 @@ pub enum InstanceKind {
 }
 
 impl Instance {
-    /// The `filtered.json` record. `published` is the span's position
+    /// The `changes.json` record. `published` is the span's position
     /// in the published value, `end` exclusive, for a `Span` instance.
     /// A left-out value has no record of its own: the path that
     /// selected it is recorded once as a value rule.
-    fn record(&self, published: Option<(usize, usize)>) -> Option<FilteredRecord> {
+    fn record(&self, published: Option<(usize, usize)>) -> Option<ChangeRecord> {
         let record =
             |kind, line, line_end, reference: Option<&str>, span: Option<(usize, usize)>| {
-                FilteredRecord {
+                ChangeRecord {
                     kind,
                     line,
                     line_end,
@@ -119,18 +119,14 @@ impl Instance {
                 }
             };
         match &self.kind {
-            InstanceKind::Line { line, line_end } => Some(record(
-                FilteredKind::Line,
-                *line,
-                Some(*line_end),
-                None,
-                None,
-            )),
+            InstanceKind::Line { line, line_end } => {
+                Some(record(ChangeKind::Line, *line, Some(*line_end), None, None))
+            }
             InstanceKind::Span { line, pointer, .. } => {
                 let span =
                     published.expect("a span instance is on a kept line, which line_edits visits");
                 Some(record(
-                    FilteredKind::Text,
+                    ChangeKind::Text,
                     *line,
                     None,
                     Some(pointer),
@@ -139,7 +135,7 @@ impl Instance {
             }
             InstanceKind::Value { .. } => None,
             InstanceKind::Attr { name } => {
-                Some(record(FilteredKind::Attr, 0, None, Some(name), None))
+                Some(record(ChangeKind::Attr, 0, None, Some(name), None))
             }
         }
     }
@@ -235,7 +231,7 @@ pub fn run_filters(
 }
 
 /// Expand `definition` over `session`, write the staged content
-/// through `stored` and `filtered.json` into `layout`, and count the
+/// through `stored` and `changes.json` into `layout`, and count the
 /// spans of each text redaction. The staged `attrs.json` is the
 /// caller's to update.
 pub fn build(
@@ -267,7 +263,7 @@ pub fn build(
     let mut sink = DirContentSink::new(layout.files_dir());
     stored.write_derived(&derivation, &mut sink)?;
 
-    let records: Vec<FilteredRecord> = rules
+    let records: Vec<ChangeRecord> = rules
         .into_iter()
         .chain(
             instances
@@ -276,7 +272,7 @@ pub fn build(
                 .filter_map(|(i, instance)| instance.record(published.get(&i).copied())),
         )
         .collect();
-    fs::write(layout.filtered_file(), format_filtered(&records))?;
+    fs::write(layout.changes_file(), format_changes(&records))?;
     Ok(Built { instances, counts })
 }
 
@@ -510,7 +506,7 @@ fn blank_values(json: &str, pointers: &[&str]) -> Result<Value, PublishError> {
 /// value.
 struct Expanded {
     instances: Vec<Instance>,
-    rules: Vec<FilteredRecord>,
+    rules: Vec<ChangeRecord>,
 }
 
 /// Expand `definition` over `session` in order of precedence: the
@@ -599,8 +595,8 @@ fn expand(definition: &PublishDefinition, session: &SessionText) -> Result<Expan
                 }
             }
         }
-        rules.extend(paths.into_iter().map(|path| FilteredRecord {
-            kind: FilteredKind::Value,
+        rules.extend(paths.into_iter().map(|path| ChangeRecord {
+            kind: ChangeKind::Value,
             line: 0,
             line_end: None,
             reference: Some(path),
@@ -901,7 +897,7 @@ fn dir_size(dir: &std::path::Path) -> Result<u64, PublishError> {
 
 #[cfg(test)]
 mod tests {
-    use gage_store::parse_filtered;
+    use gage_store::parse_changes;
 
     use super::*;
 
@@ -947,19 +943,18 @@ mod tests {
             .record(Some((4, 14)))
             .unwrap(),
         ];
-        let parsed = parse_filtered(format_filtered(&records).as_bytes()).unwrap();
-        // The parser returns list by list: lines, values, text, attrs
+        let parsed = parse_changes(format_changes(&records).as_bytes()).unwrap();
         assert_eq!(parsed.len(), 3);
-        assert_eq!(parsed[0].kind, FilteredKind::Line);
+        assert_eq!(parsed[0].kind, ChangeKind::Line);
         assert_eq!((parsed[0].line, parsed[0].line_end), (1, Some(4)));
-        assert_eq!(parsed[1].kind, FilteredKind::Text);
-        assert_eq!(parsed[1].reference.as_deref(), Some("/message/content"));
+        assert_eq!(parsed[1].kind, ChangeKind::Attr);
+        assert_eq!(parsed[1].reference.as_deref(), Some("project"));
+        assert_eq!(parsed[2].kind, ChangeKind::Text);
+        assert_eq!(parsed[2].reference.as_deref(), Some("/message/content"));
         assert_eq!(
-            (parsed[1].span_start, parsed[1].span_end),
+            (parsed[2].span_start, parsed[2].span_end),
             (Some(4), Some(14))
         );
-        assert_eq!(parsed[2].kind, FilteredKind::Attr);
-        assert_eq!(parsed[2].reference.as_deref(), Some("project"));
         assert!(
             parsed
                 .iter()

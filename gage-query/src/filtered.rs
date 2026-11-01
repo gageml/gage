@@ -1,5 +1,5 @@
 //! The `filtered` table shape: one row per record of a stored
-//! session's `filtered.json`, the rules its publish applied to the
+//! session's `changes.json`, the rules its publish applied to the
 //! original. A session that is not a publish has no rows.
 
 use std::sync::{Arc, LazyLock};
@@ -8,7 +8,7 @@ use datafusion::arrow::array::{Int64Builder, StringBuilder};
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::error::Result;
-use gage_store::FilteredRecord;
+use gage_store::ChangeRecord;
 
 static SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
     Arc::new(Schema::new(vec![
@@ -29,7 +29,7 @@ pub fn filtered_schema() -> SchemaRef {
 }
 
 /// The `filtered` rows of one session, in record order.
-pub fn filtered_batch(session_id: &str, records: &[FilteredRecord]) -> Result<RecordBatch> {
+pub fn filtered_batch(session_id: &str, records: &[ChangeRecord]) -> Result<RecordBatch> {
     let mut session_ids = StringBuilder::new();
     let mut kinds = StringBuilder::new();
     let mut lines = Int64Builder::new();

@@ -325,7 +325,7 @@ impl SessionSet {
     }
 
     /// The `filtered` batch of `session`: the records of its
-    /// `filtered.json`, from the working tree of a pending publish or
+    /// `changes.json`, from the working tree of a pending publish or
     /// the blob of a commit, cached as [`rows`] caches the derived
     /// batch.
     ///
@@ -339,10 +339,10 @@ impl SessionSet {
             return Ok(batch);
         }
         let records = match &session.root {
-            Some(root) => PublishDirLayout::new(root).read_filtered(),
+            Some(root) => PublishDirLayout::new(root).read_changes(),
             None => {
                 let store = self.lock();
-                SessionStore::from(&*store).filtered(&session.commit)
+                SessionStore::from(&*store).changes(&session.commit)
             }
         }
         .map_err(external)?;
