@@ -33,7 +33,7 @@ pub const NAMED_FILTERS: &[&str] = &[
     "secret",
     "system",
     "harness-context",
-    "harness-records",
+    "harness-record",
     "custom",
 ];
 
@@ -895,7 +895,7 @@ const TITLE_COMMENT: &str = "  // [text, author]: the title the published sessio
 
 const FILTERS_COMMENT: &str =
     "  // A name, or [name, prompt]. Each name once. Names: pii, language,
-  // secret, system, harness-context, harness-records, custom. custom
+  // secret, system, harness-context, harness-record, custom. custom
   // requires a prompt; a prompt on any other filter adds to its
   // instructions.
 ";
@@ -1024,7 +1024,7 @@ mod tests {
                 "  \"title\": [\"Fixing the duck\", \"user:g\"],\n",
                 "\n",
                 "  // A name, or [name, prompt]. Each name once. Names: pii, language,\n",
-                "  // secret, system, harness-context, harness-records, custom. custom\n",
+                "  // secret, system, harness-context, harness-record, custom. custom\n",
                 "  // requires a prompt; a prompt on any other filter adds to its\n",
                 "  // instructions.\n",
                 "  \"filters\": [\n",

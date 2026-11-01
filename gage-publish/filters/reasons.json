@@ -44,7 +44,7 @@
     "description": "Content the harness placed in the model's context (system prompt, tool definitions, injected instructions)"
   },
   {
-    "code": "harness-records",
+    "code": "harness-record",
     "description": "Records the harness kept about the run (request logs, snapshots, state, usage)"
   },
   {

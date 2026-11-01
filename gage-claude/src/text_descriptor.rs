@@ -282,7 +282,7 @@ mod tests {
         }
     }
 
-    /// The `harness-records` filter leaves out every entry that is
+    /// The `harness-record` filter leaves out every entry that is
     /// neither conversation nor context, so the two filters together
     /// leave exactly the conversation. The kept system subtypes are
     /// the ones the message table promotes.
@@ -292,7 +292,7 @@ mod tests {
         for line in sample_and_shapes() {
             let entry: serde_json::Value = serde_json::from_str(line).unwrap();
             let dropped = descriptor
-                .filter_values("harness-records", line)
+                .filter_values("harness-record", line)
                 .unwrap()
                 .dropped;
             let expected = !is_conversation(&entry) && !is_context(&entry);
@@ -301,7 +301,7 @@ mod tests {
         for (subtype, _) in SYSTEM_MESSAGE_SUBTYPES {
             let line = format!(r#"{{"type":"system","subtype":"{subtype}","content":"x"}}"#);
             let dropped = descriptor
-                .filter_values("harness-records", &line)
+                .filter_values("harness-record", &line)
                 .unwrap()
                 .dropped;
             assert!(!dropped, "{line}");

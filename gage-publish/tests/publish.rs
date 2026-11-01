@@ -431,7 +431,7 @@ fn custom_requires_a_prompt_and_any_filter_takes_one() {
     assert!(matches!(err, PublishError::Definition(_)), "{err}");
 }
 
-/// The `harness-records` filter leaves out the entries the harness
+/// The `harness-record` filter leaves out the entries the harness
 /// kept about the run: the API request on line 5 goes, with one line
 /// record under the filter, and the descriptive fields of the entries
 /// that stay go with it.
@@ -442,7 +442,7 @@ fn harness_records_filter_leaves_out_run_records_and_descriptive_fields() {
     let id = stage(
         &publisher,
         &f.original,
-        &["harness-records".parse::<FilterSpec>().unwrap()],
+        &["harness-record".parse::<FilterSpec>().unwrap()],
     );
     let lines = staged_lines(&f.publish_root, &id);
     assert_eq!(lines.len(), 4, "{lines:#?}");
@@ -458,12 +458,7 @@ fn harness_records_filter_leaves_out_run_records_and_descriptive_fields() {
         .collect();
     assert_eq!(
         dropped,
-        [(
-            5,
-            Some(5),
-            Some("harness-records"),
-            "filter:harness-records"
-        )]
+        [(5, Some(5), Some("harness-record"), "filter:harness-record")]
     );
     // The token usage is a descriptive field and goes; the working
     // directory is the system filter's and stays
@@ -483,8 +478,8 @@ fn harness_records_filter_leaves_out_run_records_and_descriptive_fields() {
         records
             .iter()
             .filter(|r| r.kind == ChangeKind::Value)
-            .all(|r| r.reason.as_deref() == Some("harness-records")
-                && r.author == "filter:harness-records")
+            .all(|r| r.reason.as_deref() == Some("harness-record")
+                && r.author == "filter:harness-record")
     );
     let summary = staged_summary(&f.publish_root, &id);
     assert_eq!(summary["line_count"], 4, "{summary}");

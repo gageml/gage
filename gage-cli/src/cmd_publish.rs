@@ -333,7 +333,7 @@ pub struct InitArgs {
 /// The paragraph `--filter` options share on what a filter argument
 /// is.
 const FILTER_HELP: &str = "A filter name; see --list-filters. Filter names are \"pii\", \
-\"language\", \"secret\", \"system\", \"harness-context\", \"harness-records\", and \
+\"language\", \"secret\", \"system\", \"harness-context\", \"harness-record\", and \
 \"custom\". \"custom\" takes a prompt as its whole instruction, so it is added in definition \
 file. A filter given here is added to those --audience and --use select.";
 
@@ -1631,7 +1631,7 @@ mod tests {
         );
         assert!(
             rendered.contains(
-                "[possible values: pii, language, secret, system, harness-context, harness-records, custom]"
+                "[possible values: pii, language, secret, system, harness-context, harness-record, custom]"
             ),
             "{rendered}"
         );
@@ -2139,7 +2139,7 @@ mod tests {
                 "secret",
                 "language",
                 "harness-context",
-                "harness-records",
+                "harness-record",
                 "pii"
             ]
         );

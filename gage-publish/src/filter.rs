@@ -741,10 +741,10 @@ static FILTERS: LazyLock<Vec<Filter>> = LazyLock::new(|| {
             keywords: None,
         },
         Filter {
-            name: "harness-records",
-            reason: "harness-records",
+            name: "harness-record",
+            reason: "harness-record",
             description: "Leave out records the harness kept about the run",
-            instructions: include_str!("../filters/harness-records.md"),
+            instructions: include_str!("../filters/harness-record.md"),
             audience: Vec::new(),
             uses: Vec::new(),
             attrs: &[],
@@ -872,7 +872,7 @@ mod tests {
                 ("language", &[Public, Trusted][..], &[][..]),
                 ("system", &[Public][..], &[][..]),
                 ("harness-context", &[][..], &[Reading][..]),
-                ("harness-records", &[][..], &[Reading][..]),
+                ("harness-record", &[][..], &[Reading][..]),
                 ("custom", &[][..], &[][..]),
             ]
         );
@@ -900,13 +900,13 @@ mod tests {
                 "language",
                 "system",
                 "harness-context",
-                "harness-records"
+                "harness-record"
             ]
         );
         assert_eq!(names(Some(Audience::Trusted), None), ["secret", "language"]);
         assert_eq!(
             names(None, Some(Use::Reading)),
-            ["harness-context", "harness-records"]
+            ["harness-context", "harness-record"]
         );
     }
 
