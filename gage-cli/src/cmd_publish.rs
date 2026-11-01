@@ -1264,8 +1264,8 @@ fn refresh(args: RefreshArgs) -> Result<(), CliError> {
 
 /// The dialog that rebuilds `pending` from its definition: the
 /// definition is read and checked, its counts shown, the rebuild
-/// confirmed when `confirm` is set, and every redaction that matches
-/// nothing reported by its position. A definition with problems ends
+/// confirmed when `confirm` is set and run under a spinner, and every
+/// redaction that matches nothing reported by its position. A definition with problems ends
 /// the dialog, and the problems follow it one per line as `show
 /// --check` prints them.
 fn refresh_dialog(
@@ -1308,9 +1308,11 @@ fn refresh_dialog(
                 return Err(DialogError::Canceled);
             }
         }
-        let refreshed = publisher
-            .refresh(&pending.id, &author)
-            .map_err(|e| DialogError::Failed(e.to_string()))?;
+        let spinner = cli::spinner();
+        spinner.start("Refreshing session");
+        let refreshed = publisher.refresh(&pending.id, &author);
+        spinner.clear();
+        let refreshed = refreshed.map_err(|e| DialogError::Failed(e.to_string()))?;
         for (position, literal) in &refreshed.unmatched {
             cli::log::warning(format!("Redaction {position} matches nothing: {literal:?}"))?;
         }
