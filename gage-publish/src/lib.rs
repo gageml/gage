@@ -31,7 +31,7 @@ use gage_store::{
 
 pub use definition::{
     Allow, FilterEntry, FilterSpec, InitArgs, NAMED_FILTERS, Problem, PublishDefinition, REASONS,
-    Reason, Segment, TextEntry, format_lines, parse_lines, requires_prompt,
+    Reason, Segment, TextEntry, TitleEntry, format_lines, parse_lines, requires_prompt,
 };
 pub use derive::{Built, Candidate, Instance, InstanceKind, Span};
 pub use filter::{Audience, Filter, Pattern, Use};
@@ -52,12 +52,11 @@ pub enum PublishError {
     Definition(Vec<Problem>),
     /// No driver is registered under the name the original records
     NoDriver(String),
-    /// The definition has no filter or segment, or the staged content
-    /// is not a removal-only derivation of the original, so `apply`
-    /// refuses to commit it
+    /// The staged content is not a removal-only derivation of the
+    /// original, so `apply` refuses to commit it
     Refused(String),
-    /// The definition has a filter or segment but none of them changed
-    /// the session, so `apply` refuses to commit it unless forced
+    /// The definition changed nothing in the session, so `apply`
+    /// refuses to commit it unless forced
     Unchanged,
 }
 
@@ -82,7 +81,7 @@ impl fmt::Display for PublishError {
                 Ok(())
             }
             PublishError::NoDriver(name) => write!(f, "no driver named {name:?} is registered"),
-            PublishError::Unchanged => write!(f, "no filter or segment changed the session"),
+            PublishError::Unchanged => write!(f, "definition changed nothing in the session"),
         }
     }
 }
@@ -264,27 +263,20 @@ impl<'a> Publisher<'a> {
         let source = derive::SessionText::read(original.stored()?.as_mut(), &original.descriptor)?;
         let staged =
             derive::SessionText::read(original.staged(&layout)?.as_mut(), &original.descriptor)?;
-        derive::check_removal_only(&definition, &source, &staged)
+        let title_entry = original.title_entry(&definition)?;
+        derive::check_removal_only(&definition, &source, &staged, title_entry.as_deref())
     }
 
     /// Verify that the pending publish `id` can be published: its
-    /// definition reads, has an author on every redaction, and has a
-    /// filter or a segment, its staged session passes [`check`], and the
-    /// definition changed the session. A definition with no filter and
-    /// no segment is refused regardless of `force`; an unchanged
-    /// session is refused unless `force` is set. Reads only.
+    /// definition reads and has an author on every redaction and the
+    /// title, its staged session passes [`check`], and the definition
+    /// changed the session. An unchanged session is refused unless
+    /// `force` is set. Reads only.
     ///
     /// [`check`]: Publisher::check
     pub fn verify(&self, id: &str, force: bool) -> Result<(), PublishError> {
         let definition = self.definition(id)?;
         definition.validate()?;
-        if definition.filters.is_empty() && definition.segments.is_empty() {
-            return Err(PublishError::Refused(
-                "definition has no filter or segment; push the session directly to \
-                 publish it unmodified"
-                    .into(),
-            ));
-        }
         self.check(id)?;
         if !force && self.changes(id)? == 0 {
             return Err(PublishError::Unchanged);
@@ -294,7 +286,8 @@ impl<'a> Publisher<'a> {
 
     /// The number of changes the pending publish `id` makes to its
     /// original: every dropped line, dropped value, dropped attribute,
-    /// and redacted span. Reads only.
+    /// and redacted span, and the title when the definition sets one.
+    /// Reads only.
     pub fn changes(&self, id: &str) -> Result<usize, PublishError> {
         let definition = self.definition(id)?;
         let session = self.open_original(id)?;
@@ -355,7 +348,14 @@ impl<'a> Publisher<'a> {
     ) -> Result<Built, PublishError> {
         let layout = self.publish.layout(id);
         let original = self.original(id)?;
-        let built = derive::build(definition, session, original.stored()?.as_mut(), &layout)?;
+        let title_entry = original.title_entry(definition)?;
+        let built = derive::build(
+            definition,
+            session,
+            original.stored()?.as_mut(),
+            &layout,
+            title_entry.as_deref(),
+        )?;
         let project_dropped = built
             .instances
             .iter()
@@ -453,5 +453,24 @@ impl Original<'_> {
             &self.record.attrs.content_format,
             content,
         )?)
+    }
+
+    /// The entry the driver adds after the last line to set the title
+    /// `definition` names; `None` when it names none. A driver with no
+    /// such entry for the content format cannot set a title.
+    fn title_entry(&self, definition: &PublishDefinition) -> Result<Option<String>, PublishError> {
+        let Some(title) = &definition.title else {
+            return Ok(None);
+        };
+        let format = &self.record.attrs.content_format;
+        self.driver
+            .title_entry(format, &title.text)
+            .map(Some)
+            .ok_or_else(|| {
+                PublishError::Input(format!(
+                    "driver {:?} sets no title for content format {format:?}",
+                    self.record.driver_name
+                ))
+            })
     }
 }

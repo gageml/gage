@@ -114,7 +114,7 @@ impl Instance {
                     reference: reference.map(String::from),
                     span_start: span.map(|(start, _)| start as u64),
                     span_end: span.map(|(_, end)| end as u64),
-                    reason: self.reason.clone(),
+                    reason: Some(self.reason.clone()),
                     author: self.author.clone(),
                 }
             };
@@ -232,13 +232,16 @@ pub fn run_filters(
 
 /// Expand `definition` over `session`, write the staged content
 /// through `stored` and `changes.json` into `layout`, and count the
-/// spans of each text redaction. The staged `attrs.json` is the
-/// caller's to update.
+/// spans of each text redaction. `title_entry` is the entry the driver
+/// adds after the last line to set the title the definition names,
+/// recorded as a title change at the line it lands on. The staged
+/// `attrs.json` is the caller's to update.
 pub fn build(
     definition: &PublishDefinition,
     session: &SessionText,
     stored: &mut dyn StoredSession,
     layout: &PublishDirLayout,
+    title_entry: Option<&str>,
 ) -> Result<Built, PublishError> {
     let Expanded {
         mut instances,
@@ -259,9 +262,27 @@ pub fn build(
             replaced.insert(entry.line, json);
         }
     }
-    let derivation = Derivation { dropped, replaced };
+    let derivation = Derivation {
+        dropped,
+        replaced,
+        appended: title_entry.into_iter().map(String::from).collect(),
+    };
     let mut sink = DirContentSink::new(layout.files_dir());
-    stored.write_derived(&derivation, &mut sink)?;
+    let added = stored.write_derived(&derivation, &mut sink)?;
+    let title = definition
+        .title
+        .as_ref()
+        .zip(added.first())
+        .map(|(title, line)| ChangeRecord {
+            kind: ChangeKind::Title,
+            line: *line,
+            line_end: None,
+            reference: None,
+            span_start: None,
+            span_end: None,
+            reason: None,
+            author: title.author.clone(),
+        });
 
     let records: Vec<ChangeRecord> = rules
         .into_iter()
@@ -271,6 +292,7 @@ pub fn build(
                 .enumerate()
                 .filter_map(|(i, instance)| instance.record(published.get(&i).copied())),
         )
+        .chain(title)
         .collect();
     fs::write(layout.changes_file(), format_changes(&records))?;
     Ok(Built { instances, counts })
@@ -370,14 +392,14 @@ pub fn counts(
     Ok(counts_of(definition, &instances))
 }
 
-/// The number of instances `definition` produces over `session`.
-/// Reads only.
+/// The number of changes `definition` makes to `session`: its
+/// instances, and the title when it sets one. Reads only.
 pub fn change_count(
     definition: &PublishDefinition,
     session: &SessionText,
 ) -> Result<usize, PublishError> {
     let Expanded { instances, .. } = expand(definition, session)?;
-    Ok(instances.len())
+    Ok(instances.len() + usize::from(definition.title.is_some()))
 }
 
 /// Every line a `Line` instance drops.
@@ -408,12 +430,14 @@ fn counts_of(definition: &PublishDefinition, instances: &[Instance]) -> BTreeMap
 /// entries in order, each with the same JSON apart from the values
 /// the named filters leave out and its text values, and each text
 /// value is the original's with substrings removed or replaced by the
-/// marker. An error names the original line and, for a value, its
-/// pointer.
+/// marker. `title_entry`, when given, is the one entry allowed after
+/// them, as the driver writes it. An error names the original line
+/// and, for a value, its pointer.
 pub fn check_removal_only(
     definition: &PublishDefinition,
     original: &SessionText,
     staged: &SessionText,
+    title_entry: Option<&str>,
 ) -> Result<(), PublishError> {
     let refuse =
         |m: String| PublishError::Refused(format!("staged session is not removal-only: {m}"));
@@ -424,14 +448,27 @@ pub fn check_removal_only(
         .iter()
         .filter(|e| !dropped.contains(&e.line))
         .collect();
-    if kept.len() != staged.entries.len() {
+    let mut staged_entries: &[EntryText] = &staged.entries;
+    if let Some(entry) = title_entry {
+        let Some((last, rest)) = staged_entries.split_last() else {
+            return Err(refuse("no title entry staged".to_string()));
+        };
+        if last.json != entry {
+            return Err(refuse(format!(
+                "staged line {} is not the title entry",
+                last.line
+            )));
+        }
+        staged_entries = rest;
+    }
+    if kept.len() != staged_entries.len() {
         return Err(refuse(format!(
             "{} entries staged, {} expected from the original",
-            staged.entries.len(),
+            staged_entries.len(),
             kept.len()
         )));
     }
-    for (source, derived) in kept.iter().zip(&staged.entries) {
+    for (source, derived) in kept.iter().zip(staged_entries) {
         let at = |m: String| refuse(format!("line {}: {m}", source.line));
         let expected_line =
             source.line - dropped.iter().filter(|&&d| d < source.line).count() as u32;
@@ -602,7 +639,7 @@ fn expand(definition: &PublishDefinition, session: &SessionText) -> Result<Expan
             reference: Some(path),
             span_start: None,
             span_end: None,
-            reason: filter.reason.to_string(),
+            reason: Some(filter.reason.to_string()),
             author: author.clone(),
         }));
     }
@@ -850,10 +887,9 @@ fn apply_spans(text: &str, spans: &[Span]) -> (String, Vec<(usize, usize)>) {
 
 /// Rewrite `size`, `project`, and the driver summary in the staged
 /// `attrs.json` from the content written. `staged` reads the staged
-/// content, not the original. `project` is the original's unless a
-/// redaction leaves it out. The title is kept from the original: the
-/// driver takes it from the first prompt, and dropping that line does
-/// not retitle the publication.
+/// content, not the original, so every summary field, the title
+/// included, describes the published content. `project` is the
+/// original's unless a redaction leaves it out.
 pub fn update_attrs(
     layout: &PublishDirLayout,
     staged: &mut dyn StoredSession,
@@ -861,12 +897,7 @@ pub fn update_attrs(
 ) -> Result<(), PublishError> {
     let size = dir_size(&layout.files_dir())?;
     let mut attrs: Value = serde_json::from_slice(&fs::read(layout.attrs_file())?)?;
-    let title = attrs
-        .pointer("/summary/title")
-        .and_then(Value::as_str)
-        .map(String::from);
-    let mut summary = SummaryAttrs::from_attrs(staged.attrs()?.as_ref());
-    summary.title = title;
+    let summary = SummaryAttrs::from_attrs(staged.attrs()?.as_ref());
     if let Some(object) = attrs.as_object_mut() {
         object.insert("size".to_string(), json!(size));
         match project {
@@ -958,7 +989,7 @@ mod tests {
         assert!(
             parsed
                 .iter()
-                .all(|r| r.reason == "pii" && r.author == "filter:pii")
+                .all(|r| r.reason.as_deref() == Some("pii") && r.author == "filter:pii")
         );
     }
 

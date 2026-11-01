@@ -1,8 +1,8 @@
 //! The publish definition, `publish/<id>.publish.jsonc`: what the
 //! staged session is derived from. The original session, the
-//! arguments `init` was given, the filters with their prompts, the
-//! segments, every text redaction with its author, and the literals a
-//! filter may not record again. It may hold the redacted literals,
+//! arguments `init` was given, the title the published session takes,
+//! the filters with their prompts, the segments, every text redaction
+//! with its author, and the literals a filter may not record again. It may hold the redacted literals,
 //! because it is instructions and is never committed. The file is
 //! edited by hand, so it is JSON with comments and trailing commas,
 //! written with the annotations an editor needs and read back without
@@ -330,6 +330,39 @@ pub struct InitArgs {
     pub notes: Option<String>,
 }
 
+/// The title the published session takes, set by an entry the driver
+/// adds after the session's last line. Recorded as `[text, author]`.
+/// A row written by hand may leave the author out, `[text]`; the
+/// author is empty until a refresh fills it in.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "Vec<String>", into = "Vec<String>")]
+pub struct TitleEntry {
+    pub text: String,
+    /// `user:<name>` or `session:<id>`
+    pub author: String,
+}
+
+impl TryFrom<Vec<String>> for TitleEntry {
+    type Error = PublishError;
+
+    fn try_from(row: Vec<String>) -> Result<Self, PublishError> {
+        let mut row = row.into_iter();
+        let (Some(text), author, None) = (row.next(), row.next(), row.next()) else {
+            return Err(PublishError::Input(TITLE_SHAPE.to_string()));
+        };
+        Ok(TitleEntry {
+            text,
+            author: author.unwrap_or_default(),
+        })
+    }
+}
+
+impl From<TitleEntry> for Vec<String> {
+    fn from(t: TitleEntry) -> Self {
+        vec![t.text, t.author]
+    }
+}
+
 /// The definition of one pending publish.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PublishDefinition {
@@ -337,6 +370,8 @@ pub struct PublishDefinition {
     pub session: String,
     #[serde(default)]
     pub init: InitArgs,
+    #[serde(default)]
+    pub title: Option<TitleEntry>,
     #[serde(default)]
     pub filters: Vec<FilterEntry>,
     #[serde(default)]
@@ -352,6 +387,7 @@ impl PublishDefinition {
         Self {
             session: session.to_string(),
             init: InitArgs::default(),
+            title: None,
             filters: filters.iter().map(FilterEntry::new).collect(),
             segments: Vec::new(),
             allow: Vec::new(),
@@ -424,6 +460,7 @@ impl PublishDefinition {
         Ok(Self {
             session: head.session,
             init: head.init,
+            title: head.title,
             filters,
             segments,
             allow,
@@ -455,12 +492,16 @@ impl PublishDefinition {
         });
     }
 
-    /// Give every redaction written without an author `author`.
-    /// Returns the number of rows filled.
+    /// Give every redaction, and the title, written without an author
+    /// `author`. Returns the number of rows filled.
     pub fn fill_authors(&mut self, author: &str) -> usize {
         let mut filled = 0;
         for t in self.redact.iter_mut().filter(|t| t.author.is_empty()) {
             t.author = author.to_string();
+            filled += 1;
+        }
+        if let Some(title) = self.title.as_mut().filter(|t| t.author.is_empty()) {
+            title.author = author.to_string();
             filled += 1;
         }
         filled
@@ -496,9 +537,12 @@ impl PublishDefinition {
     }
 
     /// Check a definition built in code or filled in after a read: the
-    /// rules the reader applies, and every redaction has an author. A
-    /// row is named by its 1-based position.
+    /// rules the reader applies, and every redaction and the title
+    /// have an author. A row is named by its 1-based position.
     pub fn validate(&self) -> Result<(), PublishError> {
+        if self.title.as_ref().is_some_and(|t| t.author.is_empty()) {
+            return Err(PublishError::Input("title: no author".to_string()));
+        }
         let mut seen = HashSet::new();
         for f in &self.filters {
             if let Some(message) = filter_problem(f, &mut seen) {
@@ -524,9 +568,10 @@ impl PublishDefinition {
     }
 
     /// The definition as the file holds it: the annotations an editor
-    /// needs as comments, `title` beside the session, and one filter,
-    /// segment, allowed literal, or redaction per line with a trailing
-    /// comma, so a row is added or deleted without touching another.
+    /// needs as comments, the original's `title` beside the session,
+    /// the title row or `null`, and one filter, segment, allowed
+    /// literal, or redaction per line with a trailing comma, so a row
+    /// is added or deleted without touching another.
     pub fn to_jsonc_text(&self, title: Option<&str>) -> String {
         fn rows<T: Clone + Into<Value>>(out: &mut String, key: &str, items: &[T]) {
             out.push_str(&format!("  \"{key}\": ["));
@@ -555,6 +600,12 @@ impl PublishDefinition {
             "  \"init\": {},\n\n",
             serde_json::to_string(&self.init).expect("init args are a JSON object")
         ));
+        out.push_str(TITLE_COMMENT);
+        let title_row = match &self.title {
+            Some(t) => row(&json!([t.text, t.author])),
+            None => "null".to_string(),
+        };
+        out.push_str(&format!("  \"title\": {title_row},\n\n"));
         out.push_str(FILTERS_COMMENT);
         rows(&mut out, "filters", &self.filters);
         out.push('\n');
@@ -585,13 +636,18 @@ impl fmt::Display for Problem {
     }
 }
 
-/// The two document fields beside the row sections.
+/// The document fields beside the row sections.
 #[derive(Deserialize)]
 struct Head {
     session: String,
     #[serde(default)]
     init: InitArgs,
+    #[serde(default)]
+    title: Option<TitleEntry>,
 }
+
+/// The shape of the title row, for a problem at it.
+const TITLE_SHAPE: &str = "title is [text, author], [text], or null";
 
 /// The shape of the file. The names a filter or reason may take, and
 /// what rows may say about each other, are checked in code.
@@ -681,6 +737,9 @@ impl<'a> Doc<'a> {
                 _ => {
                     let message = match row_shape_at(&pointer) {
                         Some(shape) => shape.to_string(),
+                        None if pointer == "/title" || pointer.starts_with("/title/") => {
+                            TITLE_SHAPE.to_string()
+                        }
                         None => e.to_string(),
                     };
                     problems.push(self.problem(&pointer, message));
@@ -828,6 +887,12 @@ const HEADER: &str = "\
 const INIT_COMMENT: &str = "  // Recorded by init. Not read by publish.
 ";
 
+const TITLE_COMMENT: &str = "  // [text, author]: the title the published session takes, set by an
+  // entry added after its last line. null keeps the title the content
+  // yields. A row without an author, [text], takes the author of the
+  // refresh that reads it.
+";
+
 const FILTERS_COMMENT: &str =
     "  // A name, or [name, prompt]. Each name once. Names: pii, language,
   // secret, system, harness-context, harness-records, custom. custom
@@ -905,9 +970,10 @@ mod tests {
         assert!(Reason::find("nope").is_none());
     }
 
-    /// The file holds the annotations, the title beside the session,
-    /// the init arguments, and one filter, segment, allowed literal,
-    /// or redaction per line, and reads back equal.
+    /// The file holds the annotations, the original's title beside the
+    /// session, the init arguments, the title row, and one filter,
+    /// segment, allowed literal, or redaction per line, and reads back
+    /// equal.
     #[test]
     fn definition_writes_one_row_per_line_and_round_trips() {
         let mut d = PublishDefinition::new(
@@ -925,6 +991,10 @@ mod tests {
         d.filters.push(FilterEntry {
             name: "system".into(),
             prompt: Some("Watch for hosts.".into()),
+        });
+        d.title = Some(TitleEntry {
+            text: "Fixing the duck".into(),
+            author: "user:g".into(),
         });
         d.push_redact("abc", "secret", "user:g", true);
         d.push_redact("Sam", "pii", "filter:pii", false);
@@ -946,6 +1016,12 @@ mod tests {
                 "\n",
                 "  // Recorded by init. Not read by publish.\n",
                 "  \"init\": {\"audience\":\"public\",\"notes\":\"For the blog\"},\n",
+                "\n",
+                "  // [text, author]: the title the published session takes, set by an\n",
+                "  // entry added after its last line. null keeps the title the content\n",
+                "  // yields. A row without an author, [text], takes the author of the\n",
+                "  // refresh that reads it.\n",
+                "  \"title\": [\"Fixing the duck\", \"user:g\"],\n",
                 "\n",
                 "  // A name, or [name, prompt]. Each name once. Names: pii, language,\n",
                 "  // secret, system, harness-context, harness-records, custom. custom\n",
@@ -996,6 +1072,7 @@ mod tests {
         let empty = PublishDefinition::new("abc", &[]).to_jsonc_text(None);
         assert!(empty.contains("  \"session\": \"abc\",\n"), "{empty}");
         assert!(empty.contains("  \"init\": {},\n"), "{empty}");
+        assert!(empty.contains("  \"title\": null,\n"), "{empty}");
         assert!(empty.contains("  \"filters\": [],\n"), "{empty}");
         assert!(empty.contains("  \"redact\": [],\n}\n"), "{empty}");
         assert_eq!(
@@ -1004,8 +1081,8 @@ mod tests {
         );
     }
 
-    /// A missing list reads as empty, and a redaction without an
-    /// author is filled by `fill_authors` and refused by `validate`
+    /// A missing list reads as empty, and a redaction or title without
+    /// an author is filled by `fill_authors` and refused by `validate`
     /// until then.
     #[test]
     fn validate_requires_an_author() {
@@ -1024,6 +1101,26 @@ mod tests {
         assert_eq!(d.redact[1].author, "user:me");
         d.validate().unwrap();
 
+        let mut d =
+            PublishDefinition::from_jsonc(r#"{"session": "abc", "title": ["Ducks"]}"#).unwrap();
+        let err = d.validate().unwrap_err().to_string();
+        assert!(err.contains("title: no author"), "{err}");
+        assert_eq!(d.fill_authors("session:s"), 1);
+        assert_eq!(
+            d.title,
+            Some(TitleEntry {
+                text: "Ducks".into(),
+                author: "session:s".into(),
+            })
+        );
+        d.validate().unwrap();
+        assert_eq!(
+            PublishDefinition::from_jsonc(r#"{"session": "abc", "title": null}"#)
+                .unwrap()
+                .title,
+            None
+        );
+
         let mut d = PublishDefinition::new("abc", &[]);
         d.push_segment("d", &[(9, 2)], "u");
         let err = d.validate().unwrap_err().to_string();
@@ -1033,8 +1130,8 @@ mod tests {
     /// The problems of a file are reported together, each at the line
     /// and column of the node it concerns, in file order. The schema's
     /// problems come first and alone: an unknown key at the key, a row
-    /// of the wrong shape at the row with the shape named, and a wrong
-    /// element at the element. A file the schema accepts then reports
+    /// of the wrong shape at the row with the shape named, a title of
+    /// the wrong shape, and a wrong element at the element. A file the schema accepts then reports
     /// what the rules find: a session other than the original, an
     /// unknown filter, a filter without its prompt, a filter listed
     /// twice, bad segment lines, an unknown reason, and a redaction
@@ -1057,6 +1154,7 @@ mod tests {
             "  \"segments\": [\n",
             "    [\"1-3\", \"d\"],\n",
             "  ],\n",
+            "  \"title\": \"Ducks\",\n",
             "  \"redact\": [\n",
             "    [\"\", \"pii\", \"u\", true],\n",
             "    [\"x\", \"pii\", \"u\", \"yes\"],\n",
@@ -1068,8 +1166,9 @@ mod tests {
             (4, 3, "unknown key \"filter\""),
             (5, 22, "a filters row is a name or [name, prompt]"),
             (7, 5, "a segments row is [lines, description, author]"),
-            (10, 6, "shorter than 1 character"),
-            (11, 23, "not of type \"boolean\""),
+            (9, 3, "title is [text, author], [text], or null"),
+            (11, 6, "shorter than 1 character"),
+            (12, 23, "not of type \"boolean\""),
         ];
         assert_eq!(found.len(), expect.len(), "{found:?}");
         for ((line, column, message), (l, c, m)) in found.iter().zip(expect) {

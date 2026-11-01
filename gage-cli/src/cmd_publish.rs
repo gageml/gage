@@ -200,7 +200,7 @@ pub enum PublishCommand {
     /// Query pending publish sessions
     ///
     /// Query pending publish sessions with SQL, as gage query does.
-    /// Tables session, entry, message, tool_use, and filtered hold
+    /// Tables session, entry, message, tool_use, and changes hold
     /// staged sessions and nothing else; no other table is present.
     Query(QueryRunArgs),
 
@@ -455,7 +455,7 @@ pub struct ApplyArgs {
     #[arg(long, requires = "tag")]
     force_tag: bool,
 
-    /// Publish session even when no filter or segment changed it
+    /// Publish session even when definition changed nothing in it
     #[arg(long)]
     force: bool,
 

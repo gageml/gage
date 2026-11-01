@@ -156,6 +156,13 @@ pub trait Driver: Send + Sync {
     /// a named filter treats as sensitive by type, for the publish
     /// redaction engine. The default is none,
     /// for a driver whose sessions cannot be published.
+    /// The entry JSON that sets a stored session's title to `title`
+    /// when appended after its last line. `None` when the driver has no
+    /// such entry for `content_format`.
+    fn title_entry(&self, _content_format: &str, _title: &str) -> Option<String> {
+        None
+    }
+
     fn text_descriptor(&self, _content_format: &str) -> Option<TextDescriptor> {
         None
     }
@@ -485,13 +492,15 @@ pub trait StoredSession {
     fn entry_json(&mut self) -> Box<dyn Iterator<Item = Result<EntryJson, DriverError>> + '_>;
     /// Write this session's content into `sink` with `derivation`
     /// applied: a dropped line is left out, a replaced line is written
-    /// as the given text, and every other byte of every path is
-    /// reproduced as stored.
+    /// as the given text, an appended entry is written after the last
+    /// line, and every other byte of every path is reproduced as
+    /// stored. Returns the line of each appended entry in the derived
+    /// content, in order.
     fn write_derived(
         &mut self,
         derivation: &Derivation,
         sink: &mut dyn ContentSink,
-    ) -> Result<(), DriverError>;
+    ) -> Result<Vec<u32>, DriverError>;
     /// The driver's attributes of the stored content, computed the way
     /// they are for a native session. The fingerprint fields describe
     /// no native artifact: the mtime is the epoch and the size is the
@@ -508,6 +517,8 @@ pub struct Derivation {
     /// Lines written as the given entry JSON text instead of the
     /// original
     pub replaced: BTreeMap<u32, String>,
+    /// Entry JSON texts written after the last line, in order
+    pub appended: Vec<String>,
 }
 
 /// One entry of a stored session as the harness wrote it.

@@ -95,15 +95,17 @@ impl PublishDirLayout {
 }
 
 /// One change of a session's `changes.json`: what its publish applied
-/// to the original. Every line number is the original's; the derived
-/// session's lines are renumbered around the dropped ones. Span
-/// offsets are positions in the published text.
+/// to the original. A line number is the original's, except on a
+/// `Title` record, whose line exists only in the derived session; the
+/// derived session's lines are renumbered around the dropped ones.
+/// Span offsets are positions in the published text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChangeRecord {
     pub kind: ChangeKind,
     /// The original line, 1-based: the first dropped line of a `Line`
-    /// record, the line of a `Text` record. A `Value` or `Attr` record
-    /// is on no line and carries 0.
+    /// record, the line of a `Text` record. A `Title` record's line is
+    /// the derived session's line of the added entry. A `Value` or
+    /// `Attr` record is on no line and carries 0.
     pub line: u32,
     /// The last dropped line of a `Line` record, inclusive.
     pub line_end: Option<u32>,
@@ -116,7 +118,8 @@ pub struct ChangeRecord {
     /// zero length.
     pub span_start: Option<u64>,
     pub span_end: Option<u64>,
-    pub reason: String,
+    /// The reason code; a `Title` record has none.
+    pub reason: Option<String>,
     pub author: String,
 }
 
@@ -131,6 +134,8 @@ pub enum ChangeKind {
     Text,
     /// An attribute of `attrs.json` was left out.
     Attr,
+    /// An entry that sets the session's title was added at the end.
+    Title,
 }
 
 impl ChangeKind {
@@ -141,6 +146,7 @@ impl ChangeKind {
             ChangeKind::Value => "value",
             ChangeKind::Text => "text",
             ChangeKind::Attr => "attr",
+            ChangeKind::Title => "title",
         }
     }
 
@@ -152,6 +158,7 @@ impl ChangeKind {
             "value" => Some(ChangeKind::Value),
             "text" => Some(ChangeKind::Text),
             "attr" => Some(ChangeKind::Attr),
+            "title" => Some(ChangeKind::Title),
             _ => None,
         }
     }
@@ -162,8 +169,9 @@ impl ChangeKind {
 /// `["line", line or [line, line_end], reason, author]`,
 /// `["value", path, reason, author]`,
 /// `["text", line, pointer, span_start, span_end, reason, author]`,
-/// and `["attr", name, reason, author]`. A record whose tag this build
-/// does not know is passed over. Records come back in file order.
+/// `["attr", name, reason, author]`, and `["title", line, author]`. A
+/// record whose tag this build does not know is passed over. Records
+/// come back in file order.
 pub fn parse_changes(bytes: &[u8]) -> Result<Vec<ChangeRecord>, StoreError> {
     let value: Value = serde_json::from_slice(bytes)
         .map_err(|e| StoreError::Parse(format!("{CHANGES_FILE}: {e}")))?;
@@ -244,7 +252,7 @@ fn parse_change(kind: ChangeKind, fields: &[Value]) -> Result<ChangeRecord, Stri
                 reference: None,
                 span_start: None,
                 span_end: None,
-                reason: text(2)?,
+                reason: Some(text(2)?),
                 author: text(3)?,
             }
         }
@@ -257,8 +265,21 @@ fn parse_change(kind: ChangeKind, fields: &[Value]) -> Result<ChangeRecord, Stri
                 reference: Some(text(1)?),
                 span_start: None,
                 span_end: None,
-                reason: text(2)?,
+                reason: Some(text(2)?),
                 author: text(3)?,
+            }
+        }
+        ChangeKind::Title => {
+            expect(3)?;
+            ChangeRecord {
+                kind,
+                line: line_of(field(1)?, "field 1")?,
+                line_end: None,
+                reference: None,
+                span_start: None,
+                span_end: None,
+                reason: None,
+                author: text(2)?,
             }
         }
         ChangeKind::Text => {
@@ -274,7 +295,7 @@ fn parse_change(kind: ChangeKind, fields: &[Value]) -> Result<ChangeRecord, Stri
                 reference: Some(text(2)?),
                 span_start: Some(span_start),
                 span_end: Some(span_end),
-                reason: text(5)?,
+                reason: Some(text(5)?),
                 author: text(6)?,
             }
         }
@@ -313,6 +334,7 @@ fn change_value(r: &ChangeRecord) -> Value {
             json!([tag, lines, r.reason, r.author])
         }
         ChangeKind::Value | ChangeKind::Attr => json!([tag, r.reference, r.reason, r.author]),
+        ChangeKind::Title => json!([tag, r.line, r.author]),
         ChangeKind::Text => json!([
             tag,
             r.line,
@@ -844,27 +866,34 @@ mod tests {
             "\n",
             r#"  ["attr", "project", "system", "filter:system"],"#,
             "\n",
+            r#"  ["title", 9, "user:t"],"#,
+            "\n",
             r#"  ["later", 1]"#,
             "\n]\n",
         );
         let records = parse_changes(text.as_bytes()).unwrap();
-        let record =
-            |kind, line, line_end, reference: Option<&str>, span, reason: &str, author: &str| {
-                let (span_start, span_end) = match span {
-                    Some((start, end)) => (Some(start), Some(end)),
-                    None => (None, None),
-                };
-                ChangeRecord {
-                    kind,
-                    line,
-                    line_end,
-                    reference: reference.map(String::from),
-                    span_start,
-                    span_end,
-                    reason: reason.into(),
-                    author: author.into(),
-                }
+        let record = |kind,
+                      line,
+                      line_end,
+                      reference: Option<&str>,
+                      span,
+                      reason: Option<&str>,
+                      author: &str| {
+            let (span_start, span_end) = match span {
+                Some((start, end)) => (Some(start), Some(end)),
+                None => (None, None),
             };
+            ChangeRecord {
+                kind,
+                line,
+                line_end,
+                reference: reference.map(String::from),
+                span_start,
+                span_end,
+                reason: reason.map(String::from),
+                author: author.into(),
+            }
+        };
         assert_eq!(
             records,
             [
@@ -874,17 +903,25 @@ mod tests {
                     Some(4),
                     None,
                     None,
-                    "scope",
+                    Some("scope"),
                     "session:abc"
                 ),
-                record(ChangeKind::Line, 7, Some(7), None, None, "scope", "user:t"),
+                record(
+                    ChangeKind::Line,
+                    7,
+                    Some(7),
+                    None,
+                    None,
+                    Some("scope"),
+                    "user:t"
+                ),
                 record(
                     ChangeKind::Value,
                     0,
                     None,
                     Some("$.cwd"),
                     None,
-                    "system",
+                    Some("system"),
                     "filter:system"
                 ),
                 record(
@@ -893,7 +930,7 @@ mod tests {
                     None,
                     Some("/message/content"),
                     Some((4, 14)),
-                    "pii",
+                    Some("pii"),
                     "filter:pii"
                 ),
                 record(
@@ -902,9 +939,10 @@ mod tests {
                     None,
                     Some("project"),
                     None,
-                    "system",
+                    Some("system"),
                     "filter:system"
                 ),
+                record(ChangeKind::Title, 9, None, None, None, None, "user:t"),
             ]
         );
         assert!(parse_changes(b"[]\n").unwrap().is_empty());
@@ -928,6 +966,11 @@ mod tests {
         assert!(
             matches!(reversed, StoreError::Parse(ref m) if m.contains("before its start")),
             "{reversed}"
+        );
+        let zero = parse_changes(br#"[["title", 0, "a"]]"#).unwrap_err();
+        assert!(
+            matches!(zero, StoreError::Parse(ref m) if m.contains("not a line number")),
+            "{zero}"
         );
         let untagged = parse_changes(br#"[[1, "scope", "a"]]"#).unwrap_err();
         assert!(
@@ -954,7 +997,7 @@ mod tests {
                 reference: None,
                 span_start: None,
                 span_end: None,
-                reason: "scope".into(),
+                reason: Some("scope".into()),
                 author: "user:t".into(),
             },
             ChangeRecord {
@@ -964,7 +1007,7 @@ mod tests {
                 reference: None,
                 span_start: None,
                 span_end: None,
-                reason: "scope".into(),
+                reason: Some("scope".into()),
                 author: "user:t".into(),
             },
             ChangeRecord {
@@ -974,8 +1017,18 @@ mod tests {
                 reference: Some("/message/content".into()),
                 span_start: Some(6),
                 span_end: Some(16),
-                reason: "pii".into(),
+                reason: Some("pii".into()),
                 author: "filter:pii".into(),
+            },
+            ChangeRecord {
+                kind: ChangeKind::Title,
+                line: 7,
+                line_end: None,
+                reference: None,
+                span_start: None,
+                span_end: None,
+                reason: None,
+                author: "user:t".into(),
             },
         ];
         assert_eq!(
@@ -984,7 +1037,8 @@ mod tests {
                 "[\n",
                 "  [\"line\",2,\"scope\",\"user:t\"],\n",
                 "  [\"line\",[4,6],\"scope\",\"user:t\"],\n",
-                "  [\"text\",1,\"/message/content\",6,16,\"pii\",\"filter:pii\"]\n",
+                "  [\"text\",1,\"/message/content\",6,16,\"pii\",\"filter:pii\"],\n",
+                "  [\"title\",7,\"user:t\"]\n",
                 "]\n",
             )
         );

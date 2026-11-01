@@ -152,7 +152,7 @@ impl Backend {
         let turns = self.load_turns(session_id, &entries).await?;
         let tool_uses = self.load_tool_uses(session_id).await?;
         // A native session is never a publish, and its context has no
-        // `filtered` relation. A pending publish has redactions, and
+        // `changes` relation. A pending publish has redactions, and
         // its context has no `note` relation.
         let (notes, redactions) = match self.kind {
             Kind::Native { .. } => (Vec::new(), Vec::new()),
@@ -281,12 +281,12 @@ impl Backend {
             .collect())
     }
 
-    /// The records of a stored session's `changes.json`, in original
-    /// line order; none for a session that is not a publish.
+    /// The records of a stored session's `changes.json`, in line
+    /// order; none for a session that is not a publish.
     async fn load_redactions(&self, session_id: &str) -> Result<Vec<Redaction>, Box<dyn Error>> {
         let sql = format!(
             "SELECT kind, line, line_end, ref, span_start, span_end, reason, author \
-             FROM filtered WHERE session_id = '{}' ORDER BY line, ref, span_start",
+             FROM changes WHERE session_id = '{}' ORDER BY line, ref, span_start",
             sql_str(session_id)
         );
         let batches = self.ctx.sql(&sql).await?.collect().await?;
@@ -306,7 +306,8 @@ impl Backend {
                     "value" => ChangeKind::Value,
                     "text" => ChangeKind::Text,
                     "attr" => ChangeKind::Attr,
-                    other => return Err(format!("unknown filtered kind {other:?}").into()),
+                    "title" => ChangeKind::Title,
+                    other => return Err(format!("unknown changes kind {other:?}").into()),
                 };
                 let line_at = |col: &Int64Array| -> Result<Option<u32>, Box<dyn Error>> {
                     Ok(if col.is_valid(i) {
@@ -331,7 +332,7 @@ impl Backend {
                         .then(|| references.value(i).to_string()),
                     span_start: offset_at(span_starts)?,
                     span_end: offset_at(span_ends)?,
-                    reason: reasons.value(i).to_string(),
+                    reason: reasons.is_valid(i).then(|| reasons.value(i).to_string()),
                     author: authors.value(i).to_string(),
                 });
             }

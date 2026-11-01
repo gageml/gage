@@ -12,9 +12,9 @@
 //! sessions: the core resolves the session set and plans every read
 //! ([`scope`]), and the driver that wrote each session deserializes
 //! its bytes into normalized rows the core turns into batches
-//! ([`rows`], [`stored_rows`]). `filtered` is the records of a
+//! ([`rows`], [`stored_rows`]). `changes` is the records of a
 //! published session's `changes.json`, over the same session set
-//! ([`filtered`]).
+//! ([`changes`]).
 //! `note` is one row per live note object, from
 //! [`gage_store::StoredNoteTable`]. `issue` is one row per live issue
 //! object and `issue_event` one row per change entry across them.
@@ -40,7 +40,7 @@
 
 mod age;
 mod blame;
-pub mod filtered;
+pub mod changes;
 mod json;
 mod native;
 mod patch;
@@ -213,8 +213,8 @@ impl ContextBuilder {
                 )),
             ),
             (
-                "filtered",
-                Arc::new(StoredRowsTable::new(RowKind::Filtered, sessions)),
+                "changes",
+                Arc::new(StoredRowsTable::new(RowKind::Changes, sessions)),
             ),
             ("note", Arc::new(StoredNoteTable::new(Arc::clone(&store)))),
             ("dataset", dataset_table(Arc::clone(&store))),
@@ -276,7 +276,7 @@ impl ContextBuilder {
 
 /// Register the publish scope's tables: `session` over the pending
 /// publish working trees under `publish_root`, and `entry`,
-/// `message`, `tool_use`, and `filtered` over the same set. Notes,
+/// `message`, `tool_use`, and `changes` over the same set. Notes,
 /// issues, and the other store tables are absent, since a pending
 /// publish is not a store object and nothing targets it.
 fn build_publish_scope(
@@ -313,8 +313,8 @@ fn build_publish_scope(
             )),
         ),
         (
-            "filtered",
-            Arc::new(StoredRowsTable::new(RowKind::Filtered, sessions)),
+            "changes",
+            Arc::new(StoredRowsTable::new(RowKind::Changes, sessions)),
         ),
     ];
     for (name, table) in tables {
@@ -330,7 +330,7 @@ fn build_publish_scope(
 }
 
 /// Register one scan's tables: `session` at the members' linked
-/// versions, `entry`, `message`, `tool_use`, and `filtered` over
+/// versions, `entry`, `message`, `tool_use`, and `changes` over
 /// them, and every other table from the scan source.
 fn build_scan_scope(
     ctx: SessionContext,
@@ -377,8 +377,8 @@ fn build_scan_scope(
             )),
         ),
         (
-            "filtered",
-            Arc::new(StoredRowsTable::new(RowKind::Filtered, sessions)),
+            "changes",
+            Arc::new(StoredRowsTable::new(RowKind::Changes, sessions)),
         ),
     ];
     tables.extend(scan_scope_tables(&store, scope.source()));
@@ -1151,12 +1151,12 @@ mod tests {
         assert_eq!(native_rows, ["Edit", "Read"]);
     }
 
-    /// `filtered` reads a published session's `changes.json`: one
-    /// row per record with the record's fields in the table's columns,
-    /// under the scope's session filter and the `line` filter. The
-    /// original session has no rows.
+    /// `changes` reads a published session's `changes.json`: one row
+    /// per record with the record's fields in the table's columns, a
+    /// title record with no reason, under the scope's session filter
+    /// and the `line` filter. The original session has no rows.
     #[tokio::test]
-    async fn filtered_reads_a_published_sessions_records() {
+    async fn changes_reads_a_published_sessions_records() {
         let (tmp, store) = open_store();
         let claude_root = tempfile::tempdir().unwrap();
         let native_id = "11111111-2222-3333-4444-888888888888";
@@ -1206,7 +1206,9 @@ mod tests {
                     "[\n",
                     r#"  ["line", 2, "scope", "user:t"],"#,
                     "\n",
-                    r#"  ["text", 1, "/message/content", 6, 16, "pii", "filter:pii"]"#,
+                    r#"  ["text", 1, "/message/content", 6, 16, "pii", "filter:pii"],"#,
+                    "\n",
+                    r#"  ["title", 3, "user:t"]"#,
                     "\n]\n",
                 ),
             )
@@ -1226,8 +1228,8 @@ mod tests {
                  || ' ' || COALESCE(ref, '-') \
                  || ' ' || COALESCE(CAST(span_start AS VARCHAR), '-') \
                  || ' ' || COALESCE(CAST(span_end AS VARCHAR), '-') \
-                 || ' ' || reason || ' ' || author \
-             FROM filtered ORDER BY line, kind",
+                 || ' ' || COALESCE(reason, '-') || ' ' || author \
+             FROM changes ORDER BY line, kind",
         )
         .await;
         assert_eq!(
@@ -1235,18 +1237,19 @@ mod tests {
             [
                 "text 1 - /message/content 6 16 pii filter:pii",
                 "line 2 2 - - - scope user:t",
+                "title 3 - - - - - user:t",
             ]
         );
 
         let by_session = strings(
             &ctx,
-            &format!("SELECT kind FROM filtered WHERE session_id = '{published_id}' AND line = 2"),
+            &format!("SELECT kind FROM changes WHERE session_id = '{published_id}' AND line = 2"),
         )
         .await;
         assert_eq!(by_session, ["line"]);
         let none = strings(
             &ctx,
-            &format!("SELECT kind FROM filtered WHERE session_id = '{original_id}'"),
+            &format!("SELECT kind FROM changes WHERE session_id = '{original_id}'"),
         )
         .await;
         assert!(none.is_empty(), "{none:?}");

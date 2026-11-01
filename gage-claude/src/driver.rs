@@ -125,6 +125,15 @@ impl Driver for ClaudeDriver {
         content_schema::content_schemas()
     }
 
+    fn title_entry(&self, content_format: &str, title: &str) -> Option<String> {
+        (content_format == CONTENT_FORMAT).then(|| {
+            format!(
+                r#"{{"type":"custom-title","customTitle":{}}}"#,
+                serde_json::Value::from(title)
+            )
+        })
+    }
+
     fn text_descriptor(&self, content_format: &str) -> Option<TextDescriptor> {
         (content_format == CONTENT_FORMAT).then(text_descriptor::text_descriptor)
     }
@@ -1225,7 +1234,7 @@ impl StoredSession for ClaudeStoredSession {
         &mut self,
         derivation: &Derivation,
         sink: &mut dyn ContentSink,
-    ) -> Result<(), DriverError> {
+    ) -> Result<Vec<u32>, DriverError> {
         self.write_derived_content(derivation, sink)
     }
 
@@ -1252,14 +1261,16 @@ impl StoredSession for ClaudeStoredSession {
 }
 
 impl ClaudeStoredSession {
-    /// `session.jsonl` with `derivation` applied, line by line, and
-    /// every other path copied as stored.
+    /// `session.jsonl` with `derivation` applied, line by line, the
+    /// appended entries after its last line, and every other path
+    /// copied as stored.
     fn write_derived_content(
         &mut self,
         derivation: &Derivation,
         sink: &mut dyn ContentSink,
-    ) -> Result<(), DriverError> {
+    ) -> Result<Vec<u32>, DriverError> {
         use std::io::{BufRead, Write};
+        let mut appended = Vec::new();
         for path in self.source.paths()? {
             let mut reader = self.source.open(&path)?;
             let mut writer = sink.create(&path)?;
@@ -1267,6 +1278,7 @@ impl ClaudeStoredSession {
                 io::copy(&mut reader, &mut writer)?;
                 continue;
             }
+            let mut written: u32 = 0;
             for (i, line) in io::BufReader::new(reader).lines().enumerate() {
                 let line = line?;
                 let number = i as u32 + 1;
@@ -1276,9 +1288,16 @@ impl ClaudeStoredSession {
                 let text = derivation.replaced.get(&number).unwrap_or(&line);
                 writer.write_all(text.as_bytes())?;
                 writer.write_all(b"\n")?;
+                written += 1;
+            }
+            for text in &derivation.appended {
+                writer.write_all(text.as_bytes())?;
+                writer.write_all(b"\n")?;
+                written += 1;
+                appended.push(written);
             }
         }
-        Ok(())
+        Ok(appended)
     }
 }
 
@@ -1694,6 +1713,69 @@ mod tests {
         fn open(&self, _path: &str) -> io::Result<Box<dyn io::Read + Send>> {
             Err(io::Error::other("no content"))
         }
+    }
+
+    /// A transcript of three lines as stored content.
+    struct Transcript(&'static str);
+
+    impl ContentSource for Transcript {
+        fn paths(&self) -> io::Result<Vec<String>> {
+            Ok(vec!["session.jsonl".to_string(), "other.txt".to_string()])
+        }
+        fn open(&self, path: &str) -> io::Result<Box<dyn io::Read + Send>> {
+            let bytes = match path {
+                "session.jsonl" => self.0.as_bytes(),
+                _ => b"as stored",
+            };
+            Ok(Box::new(io::Cursor::new(bytes.to_vec())))
+        }
+    }
+
+    #[derive(Default)]
+    struct MemorySink(std::collections::BTreeMap<String, Vec<u8>>);
+
+    impl ContentSink for MemorySink {
+        fn create<'a>(&'a mut self, path: &str) -> io::Result<Box<dyn io::Write + 'a>> {
+            Ok(Box::new(self.0.entry(path.to_string()).or_default()))
+        }
+    }
+
+    /// The derived write leaves out a dropped line, writes a replaced
+    /// line as given, appends the appended entries after the last
+    /// line and reports their lines, and copies every other path.
+    #[test]
+    fn write_derived_applies_the_derivation_and_appends_entries() {
+        let driver = ClaudeDriver::new();
+        let mut stored = driver
+            .read_stored(
+                "s1".into(),
+                CONTENT_FORMAT,
+                Box::new(Transcript(
+                    "{\"type\":\"a\"}\n{\"type\":\"b\"}\n{\"type\":\"c\"}\n",
+                )),
+            )
+            .unwrap();
+        let title = driver
+            .title_entry(CONTENT_FORMAT, "Ducks \"quoted\"")
+            .unwrap();
+        assert_eq!(
+            title,
+            r#"{"type":"custom-title","customTitle":"Ducks \"quoted\""}"#
+        );
+        assert_eq!(driver.title_entry("other 1", "x"), None);
+        let derivation = Derivation {
+            dropped: [2].into_iter().collect(),
+            replaced: [(3, "{\"type\":\"c2\"}".to_string())].into_iter().collect(),
+            appended: vec![title.clone()],
+        };
+        let mut sink = MemorySink::default();
+        let appended = stored.write_derived(&derivation, &mut sink).unwrap();
+        assert_eq!(appended, [3]);
+        assert_eq!(
+            String::from_utf8(sink.0["session.jsonl"].clone()).unwrap(),
+            format!("{{\"type\":\"a\"}}\n{{\"type\":\"c2\"}}\n{title}\n")
+        );
+        assert_eq!(sink.0["other.txt"], b"as stored");
     }
 
     #[test]

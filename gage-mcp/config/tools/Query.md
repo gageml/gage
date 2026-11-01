@@ -15,7 +15,7 @@ description = "Page of the cursor's result to return, starting at 1 (default 1).
 
 [parameters.publish]
 type = "boolean"
-description = "Run sql over pending publish sessions instead: sessions staged by gage publish and not yet applied. session, entry, message, tool_use, and filtered hold them and nothing else; no other table is present. Goes with sql."
+description = "Run sql over pending publish sessions instead: sessions staged by gage publish and not yet applied. session, entry, message, tool_use, and changes hold them and nothing else; no other table is present. Goes with sql."
 
 [annotations]
 read_only_hint = true
@@ -40,9 +40,10 @@ Tables:
   result_uuid, result_timestamp, output, is_error, input_raw, result_raw,
   files_changed) - one tool call with its result; `files_changed` is the
   paths written, null when unknown
-- filtered (session_id, kind, line, line_end, ref, span_start, span_end,
-  reason, author) - rules a publish applied to its original; `kind` is
-  line, value, text, or attr
+- changes (session_id, kind, line, line_end, ref, span_start, span_end,
+  reason, author) - changes a publish made to its original; `kind` is
+  line, value, text, attr, or title; a title row has no reason and its
+  `line` is in the published session
 - note (id, name, author, value, text, metadata, target, scan, work_id,
   created, modified) - `name` is the note kind
 - session_note (session_id, note_id, lines) - notes on a session, with the

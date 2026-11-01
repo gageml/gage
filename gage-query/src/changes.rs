@@ -1,5 +1,5 @@
-//! The `filtered` table shape: one row per record of a stored
-//! session's `changes.json`, the rules its publish applied to the
+//! The `changes` table shape: one row per record of a stored
+//! session's `changes.json`, the changes its publish made to the
 //! original. A session that is not a publish has no rows.
 
 use std::sync::{Arc, LazyLock};
@@ -19,17 +19,17 @@ static SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
         Field::new("ref", DataType::Utf8, true),
         Field::new("span_start", DataType::Int64, true),
         Field::new("span_end", DataType::Int64, true),
-        Field::new("reason", DataType::Utf8, false),
+        Field::new("reason", DataType::Utf8, true),
         Field::new("author", DataType::Utf8, false),
     ]))
 });
 
-pub fn filtered_schema() -> SchemaRef {
+pub fn changes_schema() -> SchemaRef {
     SCHEMA.clone()
 }
 
-/// The `filtered` rows of one session, in record order.
-pub fn filtered_batch(session_id: &str, records: &[ChangeRecord]) -> Result<RecordBatch> {
+/// The `changes` rows of one session, in record order.
+pub fn changes_batch(session_id: &str, records: &[ChangeRecord]) -> Result<RecordBatch> {
     let mut session_ids = StringBuilder::new();
     let mut kinds = StringBuilder::new();
     let mut lines = Int64Builder::new();
@@ -47,11 +47,11 @@ pub fn filtered_batch(session_id: &str, records: &[ChangeRecord]) -> Result<Reco
         references.append_option(r.reference.as_deref());
         span_starts.append_option(r.span_start.map(offset));
         span_ends.append_option(r.span_end.map(offset));
-        reasons.append_value(&r.reason);
+        reasons.append_option(r.reason.as_deref());
         authors.append_value(&r.author);
     }
     Ok(RecordBatch::try_new(
-        filtered_schema(),
+        changes_schema(),
         vec![
             Arc::new(session_ids.finish()),
             Arc::new(kinds.finish()),

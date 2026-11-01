@@ -6,8 +6,8 @@
 use std::fs;
 
 use gage_publish::{
-    Allow, FilterSpec, InitArgs, PublishDefinition, PublishError, Publisher, Refreshed, candidate,
-    format_lines,
+    Allow, FilterSpec, InitArgs, PublishDefinition, PublishError, Publisher, Refreshed, TitleEntry,
+    candidate, format_lines,
 };
 use gage_registry::driver::DriverRegistry;
 use gage_session::SourceOptions;
@@ -360,7 +360,9 @@ fn refresh_applies_redact_rows_and_reports_an_unmatched_row() {
     );
     let records = changes(&f.publish_root, &id);
     assert!(
-        records.iter().all(|r| r.reason == "privacy"),
+        records
+            .iter()
+            .all(|r| r.reason.as_deref() == Some("privacy")),
         "{records:#?}"
     );
 }
@@ -449,14 +451,19 @@ fn harness_records_filter_leaves_out_run_records_and_descriptive_fields() {
         "{lines:#?}"
     );
     let records = changes(&f.publish_root, &id);
-    let dropped: Vec<(u32, Option<u32>, &str, &str)> = records
+    let dropped: Vec<(u32, Option<u32>, Option<&str>, &str)> = records
         .iter()
         .filter(|r| r.kind == ChangeKind::Line)
-        .map(|r| (r.line, r.line_end, r.reason.as_str(), r.author.as_str()))
+        .map(|r| (r.line, r.line_end, r.reason.as_deref(), r.author.as_str()))
         .collect();
     assert_eq!(
         dropped,
-        [(5, Some(5), "harness-records", "filter:harness-records")]
+        [(
+            5,
+            Some(5),
+            Some("harness-records"),
+            "filter:harness-records"
+        )]
     );
     // The token usage is a descriptive field and goes; the working
     // directory is the system filter's and stays
@@ -476,7 +483,8 @@ fn harness_records_filter_leaves_out_run_records_and_descriptive_fields() {
         records
             .iter()
             .filter(|r| r.kind == ChangeKind::Value)
-            .all(|r| r.reason == "harness-records" && r.author == "filter:harness-records")
+            .all(|r| r.reason.as_deref() == Some("harness-records")
+                && r.author == "filter:harness-records")
     );
     let summary = staged_summary(&f.publish_root, &id);
     assert_eq!(summary["line_count"], 4, "{summary}");
@@ -508,14 +516,19 @@ fn harness_context_filter_leaves_out_context_entries_and_nothing_else() {
     assert!(lines[1].contains("\"usage\""), "{}", lines[1]);
     assert!(lines[2].contains("\"api-request\""), "{}", lines[2]);
     let records = changes(&f.publish_root, &id);
-    let dropped: Vec<(u32, Option<u32>, &str, &str)> = records
+    let dropped: Vec<(u32, Option<u32>, Option<&str>, &str)> = records
         .iter()
         .filter(|r| r.kind == ChangeKind::Line)
-        .map(|r| (r.line, r.line_end, r.reason.as_str(), r.author.as_str()))
+        .map(|r| (r.line, r.line_end, r.reason.as_deref(), r.author.as_str()))
         .collect();
     assert_eq!(
         dropped,
-        [(2, Some(5), "harness-context", "filter:harness-context")]
+        [(
+            2,
+            Some(5),
+            Some("harness-context"),
+            "filter:harness-context"
+        )]
     );
     assert!(
         records.iter().all(|r| r.kind == ChangeKind::Line),
@@ -663,16 +676,20 @@ fn refresh_reruns_filters_and_keeps_rows_in_place() {
 
 /// The title stays the original's: the driver takes it from the first
 /// prompt, and redacting that prompt does not retitle the publication.
+/// Every summary field, the title included, is the driver's reading
+/// of the staged content: redacting the first prompt retitles the
+/// publication.
 #[test]
-fn the_staged_summary_keeps_the_original_title() {
+fn the_staged_summary_is_computed_from_the_staged_content() {
     let f = fixture();
     let publisher = Publisher::with_root(&f.store, &f.publish_root);
     let id = stage(&publisher, &f.original, &[]);
 
     let before = staged_summary(&f.publish_root, &id);
-    let title = before["title"].clone();
     assert!(
-        title.as_str().is_some_and(|t| t.contains("Hello")),
+        before["title"]
+            .as_str()
+            .is_some_and(|t| t.contains("Hello")),
         "{before}"
     );
 
@@ -680,12 +697,116 @@ fn the_staged_summary_keeps_the_original_title() {
         d.push_redact("Hello", "privacy", "user:test", true);
     });
     let after = staged_summary(&f.publish_root, &id);
-    assert_eq!(after["title"], title, "{after}");
+    assert!(
+        after["title"]
+            .as_str()
+            .is_some_and(|t| t.starts_with("[REDACTED], what")),
+        "{after}"
+    );
     assert_eq!(after["line_count"], 5, "{after}");
     assert!(
         staged_lines(&f.publish_root, &id)[0].contains("[REDACTED], what"),
         "the prompt itself is redacted"
     );
+}
+
+/// A title in the definition is written as the driver's title entry
+/// after the last staged line, recorded as a title change at that
+/// line with the title's author, and read back as the summary title.
+/// A title written by hand without an author takes the refresh's. The
+/// staged session passes the removal-only check with the entry in
+/// place and is refused with it altered.
+#[test]
+fn a_title_in_the_definition_adds_an_entry_after_the_last_line() {
+    let f = fixture();
+    let publisher = Publisher::with_root(&f.store, &f.publish_root);
+    let id = stage(&publisher, &f.original, &["pii".parse().unwrap()]);
+    assert_eq!(staged_lines(&f.publish_root, &id).len(), 5);
+    let before = publisher.changes(&id).unwrap();
+
+    edit(&publisher, &id, |d| {
+        d.title = Some(TitleEntry {
+            text: "Ducks \"quoted\"".into(),
+            author: "user:test".into(),
+        });
+    });
+    let lines = staged_lines(&f.publish_root, &id);
+    assert_eq!(lines.len(), 6);
+    assert_eq!(
+        lines[5],
+        r#"{"type":"custom-title","customTitle":"Ducks \"quoted\""}"#
+    );
+    let records = changes(&f.publish_root, &id);
+    let titles: Vec<&ChangeRecord> = records
+        .iter()
+        .filter(|r| r.kind == ChangeKind::Title)
+        .collect();
+    assert_eq!(titles.len(), 1, "{records:#?}");
+    assert_eq!(
+        (
+            titles[0].line,
+            titles[0].reason.as_deref(),
+            titles[0].author.as_str()
+        ),
+        (6, None, "user:test")
+    );
+    assert_eq!(records.last().unwrap().kind, ChangeKind::Title);
+    let summary = staged_summary(&f.publish_root, &id);
+    assert_eq!(summary["title"], "Ducks \"quoted\"", "{summary}");
+    assert_eq!(summary["line_count"], 6, "{summary}");
+    publisher.check(&id).unwrap();
+    assert_eq!(
+        publisher.changes(&id).unwrap(),
+        before + 1,
+        "the title counts as one change"
+    );
+
+    // A title written by hand without an author takes the refresh's
+    let path = publisher.store().definition_file(&id);
+    fs::write(
+        &path,
+        format!(
+            "{{\n  \"session\": \"{}\",\n  \"title\": [\"Geese\"],\n  \"filters\": [\"pii\"],\n}}\n",
+            f.original.id
+        ),
+    )
+    .unwrap();
+    let refreshed = publisher.refresh(&id, "session:hand").unwrap();
+    assert_eq!(refreshed.authored, 1);
+    let definition = publisher.definition(&id).unwrap();
+    assert_eq!(
+        definition.title,
+        Some(TitleEntry {
+            text: "Geese".into(),
+            author: "session:hand".into(),
+        })
+    );
+    assert_eq!(
+        staged_lines(&f.publish_root, &id)[5],
+        r#"{"type":"custom-title","customTitle":"Geese"}"#
+    );
+    assert_eq!(staged_summary(&f.publish_root, &id)["title"], "Geese");
+
+    // The title entry is checked as written: an altered one is refused
+    let staged = f
+        .publish_root
+        .join(&id)
+        .join("files.d")
+        .join("session.jsonl");
+    let text = fs::read_to_string(&staged).unwrap();
+    fs::write(&staged, text.replace("Geese", "Swans")).unwrap();
+    let err = publisher.apply(&id, false).unwrap_err();
+    assert!(
+        matches!(err, PublishError::Refused(ref m) if m.contains("line 6 is not the title entry")),
+        "{err}"
+    );
+    fs::write(&staged, text).unwrap();
+
+    let commit = publisher.apply(&id, false).unwrap();
+    let published = SessionStore::from(&f.store).at_commit(&commit).unwrap();
+    assert_eq!(published.attrs.summary.title.as_deref(), Some("Geese"));
+    let committed = SessionStore::from(&f.store).changes(&commit).unwrap();
+    assert_eq!(committed.last().unwrap().kind, ChangeKind::Title);
 }
 
 /// A user's row deleted by hand is gone; a filter's row deleted by
@@ -804,16 +925,16 @@ fn refresh_reapplies_a_hand_edited_file() {
     assert!(lines[0].contains(r#""uuid":"a1""#), "{}", lines[0]);
     assert!(lines[1].contains(r#""uuid":"a2""#), "{}", lines[1]);
     let records = changes(&f.publish_root, &id);
-    let dropped: Vec<(u32, Option<u32>, &str, &str)> = records
+    let dropped: Vec<(u32, Option<u32>, Option<&str>, &str)> = records
         .iter()
         .filter(|r| r.kind == ChangeKind::Line)
-        .map(|r| (r.line, r.line_end, r.reason.as_str(), r.author.as_str()))
+        .map(|r| (r.line, r.line_end, r.reason.as_deref(), r.author.as_str()))
         .collect();
     assert_eq!(
         dropped,
         [
-            (1, Some(1), "scope", "session:hand"),
-            (4, Some(5), "scope", "session:hand"),
+            (1, Some(1), Some("scope"), "session:hand"),
+            (4, Some(5), Some("scope"), "session:hand"),
         ]
     );
     let after = staged_summary(&f.publish_root, &id);
@@ -823,7 +944,8 @@ fn refresh_reapplies_a_hand_edited_file() {
         after["message_count"].as_u64().unwrap() < before["message_count"].as_u64().unwrap(),
         "{before} -> {after}"
     );
-    assert_eq!(after["title"], before["title"], "{after}");
+    // The kept lines hold no prompt, so the content yields no title
+    assert_eq!(after["title"], Value::Null, "{after}");
     publisher.check(&id).unwrap();
 
     fs::write(
@@ -1120,24 +1242,32 @@ fn init_adds_segments_by_description() {
     assert_eq!(publisher.changes(&id).unwrap(), 0);
 }
 
-/// `apply` refuses a definition with no filter and no segment, forced
-/// or not: an unmodified session is pushed directly. A definition
-/// whose filters and segments changed nothing is refused unless
-/// forced, and a forced apply publishes the session as it is.
+/// `apply` refuses a definition that changed nothing, with or without
+/// filters, unless forced, and a forced apply publishes the session as
+/// it is. A definition whose only change is the title is applied.
 #[test]
-fn apply_requires_a_filter_or_segment_and_a_change_unless_forced() {
+fn apply_requires_a_change_unless_forced() {
     let f = fixture();
     let publisher = Publisher::with_root(&f.store, &f.publish_root);
     let sessions = SessionStore::from(&f.store);
 
     let empty = stage(&publisher, &f.original, &[]);
-    for force in [false, true] {
-        let err = publisher.apply(&empty, force).unwrap_err();
-        assert!(matches!(err, PublishError::Refused(_)), "{err}");
-        assert!(err.to_string().contains("no filter or segment"), "{err}");
-    }
+    let err = publisher.apply(&empty, false).unwrap_err();
+    assert!(matches!(err, PublishError::Unchanged), "{err}");
     assert!(f.publish_root.join(&empty).is_dir());
     assert_eq!(sessions.iter().unwrap().count(), 1);
+
+    edit(&publisher, &empty, |d| {
+        d.title = Some(TitleEntry {
+            text: "Retitled".into(),
+            author: "user:test".into(),
+        });
+    });
+    assert_eq!(publisher.changes(&empty).unwrap(), 1);
+    let commit = publisher.apply(&empty, false).unwrap();
+    let retitled = sessions.at_commit(&commit).unwrap();
+    assert_eq!(retitled.attrs.summary.title.as_deref(), Some("Retitled"));
+    assert_eq!(sessions.iter().unwrap().count(), 2);
 
     let filters = [FilterSpec::new("custom", Some("Remove nothing".into())).unwrap()];
     let unchanged = stage(&publisher, &f.original, &filters);
@@ -1145,7 +1275,7 @@ fn apply_requires_a_filter_or_segment_and_a_change_unless_forced() {
     let err = publisher.apply(&unchanged, false).unwrap_err();
     assert!(matches!(err, PublishError::Unchanged), "{err}");
     assert!(f.publish_root.join(&unchanged).is_dir());
-    assert_eq!(sessions.iter().unwrap().count(), 1);
+    assert_eq!(sessions.iter().unwrap().count(), 2);
 
     let commit = publisher.apply(&unchanged, true).unwrap();
     let published = sessions.at_commit(&commit).unwrap();
@@ -1243,8 +1373,8 @@ fn system_filter_leaves_out_system_values_and_drops_the_project_attribute() {
     assert_eq!(attrs.len(), 1, "{records:#?}");
     assert_eq!(attrs[0].reference.as_deref(), Some("project"));
     assert_eq!(
-        (attrs[0].reason.as_str(), attrs[0].author.as_str()),
-        ("system", "filter:system")
+        (attrs[0].reason.as_deref(), attrs[0].author.as_str()),
+        (Some("system"), "filter:system")
     );
     // One value rule per path, on no line, however many values it
     // selects; no text record is on a left-out value
@@ -1254,9 +1384,9 @@ fn system_filter_leaves_out_system_values_and_drops_the_project_attribute() {
         .collect();
     assert_eq!(values.len(), 5, "{records:#?}");
     assert!(
-        values
-            .iter()
-            .all(|r| r.line == 0 && r.reason == "system" && r.author == "filter:system"),
+        values.iter().all(|r| r.line == 0
+            && r.reason.as_deref() == Some("system")
+            && r.author == "filter:system"),
         "{records:#?}"
     );
     assert!(

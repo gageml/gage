@@ -1,5 +1,5 @@
 //! A publish-scoped context serves a pending publish working tree in
-//! the `session`, `entry`, `message`, `tool_use`, and `filtered`
+//! the `session`, `entry`, `message`, `tool_use`, and `changes`
 //! tables, and nothing else; a rebuilt working tree is re-read by the
 //! same context.
 
@@ -125,7 +125,7 @@ async fn publish_scope_serves_pending_publishes_in_the_session_tables() {
     // next query, which is what the session view's reload relies on.
     let empty = strings(
         &ctx,
-        &format!("SELECT kind FROM filtered WHERE session_id = '{id}'"),
+        &format!("SELECT kind FROM changes WHERE session_id = '{id}'"),
     )
     .await;
     assert!(
@@ -160,7 +160,7 @@ async fn publish_scope_serves_pending_publishes_in_the_session_tables() {
     let records = strings(
         &ctx,
         &format!(
-            "SELECT kind || ' ' || ref || ' ' || reason FROM filtered WHERE session_id = '{id}'"
+            "SELECT kind || ' ' || ref || ' ' || reason FROM changes WHERE session_id = '{id}'"
         ),
     )
     .await;

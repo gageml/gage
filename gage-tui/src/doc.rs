@@ -35,7 +35,8 @@ pub struct Redaction {
     pub reference: Option<String>,
     pub span_start: Option<u64>,
     pub span_end: Option<u64>,
-    pub reason: String,
+    /// The reason code; a `Title` record has none
+    pub reason: Option<String>,
     pub author: String,
 }
 
@@ -44,7 +45,7 @@ impl Redaction {
     fn dropped_lines(&self) -> Option<(u32, u32)> {
         match self.kind {
             ChangeKind::Line => Some((self.line, self.line_end.unwrap_or(self.line))),
-            ChangeKind::Value | ChangeKind::Text | ChangeKind::Attr => None,
+            ChangeKind::Value | ChangeKind::Text | ChangeKind::Attr | ChangeKind::Title => None,
         }
     }
 }
@@ -115,14 +116,23 @@ impl Document {
         Some(line + shift)
     }
 
-    /// The `Text` records on entry `index`, in record order.
+    /// The `Text` records on entry `index`, matched by its original
+    /// line, and the `Title` record of an entry the publish added,
+    /// matched by its derived line, in record order.
     pub fn entry_redactions(&self, index: usize) -> Vec<&Redaction> {
+        let Some(entry) = self.entries.get(index) else {
+            return Vec::new();
+        };
         let Some(line) = self.original_line(index) else {
             return Vec::new();
         };
         self.redactions
             .iter()
-            .filter(|r| r.kind == ChangeKind::Text && r.line == line)
+            .filter(|r| match r.kind {
+                ChangeKind::Text => r.line == line,
+                ChangeKind::Title => r.line == entry.line,
+                ChangeKind::Line | ChangeKind::Value | ChangeKind::Attr => false,
+            })
             .collect()
     }
 
@@ -336,14 +346,15 @@ mod tests {
             reference: (kind != ChangeKind::Line).then(|| "/message/content".to_string()),
             span_start: (kind == ChangeKind::Text).then_some(0),
             span_end: (kind == ChangeKind::Text).then_some(10),
-            reason: "pii".to_string(),
+            reason: (kind != ChangeKind::Title).then(|| "pii".to_string()),
             author: "filter:pii".to_string(),
         }
     }
 
     /// A derived session of five entries from an original of ten:
     /// lines 2-3 and 6 were dropped, as were lines 9-10 after the
-    /// last kept entry.
+    /// last kept entry, and the fifth entry is the title the publish
+    /// added.
     fn derived() -> Document {
         Document {
             session: Session {
@@ -373,6 +384,7 @@ mod tests {
                 redaction(ChangeKind::Line, 9, Some(10)),
                 redaction(ChangeKind::Value, 0, None),
                 redaction(ChangeKind::Attr, 0, None),
+                redaction(ChangeKind::Title, 5, None),
             ],
         }
     }
@@ -401,8 +413,9 @@ mod tests {
         assert_eq!(doc.original_line(5), None);
     }
 
-    /// Text records are matched to entries by original line, a value
-    /// or attr rule is on no entry, and a run lists every line record
+    /// Text records are matched to entries by original line, a title
+    /// record by the derived line of the entry it added, a value or
+    /// attr rule is on no entry, and a run lists every line record
     /// that touches it.
     #[test]
     fn records_are_found_by_original_line() {
@@ -413,6 +426,8 @@ mod tests {
         assert_eq!(kinds(0), [ChangeKind::Text]);
         assert_eq!(kinds(1), []);
         assert_eq!(kinds(2), [ChangeKind::Text]);
+        assert_eq!(kinds(3), []);
+        assert_eq!(kinds(4), [ChangeKind::Title]);
         let first_run = &doc.dropped()[0];
         let lines: Vec<(u32, Option<u32>)> = doc
             .dropped_redactions(first_run)

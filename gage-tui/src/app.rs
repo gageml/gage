@@ -1700,9 +1700,10 @@ fn draw_dropped(frame: &mut Frame, doc: &Document, dropped: &Dropped, area: Rect
 }
 
 /// One record as the content pane lists it: where it applied, its
-/// reason, and its author. A text record names its pointer and its
-/// byte offsets in the published value, a value record its selector,
-/// a line record its lines, and an attr record its attribute.
+/// reason when it has one, and its author. A text record names its
+/// pointer and its byte offsets in the published value, a value record
+/// its selector, a line record its lines, an attr record its
+/// attribute, and a title record the line the publish added.
 fn redaction_line(r: &Redaction) -> Line<'static> {
     let reference = r.reference.clone().unwrap_or_default();
     let location = match r.kind {
@@ -1713,13 +1714,18 @@ fn redaction_line(r: &Redaction) -> Line<'static> {
         },
         ChangeKind::Value => format!("values {reference}"),
         ChangeKind::Attr => format!("attr {reference}"),
+        ChangeKind::Title => format!("title added at line {}", r.line),
     };
-    Line::from(vec![
-        Span::raw(location),
-        Span::styled(" · ", styles::Text::dim()),
-        Span::raw(r.reason.clone()),
-        Span::styled(format!(" · {}", r.author), styles::Text::dim()),
-    ])
+    let mut spans = vec![Span::raw(location)];
+    if let Some(reason) = &r.reason {
+        spans.push(Span::styled(" · ", styles::Text::dim()));
+        spans.push(Span::raw(reason.clone()));
+    }
+    spans.push(Span::styled(
+        format!(" · {}", r.author),
+        styles::Text::dim(),
+    ));
+    Line::from(spans)
 }
 
 fn draw_note(frame: &mut Frame, note: &Note, area: Rect) {
@@ -2142,6 +2148,42 @@ mod tests {
         assert!(saved.view().user);
     }
 
+    /// A record line names where the change applied, its reason when
+    /// it has one, and its author.
+    #[test]
+    fn redaction_line_omits_the_reason_a_title_record_lacks() {
+        use crate::doc::Redaction;
+        let text = |r: &Redaction| -> String {
+            redaction_line(r)
+                .spans
+                .iter()
+                .map(|s| s.content.to_string())
+                .collect()
+        };
+        let title = Redaction {
+            kind: ChangeKind::Title,
+            line: 6,
+            line_end: None,
+            reference: None,
+            span_start: None,
+            span_end: None,
+            reason: None,
+            author: "user:t".into(),
+        };
+        assert_eq!(text(&title), "title added at line 6 · user:t");
+        let attr = Redaction {
+            kind: ChangeKind::Attr,
+            line: 0,
+            line_end: None,
+            reference: Some("project".into()),
+            span_start: None,
+            span_end: None,
+            reason: Some("system".into()),
+            author: "filter:system".into(),
+        };
+        assert_eq!(text(&attr), "attr project · system · filter:system");
+    }
+
     /// A derived session: five kept entries of an original whose
     /// lines 2-3 were dropped, with a span redacted on the first entry.
     fn doc_with_redactions() -> Document {
@@ -2156,7 +2198,7 @@ mod tests {
                 reference: Some("/message/content".into()),
                 span_start: Some(6),
                 span_end: Some(16),
-                reason: "pii".into(),
+                reason: Some("pii".into()),
                 author: "filter:pii".into(),
             },
             Redaction {
@@ -2166,7 +2208,7 @@ mod tests {
                 reference: None,
                 span_start: None,
                 span_end: None,
-                reason: "scope".into(),
+                reason: Some("scope".into()),
                 author: "user:t".into(),
             },
         ];

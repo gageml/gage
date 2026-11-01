@@ -788,7 +788,7 @@ mod tests {
         assert_eq!(
             names(
                 "SELECT table_name FROM information_schema.tables \
-                 WHERE table_name IN ('session', 'entry', 'message', 'tool_use', 'filtered')"
+                 WHERE table_name IN ('session', 'entry', 'message', 'tool_use', 'changes')"
             )
             .await,
             5

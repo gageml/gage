@@ -1,4 +1,4 @@
-//! The `entry`, `message`, `tool_use`, and `filtered` tables over
+//! The `entry`, `message`, `tool_use`, and `changes` tables over
 //! stored sessions.
 //!
 //! One provider type serves the four tables; [`RowKind`] selects the
@@ -33,7 +33,7 @@ use datafusion::prelude::Expr;
 use futures::StreamExt;
 use gage_session::filter::{self, RowFilter};
 
-use crate::filtered::filtered_schema;
+use crate::changes::changes_schema;
 use crate::rows::{RowCache, entry_rows, entry_schema, message_rows, message_schema};
 use crate::scope::{SessionSet, StoredSessionRef};
 use gage_session::tool_use_schema;
@@ -45,7 +45,7 @@ pub enum RowKind {
     Entry,
     Message,
     ToolUse,
-    Filtered,
+    Changes,
 }
 
 impl RowKind {
@@ -54,7 +54,7 @@ impl RowKind {
             RowKind::Entry => entry_schema(),
             RowKind::Message => message_schema(),
             RowKind::ToolUse => tool_use_schema(),
-            RowKind::Filtered => filtered_schema(),
+            RowKind::Changes => changes_schema(),
         }
     }
 
@@ -69,7 +69,7 @@ impl RowKind {
             RowKind::Entry => entry_rows(scope.rows(session, cache)?.as_ref()),
             RowKind::Message => message_rows(scope.rows(session, cache)?.as_ref()),
             RowKind::ToolUse => Ok(scope.tool_uses(session, cache)?.as_ref().clone()),
-            RowKind::Filtered => Ok(scope.filtered(session, cache)?.as_ref().clone()),
+            RowKind::Changes => Ok(scope.changes(session, cache)?.as_ref().clone()),
         }
     }
 
@@ -78,7 +78,7 @@ impl RowKind {
     fn line_col(self) -> usize {
         match self {
             RowKind::Entry | RowKind::Message => 1,
-            RowKind::Filtered => 2,
+            RowKind::Changes => 2,
             RowKind::ToolUse => 3,
         }
     }
