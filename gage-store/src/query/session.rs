@@ -356,21 +356,23 @@ impl StoredSessionExec {
                 (Vec::new(), pending)
             }
         };
-        // id_prefix is unique within the short-prefix set of sessions,
-        // where a session prefix resolves first, plus the fixed and
-        // pending rows
-        let mut peers = store
-            .short_prefix_ids(Some(SESSION_TYPE))
-            .map_err(external)?;
-        for id in all
-            .iter()
-            .map(|t| &t.id)
-            .chain(pending.iter().map(|p| &p.id))
-        {
-            if !peers.contains(id) {
-                peers.push(id.clone());
+        // id_prefix is unique within the set a prefix resolves against:
+        // the short-prefix set of sessions plus the fixed rows, or the
+        // pending publishes alone
+        let peers = match &self.rows {
+            Rows::Pending(_) => pending.iter().map(|p| p.id.clone()).collect(),
+            Rows::Live | Rows::Versions(_) => {
+                let mut peers = store
+                    .short_prefix_ids(Some(SESSION_TYPE))
+                    .map_err(external)?;
+                for id in all.iter().map(|t| &t.id) {
+                    if !peers.contains(id) {
+                        peers.push(id.clone());
+                    }
+                }
+                peers
             }
-        }
+        };
         let prefix_len = unique_prefix_lens(peers);
 
         let since = self.filters.iter().filter_map(modified_lower_bound).max();
@@ -450,8 +452,8 @@ impl StoredSessionExec {
         }
 
         // A pending publish has no commit: its id prefix is unique
-        // among the peers, its locator is its staging directory, and
-        // its created is its modified
+        // among the pending publishes, its locator is its staging
+        // directory, and its created is its modified
         for p in &pending {
             ids.append_value(&p.id);
             id_displays.append_value(short_uuid(&p.id));
@@ -614,7 +616,7 @@ mod tests {
     use datafusion::arrow::array::{Array, StringArray};
     use datafusion::prelude::SessionContext;
 
-    use super::StoredSessionTable;
+    use super::{StoredSessionTable, unique_prefix_lens};
     use crate::session::tests::{FakeDriver, fake};
     use crate::test_support::open_store;
     use crate::{PublishStore, SessionStore};
@@ -731,8 +733,9 @@ mod tests {
 
     /// The pending table lists the publish working trees under its
     /// root, newest modified first, with an id prefix unique among the
-    /// stored sessions; it lists no stored session, and the store-wide
-    /// table lists no pending publish. Both respect an id filter.
+    /// pending publishes alone, as a publish command resolves it; it
+    /// lists no stored session, and the store-wide table lists no
+    /// pending publish. Both respect an id filter.
     #[tokio::test]
     async fn pending_table_lists_publish_working_trees_only() {
         let tmp = tempfile::tempdir().unwrap();
@@ -784,8 +787,9 @@ mod tests {
         assert_eq!(one, vec![first.id.clone()]);
 
         let prefixes = ids(&ctx, "SELECT id_prefix FROM pending ORDER BY modified DESC").await;
-        assert!(second.id.starts_with(&prefixes[0]), "{prefixes:?}");
-        assert!(first.id.starts_with(&prefixes[1]), "{prefixes:?}");
+        let among_pending = unique_prefix_lens(vec![first.id.clone(), second.id.clone()]);
+        let expect = |id: &str| id.chars().take(among_pending[id]).collect::<String>();
+        assert_eq!(prefixes, [expect(&second.id), expect(&first.id)]);
         assert_ne!(prefixes[0], prefixes[1]);
 
         let locator = ids(

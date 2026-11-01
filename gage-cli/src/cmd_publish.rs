@@ -763,19 +763,20 @@ fn list() -> Result<(), CliError> {
         println!("No pending publish sessions");
         return Ok(());
     }
-    let mut peers = store
+    let stored = store
         .short_prefix_ids(Some(SESSION_TYPE))
         .map_err(|e| fail(e.to_string()))?;
-    peers.extend(pending.iter().map(|p| p.id.clone()));
-    let highlighter = IdHighlighter::new(peers);
+    let (ids, origins) = list_highlighters(&pending, stored);
 
     let header: Vec<String> = ["Id", "Origin", "Title", "Redactions", "Modified"]
         .iter()
         .map(|s| s.to_string())
         .collect();
     let publisher = Publisher::new(&store);
-    let rows = pending_rows(pending, &highlighter, |id| redaction_count(&publisher, id))
-        .map_err(|e| fail(e.to_string()))?;
+    let rows = pending_rows(pending, &ids, &origins, |id| {
+        redaction_count(&publisher, id)
+    })
+    .map_err(|e| fail(e.to_string()))?;
     let table = Table::from_iter(std::iter::once(header).chain(rows))
         .with(Style::rounded())
         .modify(Rows::first(), style::tty(Color::FG_BRIGHT_YELLOW))
@@ -787,12 +788,25 @@ fn list() -> Result<(), CliError> {
     Ok(())
 }
 
-/// One row per pending publish, newest first: the highlighted short
-/// id, the `origin` and title from `attrs.json`, the redaction count
-/// `redactions` gives for the id, and the age of the working tree.
+/// The listing's highlighters: a pending id resolves among the pending
+/// publishes alone, as the publish commands resolve it, and an origin
+/// among the store's short-prefix set of sessions.
+fn list_highlighters(
+    pending: &[PendingPublish],
+    stored: Vec<String>,
+) -> (IdHighlighter, IdHighlighter) {
+    let ids = IdHighlighter::new(pending.iter().map(|p| p.id.clone()).collect());
+    (ids, IdHighlighter::new(stored))
+}
+
+/// One row per pending publish, newest first: the short id highlighted
+/// by `ids`, the `origin` highlighted by `origins` and title from
+/// `attrs.json`, the redaction count `redactions` gives for the id,
+/// and the age of the working tree.
 fn pending_rows(
     mut pending: Vec<PendingPublish>,
-    highlighter: &IdHighlighter,
+    ids: &IdHighlighter,
+    origins: &IdHighlighter,
     redactions: impl Fn(&str) -> Result<String, PublishError>,
 ) -> Result<Vec<Vec<String>>, PublishError> {
     pending.sort_by_key(|p| Reverse(p.modified_ms));
@@ -800,8 +814,8 @@ fn pending_rows(
         .iter()
         .map(|p| {
             Ok(vec![
-                highlighter.short(&p.id),
-                origin_cell(&p.attrs.origin, highlighter),
+                ids.short(&p.id),
+                origin_cell(&p.attrs.origin, origins),
                 p.attrs.summary.title.clone().unwrap_or_default(),
                 redactions(&p.id)?,
                 format_elapsed_ms(p.modified_ms),
@@ -2015,14 +2029,12 @@ mod tests {
             Some("Fix the duck"),
             now - 5_000,
         );
-        let highlighter = IdHighlighter::new(vec![
-            older.id.clone(),
-            newer.id.clone(),
-            orig1.to_string(),
-            orig2.to_string(),
-        ]);
+        let (ids, origins) = list_highlighters(
+            &[older.clone(), newer.clone()],
+            vec![orig1.to_string(), orig2.to_string()],
+        );
 
-        let rows = pending_rows(vec![older.clone(), newer.clone()], &highlighter, |id| {
+        let rows = pending_rows(vec![older.clone(), newer.clone()], &ids, &origins, |id| {
             Ok(if id == newer.id {
                 "3".to_string()
             } else {
@@ -2050,6 +2062,31 @@ mod tests {
         assert_eq!(rows[1][3], "", "a deleted definition shows no count");
         assert_eq!(rows[1][4], "1h ago");
     }
+    /// A pending id's prefix is unique among the pending publishes
+    /// alone, so a stored session sharing its leading characters does
+    /// not lengthen it; an origin's prefix is unique among the stored
+    /// sessions.
+    #[test]
+    fn list_highlights_pending_ids_among_pending_publishes_alone() {
+        let now = now_ms();
+        let one = pending(
+            "aaaaaaaa-0000-4000-8000-000000000001",
+            "session:aaaaaaaa-0000-4000-8000-000000000002@0123456789abcdef0123456789abcdef01234567",
+            None,
+            now,
+        );
+        let stored = vec![
+            "aaaaaaaa-0000-4000-8000-000000000002".to_string(),
+            "aaaaaaaa-0000-4000-8000-000000000003".to_string(),
+        ];
+        let (ids, origins) = list_highlighters(std::slice::from_ref(&one), stored);
+        assert_eq!(ids.unique_prefix_len(&one.id), 1);
+        assert_eq!(
+            origins.unique_prefix_len("aaaaaaaa-0000-4000-8000-000000000002"),
+            36
+        );
+    }
+
     #[test]
     fn origin_cell_shows_a_native_origin_as_stored() {
         let highlighter = IdHighlighter::new(vec![]);
