@@ -88,7 +88,7 @@ impl Outline {
     }
 
     /// Show or hide the dropped runs and rebuild. Used when the
-    /// redactions view option toggles.
+    /// changes view option toggles.
     pub fn set_dropped_shown(&mut self, shown: bool) {
         self.dropped_shown = shown;
         self.rebuild();

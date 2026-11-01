@@ -226,7 +226,7 @@ pub struct ViewOptionArgs {
     /// Content and extras:
     ///   s, source     native source in content pane
     ///   n, turns      turn markers in outline
-    ///   r, redacted   redactions of a published session
+    ///   c, changes    changes of a published session
     ///
     /// A leading "!" turns an option off, as in "!user"
     #[arg(short = 'v', long, verbatim_doc_comment)]

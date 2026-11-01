@@ -182,6 +182,13 @@ impl Text {
         Style::new().add_modifier(Modifier::DIM)
     }
 
+    /// Commentary standing in for absent content, e.g. a run of
+    /// dropped lines or "This is the only version": dim italic with no
+    /// decoration so it reads as an aside rather than data
+    pub fn aside() -> Style {
+        Style::new().add_modifier(Modifier::DIM | Modifier::ITALIC)
+    }
+
     /// Emphasized quoted content, e.g. evidence note values in the
     /// issue detail
     pub fn accent() -> Style {

@@ -20,10 +20,10 @@ pub struct ViewOptions {
     pub source: bool,
     /// Turn markers in the outline
     pub turns: bool,
-    /// Redactions of a published session: dropped-line rows in the
+    /// Changes of a published session: dropped-line rows in the
     /// outline, a mark on each redacted entry, and the records in the
     /// content pane
-    pub redactions: bool,
+    pub changes: bool,
 }
 
 impl Default for ViewOptions {
@@ -35,7 +35,7 @@ impl Default for ViewOptions {
             all_entries: false,
             source: false,
             turns: false,
-            redactions: false,
+            changes: false,
         }
     }
 }
@@ -62,7 +62,7 @@ impl ViewOptions {
                 "e" | "entries" => opts.all_entries = on,
                 "s" | "source" => opts.source = on,
                 "n" | "turns" => opts.turns = on,
-                "r" | "redacted" => opts.redactions = on,
+                "c" | "changes" => opts.changes = on,
                 other => return Err(UnknownOption(other.to_string())),
             }
         }
@@ -94,7 +94,7 @@ mod tests {
         assert!(!o.all_entries);
         assert!(!o.source);
         assert!(!o.turns);
-        assert!(!o.redactions);
+        assert!(!o.changes);
     }
 
     #[test]
@@ -112,21 +112,21 @@ mod tests {
 
     #[test]
     fn comma_list_enables_default_off_options() {
-        let o = ViewOptions::parse("tools,source,turns,entries,redacted").unwrap();
+        let o = ViewOptions::parse("tools,source,turns,entries,changes").unwrap();
         assert!(o.tools);
         assert!(o.source);
         assert!(o.turns);
         assert!(o.all_entries);
-        assert!(o.redactions);
+        assert!(o.changes);
     }
 
     #[test]
     fn short_and_long_names_are_equivalent() {
-        let short = ViewOptions::parse("t,!u,r").unwrap();
-        let long = ViewOptions::parse("tools,!user,redacted").unwrap();
+        let short = ViewOptions::parse("t,!u,c").unwrap();
+        let long = ViewOptions::parse("tools,!user,changes").unwrap();
         assert_eq!(short.tools, long.tools);
         assert_eq!(short.user, long.user);
-        assert_eq!(short.redactions, long.redactions);
+        assert_eq!(short.changes, long.changes);
     }
 
     #[test]

@@ -24,7 +24,6 @@ use gage_store::object::{LinkFile, ObjectHeader, ObjectRef};
 use gage_store::{CommitMeta, EntryKind, Store, StoreError, TagRef, TagStore, TreeEntry};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Cell, Paragraph, Row, Table};
 use ratatui::{DefaultTerminal, Frame};
@@ -1190,12 +1189,11 @@ fn err_line(text: String) -> Line<'static> {
 }
 
 /// A note standing in for absent content, e.g. "None" or "This is
-/// the only version". Rendered dim italic with no decoration so it
-/// reads as commentary rather than data.
+/// the only version".
 fn note_line(indent: &str, text: &str) -> Line<'static> {
     Line::from(Span::styled(
         format!("{indent}{text}"),
-        styles::Text::dim().add_modifier(Modifier::ITALIC),
+        styles::Text::aside(),
     ))
 }
 
