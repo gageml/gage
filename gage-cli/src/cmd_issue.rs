@@ -820,13 +820,7 @@ pub fn delete(args: IssueDeleteArgs) -> Result<(), CliError> {
 
     dialog::run("Delete issues", || {
         issues_step(&targets)?;
-        cli::log::remark("This cannot be undone")?;
-        if !args.yes {
-            let confirmed = cli::confirm("Continue?").initial_value(false).interact()?;
-            if !confirmed {
-                return Err(DialogError::Canceled);
-            }
-        }
+        dialog::confirm_irreversible(args.yes)?;
         let mut deleted = 0;
         for issue in &targets {
             match issues.delete(&issue.id) {

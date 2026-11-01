@@ -173,13 +173,14 @@ pub async fn main(args: BackupArgs) -> Result<(), CliError> {
         if destructive {
             cli::log::warning(effect_lines(set.force.len(), set.delete.len(), remote).join("\n"))?;
         }
-        if destructive
-            && !args.yes
-            && !cli::confirm(replace_prompt(set.force.len(), set.delete.len(), remote))
+        if destructive && !args.yes {
+            cli::log::remark(dialog::IRREVERSIBLE)?;
+            if !cli::confirm(replace_prompt(set.force.len(), set.delete.len(), remote))
                 .initial_value(false)
                 .interact()?
-        {
-            return Err(DialogError::Canceled);
+            {
+                return Err(DialogError::Canceled);
+            }
         }
         let message = if !set.is_empty() {
             format!("Backing up {} to {remote}", count(set.len(), "ref"))
@@ -337,16 +338,10 @@ fn capped(lines: Vec<String>) -> Vec<String> {
 fn effect_lines(force: usize, delete: usize, remote: &str) -> Vec<String> {
     let mut lines = Vec::new();
     if force > 0 {
-        lines.push(format!(
-            "Replacing {} on {remote} - this cannot be undone",
-            count(force, "ref")
-        ));
+        lines.push(format!("Replacing {} on {remote}", count(force, "ref")));
     }
     if delete > 0 {
-        lines.push(format!(
-            "Deleting {} from {remote} - this cannot be undone",
-            count(delete, "ref")
-        ));
+        lines.push(format!("Deleting {} from {remote}", count(delete, "ref")));
     }
     lines
 }
@@ -424,11 +419,11 @@ mod tests {
         assert!(effect_lines(0, 0, "github").is_empty());
         assert_eq!(
             effect_lines(1, 0, "github"),
-            vec!["Replacing 1 ref on github - this cannot be undone"]
+            vec!["Replacing 1 ref on github"]
         );
         assert_eq!(
             effect_lines(0, 2, "github"),
-            vec!["Deleting 2 refs from github - this cannot be undone"]
+            vec!["Deleting 2 refs from github"]
         );
         assert_eq!(effect_lines(3, 2, "github").len(), 2);
     }

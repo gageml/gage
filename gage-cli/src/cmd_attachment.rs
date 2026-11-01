@@ -225,7 +225,7 @@ async fn add_dialog(args: &AttachmentAddArgs, store: &Store) -> Result<DialogRes
         let shown = describe(record.attrs.name.as_deref(), &record.id);
         dialog::step_value("Attachment", &shown)?;
         dialog::step_value("Dataset", short_uuid(&dataset_id))?;
-        confirm(args.yes)?;
+        dialog::confirm(args.yes, true)?;
         let (dataset_id, linked) =
             link_to_dataset(store, &dataset_id, &record.id).map_err(DialogError::Failed)?;
         let verb = match linked {
@@ -270,7 +270,7 @@ async fn add_dialog(args: &AttachmentAddArgs, store: &Store) -> Result<DialogRes
         }
         None => None,
     };
-    confirm(args.yes)?;
+    dialog::confirm(args.yes, true)?;
 
     let spec = AttachmentSpec {
         name: args.name.as_deref(),
@@ -312,14 +312,6 @@ async fn add_dialog(args: &AttachmentAddArgs, store: &Store) -> Result<DialogRes
     }
 }
 
-/// The confirmation before a write; `yes` skips it
-fn confirm(yes: bool) -> Result<(), DialogError> {
-    if !yes && !cli::confirm("Continue?").initial_value(true).interact()? {
-        return Err(DialogError::Canceled);
-    }
-    Ok(())
-}
-
 /// Run the attach tasks of each named scanner against the dataset.
 /// The first failing task ends the command; attachments linked
 /// before it stay linked.
@@ -349,7 +341,7 @@ async fn add_from_scanners(
         "Scanners",
         selected.iter().map(|r| r.source.def().name.clone()),
     )?;
-    confirm(yes)?;
+    dialog::confirm(yes, true)?;
     let driver = source::driver_registry()
         .default()
         .ok_or_else(|| DialogError::Failed("no default session driver registered".to_string()))?;

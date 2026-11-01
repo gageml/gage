@@ -1546,13 +1546,8 @@ fn delete(args: ScanDeleteArgs) -> Result<(), CliError> {
     dialog::run("Delete scan runs", || {
         dialog::step_list("Scan runs", ids.iter().map(|id| short_uuid(id).to_string()))?;
 
-        cli::log::remark("Associated notes and issues are deleted. This cannot be undone.")?;
-        if !args.yes {
-            let confirmed = cli::confirm("Continue?").initial_value(false).interact()?;
-            if !confirmed {
-                return Err(DialogError::Canceled);
-            }
-        }
+        cli::log::remark("Associated notes and issues are deleted")?;
+        dialog::confirm_irreversible(args.yes)?;
 
         let mut deleted = 0;
         let mut notes = 0;

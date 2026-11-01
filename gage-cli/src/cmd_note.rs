@@ -650,13 +650,7 @@ pub fn delete(args: NoteDeleteArgs) -> Result<(), CliError> {
                 .map(|n| format!("{} {}", short_uuid(&n.id), n.name)),
         )?;
 
-        cli::log::remark("This cannot be undone")?;
-        if !args.yes {
-            let confirmed = cli::confirm("Continue?").initial_value(false).interact()?;
-            if !confirmed {
-                return Err(DialogError::Canceled);
-            }
-        }
+        dialog::confirm_irreversible(args.yes)?;
 
         let mut deleted = 0;
         for note in &targets {

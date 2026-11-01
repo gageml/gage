@@ -14,7 +14,7 @@ use tabled::{
     },
 };
 
-use crate::dialog::{self, DialogError};
+use crate::dialog;
 use crate::error::CliError;
 use crate::human::{count, format_size};
 use crate::style;
@@ -202,13 +202,7 @@ fn delete(store: &Store, args: DeleteArgs) -> Result<(), CliError> {
                 .iter()
                 .map(|(id, type_name)| format!("{type_name} {}", short_uuid(id))),
         )?;
-        cli::log::remark("This cannot be undone")?;
-        if !args.yes {
-            let confirmed = cli::confirm("Continue?").initial_value(false).interact()?;
-            if !confirmed {
-                return Err(DialogError::Canceled);
-            }
-        }
+        dialog::confirm_irreversible(args.yes)?;
         let mut deleted = 0;
         for (id, _) in &targets {
             match store.delete_object(id) {

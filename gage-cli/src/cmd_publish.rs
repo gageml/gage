@@ -554,12 +554,9 @@ async fn publish_sessions(args: PublishRunArgs) -> Result<(), CliError> {
             None => None,
         };
         let model = model_prompt::model_step(args.model.as_deref(), args.yes)?;
-        dialog::usage_notice(usage_notice(args.batch))?;
         if !args.yes {
-            let confirmed = cli::confirm("Continue?").initial_value(true).interact()?;
-            if !confirmed {
-                return Err(DialogError::Canceled);
-            }
+            dialog::usage_notice(usage_notice(args.batch))?;
+            dialog::confirm(false, true)?;
         }
         let inputs = InitInputs {
             audience,

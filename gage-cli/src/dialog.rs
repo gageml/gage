@@ -194,6 +194,35 @@ fn handle_result(result: Result<DialogResult, DialogError>) -> Result<(), CliErr
     }
 }
 
+/// The confirmation before a write; `yes` skips it. `initial` is the
+/// answer selected when the prompt opens.
+pub fn confirm(yes: bool, initial: bool) -> Result<(), DialogError> {
+    if yes {
+        return Ok(());
+    }
+    if !cli::confirm("Continue?")
+        .initial_value(initial)
+        .interact()?
+    {
+        return Err(DialogError::Canceled);
+    }
+    Ok(())
+}
+
+/// The confirmation before a write that cannot be reversed. The remark
+/// informs the decision, so `yes` skips the remark along with the
+/// prompt.
+pub fn confirm_irreversible(yes: bool) -> Result<(), DialogError> {
+    if yes {
+        return Ok(());
+    }
+    cli::log::remark(IRREVERSIBLE)?;
+    confirm(false, false)
+}
+
+/// The remark before a confirmation whose effect cannot be reversed
+pub const IRREVERSIBLE: &str = "This cannot be undone";
+
 /// A step naming a set of objects: `label` on the first line, then
 /// one dimmed line per object. The lines name each object the step
 /// concerns, `<short id> <detail>`, so a confirmation that follows
@@ -262,6 +291,12 @@ mod tests {
     use console::strip_ansi_codes;
 
     use super::*;
+
+    #[test]
+    fn yes_skips_the_confirmation_without_a_terminal() {
+        assert!(matches!(confirm(true, false), Ok(())));
+        assert!(matches!(confirm_irreversible(true), Ok(())));
+    }
 
     #[test]
     fn absent_value_renders_as_title_case_none() {

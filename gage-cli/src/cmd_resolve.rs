@@ -101,15 +101,12 @@ fn run_dialog(
 
     let model = model_prompt::model_step(args.model.as_deref(), args.yes)?;
 
-    dialog::usage_notice(
-        "You are about to start an interactive session to resolve issues. \
-         Standard token usage applies for the selected model.",
-    )?;
     if !args.yes {
-        let confirmed = cli::confirm("Continue?").initial_value(true).interact()?;
-        if !confirmed {
-            return Err(DialogError::Canceled);
-        }
+        dialog::usage_notice(
+            "You are about to start an interactive session to resolve issues. \
+             Standard token usage applies for the selected model.",
+        )?;
+        dialog::confirm(false, true)?;
     }
 
     *setup = Some(ResolveSetup { ids, model });

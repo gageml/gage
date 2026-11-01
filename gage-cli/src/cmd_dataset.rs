@@ -689,13 +689,7 @@ pub fn delete(args: DatasetDeleteArgs) -> Result<(), CliError> {
             cli::log::remark(format!("{} to remove", count(members, "session")))?;
         }
 
-        cli::log::remark("This cannot be undone")?;
-        if !args.yes {
-            let confirmed = cli::confirm("Continue?").initial_value(false).interact()?;
-            if !confirmed {
-                return Err(DialogError::Canceled);
-            }
-        }
+        dialog::confirm_irreversible(args.yes)?;
 
         let mut deleted = 0;
         let mut removed = 0;

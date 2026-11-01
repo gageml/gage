@@ -820,7 +820,7 @@ async fn add_dialog(
             dialog::step_value("Dataset", short_uuid(dataset_id))?;
             let lines: Vec<SessionLine> = records.iter().map(SessionLine::from).collect();
             preview_sessions(&lines, IdKind::Gage, args.tag.as_deref())?;
-            confirm_add(args.yes)?;
+            dialog::confirm(args.yes, true)?;
             link_stored(&store, dataset_id, &records, &mut |e| view.on(e))?;
             records.into_iter().map(|r| r.id).collect()
         }
@@ -848,7 +848,7 @@ async fn add_dialog(
                 .await
                 .map_err(|e| DialogError::Failed(format!("{e}")))?;
             preview_sessions(&lines, IdKind::Native, args.tag.as_deref())?;
-            confirm_add(args.yes)?;
+            dialog::confirm(args.yes, true)?;
             add_native(
                 &store,
                 source,
@@ -899,17 +899,6 @@ fn add_outro(store: &Store, placed_ids: &[String], dataset_id: Option<&str>, don
         Some(dataset) => format!("Added session {shown} to dataset {}", short_uuid(dataset)),
         None => format!("Added session {shown} to the store"),
     }
-}
-
-/// The confirmation before an add writes; `yes` skips it
-fn confirm_add(yes: bool) -> Result<(), DialogError> {
-    if yes {
-        return Ok(());
-    }
-    if !cli::confirm("Continue?").initial_value(true).interact()? {
-        return Err(DialogError::Canceled);
-    }
-    Ok(())
 }
 
 /// Add every session in `source` to `store` inside the caller's
@@ -1576,13 +1565,7 @@ async fn delete_dialog(
     let total = targets.len();
     preview_sessions(&targets, IdKind::Native, None)?;
 
-    cli::log::remark("This cannot be undone")?;
-    if !args.yes {
-        let confirmed = cli::confirm("Continue?").initial_value(false).interact()?;
-        if !confirmed {
-            return Err(DialogError::Canceled);
-        }
-    }
+    dialog::confirm_irreversible(args.yes)?;
 
     let mut deleted = 0;
     for t in &targets {
