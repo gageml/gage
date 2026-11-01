@@ -355,9 +355,10 @@ impl TextDescriptor {
         };
         let safe_roots = self.safe.irregular_pointers(value.as_ref());
         let mut strings = Vec::new();
+        let mut pointer = String::new();
         let mut deserializer = serde_json::Deserializer::from_str(json);
         Collect {
-            pointer: String::new(),
+            pointer: &mut pointer,
             out: &mut strings,
         }
         .deserialize(&mut deserializer)?;
@@ -379,7 +380,9 @@ impl TextDescriptor {
 /// keys, so the walk runs on the deserializer, whose map visitor
 /// receives keys in input order.
 struct Collect<'a> {
-    pointer: String,
+    /// The pointer to the node being visited: one buffer for the whole
+    /// walk, extended by a segment on descent and truncated on return.
+    pointer: &'a mut String,
     out: &'a mut Vec<(String, String)>,
 }
 
@@ -402,12 +405,12 @@ impl<'de> Visitor<'de> for Collect<'_> {
     }
 
     fn visit_str<E: de::Error>(self, v: &str) -> std::result::Result<(), E> {
-        self.out.push((self.pointer, v.to_string()));
+        self.out.push((self.pointer.clone(), v.to_string()));
         Ok(())
     }
 
     fn visit_string<E: de::Error>(self, v: String) -> std::result::Result<(), E> {
-        self.out.push((self.pointer, v));
+        self.out.push((self.pointer.clone(), v));
         Ok(())
     }
 
@@ -436,35 +439,47 @@ impl<'de> Visitor<'de> for Collect<'_> {
     }
 
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> std::result::Result<(), A::Error> {
-        let out = self.out;
+        let len = self.pointer.len();
         while let Some(key) = map.next_key::<String>()? {
+            self.pointer.push('/');
+            push_escaped(self.pointer, &key);
             map.next_value_seed(Collect {
-                pointer: format!("{}/{}", self.pointer, escape(&key)),
-                out: &mut *out,
+                pointer: &mut *self.pointer,
+                out: &mut *self.out,
             })?;
+            self.pointer.truncate(len);
         }
         Ok(())
     }
 
     fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> std::result::Result<(), A::Error> {
-        let out = self.out;
+        use std::fmt::Write;
+        let len = self.pointer.len();
         let mut index = 0usize;
-        while seq
-            .next_element_seed(Collect {
-                pointer: format!("{}/{index}", self.pointer),
-                out: &mut *out,
-            })?
-            .is_some()
-        {
+        loop {
+            write!(self.pointer, "/{index}").expect("writing to a String cannot fail");
+            let next = seq.next_element_seed(Collect {
+                pointer: &mut *self.pointer,
+                out: &mut *self.out,
+            })?;
+            self.pointer.truncate(len);
+            if next.is_none() {
+                return Ok(());
+            }
             index += 1;
         }
-        Ok(())
     }
 }
 
-/// A member name as a JSON Pointer reference token.
-fn escape(key: &str) -> String {
-    key.replace('~', "~0").replace('/', "~1")
+/// Append `key` to `pointer` as a JSON Pointer reference token.
+fn push_escaped(pointer: &mut String, key: &str) {
+    for c in key.chars() {
+        match c {
+            '~' => pointer.push_str("~0"),
+            '/' => pointer.push_str("~1"),
+            c => pointer.push(c),
+        }
+    }
 }
 
 #[cfg(test)]
