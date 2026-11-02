@@ -22,6 +22,7 @@ use std::time::UNIX_EPOCH;
 use gage_core::uuid::new_uuid;
 use serde_json::{Value, json};
 
+use crate::attachment::{AttachmentSpec, AttachmentStore};
 use crate::index::IdMatch;
 use crate::object::{ObjectTree, object_ref};
 use crate::scan::import_opaque_tree;
@@ -32,6 +33,9 @@ const PUBLISH_DIR: &str = "publish";
 const ATTRS_FILE: &str = "attrs.json";
 pub(crate) const CHANGES_FILE: &str = "changes.json";
 const DEFINITION_SUFFIX: &str = ".publish.jsonc";
+/// The name of the attachment that keeps a publish's definition once
+/// the publish is applied
+pub const DEFINITION_ATTACHMENT: &str = "publish-def";
 
 /// One pending publish working tree, read from its staging directory.
 #[derive(Debug, Clone, PartialEq)]
@@ -476,10 +480,14 @@ impl<'a> PublishStore<'a> {
     /// Commit the staged directory of the pending publish `id` as a
     /// new session object, as it stands: `attrs.json` as the attrs,
     /// `changes.json` as a root blob, `files.d` as the content
-    /// subtree. The object's ref must not exist. The staging
-    /// directory and the definition are deleted afterward. Returns the
-    /// commit SHA. Nothing in the staged content is checked here; the
-    /// publish engine validates before it calls.
+    /// subtree. The object's ref must not exist. The definition file
+    /// is kept as an unkeyed attachment named `publish-def` whose one
+    /// target is the new session. The attachment's commit names the
+    /// session's as a parent and not the reverse, so a push or fetch
+    /// of the session does not carry the definition. The staging
+    /// directory and the definition file are deleted afterward.
+    /// Returns the commit SHA. Nothing in the staged content is
+    /// checked here; the publish engine validates before it calls.
     pub fn apply(&self, id: &str) -> Result<String, StoreError> {
         let layout = self.layout(id);
         if !layout.root().is_dir() {
@@ -487,6 +495,13 @@ impl<'a> PublishStore<'a> {
         }
         if self.store.rev_parse(&object_ref(id))?.is_some() {
             return Err(StoreError::ObjectExists(id.to_string()));
+        }
+        let definition_name = format!("{id}{DEFINITION_SUFFIX}");
+        if !self.root.join(&definition_name).is_file() {
+            return Err(StoreError::Parse(format!(
+                "publish {id}: no definition file {}",
+                self.root.join(&definition_name).display()
+            )));
         }
         let read = |path: &Path| fs::read(path).map_err(StoreError::ReadContent);
         let attrs: serde_json::Value = serde_json::from_slice(&read(&layout.attrs_file())?)
@@ -515,6 +530,14 @@ impl<'a> PublishStore<'a> {
         let commit_sha = self
             .store
             .create(OBJECT_TYPE, OBJECT_VERSION, id, &tree, &message)?;
+        AttachmentStore::from(self.store).add(&AttachmentSpec {
+            name: Some(DEFINITION_ATTACHMENT),
+            key: None,
+            targets: &[format!("session:{id}")],
+            root: &self.root,
+            includes: &[definition_name],
+            excludes: &[],
+        })?;
         self.remove_staging(id)?;
         Ok(commit_sha)
     }
@@ -739,8 +762,10 @@ mod tests {
 
     /// `apply` commits the staged directory as it stands, with
     /// `changes.json` as a root blob beside the session's usual
-    /// entries, and deletes the staging directory and the definition.
-    /// A second apply is `ObjectNotFound`.
+    /// entries, keeps the definition as the `publish-def` attachment
+    /// targeting the new session, and deletes the staging directory
+    /// and the definition file. The session does not link the
+    /// attachment. A second apply is `ObjectNotFound`.
     #[test]
     fn apply_commits_the_staged_directory_and_removes_it() {
         let tmp = tempfile::tempdir().unwrap();
@@ -802,8 +827,63 @@ mod tests {
         assert!(!publish.definition_file(&init.id).exists());
         assert!(publish.list().unwrap().is_empty());
 
+        let attachments = AttachmentStore::from(&store);
+        let kept = attachments
+            .query()
+            .name(DEFINITION_ATTACHMENT)
+            .iter()
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(kept.len(), 1);
+        let kept = &kept[0];
+        assert_eq!(kept.attrs.key, None);
+        assert_eq!(kept.attrs.targets, [format!("session:{}", init.id)]);
+        assert_eq!(
+            attachments
+                .read_file(&kept.commit_sha, &format!("{}{DEFINITION_SUFFIX}", init.id))
+                .unwrap(),
+            Some(b"{}\n".to_vec())
+        );
+        let parents = store.read_commit(&kept.commit_sha).unwrap().parents;
+        assert!(parents.contains(&commit));
+        let closure: Vec<String> = store
+            .link_closure(std::slice::from_ref(&init.id))
+            .unwrap()
+            .into_iter()
+            .map(|m| m.id)
+            .collect();
+        assert_eq!(closure, [init.id.clone()]);
+
         let again = publish.apply(&init.id).unwrap_err();
         assert!(matches!(again, StoreError::ObjectNotFound(ref id) if *id == init.id));
+    }
+
+    /// The definition is what apply keeps, so apply without one is an
+    /// error that leaves the staging directory in place.
+    #[test]
+    fn apply_without_a_definition_is_an_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let mut session = crate::session::tests::fake("s1", &[("session.jsonl", "a\n")]);
+        let outcome = SessionStore::from(&store)
+            .add(&crate::session::tests::FakeDriver, &mut session)
+            .unwrap();
+        let original = SessionStore::from(&store)
+            .at_commit(&outcome.commit_sha)
+            .unwrap();
+        let publish_dir = tmp.path().join("publish");
+        let publish = PublishStore::with_root(&store, &publish_dir);
+        let init = publish.init(&original).unwrap();
+
+        let err = publish.apply(&init.id).unwrap_err();
+        assert!(
+            matches!(err, StoreError::Parse(ref m) if m.contains("no definition file")),
+            "{err}"
+        );
+        assert!(publish_dir.join(&init.id).is_dir());
+        assert_eq!(SessionStore::from(&store).iter().unwrap().count(), 1);
+        assert_eq!(AttachmentStore::from(&store).iter().unwrap().count(), 0);
     }
 
     /// `apply` refuses when the object's ref already exists and leaves
@@ -826,6 +906,7 @@ mod tests {
         // of its directory, after the first is applied
         let twin = publish_dir.join("twin");
         copy_dir(&publish_dir.join(&init.id), &twin);
+        fs::write(publish.definition_file(&init.id), b"{}\n").unwrap();
         publish.apply(&init.id).unwrap();
         fs::rename(&twin, publish_dir.join(&init.id)).unwrap();
 
@@ -1069,6 +1150,7 @@ mod tests {
         .unwrap();
         let staged = layout.read_changes().unwrap();
         assert_eq!(staged.len(), 2);
+        fs::write(publish.definition_file(&init.id), b"{}\n").unwrap();
 
         let commit = publish.apply(&init.id).unwrap();
         let committed = SessionStore::from(&store).changes(&commit).unwrap();

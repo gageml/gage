@@ -31,7 +31,8 @@ use datafusion::prelude::SessionContext;
 use gage_query::{ContextBuilder, ScanScope};
 use gage_session::Driver;
 use gage_store::{
-    AttachmentLinkOutcome, AttachmentSpec, AttachmentStore, DatasetStore, Store, selection_key_part,
+    AttachmentLinkOutcome, AttachmentSpec, AttachmentStore, DatasetStore, Store,
+    default_attachment_key, selection_key_part,
 };
 use rune::alloc::fmt::TryWrite;
 use rune::runtime::{Formatter, Protocol, Ref, Value, VmError};
@@ -386,7 +387,11 @@ async fn write(w: AttachWriter) -> Result<Result<Attached, Error>, VmError> {
         Err(e) => return Ok(Err(e)),
     };
     let key = match w.key.as_ref().map(encode_object_key).transpose() {
-        Ok(key) => key,
+        Ok(Some(key)) => Some(key),
+        Ok(None) => w
+            .name
+            .as_deref()
+            .map(|name| default_attachment_key(name, &root, &w.files.includes, &w.files.excludes)),
         Err(e) => return Ok(Err(e)),
     };
     let mut targets = Vec::with_capacity(w.targets.len());

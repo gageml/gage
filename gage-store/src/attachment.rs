@@ -14,10 +14,11 @@
 //! add whose key names a live attachment edits that attachment:
 //! unchanged content and targets write nothing, anything else writes
 //! an edit commit. An add whose key names nothing, or that has no
-//! key, creates an attachment with a random id. A named add without
-//! a key takes the default key: the name and the selection's key
-//! part, colon-joined; see [`selection_key_part`]. Targets are the
-//! objects the files are about, any number of them. An edit unions
+//! key, creates an attachment with a random id. The store applies no
+//! default key; a caller that wants one composes it, and
+//! [`default_attachment_key`] is the one the CLI and the scanner
+//! attach writer apply. Targets are the objects the files are about,
+//! any number of them. An edit unions
 //! the given targets with those already linked, and a target already
 //! linked keeps the commit it was linked at. A dataset links
 //! attachments through `attachments.link` the way it links sessions.
@@ -112,9 +113,8 @@ pub struct AttachmentAttrs {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttachmentSpec<'a> {
     pub name: Option<&'a str>,
-    /// The identity. `None` with a name takes the default key;
-    /// `None` without one creates an attachment no later add can
-    /// address.
+    /// The identity a later add addresses, as the caller composed
+    /// it; `None` creates an attachment no later add can address.
     pub key: Option<&'a str>,
     /// Gage URLs of live objects with full ids and no fragments
     pub targets: &'a [String],
@@ -194,6 +194,19 @@ pub fn selection_key_part(root: &Path, includes: &[String], excludes: &[String])
     format!("{:016x}", XxHash3_64::oneshot(&input))
 }
 
+/// The default key of a named attachment, `<name>/<selection key
+/// part>`: one identity per name and selection, so a repeated add of
+/// the same files under the same name is an edit. The CLI and the
+/// scanner attach writer apply it when no key is given.
+pub fn default_attachment_key(
+    name: &str,
+    root: &Path,
+    includes: &[String],
+    excludes: &[String],
+) -> String {
+    format!("{name}/{}", selection_key_part(root, includes, excludes))
+}
+
 impl AttachmentRecord {
     /// The name, or the short id when unnamed, for messages
     pub fn label(&self) -> &str {
@@ -218,14 +231,7 @@ impl AttachmentStore<'_> {
                 spec.root.display()
             )));
         }
-        let key = match (spec.key, spec.name) {
-            (Some(key), _) => Some(key.to_string()),
-            (None, Some(name)) => Some(format!(
-                "{name}/{}",
-                selection_key_part(spec.root, spec.includes, spec.excludes)
-            )),
-            (None, None) => None,
-        };
+        let key = spec.key.map(String::from);
         let current = match &key {
             Some(key) => self.live_under(key)?,
             None => None,
@@ -680,6 +686,7 @@ fn decode_attrs(object: &Object) -> Result<AttachmentAttrs, StoreError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::KeyStore;
     use crate::object::object_ref;
     use crate::test_support::open_store;
     use std::slice;
@@ -820,12 +827,14 @@ mod tests {
         let (store, _fsck) = open_store(dir.path());
         let root = fixture_root(dir.path());
         let attachments = AttachmentStore::from(&store);
+        let pats = patterns(&["settings*.json"]);
+        let key = default_attachment_key("claude-config", &root, &pats, &[]);
         let spec = AttachmentSpec {
             name: Some("claude-config"),
-            key: None,
+            key: Some(&key),
             targets: &[],
             root: &root,
-            includes: &patterns(&["settings*.json"]),
+            includes: &pats,
             excludes: &[],
         };
         let added = attachments.add(&spec).unwrap();
@@ -835,13 +844,7 @@ mod tests {
         let record = attachments.get(&added.id).unwrap();
         assert_eq!(record.commit_sha, added.commit_sha);
         assert_eq!(record.attrs.name.as_deref(), Some("claude-config"));
-        assert_eq!(
-            record.attrs.key,
-            Some(format!(
-                "claude-config/{}",
-                selection_key_part(&root, &patterns(&["settings*.json"]), &[])
-            ))
-        );
+        assert_eq!(record.attrs.key.as_deref(), Some(key.as_str()));
         assert!(record.attrs.targets.is_empty());
         assert_eq!(record.attrs.root, root);
         assert_eq!(record.attrs.includes, ["settings*.json"]);
@@ -865,15 +868,31 @@ mod tests {
     }
 
     #[test]
+    fn the_default_key_joins_the_name_and_the_selection_key_part() {
+        let root = Path::new("/tmp/claude");
+        let pats = patterns(&["settings.json", "*.md"]);
+        let excludes = patterns(&["skills/**"]);
+        let key = default_attachment_key("cfg", root, &pats, &excludes);
+        assert_eq!(
+            key,
+            format!("cfg/{}", selection_key_part(root, &pats, &excludes))
+        );
+        validate_key(&key).unwrap();
+        assert_ne!(key, default_attachment_key("other", root, &pats, &excludes));
+        assert_ne!(key, default_attachment_key("cfg", root, &pats, &[]));
+    }
+
+    #[test]
     fn re_add_is_unchanged_then_updated_under_the_same_id() {
         let dir = tempfile::tempdir().unwrap();
         let (store, _fsck) = open_store(dir.path());
         let root = fixture_root(dir.path());
         let attachments = AttachmentStore::from(&store);
         let pats = patterns(&["settings.json"]);
+        let key = default_attachment_key("cfg", &root, &pats, &[]);
         let spec = AttachmentSpec {
             name: Some("cfg"),
-            key: None,
+            key: Some(&key),
             targets: &[],
             root: &root,
             includes: &pats,
@@ -914,7 +933,7 @@ mod tests {
             attachments
                 .add(&AttachmentSpec {
                     name: Some(name),
-                    key: None,
+                    key: Some(&default_attachment_key(name, &root, &pats, &[])),
                     targets: &[],
                     root: &root,
                     includes: &pats,
@@ -950,7 +969,7 @@ mod tests {
         let back = attachments
             .add(&AttachmentSpec {
                 name: Some("b"),
-                key: None,
+                key: Some(&default_attachment_key("b", &root, &pats, &[])),
                 targets: &[],
                 root: &root,
                 includes: &pats,
@@ -972,9 +991,10 @@ mod tests {
         let attachments = AttachmentStore::from(&store);
         let datasets = DatasetStore::from(&store);
         let pats = patterns(&["settings.json"]);
+        let key = default_attachment_key("cfg", &root, &pats, &[]);
         let spec = AttachmentSpec {
             name: Some("cfg"),
-            key: None,
+            key: Some(&key),
             targets: &[],
             root: &root,
             includes: &pats,
@@ -1160,6 +1180,35 @@ mod tests {
         assert_eq!(attachments.query().name("x").iter().unwrap().count(), 0);
     }
 
+    /// The store composes no key: a named add without one has none,
+    /// and a repeat of it is a second attachment.
+    #[test]
+    fn a_named_add_without_a_key_has_none_and_is_not_re_addressed() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(dir.path());
+        let root = fixture_root(dir.path());
+        let attachments = AttachmentStore::from(&store);
+        let pats = patterns(&["settings.json"]);
+        let spec = AttachmentSpec {
+            name: Some("cfg"),
+            key: None,
+            targets: &[],
+            root: &root,
+            includes: &pats,
+            excludes: &[],
+        };
+        let first = attachments.add(&spec).unwrap();
+        let second = attachments.add(&spec).unwrap();
+        assert_eq!(first.outcome, AttachmentOutcome::Added);
+        assert_eq!(second.outcome, AttachmentOutcome::Added);
+        assert_ne!(first.id, second.id);
+        let record = attachments.get(&first.id).unwrap();
+        assert_eq!(record.attrs.name.as_deref(), Some("cfg"));
+        assert_eq!(record.attrs.key, None);
+        assert_eq!(attachments.query().name("cfg").iter().unwrap().count(), 2);
+        assert!(KeyStore::from(&store).list().unwrap().is_empty());
+    }
+
     #[test]
     fn a_targeted_add_links_the_targets_and_a_re_add_unions_them() {
         use crate::SessionStore;
@@ -1174,9 +1223,10 @@ mod tests {
             .unwrap();
         let target = format!("session:{}", session.id);
         let pats = patterns(&["CLAUDE.md"]);
+        let key = default_attachment_key("stack-files", &root, &pats, &[]);
         let spec = AttachmentSpec {
             name: Some("stack-files"),
-            key: None,
+            key: Some(&key),
             targets: std::slice::from_ref(&target),
             root: &root,
             includes: &pats,
@@ -1378,9 +1428,10 @@ mod tests {
         let (store, _fsck) = open_store(dir.path());
         let root = fixture_root(dir.path());
         let pats = patterns(&["CLAUDE.md", "settings.json"]);
+        let key = default_attachment_key("cfg", &root, &pats, &[]);
         let spec = AttachmentSpec {
             name: Some("cfg"),
-            key: None,
+            key: Some(&key),
             targets: &[],
             root: &root,
             includes: &pats,

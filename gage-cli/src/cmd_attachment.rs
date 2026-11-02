@@ -25,7 +25,7 @@ use gage_query::ContextBuilder;
 use gage_registry::scanner::ScannerRegistry;
 use gage_store::{
     ATTACHMENT_TYPE, AttachmentLinkOutcome, AttachmentOutcome, AttachmentRecord, AttachmentSpec,
-    AttachmentStore, DatasetStore, Store, StoreError,
+    AttachmentStore, DatasetStore, Store, StoreError, default_attachment_key,
 };
 use tabled::{
     Table,
@@ -272,9 +272,10 @@ async fn add_dialog(args: &AttachmentAddArgs, store: &Store) -> Result<DialogRes
     };
     dialog::confirm(args.yes, true)?;
 
+    let key = add_key(args, &root);
     let spec = AttachmentSpec {
         name: args.name.as_deref(),
-        key: args.key.as_deref(),
+        key: key.as_deref(),
         targets: &targets,
         root: &root,
         includes: &args.includes,
@@ -315,6 +316,22 @@ async fn add_dialog(args: &AttachmentAddArgs, store: &Store) -> Result<DialogRes
 /// Run the attach tasks of each named scanner against the dataset.
 /// The first failing task ends the command; attachments linked
 /// before it stay linked.
+/// The key the add writes: `--key` as given; for a named add without
+/// one, the default key of the name and the selection under `root`;
+/// none for an unnamed add.
+fn add_key(args: &AttachmentAddArgs, root: &Path) -> Option<String> {
+    match (args.key.as_deref(), args.name.as_deref()) {
+        (Some(key), _) => Some(key.to_string()),
+        (None, Some(name)) => Some(default_attachment_key(
+            name,
+            root,
+            &args.includes,
+            &args.exclude,
+        )),
+        (None, None) => None,
+    }
+}
+
 async fn add_from_scanners(
     store: &Store,
     dataset_prefix: &str,
@@ -641,4 +658,46 @@ fn resolve(attachments: &AttachmentStore<'_>, arg: &str) -> Result<AttachmentRec
 fn open_store(command: &str) -> Result<Store, CliError> {
     let store = Store::open(&gage_store::store_path()).context(command.to_string())?;
     Ok(store)
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+    use gage_store::selection_key_part;
+
+    use super::*;
+    use crate::{Cli, Command};
+
+    fn add_args(argv: &[&str]) -> AttachmentAddArgs {
+        let cli = Cli::try_parse_from([&["gage", "attachment", "add"], argv].concat()).unwrap();
+        let Command::Attachment {
+            command: AttachmentCommand::Add(args),
+        } = cli.command
+        else {
+            panic!("expected attachment add");
+        };
+        args
+    }
+
+    /// A named add without --key takes the default key of its name and
+    /// selection; --key is taken as given; an unnamed add has none.
+    #[test]
+    fn add_key_defaults_for_a_named_add_only() {
+        let root = Path::new("/tmp/claude");
+        let args = add_args(&["-n", "claude-config", "-e", "skills/**", "settings.json"]);
+        assert_eq!(
+            add_key(&args, root).as_deref(),
+            Some(
+                format!(
+                    "claude-config/{}",
+                    selection_key_part(root, &args.includes, &args.exclude)
+                )
+                .as_str()
+            )
+        );
+        let args = add_args(&["-n", "claude-config", "-k", "cfg/main", "settings.json"]);
+        assert_eq!(add_key(&args, root).as_deref(), Some("cfg/main"));
+        let args = add_args(&["settings.json"]);
+        assert_eq!(add_key(&args, root), None);
+    }
 }

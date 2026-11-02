@@ -1266,6 +1266,7 @@ mod tests {
                 ),
             )
             .unwrap();
+            std::fs::write(publish.definition_file(&init.id), b"{}\n").unwrap();
             publish.apply(&init.id).unwrap();
             (outcome.id, init.id)
         };

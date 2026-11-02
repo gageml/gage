@@ -75,7 +75,7 @@ pub use attachment::{
     AttachmentAddOutcome, AttachmentAttrs, AttachmentFile, AttachmentOutcome, AttachmentQuery,
     AttachmentRecord, AttachmentRemoveOutcome, AttachmentSpec, AttachmentStore,
     MAX_FILES as ATTACHMENT_MAX_FILES, MAX_SIZE as ATTACHMENT_MAX_SIZE,
-    OBJECT_TYPE as ATTACHMENT_TYPE, selection_key_part,
+    OBJECT_TYPE as ATTACHMENT_TYPE, default_attachment_key, selection_key_part,
 };
 pub use dataset::{
     AddStep, AttachmentLinkOutcome, DatasetAttachmentLinkOutcome, DatasetAttachmentUnlinkOutcome,
@@ -100,8 +100,9 @@ pub use note::{
 };
 pub use object::SHORT_PREFIX_SET_SIZE;
 pub use publish::{
-    ChangeKind, ChangeRecord, PendingPublish, PublishDirLayout, PublishInit, PublishStore,
-    format_changes, parse_changes, publish_root,
+    ChangeKind, ChangeRecord, DEFINITION_ATTACHMENT as PUBLISH_DEFINITION_ATTACHMENT,
+    PendingPublish, PublishDirLayout, PublishInit, PublishStore, format_changes, parse_changes,
+    publish_root,
 };
 pub use query::{
     LinkKind, NoteDocRow, ScanSource, ScopedIssue, ScopedNote, StoredNoteTable, StoredSessionTable,

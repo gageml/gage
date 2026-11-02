@@ -5558,7 +5558,7 @@ mod tests {
     /// scan after that carries only the new note.
     #[tokio::test]
     async fn attachment_marks_and_carries_follow_the_content_digest() {
-        use gage_store::{AttachmentSpec, AttachmentStore};
+        use gage_store::{AttachmentSpec, AttachmentStore, default_attachment_key};
 
         let (tmp, store) = open_store();
         let root = tmp.path().join("claude");
@@ -5569,9 +5569,11 @@ mod tests {
         let datasets = DatasetStore::from(&store);
         let cfg_pats = ["settings.json".to_string()];
         let other_pats = ["CLAUDE.md".to_string()];
+        let cfg_key = default_attachment_key("cfg", &root, &cfg_pats, &[]);
+        let other_key = default_attachment_key("other", &root, &other_pats, &[]);
         let cfg_spec = AttachmentSpec {
             name: Some("cfg"),
-            key: None,
+            key: Some(&cfg_key),
             targets: &[],
             root: &root,
             includes: &cfg_pats,
@@ -5581,6 +5583,7 @@ mod tests {
         let other = attachments
             .add(&AttachmentSpec {
                 name: Some("other"),
+                key: Some(&other_key),
                 includes: &other_pats,
                 ..cfg_spec.clone()
             })

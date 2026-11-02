@@ -28,7 +28,7 @@ use gage_session::{
 use gage_store::{
     AttachmentSpec, AttachmentStore, DatasetOrigin, DatasetStore, IssueInput, IssueStatus,
     IssueStore, KeyStore, NoteInput, NoteStore, NoteValue, ScanStore, SessionStore, Store,
-    TagStore, TaskStatus,
+    TagStore, TaskStatus, default_attachment_key,
 };
 
 const BUNDLE: &str = "tests/fixtures/generation-1.bundle";
@@ -202,13 +202,19 @@ fn write_generation_1_fixture() {
     write(&root.join("CLAUDE.md"), "rules\n");
     write(&root.join("settings.json"), "{\"a\":1}\n");
     let target = format!("session:{}", session.id);
+    let includes = ["*".to_string()];
     AttachmentStore::from(&store)
         .add(&AttachmentSpec {
             name: Some("fixture-attachment"),
-            key: None,
+            key: Some(&default_attachment_key(
+                "fixture-attachment",
+                &root,
+                &includes,
+                &[],
+            )),
             targets: std::slice::from_ref(&target),
             root: &root,
-            includes: &["*".to_string()],
+            includes: &includes,
             excludes: &[],
         })
         .unwrap();
