@@ -1,10 +1,12 @@
-//! The named filters: the instruction prose the agent follows and the
-//! deterministic patterns the engine applies. The `secret` filter's
-//! patterns are the gitleaks rule set, vendored as `filters/gitleaks.toml`
-//! under the MIT license beside it. A filter's typed-sensitive paths are
-//! content-format knowledge and come from the driver's text descriptor,
-//! not from here; the attributes it leaves out are store knowledge and
-//! are named here.
+//! The named filters. Each is defined by a file under `filters/`: the
+//! front matter gives the description, selection, patterns, and
+//! attributes, and the body is the instruction prose the agent follows.
+//! `Filter::load` reads one file; the files are embedded and loaded in
+//! listing order. The `secret` filter sets `gitleaks = true` and takes
+//! the gitleaks rule set as its patterns, vendored as
+//! `filters/gitleaks.toml` under the MIT license beside it. A filter's
+//! typed-sensitive paths are content-format knowledge and come from the
+//! driver's text descriptor, not from here.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -21,13 +23,14 @@ use crate::PublishError;
 /// A named filter.
 pub struct Filter {
     pub name: &'static str,
-    /// The reason code its redactions carry
-    pub reason: &'static str,
+    /// The reason code its redactions carry. The front matter sets it,
+    /// defaulting to the filter name.
+    pub reason: String,
     /// One line on what the filter removes, for a listing
-    pub description: &'static str,
-    /// The instruction prose for the agent, after the front matter. A
-    /// filter that requires a prompt has prose on how the prompt is
-    /// read
+    pub description: String,
+    /// The instruction prose for the agent, the body after the front
+    /// matter. A filter that requires a prompt has prose on how the
+    /// prompt is read
     pub instructions: &'static str,
     /// The audiences the filter is selected for. The values are
     /// independent: a listed value selects the filter, and no value
@@ -37,7 +40,7 @@ pub struct Filter {
     pub uses: Vec<Use>,
     /// The attributes of `attrs.json` the filter leaves out of the
     /// published session
-    pub attrs: &'static [&'static str],
+    pub attrs: Vec<String>,
     patterns: Vec<Pattern>,
     /// The keyword prefilter: a pattern with keywords runs only on text
     /// containing one of them.
@@ -143,16 +146,35 @@ impl fmt::Display for Use {
     }
 }
 
-/// The front matter of a filter's prose file: the audiences and uses
-/// the filter is selected for. A file without front matter lists
-/// neither.
+/// The front matter of a filter file: everything the publish side
+/// knows about the filter but its instruction body. `description` is
+/// required; the rest default to absent. `reason` defaults to the
+/// filter name. `gitleaks` loads the vendored rule set as the filter's
+/// patterns, for the `secret` filter.
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FrontMatter {
+    description: String,
+    #[serde(default)]
+    reason: Option<String>,
     #[serde(default)]
     audience: Vec<Audience>,
     #[serde(default, rename = "use")]
     uses: Vec<Use>,
+    #[serde(default)]
+    attrs: Vec<String>,
+    #[serde(default)]
+    gitleaks: bool,
+    #[serde(default)]
+    pattern: Vec<PatternSpec>,
+}
+
+/// A pattern as the front matter declares it: a name and a regex.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PatternSpec {
+    name: String,
+    regex: String,
 }
 
 /// A compiled matcher for a known shape of sensitive text. The secret
@@ -618,18 +640,37 @@ impl Filter {
             .collect()
     }
 
-    /// The filter with its front matter read out of `instructions`:
-    /// the audiences and uses it lists, and the prose after them.
-    fn read_front_matter(mut self) -> Self {
-        let (toml, body) = front_matter::split(self.instructions)
-            .unwrap_or_else(|e| panic!("filter {}: {e}", self.name));
-        let front: FrontMatter = toml
-            .map(|t| toml::from_str(t).unwrap_or_else(|e| panic!("filter {}: {e}", self.name)))
+    /// The filter `name` built from its file `source`: the front matter
+    /// gives every field but the instruction body, which is the prose
+    /// after it. A `gitleaks` filter takes the vendored rule set as its
+    /// patterns; any other takes the patterns the front matter lists.
+    fn load(name: &'static str, source: &'static str) -> Self {
+        let (toml_src, body) =
+            front_matter::split(source).unwrap_or_else(|e| panic!("filter {name}: {e}"));
+        let front: FrontMatter = toml_src
+            .map(|t| toml::from_str(t).unwrap_or_else(|e| panic!("filter {name}: {e}")))
             .unwrap_or_default();
-        self.audience = front.audience;
-        self.uses = front.uses;
-        self.instructions = body.trim_start();
-        self
+        let patterns = if front.gitleaks {
+            gitleaks_patterns(GITLEAKS).expect("vendored gitleaks rules compile")
+        } else {
+            front
+                .pattern
+                .iter()
+                .map(|p| Pattern::new(&p.name, &p.regex))
+                .collect()
+        };
+        let keywords = Keywords::new(&patterns);
+        Filter {
+            name,
+            reason: front.reason.unwrap_or_else(|| name.to_string()),
+            description: front.description,
+            instructions: body.trim_start(),
+            audience: front.audience,
+            uses: front.uses,
+            attrs: front.attrs,
+            patterns,
+            keywords,
+        }
     }
 
     /// The instructions with `prompt` in place of every `{{ prompt }}`
@@ -670,100 +711,21 @@ impl Filter {
 const GITLEAKS: &str = include_str!("../filters/gitleaks.toml");
 
 static FILTERS: LazyLock<Vec<Filter>> = LazyLock::new(|| {
-    let secret = gitleaks_patterns(GITLEAKS).expect("vendored gitleaks rules compile");
-    let filters = vec![
-        Filter {
-            name: "pii",
-            reason: "pii",
-            description: "Remove personally identifiable information",
-            instructions: include_str!("../filters/pii.md"),
-            audience: Vec::new(),
-            uses: Vec::new(),
-            attrs: &[],
-            patterns: vec![
-                Pattern::new("email", r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"),
-                Pattern::new(
-                    "phone",
-                    r"(?:^|[^0-9A-Za-z])((?:\+?[0-9]{1,3}[ .-])?\(?[0-9]{3}\)?[ .-][0-9]{3}[ .-][0-9]{4})(?:[^0-9A-Za-z]|$)",
-                ),
-                Pattern::new(
-                    "ssn",
-                    r"(?:^|[^0-9-])([0-9]{3}-[0-9]{2}-[0-9]{4})(?:[^0-9-]|$)",
-                ),
-                // The name the harness's repository status reminder
-                // quotes from the Git identity
-                Pattern::new("git-user", r"(?m)^Git user: (.+?)[ \t]*$"),
-            ],
-            keywords: None,
-        },
-        Filter {
-            name: "secret",
-            reason: "secret",
-            description: "Remove passwords, API keys, and other secrets",
-            instructions: include_str!("../filters/secret.md"),
-            audience: Vec::new(),
-            uses: Vec::new(),
-            attrs: &[],
-            keywords: Keywords::new(&secret),
-            patterns: secret,
-        },
-        Filter {
-            name: "language",
-            reason: "language",
-            description: "Remove profanity and other language unfit for a shared record",
-            instructions: include_str!("../filters/language.md"),
-            audience: Vec::new(),
-            uses: Vec::new(),
-            attrs: &[],
-            patterns: Vec::new(),
-            keywords: None,
-        },
-        Filter {
-            name: "system",
-            reason: "system",
-            description: "Remove paths, hosts, and OS versions",
-            instructions: include_str!("../filters/system.md"),
-            audience: Vec::new(),
-            uses: Vec::new(),
-            attrs: &["project"],
-            patterns: Vec::new(),
-            keywords: None,
-        },
-        Filter {
-            name: "harness-context",
-            reason: "harness-context",
-            description: "Leave out what the harness placed in the model's context",
-            instructions: include_str!("../filters/harness-context.md"),
-            audience: Vec::new(),
-            uses: Vec::new(),
-            attrs: &[],
-            patterns: Vec::new(),
-            keywords: None,
-        },
-        Filter {
-            name: "harness-record",
-            reason: "harness-record",
-            description: "Leave out records the harness kept about the run",
-            instructions: include_str!("../filters/harness-record.md"),
-            audience: Vec::new(),
-            uses: Vec::new(),
-            attrs: &[],
-            patterns: Vec::new(),
-            keywords: None,
-        },
-        Filter {
-            name: "custom",
-            reason: "custom",
-            description: "Remove what a prompt of your own describes",
-            instructions: include_str!("../filters/custom.md"),
-            audience: Vec::new(),
-            uses: Vec::new(),
-            attrs: &[],
-            patterns: Vec::new(),
-            keywords: None,
-        },
-    ];
-    filters.into_iter().map(Filter::read_front_matter).collect()
+    vec![
+        Filter::load("custom", include_str!("../filters/custom.md")),
+        Filter::load(
+            "harness-context",
+            include_str!("../filters/harness-context.md"),
+        ),
+        Filter::load(
+            "harness-record",
+            include_str!("../filters/harness-record.md"),
+        ),
+        Filter::load("language", include_str!("../filters/language.md")),
+        Filter::load("pii", include_str!("../filters/pii.md")),
+        Filter::load("secret", include_str!("../filters/secret.md")),
+        Filter::load("system", include_str!("../filters/system.md")),
+    ]
 });
 
 #[cfg(test)]
@@ -776,7 +738,7 @@ mod tests {
     fn reason_codes_in_the_prose_are_listed() {
         use crate::definition::Reason;
         for filter in FILTERS.iter() {
-            assert!(Reason::find(filter.reason).is_some(), "{}", filter.name);
+            assert!(Reason::find(&filter.reason).is_some(), "{}", filter.name);
             for quoted in filter
                 .instructions
                 .split("reason \"")
@@ -807,12 +769,12 @@ mod tests {
         );
         let filter = Filter {
             name: "t",
-            reason: "custom",
-            description: "",
+            reason: "custom".to_string(),
+            description: String::new(),
             instructions: "A {{prompt}} B {{  prompt  }} C",
             audience: Vec::new(),
             uses: Vec::new(),
-            attrs: &[],
+            attrs: Vec::new(),
             patterns: Vec::new(),
             keywords: None,
         };
@@ -828,22 +790,60 @@ mod tests {
     }
 
     #[test]
-    fn every_named_filter_has_prose_and_a_description() {
+    fn every_named_filter_has_a_description() {
         for name in crate::NAMED_FILTERS {
             let filter = Filter::named(name).unwrap();
-            assert!(!filter.instructions.trim().is_empty(), "{name}");
             assert!(!filter.description.is_empty(), "{name}");
         }
         assert_eq!(Filter::all().len(), crate::NAMED_FILTERS.len());
         assert!(Filter::named("ducks").is_none());
     }
 
-    /// The front matter never reaches the model: every filter's
-    /// instructions open with prose.
+    /// The loaded filters are exactly the `NAMED_FILTERS` names, in the
+    /// same order, and that order is lexicographic. The two lists and
+    /// their shared order are kept in step by this assertion.
+    #[test]
+    fn loaded_filters_match_the_named_filter_list_in_lexicographic_order() {
+        let loaded: Vec<&str> = Filter::all().iter().map(|f| f.name).collect();
+        assert_eq!(loaded.as_slice(), crate::NAMED_FILTERS);
+        let mut sorted = loaded.clone();
+        sorted.sort_unstable();
+        assert_eq!(loaded, sorted);
+    }
+
+    /// Every field but the body comes from the file's front matter: the
+    /// description, the patterns, the attributes, the gitleaks rule set,
+    /// and the reason, which defaults to the name.
+    #[test]
+    fn filter_fields_come_from_the_front_matter() {
+        let pii = Filter::named("pii").unwrap();
+        assert_eq!(
+            pii.description,
+            "Removes personally identifiable information"
+        );
+        assert_eq!(pii.reason, "pii");
+        let names: Vec<&str> = pii.patterns.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["email", "phone", "ssn", "git-user"]);
+        assert!(pii.attrs.is_empty());
+
+        let system = Filter::named("system").unwrap();
+        assert_eq!(system.attrs, ["project"]);
+
+        let secret = Filter::named("secret").unwrap();
+        assert!(secret.patterns.len() > 200, "{}", secret.patterns.len());
+        assert!(secret.keywords.is_some());
+    }
+
+    /// The front matter never reaches the model: a filter with prose
+    /// of its own opens with prose and carries no front matter. A
+    /// driver-only filter renders nothing.
     #[test]
     fn instructions_begin_with_prose_and_carry_no_front_matter() {
         for filter in Filter::all() {
             let rendered = filter.instructions_with_prompt(None);
+            if rendered.is_empty() {
+                continue;
+            }
             assert!(!rendered.contains("+++"), "{}: {rendered}", filter.name);
             assert!(
                 rendered.starts_with(|c: char| c.is_ascii_uppercase()),
@@ -867,13 +867,13 @@ mod tests {
         assert_eq!(
             listed,
             [
-                ("pii", &[Public][..], &[][..]),
-                ("secret", &[Public, Trusted][..], &[][..]),
-                ("language", &[Public, Trusted][..], &[][..]),
-                ("system", &[Public][..], &[][..]),
+                ("custom", &[][..], &[][..]),
                 ("harness-context", &[][..], &[Reading][..]),
                 ("harness-record", &[][..], &[Reading][..]),
-                ("custom", &[][..], &[][..]),
+                ("language", &[Public, Trusted][..], &[][..]),
+                ("pii", &[Public][..], &[][..]),
+                ("secret", &[Public, Trusted][..], &[][..]),
+                ("system", &[Public][..], &[][..]),
             ]
         );
     }
@@ -895,15 +895,15 @@ mod tests {
         assert_eq!(
             names(Some(Audience::Public), Some(Use::Reading)),
             [
+                "harness-context",
+                "harness-record",
+                "language",
                 "pii",
                 "secret",
-                "language",
-                "system",
-                "harness-context",
-                "harness-record"
+                "system"
             ]
         );
-        assert_eq!(names(Some(Audience::Trusted), None), ["secret", "language"]);
+        assert_eq!(names(Some(Audience::Trusted), None), ["language", "secret"]);
         assert_eq!(
             names(None, Some(Use::Reading)),
             ["harness-context", "harness-record"]

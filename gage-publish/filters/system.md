@@ -1,5 +1,7 @@
 +++
 audience = ["public"]
+description = "Removes paths, hosts, and OS versions"
+attrs = ["project"]
 +++
 
 Remove anything in text that would help someone target the machine or network

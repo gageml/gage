@@ -1,3 +1,7 @@
++++
+description = "Removes what a prompt of your own describes"
++++
+
 Remove what the prompt describes. The prompt is the whole instruction: read it
 as the owner of the publication stating what must not be disclosed, and apply it
 to every text value. Redact each match as a text redaction with reason "custom",

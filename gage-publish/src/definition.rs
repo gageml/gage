@@ -28,13 +28,13 @@ use crate::filter::Filter;
 
 /// The filters with a built-in definition, in listing order.
 pub const NAMED_FILTERS: &[&str] = &[
-    "pii",
-    "language",
-    "secret",
-    "system",
+    "custom",
     "harness-context",
     "harness-record",
-    "custom",
+    "language",
+    "pii",
+    "secret",
+    "system",
 ];
 
 /// Whether the filter `name` has no instructions of its own and takes
@@ -518,20 +518,22 @@ impl PublishDefinition {
     /// The redaction instructions of every filter as markdown: per
     /// filter a level-three heading with its name in code font, then
     /// its instructions with the prompt given for it in place of the
-    /// placeholder. Sections are separated by a blank line.
+    /// placeholder. Sections are separated by a blank line. A filter
+    /// with no instructions of its own, one that redacts whole entries
+    /// at the driver, contributes no section.
     pub fn instructions_markdown(&self) -> Result<String, PublishError> {
         let mut out = String::new();
         for entry in &self.filters {
             let filter = Filter::named(&entry.name)
                 .ok_or_else(|| PublishError::Input(format!("unknown filter {:?}", entry.name)))?;
+            let instructions = filter.instructions_with_prompt(entry.prompt.as_deref());
+            if instructions.is_empty() {
+                continue;
+            }
             if !out.is_empty() {
                 out.push('\n');
             }
-            out.push_str(&format!(
-                "### `{}`\n\n{}\n",
-                filter.name,
-                filter.instructions_with_prompt(entry.prompt.as_deref())
-            ));
+            out.push_str(&format!("### `{}`\n\n{instructions}\n", filter.name));
         }
         Ok(out)
     }
@@ -606,7 +608,7 @@ impl PublishDefinition {
             None => "null".to_string(),
         };
         out.push_str(&format!("  \"title\": {title_row},\n\n"));
-        out.push_str(FILTERS_COMMENT);
+        out.push_str(&filters_comment());
         rows(&mut out, "filters", &self.filters);
         out.push('\n');
         out.push_str(SEGMENTS_COMMENT);
@@ -615,7 +617,7 @@ impl PublishDefinition {
         out.push_str(ALLOW_COMMENT);
         rows(&mut out, "allow", &self.allow);
         out.push('\n');
-        out.push_str(REDACT_COMMENT);
+        out.push_str(&redact_comment());
         rows(&mut out, "redact", &self.redact);
         out.push_str("}\n");
         out
@@ -893,12 +895,50 @@ const TITLE_COMMENT: &str = "  // [text, author]: the title the published sessio
   // refresh that reads it.
 ";
 
-const FILTERS_COMMENT: &str =
-    "  // A name, or [name, prompt]. Each name once. Names: pii, language,
-  // secret, system, harness-context, harness-record, custom. custom
-  // requires a prompt; a prompt on any other filter adds to its
-  // instructions.
-";
+/// The `filters` annotation, with the named-filter list from
+/// [`NAMED_FILTERS`].
+fn filters_comment() -> String {
+    comment(&format!(
+        "A name, or [name, prompt]. Each name once. Names: {}. custom \
+         requires a prompt; a prompt on any other filter adds to its \
+         instructions.",
+        NAMED_FILTERS.join(", ")
+    ))
+}
+
+/// The `redact` annotation, with the reason-code list from [`REASONS`].
+fn redact_comment() -> String {
+    let reasons = REASONS
+        .iter()
+        .map(|r| r.code.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    comment(&format!(
+        "[text, reason, author, mark]. Text is matched without case \
+         everywhere it appears. Reasons: {reasons}. mark false removes \
+         the text with no marker. A row without an author, [text, \
+         reason, mark], takes the author of the refresh that reads it."
+    ))
+}
+
+/// `text` wrapped into `  // ` comment lines no wider than 70 columns.
+fn comment(text: &str) -> String {
+    const WIDTH: usize = 70;
+    let mut out = String::new();
+    let mut line = String::from("  //");
+    for word in text.split_whitespace() {
+        if line.len() + 1 + word.len() > WIDTH {
+            out.push_str(&line);
+            out.push('\n');
+            line = String::from("  //");
+        }
+        line.push(' ');
+        line.push_str(word);
+    }
+    out.push_str(&line);
+    out.push('\n');
+    out
+}
 
 const SEGMENTS_COMMENT: &str =
     "  // [lines, description, author]. Lines are 1-based inclusive ranges
@@ -909,13 +949,6 @@ const SEGMENTS_COMMENT: &str =
 
 const ALLOW_COMMENT: &str = "  // [text, author]: text a filter found that stays. A filter row
   // deleted from redact comes back on refresh unless its text is here.
-";
-
-const REDACT_COMMENT: &str = "  // [text, reason, author, mark]. Text is matched without case
-  // everywhere it appears. Reasons: pii, secret, language, system,
-  // scope, custom. mark false removes the text with no marker. A row
-  // without an author, [text, reason, mark], takes the author of the
-  // refresh that reads it.
 ";
 
 /// `reason` is a known code.
@@ -970,6 +1003,20 @@ mod tests {
         assert!(Reason::find("nope").is_none());
     }
 
+    /// The redact annotation names every reason code and the filters
+    /// annotation every named filter, so neither drifts from its source.
+    #[test]
+    fn the_annotations_name_every_code_and_filter() {
+        let redact = redact_comment();
+        for r in REASONS.iter() {
+            assert!(redact.contains(r.code.as_str()), "redact omits {}", r.code);
+        }
+        let filters = filters_comment();
+        for name in NAMED_FILTERS {
+            assert!(filters.contains(name), "filters omits {name}");
+        }
+    }
+
     /// The file holds the annotations, the original's title beside the
     /// session, the init arguments, the title row, and one filter,
     /// segment, allowed literal, or redaction per line, and reads back
@@ -1005,61 +1052,56 @@ mod tests {
             author: "user:g".into(),
         });
         let text = d.to_jsonc_text(Some("Fix  the\nduck"));
-        assert_eq!(
-            text,
-            concat!(
-                "// A pending publish. Edit and save; `gage publish edit` rebuilds the\n",
-                "// staged session on exit, and `gage publish refresh` rebuilds after an\n",
-                "// edit made elsewhere.\n",
-                "{\n",
-                "  \"session\": \"abc\", // title: Fix the duck\n",
-                "\n",
-                "  // Recorded by init. Not read by publish.\n",
-                "  \"init\": {\"audience\":\"public\",\"notes\":\"For the blog\"},\n",
-                "\n",
-                "  // [text, author]: the title the published session takes, set by an\n",
-                "  // entry added after its last line. null keeps the title the content\n",
-                "  // yields. A row without an author, [text], takes the author of the\n",
-                "  // refresh that reads it.\n",
-                "  \"title\": [\"Fixing the duck\", \"user:g\"],\n",
-                "\n",
-                "  // A name, or [name, prompt]. Each name once. Names: pii, language,\n",
-                "  // secret, system, harness-context, harness-record, custom. custom\n",
-                "  // requires a prompt; a prompt on any other filter adds to its\n",
-                "  // instructions.\n",
-                "  \"filters\": [\n",
-                "    \"pii\",\n",
-                "    [\"custom\", \"Ducks only\"],\n",
-                "    [\"system\", \"Watch for hosts.\"],\n",
-                "  ],\n",
-                "\n",
-                "  // [lines, description, author]. Lines are 1-based inclusive ranges\n",
-                "  // of the session, \"100-125,130\", or null for a segment that drops\n",
-                "  // nothing yet. Once any segment has lines, every line outside every\n",
-                "  // segment is dropped.\n",
-                "  \"segments\": [\n",
-                "    [\"100-125,130\", \"The reply\", \"session:s\"],\n",
-                "    [null, \"The question\", \"session:s\"],\n",
-                "  ],\n",
-                "\n",
-                "  // [text, author]: text a filter found that stays. A filter row\n",
-                "  // deleted from redact comes back on refresh unless its text is here.\n",
-                "  \"allow\": [\n",
-                "    [\"hunter2\", \"user:g\"],\n",
-                "  ],\n",
-                "\n",
-                "  // [text, reason, author, mark]. Text is matched without case\n",
-                "  // everywhere it appears. Reasons: pii, secret, language, system,\n",
-                "  // scope, custom. mark false removes the text with no marker. A row\n",
-                "  // without an author, [text, reason, mark], takes the author of the\n",
-                "  // refresh that reads it.\n",
-                "  \"redact\": [\n",
-                "    [\"abc\", \"secret\", \"user:g\", true],\n",
-                "    [\"Sam\", \"pii\", \"filter:pii\", false],\n",
-                "  ],\n",
-                "}\n",
-            )
-        );
+        let mut expected = String::from(concat!(
+            "// A pending publish. Edit and save; `gage publish edit` rebuilds the\n",
+            "// staged session on exit, and `gage publish refresh` rebuilds after an\n",
+            "// edit made elsewhere.\n",
+            "{\n",
+            "  \"session\": \"abc\", // title: Fix the duck\n",
+            "\n",
+            "  // Recorded by init. Not read by publish.\n",
+            "  \"init\": {\"audience\":\"public\",\"notes\":\"For the blog\"},\n",
+            "\n",
+            "  // [text, author]: the title the published session takes, set by an\n",
+            "  // entry added after its last line. null keeps the title the content\n",
+            "  // yields. A row without an author, [text], takes the author of the\n",
+            "  // refresh that reads it.\n",
+            "  \"title\": [\"Fixing the duck\", \"user:g\"],\n",
+            "\n",
+        ));
+        expected.push_str(&filters_comment());
+        expected.push_str(concat!(
+            "  \"filters\": [\n",
+            "    \"pii\",\n",
+            "    [\"custom\", \"Ducks only\"],\n",
+            "    [\"system\", \"Watch for hosts.\"],\n",
+            "  ],\n",
+            "\n",
+            "  // [lines, description, author]. Lines are 1-based inclusive ranges\n",
+            "  // of the session, \"100-125,130\", or null for a segment that drops\n",
+            "  // nothing yet. Once any segment has lines, every line outside every\n",
+            "  // segment is dropped.\n",
+            "  \"segments\": [\n",
+            "    [\"100-125,130\", \"The reply\", \"session:s\"],\n",
+            "    [null, \"The question\", \"session:s\"],\n",
+            "  ],\n",
+            "\n",
+            "  // [text, author]: text a filter found that stays. A filter row\n",
+            "  // deleted from redact comes back on refresh unless its text is here.\n",
+            "  \"allow\": [\n",
+            "    [\"hunter2\", \"user:g\"],\n",
+            "  ],\n",
+            "\n",
+        ));
+        expected.push_str(&redact_comment());
+        expected.push_str(concat!(
+            "  \"redact\": [\n",
+            "    [\"abc\", \"secret\", \"user:g\", true],\n",
+            "    [\"Sam\", \"pii\", \"filter:pii\", false],\n",
+            "  ],\n",
+            "}\n",
+        ));
+        assert_eq!(text, expected);
         let back = PublishDefinition::from_jsonc(&text).unwrap();
         assert_eq!(back, d);
         assert_eq!(
@@ -1274,5 +1316,19 @@ mod tests {
             markdown.ends_with("\n\nRemove the project codename\n"),
             "{markdown}"
         );
+    }
+
+    /// A driver-only filter, one with no instructions of its own,
+    /// contributes no section; the filters around it still do.
+    #[test]
+    fn instructions_omit_a_driver_only_filter() {
+        let filters = [
+            FilterSpec::new("harness-record", None).unwrap(),
+            FilterSpec::new("pii", None).unwrap(),
+        ];
+        let definition = PublishDefinition::new("abc", &filters);
+        let markdown = definition.instructions_markdown().unwrap();
+        assert!(!markdown.contains("harness-record"), "{markdown}");
+        assert!(markdown.contains("### `pii`"), "{markdown}");
     }
 }

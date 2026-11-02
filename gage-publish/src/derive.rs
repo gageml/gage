@@ -223,7 +223,7 @@ pub fn run_filters(
                 .iter()
                 .any(|t| t.author == author && t.literal.eq_ignore_ascii_case(&literal));
             if !present {
-                definition.push_redact(&literal, filter.reason, &author, true);
+                definition.push_redact(&literal, &filter.reason, &author, true);
             }
         }
     }
@@ -579,7 +579,7 @@ fn expand(definition: &PublishDefinition, session: &SessionText) -> Result<Expan
         for (line, line_end) in runs(lines.iter().copied()) {
             instances.push(Instance {
                 entry: None,
-                reason: filter.reason.to_string(),
+                reason: filter.reason.clone(),
                 author: format!("filter:{}", filter.name),
                 kind: InstanceKind::Line { line, line_end },
             });
@@ -606,11 +606,11 @@ fn expand(definition: &PublishDefinition, session: &SessionText) -> Result<Expan
         let author = format!("filter:{}", filter.name);
         let instance = |kind| Instance {
             entry: None,
-            reason: filter.reason.to_string(),
+            reason: filter.reason.clone(),
             author: author.clone(),
             kind,
         };
-        for attr in filter.attrs {
+        for attr in &filter.attrs {
             if session.has_attr(attr) {
                 instances.push(instance(InstanceKind::Attr {
                     name: attr.to_string(),
@@ -639,7 +639,7 @@ fn expand(definition: &PublishDefinition, session: &SessionText) -> Result<Expan
             reference: Some(path),
             span_start: None,
             span_end: None,
-            reason: Some(filter.reason.to_string()),
+            reason: Some(filter.reason.clone()),
             author: author.clone(),
         }));
     }

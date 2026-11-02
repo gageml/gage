@@ -333,9 +333,9 @@ pub struct InitArgs {
 
 /// The paragraph `--filter` options share on what a filter argument
 /// is.
-const FILTER_HELP: &str = "A filter name; see --list-filters. Filter names are \"pii\", \
-\"language\", \"secret\", \"system\", \"harness-context\", \"harness-record\", and \
-\"custom\". \"custom\" takes a prompt as its whole instruction, so it is added in definition \
+const FILTER_HELP: &str = "A filter name; see --list-filters. Filter names are \"custom\", \
+\"harness-context\", \"harness-record\", \"language\", \"pii\", \"secret\", and \
+\"system\". \"custom\" takes a prompt as its whole instruction, so it is added in definition \
 file. A filter given here is added to those --audience and --use select.";
 
 #[derive(Args)]
@@ -1638,7 +1638,7 @@ mod tests {
         );
         assert!(
             rendered.contains(
-                "[possible values: pii, language, secret, system, harness-context, harness-record, custom]"
+                "[possible values: custom, harness-context, harness-record, language, pii, secret, system]"
             ),
             "{rendered}"
         );
@@ -2150,10 +2150,10 @@ mod tests {
                 vec![spec("secret"), spec("pii")]
             ),
             [
-                "secret",
-                "language",
                 "harness-context",
                 "harness-record",
+                "language",
+                "secret",
                 "pii"
             ]
         );

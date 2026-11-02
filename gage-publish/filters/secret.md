@@ -1,5 +1,7 @@
 +++
 audience = ["public", "trusted"]
+description = "Removes passwords, API keys, and other secrets"
+gitleaks = true
 +++
 
 Remove every credential or key whose leak enables unauthorized access or

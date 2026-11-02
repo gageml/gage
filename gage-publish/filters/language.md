@@ -1,5 +1,6 @@
 +++
 audience = ["public", "trusted"]
+description = "Removes profanity and other language unfit for a shared record"
 +++
 
 Identify language that is not fit for a shared record: profanity, slurs, sexual
