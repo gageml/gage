@@ -437,16 +437,13 @@ impl Backend {
         limit: usize,
         offset: usize,
     ) -> Result<Vec<SessionListItem>, Box<dyn Error>> {
-        let (time_col, driver_col, title_col) = match self.kind {
-            Kind::Native { .. } => ("mtime", "'' AS driver", "title"),
-            Kind::Stored { .. } => (
-                "modified",
-                "driver",
-                "json_extract(summary, '$.title') AS title",
-            ),
+        let (time_col, driver_col) = match self.kind {
+            Kind::Native { .. } => ("mtime", "'' AS driver"),
+            Kind::Stored { .. } => ("modified", "driver"),
         };
         let sql = format!(
-            "SELECT id, id_display, project, {title_col}, {time_col}, {driver_col} \
+            "SELECT id, id_display, project, json_extract(summary, '$.title') AS title, \
+             {time_col}, {driver_col} \
              FROM {} ORDER BY {time_col} DESC LIMIT {limit} OFFSET {offset}",
             self.session_rel()
         );
@@ -681,9 +678,9 @@ fn target_lines(target: &str) -> Result<(Option<u32>, Option<u32>), Box<dyn Erro
 }
 
 /// Replace the row's `summary` text with the JSON object it holds, so
-/// the pane's YAML nests its keys. The stored `summary` column is a
-/// text column that carries a JSON object; a value that does not
-/// parse is left as text, which the pane still shows.
+/// the pane's YAML nests its keys. The `summary` column is a text
+/// column that carries a JSON object; a value that does not parse is
+/// left as text, which the pane still shows.
 fn nest_summary(row: &mut Value) {
     let Some(summary) = row.get_mut("summary") else {
         return;

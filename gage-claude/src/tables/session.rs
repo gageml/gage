@@ -7,15 +7,14 @@ use std::time::UNIX_EPOCH;
 use crate::index::{ClaudeSessionAttrs, IndexStore};
 use async_trait::async_trait;
 use datafusion::arrow::array::{
-    BooleanBuilder, Float64Builder, Int64Builder, ListBuilder, StringBuilder,
-    TimestampMillisecondBuilder,
+    BooleanBuilder, Int64Builder, ListBuilder, StringBuilder, TimestampMillisecondBuilder,
 };
 use datafusion::arrow::compute::SortOptions;
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::catalog::Session;
 use datafusion::datasource::{TableProvider, TableType};
-use datafusion::error::Result;
+use datafusion::error::{DataFusionError, Result};
 use datafusion::execution::context::TaskContext;
 use datafusion::logical_expr::TableProviderFilterPushDown;
 use datafusion::physical_expr::expressions::col;
@@ -28,7 +27,7 @@ use datafusion::physical_plan::{
 };
 use datafusion::prelude::*;
 use futures::stream;
-use gage_session::SessionAttrs;
+use gage_session::SummaryAttrs;
 
 use super::cache::SessionCache;
 use super::walk::{SummaryPrune, WALK_COLS, walk_sessions};
@@ -42,51 +41,38 @@ use gage_session::system;
 /// other column is filled from the directory walk. A projection that
 /// touches none of these — `SELECT COUNT(*)`, `SELECT id FROM session
 /// WHERE ...` — can skip per-row derivation entirely.
-const SUMMARY_COLS: &[&str] = &[
-    "title",
-    "model",
-    "message_count",
-    "input_tokens",
-    "output_tokens",
-    "cached_tokens",
-    "cost_usd",
-    "is_empty",
-    "files_changed",
-    "files_referenced",
-];
+const SUMMARY_COLS: &[&str] = &["summary", "is_empty", "files_changed", "files_referenced"];
 
 fn session_schema() -> SchemaRef {
     // Column order is shared with the store's `session` table:
-    // identity, location, timestamps and size, content summary, token
-    // usage, derived flags, system. A new column joins the category it
-    // belongs to.
+    // identity, location, timestamps, provenance, content, summary,
+    // derived flags, files, system. A new column joins the category
+    // it belongs to.
     Arc::new(Schema::new(vec![
         // Identity
         Field::new("id", DataType::Utf8, false),
         // Location
         Field::new("project", DataType::Utf8, true),
-        // Timestamps and size
+        // Timestamps
         Field::new(
             "mtime",
             DataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into())),
             false,
         ),
-        Field::new("size", DataType::Int64, false),
         // Provenance
         // The driver's name and version for the byte layout of `raw`;
         // a reader of `raw` checks it
         Field::new("content_format", DataType::Utf8, false),
-        // Content summary
-        Field::new("title", DataType::Utf8, true),
-        Field::new("model", DataType::Utf8, true),
-        Field::new("message_count", DataType::Int64, false),
-        // Token usage, as `SessionAttrs` defines it: totals over the
-        // session's API responses, each counted once
-        Field::new("input_tokens", DataType::Int64, false),
-        Field::new("output_tokens", DataType::Int64, false),
-        Field::new("cached_tokens", DataType::Int64, false),
-        Field::new("cost_usd", DataType::Float64, true),
+        // Content
+        // The byte size of the session file
+        Field::new("size", DataType::Int64, false),
+        // The driver's projection of the session, as a JSON object:
+        // title, model, message_count, is_empty, line_count, the token
+        // totals, and cost_usd. Null when the session could not be read.
+        Field::new("summary", DataType::Utf8, true),
         // Derived flags
+        // `summary.is_empty` as a typed column, the predicate of
+        // `gage session delete --empty`
         Field::new("is_empty", DataType::Boolean, false),
         // Files
         // Every path a tool call wrote, as the driver judged it
@@ -367,13 +353,7 @@ impl SessionExec {
         let mut mtimes = TimestampMillisecondBuilder::with_capacity(len);
         let mut sizes = Int64Builder::with_capacity(len);
         let mut content_formats = StringBuilder::with_capacity(len, len * CONTENT_FORMAT.len());
-        let mut titles = StringBuilder::new();
-        let mut models = StringBuilder::new();
-        let mut message_counts = Int64Builder::with_capacity(len);
-        let mut input_tokens = Int64Builder::with_capacity(len);
-        let mut output_tokens = Int64Builder::with_capacity(len);
-        let mut cached_tokens = Int64Builder::with_capacity(len);
-        let mut costs = Float64Builder::with_capacity(len);
+        let mut summaries = StringBuilder::new();
         let mut is_empty = BooleanBuilder::with_capacity(len);
         let mut files_changed = ListBuilder::new(StringBuilder::new());
         let mut files_referenced = ListBuilder::new(StringBuilder::new());
@@ -404,36 +384,34 @@ impl SessionExec {
             content_formats.append_value(CONTENT_FORMAT);
 
             // The native session is the authority on a session's
-            // attributes; the table is one consumer of it.
-            let summary = if !needs_summary {
-                default_summary.clone()
+            // attributes; the table is one consumer of it. A summary
+            // not needed or not readable leaves the `summary` column
+            // null and the derived columns at their defaults.
+            let attrs = if !needs_summary {
+                None
             } else {
                 match ClaudeNativeSession::open(&s.id, &s.src, s.mtime, &root, &self.store) {
-                    Ok(session) => session.claude_attrs().clone(),
+                    Ok(session) => Some(session.claude_attrs().clone()),
                     Err(e) => {
                         tracing::warn!(session_id = %s.id, "session summary unavailable: {e}");
-                        default_summary.clone()
+                        None
                     }
                 }
             };
-            match &summary.title {
-                Some(t) => titles.append_value(t),
-                None => titles.append_null(),
+            match &attrs {
+                Some(attrs) => summaries.append_value(
+                    SummaryAttrs::from_attrs(attrs)
+                        .to_json()
+                        .map_err(|e| DataFusionError::External(Box::new(e)))?,
+                ),
+                None => summaries.append_null(),
             }
-            match &summary.model {
-                Some(m) => models.append_value(m),
-                None => models.append_null(),
-            }
-            message_counts.append_value(summary.message_count);
-            input_tokens.append_value(SessionAttrs::input_tokens(&summary).unwrap_or(0) as i64);
-            output_tokens.append_value(SessionAttrs::output_tokens(&summary).unwrap_or(0) as i64);
-            cached_tokens.append_value(summary.cached_tokens().unwrap_or(0) as i64);
-            costs.append_option(summary.cost_usd());
-            is_empty.append_value(summary.is_empty);
-            append_paths(&mut files_changed, &summary.files_changed, needs_summary);
+            let attrs = attrs.as_ref().unwrap_or(&default_summary);
+            is_empty.append_value(attrs.is_empty);
+            append_paths(&mut files_changed, &attrs.files_changed, needs_summary);
             append_paths(
                 &mut files_referenced,
-                &summary.files_referenced,
+                &attrs.files_referenced,
                 needs_summary,
             );
         }
@@ -444,15 +422,9 @@ impl SessionExec {
                 Arc::new(ids.finish()),
                 Arc::new(projects.finish()),
                 Arc::new(mtimes.finish().with_timezone("UTC")),
-                Arc::new(sizes.finish()),
                 Arc::new(content_formats.finish()),
-                Arc::new(titles.finish()),
-                Arc::new(models.finish()),
-                Arc::new(message_counts.finish()),
-                Arc::new(input_tokens.finish()),
-                Arc::new(output_tokens.finish()),
-                Arc::new(cached_tokens.finish()),
-                Arc::new(costs.finish()),
+                Arc::new(sizes.finish()),
+                Arc::new(summaries.finish()),
                 Arc::new(is_empty.finish()),
                 Arc::new(files_changed.finish()),
                 Arc::new(files_referenced.finish()),

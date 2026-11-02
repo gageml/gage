@@ -42,7 +42,7 @@ use futures::stream;
 use gage_core::style::IdHighlighter;
 use gage_core::uuid::short_uuid;
 use gage_session::filter::{self, IdFilter};
-use gage_session::system;
+use gage_session::{SummaryAttrs, system};
 
 use super::batch::readable;
 use crate::{
@@ -516,8 +516,9 @@ fn external(e: StoreError) -> DataFusionError {
 
 /// The driver's session summary as a JSON object string, the value the
 /// `summary` column carries.
-fn summary_json(summary: &crate::SummaryAttrs) -> Result<String> {
-    serde_json::to_string(summary)
+fn summary_json(summary: &SummaryAttrs) -> Result<String> {
+    summary
+        .to_json()
         .map_err(|e| external(StoreError::Parse(format!("session summary encode: {e}"))))
 }
 

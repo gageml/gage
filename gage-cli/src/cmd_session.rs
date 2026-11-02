@@ -469,13 +469,12 @@ impl Listing {
 /// Run one SQL query for the shown rows and a second for the total
 /// count under the same filter. The count is needed for the summary
 /// line; DataFusion's `LIMIT` truncates the shown rows and does not
-/// report a total. Both bindings select the same column list; the
-/// native binding has no type and fills it with an empty literal, and
-/// reads `title`, `model`, and `message_count` as its own columns
-/// where the store reads them from its `summary` JSON; its time
-/// column is `mtime` where the store's is `created`; and rows order
-/// and `--since` filter on `mtime` where the store's do on
-/// `modified`.
+/// report a total. Both bindings select the same column list and
+/// read `title`, `model`, and `message_count` from their `summary`
+/// JSON; the native binding has no type or driver and fills them
+/// with an empty literal; its time column is `mtime` where the
+/// store's is `created`; and rows order and `--since` filter on
+/// `mtime` where the store's do on `modified`.
 async fn query_sessions(
     ctx: &SessionContext,
     args: &SessionListArgs,
@@ -488,28 +487,17 @@ async fn query_sessions(
         Some(n) => format!(" LIMIT {n}"),
         None => String::new(),
     };
-    let (type_col, title_col, model_col, count_col, time_col, driver_col) = match listing {
-        Listing::Native => (
-            "'' AS session_type",
-            "title",
-            "model",
-            "message_count",
-            "mtime AS time",
-            "'' AS driver",
-        ),
-        Listing::Stored | Listing::Dataset => (
-            "session_type",
-            "json_extract(summary, '$.title') AS title",
-            "json_extract(summary, '$.model') AS model",
-            "CAST(json_extract(summary, '$.message_count') AS BIGINT) AS message_count",
-            "created AS time",
-            "driver",
-        ),
+    let (type_col, time_col, driver_col) = match listing {
+        Listing::Native => ("'' AS session_type", "mtime AS time", "'' AS driver"),
+        Listing::Stored | Listing::Dataset => ("session_type", "created AS time", "driver"),
     };
     let order_clause = listing.order_clause();
     let sql = format!(
-        "SELECT id, id_display, id_prefix, project, {title_col}, {type_col}, {model_col}, size, \
-         {count_col}, {time_col}, {driver_col} \
+        "SELECT id, id_display, id_prefix, project, \
+         json_extract(summary, '$.title') AS title, {type_col}, \
+         json_extract(summary, '$.model') AS model, size, \
+         CAST(json_extract(summary, '$.message_count') AS BIGINT) AS message_count, \
+         {time_col}, {driver_col} \
          FROM {from}{where_clause} \
          ORDER BY {order_clause}{limit_clause}",
     );
@@ -1540,7 +1528,9 @@ async fn delete_dialog(
         spinner.start("Looking for empty sessions");
         let targets = delete_targets(
             &ctx,
-            &format!("SELECT id, title FROM {from} WHERE is_empty"),
+            &format!(
+                "SELECT id, json_extract(summary, '$.title') AS title FROM {from} WHERE is_empty"
+            ),
         )
         .await
         .map_err(|e| DialogError::Other(e.into()))?;
@@ -1553,7 +1543,9 @@ async fn delete_dialog(
             .map(|id| format!("'{}'", id.replace('\'', "''")))
             .collect::<Vec<_>>()
             .join(", ");
-        let sql = format!("SELECT id, title FROM {from} WHERE id IN ({in_list})");
+        let sql = format!(
+            "SELECT id, json_extract(summary, '$.title') AS title FROM {from} WHERE id IN ({in_list})"
+        );
         delete_targets(&ctx, &sql)
             .await
             .map_err(|e| DialogError::Other(e.into()))?

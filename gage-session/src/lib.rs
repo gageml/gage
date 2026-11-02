@@ -18,6 +18,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use datafusion::datasource::TableProvider;
+use serde::{Deserialize, Serialize};
 
 pub mod agent;
 pub mod content_schema;
@@ -573,6 +574,59 @@ pub trait SessionAttrs {
     /// when it reports one. A presented number, not what was billed.
     fn cost_usd(&self) -> Option<f64> {
         None
+    }
+}
+
+/// The driver's projection of a session: the [`SessionAttrs`] values
+/// a session table carries in its `summary` JSON column, and the
+/// value the store writes as `attrs.summary`. Only the driver can
+/// compute these; a table or the store copies them verbatim.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
+pub struct SummaryAttrs {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_count: Option<u64>,
+    /// The session has no entry with content
+    pub is_empty: bool,
+    /// The number of lines in the native content, when the driver
+    /// reports it
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_count: Option<u64>,
+    /// Token totals and cost as `SessionAttrs` defines them, when the
+    /// driver reports them
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
+}
+
+impl SummaryAttrs {
+    /// The summary of a session from the driver's attributes.
+    pub fn from_attrs(attrs: &dyn SessionAttrs) -> Self {
+        SummaryAttrs {
+            title: attrs.title().map(String::from),
+            model: attrs.model().map(String::from),
+            message_count: attrs.message_count(),
+            is_empty: attrs.is_empty(),
+            line_count: attrs.line_count(),
+            input_tokens: attrs.input_tokens(),
+            output_tokens: attrs.output_tokens(),
+            cached_tokens: attrs.cached_tokens(),
+            cost_usd: attrs.cost_usd(),
+        }
+    }
+
+    /// The summary as the JSON object string a `summary` column
+    /// carries.
+    pub fn to_json(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string(self)
     }
 }
 

@@ -964,6 +964,59 @@ mod tests {
         );
     }
 
+    /// `native_session` carries the driver's projection as the same
+    /// `summary` JSON the stored `session` table carries, so one
+    /// `json_extract` reads either; `is_empty` stays a typed column.
+    #[tokio::test]
+    async fn native_session_carries_the_summary_json() {
+        let claude_root = tempfile::tempdir().unwrap();
+        let dir = claude_root.path().join("projects").join("-w-proj");
+        std::fs::create_dir_all(&dir).unwrap();
+        let id = "dddddddd-0000-0000-0000-000000000001";
+        std::fs::write(
+            dir.join(format!("{id}.jsonl")),
+            concat!(
+                r#"{"type":"user","uuid":"u1","timestamp":"2025-01-01T00:00:00Z","message":{"role":"user","content":"Fix the parser"}}"#,
+                "\n",
+                r#"{"type":"assistant","uuid":"a1","timestamp":"2025-01-01T00:00:01Z","message":{"role":"assistant","model":"claude-x","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":3,"output_tokens":2,"cache_read_input_tokens":1}}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        let empty = "dddddddd-0000-0000-0000-000000000002";
+        std::fs::write(dir.join(format!("{empty}.jsonl")), "").unwrap();
+        let spec = format!("claude:{}", claude_root.path().display());
+        let ctx = ContextBuilder::new(None)
+            .cache_root(claude_root.path().join("cache"))
+            .build()
+            .await;
+        let from = format!("native_session('{spec}')");
+        let cols = strings(
+            &ctx,
+            &format!(
+                "SELECT json_extract(summary, '$.title') || '|' || \
+                        json_extract(summary, '$.model') || '|' || \
+                        json_extract(summary, '$.message_count') || '|' || \
+                        json_extract(summary, '$.line_count') || '|' || \
+                        json_extract(summary, '$.input_tokens') || '|' || \
+                        json_extract(summary, '$.cached_tokens') || '|' || \
+                        json_extract(summary, '$.is_empty') \
+                 FROM {from} WHERE id = '{id}'"
+            ),
+        )
+        .await;
+        assert_eq!(cols, ["Fix the parser|claude-x|2|2|4|1|false"]);
+        assert_eq!(
+            strings(&ctx, &format!("SELECT id FROM {from} WHERE is_empty")).await,
+            [empty]
+        );
+        let flat = ctx.sql(&format!("SELECT title FROM {from}")).await;
+        assert!(
+            flat.is_err(),
+            "the flat summary columns are gone from native_session"
+        );
+    }
+
     #[tokio::test]
     async fn native_session_pushes_project_and_mtime_filters_into_the_walk() {
         use std::time::{Duration, UNIX_EPOCH};

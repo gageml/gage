@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use gage_core::uuid::derive_id;
-use gage_session::{ContentSink, ContentSource, Driver, NativeSession, SessionAttrs};
+use gage_session::{ContentSink, ContentSource, Driver, NativeSession, SummaryAttrs};
 use serde::{Deserialize, Serialize};
 
 use crate::content::GitContentSource;
@@ -97,52 +97,6 @@ impl SessionAttrsRecord {
             &self.origin[i + 1..]
         } else {
             &self.origin
-        }
-    }
-}
-
-/// `attrs.summary`: the driver's session-level attributes at write
-/// time. Only the driver can compute these; the store copies them
-/// verbatim.
-#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
-pub struct SummaryAttrs {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub message_count: Option<u64>,
-    /// The session has no entry with content
-    pub is_empty: bool,
-    /// The number of lines in the native content, when the driver
-    /// reports it
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub line_count: Option<u64>,
-    /// Token totals and cost as `SessionAttrs` defines them, when the
-    /// driver reports them
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub input_tokens: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub output_tokens: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cached_tokens: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cost_usd: Option<f64>,
-}
-
-impl SummaryAttrs {
-    /// The summary of a session from the driver's attributes.
-    pub fn from_attrs(attrs: &dyn SessionAttrs) -> Self {
-        SummaryAttrs {
-            title: attrs.title().map(String::from),
-            model: attrs.model().map(String::from),
-            message_count: attrs.message_count(),
-            is_empty: attrs.is_empty(),
-            line_count: attrs.line_count(),
-            input_tokens: attrs.input_tokens(),
-            output_tokens: attrs.output_tokens(),
-            cached_tokens: attrs.cached_tokens(),
-            cost_usd: attrs.cost_usd(),
         }
     }
 }
@@ -754,6 +708,7 @@ pub(crate) mod tests {
     use crate::DatasetStore;
     use crate::git::{git_in, run};
     use crate::test_support::open_store;
+    use gage_session::SessionAttrs;
 
     fn attrs_with_origin(origin: &str) -> SessionAttrsRecord {
         SessionAttrsRecord {

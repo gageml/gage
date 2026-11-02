@@ -85,6 +85,7 @@ pub use dataset::{
 };
 pub use error::StoreError;
 pub use fetch::{Conflict, FetchReport, Outcome, RefOutcome, Side};
+pub use gage_session::SummaryAttrs;
 pub use git::{CommitMeta, EntryKind, TreeEntry};
 pub use index::{IdMatch, IndexCounts, IndexStatus, Order, SelectedTip};
 pub use issue::{
@@ -121,8 +122,7 @@ pub use scan::{
 pub use scan_dir::ScanDirLayout;
 pub use session::{
     OBJECT_TYPE as SESSION_TYPE, SessionAddOutcome, SessionAttrsRecord, SessionOutcome,
-    SessionQuery, SessionRecord, SessionRemoveOutcome, SessionStore, SummaryAttrs,
-    session_object_id,
+    SessionQuery, SessionRecord, SessionRemoveOutcome, SessionStore, session_object_id,
 };
 pub use sqlite_index::INDEX_SCHEMA_VERSION;
 pub use store::{INDEX_FILE, Store};

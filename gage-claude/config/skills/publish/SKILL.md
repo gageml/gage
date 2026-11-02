@@ -1,10 +1,10 @@
 ---
 description: |
-  Publish a shareable copy of a session. Use whenever the user asks to publish,
-  share, redact, scrub, sanitize, or export a session, to prepare a session for a
-  shared or public repository, or to remove secrets, personal information, paths,
-  or profanity from a session before sharing it. Drives the gage publish commands
-  from staging through review to apply.
+    Publish a copy of a session for sharing. Use whenever the user asks to publish,
+    share, redact, scrub, sanitize, or export a session, to prepare a session for a
+    shared or public repository, or to remove secrets, personal information, paths,
+    or profanity from a session before sharing it. Drives the gage publish commands
+    from staging through review to apply.
 ---
 
 ## Background
@@ -42,3 +42,41 @@ ways:
 4. Identify text to redact for each session
 5. Finalize the publish definition by adding text redaction
 6. Apply the publish command to add each session to the store
+
+### Sessions to publish
+
+The user may want to publish more than one session.
+
+If the user has not provided sessions, ask them what they want to publish. If
+they don't know the IDs, use `mcp__plugin_gage_gage__Query` and in particular
+the `message_text` TVF to find the sessions.
+
+### Audience and use
+
+There are two categories of target audience for a session:
+
+- `public` - Anyone in the world
+- `trusted` - Only designated users
+
+## Publish interface
+
+A session is published by first staging it using `gage publish init`.
+
+Get help for this command:
+
+```shell
+gage publish init --help
+```
+
+This creates a staged session under `~/.gage/publish/<SESSION>`.
+
+The file `~/.gage/publish/<SESSION>.jsonc`.
+
+Edit this file in preparation for publishing the session.
+
+Use `mcp__plugin_gage_gage__Query` with the `publish` flag set to `true` to
+preview staged sessions.
+
+Use `gage publish apply <SESSION> -y` to add the staged publish session to the
+store. This finalized the publish operation and removed the session from the
+pending list.

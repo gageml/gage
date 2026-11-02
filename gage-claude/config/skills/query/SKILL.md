@@ -12,23 +12,28 @@ description for the table catalog and column lists.
 ## Sessions not in the store: the native source functions
 
 The `session`, `entry`, `message`, and `tool_use` tables hold stored sessions
-only. A session named by its native UUID (the Claude Code transcript id) may
-not be stored. `native_session(source)`, `native_message(source)`,
-`native_entry(source)`, and `native_tool_use(source)` read the source
-directly. The argument is required: `''` names the default source,
-`'claude:'` is the default Claude Code source, and `'claude:/path'` names a
-projects directory. The native tables use the native UUID: `id` in
-`native_session`, `session_id` in the other three. The table `native_session`
-returns carries `mtime` and `size` in place of the stored table's
-`line_count`, `created`, and `modified`; both carry the token columns; the
-other three return their stored tables' columns.
+only. A session named by its native UUID (the Claude Code transcript id) may not
+be stored. `native_session(source)`, `native_message(source)`,
+`native_entry(source)`, and `native_tool_use(source)` read the source directly.
+The argument is required: `''` names the default source, `'claude:'` is the
+default Claude Code source, and `'claude:/path'` names a projects directory. The
+native tables use the native UUID: `id` in `native_session`, `session_id` in the
+other three. The table `native_session` returns is `(id, project, mtime,
+content_format, size, summary, is_empty, files_changed, files_referenced)`:
+`mtime` and `size` are the session file's, where the stored table has `created`
+and `modified` and the stored content size; `summary` is the same JSON object
+the stored table carries; `is_empty` is `summary.is_empty` as a typed column;
+`files_changed` and `files_referenced` are the paths the session's tool calls
+wrote and named. The other three return their stored tables' columns.
 
-Token columns on `session` and on `native_session`'s result are session
-totals, each API response counted once: `input_tokens` is every prompt token
-sent, cached or not; `output_tokens` every token generated, reasoning
-included; `cached_tokens` the part of input served from cache. `cost_usd` is
-the harness's reported figure, null when it reports none. Use these before
-reading usage out of `raw`.
+The `summary` JSON on `session` and on `native_session`'s result holds `title`,
+`model`, `message_count`, `line_count`, `is_empty`, the token totals, and
+`cost_usd`. Read a field with `json_extract(summary, '$.title')` and CAST a
+number for arithmetic. The token totals count each API response once:
+`input_tokens` is every prompt token sent, cached or not; `output_tokens` every
+token generated, reasoning included; `cached_tokens` the part of input served
+from cache. `cost_usd` is the harness's reported figure, absent when it reports
+none. Use these before reading usage out of `raw`.
 
 ## Full-text search: `message_text` and `native_message_text`
 
@@ -39,11 +44,11 @@ Each returns `(url, session_id, line, type, subtype, score, snippet)`, one row
 per matching message, best match first. `url` names the session across every
 source and store (`claude:<root>/<native id>`, `gage:<store>/<id>`);
 `session_id` is the id the corpus uses, so a row joins to `message` or to
-`native_message(source)` on `(session_id, line)`. Matched terms in `snippet`
-are wrapped in `«guillemets»`; `snippet_len` caps its length, default 200.
-`LIMIT n` reaches the search; without one the cap is 100 rows. The search
-reconciles its index first, so a message written since the last query is
-found. `message_text` is absent from a scan-scoped context.
+`native_message(source)` on `(session_id, line)`. Matched terms in `snippet` are
+wrapped in `«guillemets»`; `snippet_len` caps its length, default 200. `LIMIT n`
+reaches the search; without one the cap is 100 rows. The search reconciles its
+index first, so a message written since the last query is found. `message_text`
+is absent from a scan-scoped context.
 
 ### Query syntax
 
@@ -77,18 +82,17 @@ ORDER BY hits DESC;
 
 `native_blame(source, file [, lines])` and `blame(file [, lines])` return one
 row per contiguous line range and candidate call:
-`(line, line_end, session_id, session_lines, tool_use_id, tool_name,
-timestamp, rank, match)`. `line_end` is null for a single line.
-`native_blame` reads a native source and `blame` the stored sessions. `file`
-is a path; `lines` is optional and selects lines as a number (`42`) or as
-text (`'10-20,42'`). A line may have several candidate calls; `rank` 1 is the
-strongest, and `match` names the evidence: `patch` (the call's recorded patch
-added the line), `input` (its input carries the line and the driver judged it
-wrote the file), `command` (its input carries the line, write unjudged), or
-`neighbor` (both adjacent lines are patch matches of this call). An
-unattributed line yields no row. `session_lines` is the selection to read,
-from the human prompt before the call through the call. Filter `WHERE rank =
-1` for one attribution per line.
+`(line, line_end, session_id, session_lines, tool_use_id, tool_name, timestamp, rank, match)`.
+`line_end` is null for a single line. `native_blame` reads a native source and
+`blame` the stored sessions. `file` is a path; `lines` is optional and selects
+lines as a number (`42`) or as text (`'10-20,42'`). A line may have several
+candidate calls; `rank` 1 is the strongest, and `match` names the evidence:
+`patch` (the call's recorded patch added the line), `input` (its input carries
+the line and the driver judged it wrote the file), `command` (its input carries
+the line, write unjudged), or `neighbor` (both adjacent lines are patch matches
+of this call). An unattributed line yields no row. `session_lines` is the
+selection to read, from the human prompt before the call through the call.
+Filter `WHERE rank = 1` for one attribution per line.
 
 ```sql
 SELECT line, line_end, session_id, session_lines, tool_name, match
@@ -97,7 +101,8 @@ WHERE rank = 1;
 ```
 
 ```sql
-SELECT id, project, message_count FROM native_session('claude:')
+SELECT id, project, json_extract(summary, '$.message_count') AS message_count
+FROM native_session('claude:')
 WHERE id LIKE '3fefde6c%';
 
 SELECT line, type, substr(text, 1, 800) AS text
@@ -106,21 +111,20 @@ WHERE session_id = '3fefde6c-69be-4a8d-b210-c394c5d23725'
 ORDER BY line;
 ```
 
-A stored session's `native_id` is its native UUID, so
-`SELECT id FROM session WHERE native_id LIKE '3fefde6c%'` tells whether a
-native session is stored.
+A stored session's `origin` ends in its native UUID, so
+`SELECT id FROM session WHERE origin LIKE '%/3fefde6c%'` tells whether a native
+session is stored.
 
 ## Scan link tables: `scan_session`, `scan_note`, `scan_issue`
 
-`scan_session (scan_id, session_num, session_id)` links a scan to the
-sessions it covered, its cohort, in dataset member order. A scan with zero
-notes still has its cohort rows here, so this is also the existence check
-for a scan id.
+`scan_session (scan_id, session_num, session_id)` links a scan to the sessions
+it covered, its cohort, in dataset member order. A scan with zero notes still
+has its cohort rows here, so this is also the existence check for a scan id.
 
-`scan_note (scan_id, note_id, carried)` links a scan to the notes in its
-visible set. `carried` is false when the scan wrote the note and true when
-the note predates the scan and was carried forward. To select exactly the
-notes a scan produced:
+`scan_note (scan_id, note_id, carried)` links a scan to the notes in its visible
+set. `carried` is false when the scan wrote the note and true when the note
+predates the scan and was carried forward. To select exactly the notes a scan
+produced:
 
 ```sql
 SELECT n.*
@@ -133,23 +137,22 @@ WHERE sc.scan_id = '<SCAN_ID>' AND NOT sc.carried;
 
 ## Scan tasks: `scan_task`, `scan_task_agent`
 
-`scan_task (scan_id, num, scanner, task, status, started, stopped,
-worked_ms, selected)` is one row per task of a scan. `num` is the task's
-position in the scan's plan, the order the runner dispatched. `status` is
-`pending`, `started`, `completed`, `failed`, or `canceled`.
+`scan_task (scan_id, num, scanner, task, status, started, stopped, worked_ms, selected)`
+is one row per task of a scan. `num` is the task's position in the scan's plan,
+the order the runner dispatched. `status` is `pending`, `started`, `completed`,
+`failed`, or `canceled`.
 
-`scan_task_agent (scan_id, scanner, task, session_id, native_id, exit_code,
-is_error, stop_reason, turns, duration_ms, cost_usd, result)` is one row per
-agent a task ran. `session_id` is the agent's stored session, `native_id`
-its native UUID, and `result` the harness's result message verbatim. An
-agent still running has its `native_id` and null result columns.
+`scan_task_agent (scan_id, scanner, task, session_id, native_id, exit_code, is_error, stop_reason, turns, duration_ms, cost_usd, result)`
+is one row per agent a task ran. `session_id` is the agent's stored session,
+`native_id` its native UUID, and `result` the harness's result message verbatim.
+An agent still running has its `native_id` and null result columns.
 
 ## Scan logs: `scan_log`
 
-`scan_log (scan_id, name, text)` is one row per log a scan wrote, at most
-three: `name` is `out` (what the scanners printed), `err` (Gage's status
-lines and task failures), or `records` (the `tracing` records of the run,
-one line each). Read a failed scan's `err` first:
+`scan_log (scan_id, name, text)` is one row per log a scan wrote, at most three:
+`name` is `out` (what the scanners printed), `err` (Gage's status lines and task
+failures), or `records` (the `tracing` records of the run, one line each). Read
+a failed scan's `err` first:
 
 ```sql
 SELECT text FROM scan_log WHERE scan_id = '<SCAN_ID>' AND name = 'err';
@@ -157,12 +160,12 @@ SELECT text FROM scan_log WHERE scan_id = '<SCAN_ID>' AND name = 'err';
 
 ## Notes
 
-`note (id, name, target, author, value, text, metadata, created, modified,
-scan, work_id)`. `value` is the note's JSON text; `text` is the plain-text
-form alone and is null for a structured note. `target` names what the note
-is on: `session:<id>`, `session:<id>#<lines>`, or `attachment:<id>`. `scan` is the scan the
-note was written during. Each `name` has a row in `note_doc (note_name, doc,
-written_by)` describing what notes of that name hold.
+`note (id, name, target, author, value, text, metadata, created, modified, scan, work_id)`.
+`value` is the note's JSON text; `text` is the plain-text form alone and is null
+for a structured note. `target` names what the note is on: `session:<id>`,
+`session:<id>#<lines>`, or `attachment:<id>`. `scan` is the scan the note was
+written during. Each `name` has a row in `note_doc (note_name, doc, written_by)`
+describing what notes of that name hold.
 
 `session_note (session_id, note_id, lines)` is the session-targeted notes.
 `lines` is the cited line ranges as text, for example `831-838` or
@@ -172,9 +175,9 @@ written_by)` describing what notes of that name hold.
 
 `raw` on `entry`, `message`, and their native forms, and `input_raw` and
 `result_raw` on `tool_use`, are JSON text in the driver's native shape. The
-shape is described in `content_schema (content_format, name, schema)`:
-one row per content format and native field, `schema` a JSON Schema document,
-partial, listing the common fields. Read it before reading into `raw`:
+shape is described in `content_schema (content_format, name, schema)`: one row
+per content format and native field, `schema` a JSON Schema document, partial,
+listing the common fields. Read it before reading into `raw`:
 
 ```sql
 SELECT name, schema FROM content_schema WHERE content_format = 'claude-jsonl 1';
@@ -185,9 +188,9 @@ A path is valid for one content format. Scope the rows first through
 another format the path yields NULL without an error.
 
 `json_extract(json, path)` returns one value as text: the path is `$` followed
-by `.key` and `[index]` steps. A string comes back unquoted, any other value
-as its JSON text, and a missing step or JSON null as SQL NULL. CAST the text
-for arithmetic.
+by `.key` and `[index]` steps. A string comes back unquoted, any other value as
+its JSON text, and a missing step or JSON null as SQL NULL. CAST the text for
+arithmetic.
 
 ```sql
 SELECT line,
@@ -210,26 +213,26 @@ FROM (SELECT max(CAST(json_extract(raw, '$.message.usage.output_tokens') AS BIGI
       GROUP BY json_extract(raw, '$.message.id'));
 ```
 
-The `->` and `->>` operators with string keys also work, as `raw->'message'->>'model'`.
-`raw` is already text: `raw::json` and `raw::jsonb` fail with "Unsupported SQL
-type". A comparison directly after `->>` binds the key to the comparison first;
-wrap the extraction in parentheses or use `json_extract`.
+The `->` and `->>` operators with string keys also work, as
+`raw->'message'->>'model'`. `raw` is already text: `raw::json` and `raw::jsonb`
+fail with "Unsupported SQL type". A comparison directly after `->>` binds the
+key to the comparison first; wrap the extraction in parentheses or use
+`json_extract`.
 
 ## Commit-bearing link tables
 
-`note_target_link`, `issue_evidence_link`, `scan_note_link`,
-`scan_issue_link`, `scan_dataset_link`, `dataset_session_link`, and
-`dataset_attachment_link` are the forms of the link tables that carry the
-commit of each end (`note_commit`, `issue_commit`, `session_commit`, and so
-on). Use them only when a specific commit matters; the short forms above
-join on ids.
+`note_target_link`, `issue_evidence_link`, `scan_note_link`, `scan_issue_link`,
+`scan_dataset_link`, `dataset_session_link`, and `dataset_attachment_link` are
+the forms of the link tables that carry the commit of each end (`note_commit`,
+`issue_commit`, `session_commit`, and so on). Use them only when a specific
+commit matters; the short forms above join on ids.
 
 ## System columns
 
 A context that serves a program also exposes system columns: `id_display`,
-`id_prefix`, `locator`, `commit`, and the `*_commit` columns. They address a
-row rather than describe it. Leave them out of a listing unless a commit is
-the point.
+`id_prefix`, `locator`, `commit`, and the `*_commit` columns. They address a row
+rather than describe it. Leave them out of a listing unless a commit is the
+point.
 
 ## DataFusion limitations
 
@@ -252,8 +255,8 @@ the point.
 
 ## Scoped contexts
 
-A scan-scoped Query tool may also be constrained to specific sessions and,
-per session, to a line range. `entry`, `message`, and `tool_use` then return
-only in-range rows, even though the SQL carries no such predicate. Rows
-outside the scope do not exist from the tool's point of view; do not infer
-their absence from the corpus.
+A scan-scoped Query tool may also be constrained to specific sessions and, per
+session, to a line range. `entry`, `message`, and `tool_use` then return only
+in-range rows, even though the SQL carries no such predicate. Rows outside the
+scope do not exist from the tool's point of view; do not infer their absence
+from the corpus.
