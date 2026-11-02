@@ -1,7 +1,7 @@
 //! `gage status` — one-shot health and inventory report.
 //!
 //! Gathers each driver's status (its harness, login, and Gage's
-//! plugin installation), corpus item counts, and disk usage under `~/.gage`
+//! plugin installation), corpus item counts, and disk usage under Gage home
 //! behind a spinner, then prints the whole report at once. Read-only:
 //! no dialogs, no session spawns, no token cost.
 
@@ -18,6 +18,7 @@ use console::style;
 use datafusion::prelude::SessionContext;
 
 use gage_core::config::gage_home;
+use gage_core::path::shorten_home;
 use gage_query::ContextBuilder;
 use gage_session::{AuthInfo, Driver, DriverStatus, Field, HarnessInfo, InstallInfo};
 use gage_store::Store;
@@ -29,7 +30,7 @@ use crate::source::driver_registry;
 
 #[derive(Args)]
 pub struct StatusArgs {
-    /// Show per-subdirectory storage breakdown under ~/.gage
+    /// Show per-subdirectory storage breakdown under Gage home
     #[arg(short, long)]
     pub verbose: bool,
 }
@@ -53,7 +54,7 @@ async fn report(args: StatusArgs) -> Result<String, CliError> {
     out.push('\n');
     write_counts(&mut out, &mut problems).await?;
     out.push('\n');
-    write_storage(&mut out, args.verbose);
+    write_storage(&mut out, &gage_home(), args.verbose);
     if !problems.is_empty() {
         out.push('\n');
         write_problems(&mut out, &problems);
@@ -197,15 +198,17 @@ async fn write_store_counts(
     Ok(())
 }
 
-fn write_storage(out: &mut String, verbose: bool) {
+fn write_storage(out: &mut String, root: &Path, verbose: bool) {
     w(out, format!("{}", style("Storage").bold()));
-    let root = gage_home();
-    let total = dir_size(&root);
-    w(out, format!("  ~/.gage:  {}", format_size(total as i64)));
+    let total = dir_size(root);
+    w(
+        out,
+        format!("  {}:  {}", shorten_home(root), format_size(total as i64)),
+    );
     if !verbose {
         return;
     }
-    let entries = match fs::read_dir(&root) {
+    let entries = match fs::read_dir(root) {
         Ok(it) => it,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return,
         Err(e) => panic!("failed to read {}: {e}", root.display()),
@@ -268,4 +271,20 @@ fn write_problems(out: &mut String, problems: &[String]) {
 /// dance without discarding a fallible operation.
 fn w(out: &mut String, line: String) {
     writeln!(out, "{line}").expect("String write is infallible");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn storage_line_names_the_given_root() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a"), b"12345").unwrap();
+        let mut out = String::new();
+        write_storage(&mut out, dir.path(), false);
+        let line = out.lines().nth(1).unwrap();
+        assert_eq!(line, format!("  {}:  5 B", shorten_home(dir.path())));
+        assert!(!out.contains("~/.gage"));
+    }
 }
