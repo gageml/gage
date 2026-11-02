@@ -13,7 +13,7 @@ one candidate file (`PATH` below).
 Get the redaction instructions:
 
 ```bash
-gage publish show ID --instructions
+gage publish candidate ID --instructions
 ```
 
 The instructions are markdown, one section per filter:

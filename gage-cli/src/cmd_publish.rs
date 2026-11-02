@@ -207,11 +207,8 @@ pub enum PublishCommand {
     /// Show definition of a pending publish
     ///
     /// Show definition of a pending publish. Prints definition file.
-    /// With --instructions, prints redaction instructions of each
-    /// filter as markdown instead: a heading naming filter, then its
-    /// instructions with prompt given for it in place of its
-    /// placeholder. With --check, prints nothing and reports each
-    /// problem of definition file by line instead.
+    /// With --check, prints nothing and reports each problem of
+    /// definition file by line instead.
     Show(ShowArgs),
 
     /// Edit definition of a pending publish in system editor
@@ -238,7 +235,11 @@ pub enum PublishCommand {
     /// value of kept lines, with left-out values omitted, once, one
     /// per line as a JSON string, in order of first occurrence. Text
     /// is divided into splits bounded by --split, one per file with
-    /// --split-files. This is what a redaction agent reads.
+    /// --split-files. This is what a redaction agent reads. With
+    /// --instructions, prints redaction instructions of each filter as
+    /// markdown instead: a heading naming filter, then its
+    /// instructions with prompt given for it in place of its
+    /// placeholder.
     Candidate(CandidateArgs),
 
     /// Abort pending publishes
@@ -358,17 +359,13 @@ pub struct ShowArgs {
     #[arg(value_name = "SESSION")]
     session: String,
 
-    /// Print redaction instructions of each filter as markdown
-    #[arg(long)]
-    instructions: bool,
-
     /// Check definition file and report each problem by line
     ///
     /// Check definition file and report each problem by line. A
     /// problem is one line on standard error, as "PATH:LINE:COLUMN:
     /// error: MESSAGE". A file without problems prints nothing. Exit
     /// status is 1 when there is a problem.
-    #[arg(long, conflicts_with = "instructions")]
+    #[arg(long)]
     check: bool,
 }
 
@@ -420,6 +417,14 @@ pub struct CandidateArgs {
     /// --split-files.
     #[arg(long, value_name = "DIR")]
     split_files_dir: Option<PathBuf>,
+
+    /// Print redaction instructions of each filter
+    ///
+    /// Print redaction instructions of each filter as markdown and
+    /// exit. Instructions are what a redaction agent applies to
+    /// candidate text.
+    #[arg(long, conflicts_with_all = ["split", "split_files", "split_files_dir"])]
+    instructions: bool,
 }
 
 /// Bytes per candidate split when `--split` is not given.
@@ -1152,8 +1157,8 @@ fn report_filter_redactions(publisher: &Publisher<'_>, id: &str) -> Result<(), P
     Ok(())
 }
 
-/// Print the definition file of a pending publish, the redaction
-/// instructions of its filters, or the problems the file has.
+/// Print the definition file of a pending publish or the problems the
+/// file has.
 fn show(args: ShowArgs) -> Result<(), CliError> {
     let fail = |e: String| CliError::message(format!("gage publish show: {e}"));
     let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
@@ -1175,16 +1180,6 @@ fn show(args: ShowArgs) -> Result<(), CliError> {
             Err(e) => Err(fail(e.to_string())),
         };
     }
-    if args.instructions {
-        let definition = publisher
-            .definition(&pending.id)
-            .map_err(|e| fail(definition_failure(&path, &e)))?;
-        let markdown = definition
-            .instructions_markdown()
-            .map_err(|e| fail(e.to_string()))?;
-        print!("{markdown}");
-        return Ok(());
-    }
     let text = fs::read_to_string(&path).map_err(|e| fail(format!("{}: {e}", path.display())))?;
     print!("{text}");
     Ok(())
@@ -1200,19 +1195,6 @@ fn diagnostic(path: &Path, problem: &Problem) -> String {
         problem.column,
         problem.message
     )
-}
-
-/// The error of a definition read as its message, or, for a file with
-/// problems, one diagnostic per line.
-fn definition_failure(path: &Path, e: &PublishError) -> String {
-    match e {
-        PublishError::Definition(problems) => problems
-            .iter()
-            .map(|p| diagnostic(path, p))
-            .collect::<Vec<_>>()
-            .join("\n"),
-        e => e.to_string(),
-    }
 }
 
 /// Open the definition file in the editor and rebuild when the editor
@@ -1330,7 +1312,8 @@ fn refresh_dialog(
 }
 
 /// List the text values open to redaction, one per line where the
-/// value fits, else as a header with the text indented below it.
+/// value fits, else as a header with the text indented below it, or
+/// the redaction instructions of the definition's filters.
 fn candidate(args: CandidateArgs) -> Result<(), CliError> {
     let fail = |e: String| CliError::message(format!("gage publish candidate: {e}"));
     let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
@@ -1339,6 +1322,17 @@ fn candidate(args: CandidateArgs) -> Result<(), CliError> {
         .store()
         .get(&args.session)
         .map_err(|e| fail(e.to_string()))?;
+    if args.instructions {
+        let path = publisher.store().definition_file(&pending.id);
+        let definition = publisher
+            .definition(&pending.id)
+            .map_err(|e| fail(definition_failure(&path, &e)))?;
+        let markdown = definition
+            .instructions_markdown()
+            .map_err(|e| fail(e.to_string()))?;
+        print!("{markdown}");
+        return Ok(());
+    }
     let texts = publisher
         .candidate_texts(&pending.id)
         .map_err(|e| fail(e.to_string()))?;
@@ -1366,6 +1360,19 @@ fn candidate(args: CandidateArgs) -> Result<(), CliError> {
 /// `tmp/candidate/<pending id>` under Gage home.
 fn candidate_files_dir(id: &str) -> PathBuf {
     gage_home().join("tmp").join("candidate").join(id)
+}
+
+/// The error of a definition read as its message, or, for a file with
+/// problems, one diagnostic per line.
+fn definition_failure(path: &Path, e: &PublishError) -> String {
+    match e {
+        PublishError::Definition(problems) => problems
+            .iter()
+            .map(|p| diagnostic(path, p))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        e => e.to_string(),
+    }
 }
 
 /// Delete a pending publish after confirmation. The id is resolved
@@ -1714,11 +1721,11 @@ mod tests {
         }
         for argv in [
             vec!["show", "abc"],
-            vec!["show", "abc", "--instructions"],
             vec!["show", "abc", "--check"],
             vec!["edit", "abc"],
             vec!["refresh", "abc", "-y"],
             vec!["candidate", "abc", "--split-files"],
+            vec!["candidate", "abc", "--instructions"],
             vec![
                 "candidate",
                 "abc",
@@ -1763,17 +1770,24 @@ mod tests {
         assert!(Cli::try_parse_from(["gage", "session", "view", "-P"]).is_err());
         assert!(Cli::try_parse_from(["gage", "session", "publish", "list"]).is_err());
         assert!(Cli::try_parse_from(["gage", "publish", "show", "--stored", "abc"]).is_err());
-        assert!(
-            Cli::try_parse_from([
-                "gage",
-                "publish",
-                "show",
+        // Instructions are a mode of candidate, apart from its splits
+        assert!(Cli::try_parse_from(["gage", "publish", "show", "abc", "--instructions"]).is_err());
+        for argv in [
+            vec!["candidate", "abc", "--instructions", "--split", "10"],
+            vec!["candidate", "abc", "--instructions", "--split-files"],
+            vec![
+                "candidate",
                 "abc",
-                "--check",
-                "--instructions"
-            ])
-            .is_err()
-        );
+                "--instructions",
+                "--split-files-dir",
+                "/tmp/c",
+            ],
+        ] {
+            assert!(
+                Cli::try_parse_from([&["gage", "publish"], &argv[..]].concat()).is_err(),
+                "{argv:?} parsed"
+            );
+        }
         assert!(Cli::try_parse_from(["gage", "publish", "edit"]).is_err());
         // The former subcommands are a run's positional sessions
         let cli = Cli::try_parse_from(["gage", "publish", "status", "abc"]).unwrap();
