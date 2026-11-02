@@ -16,7 +16,7 @@ use crate::{
 use datafusion::arrow::array::StringBuilder;
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
-use datafusion::catalog::TableFunctionImpl;
+use datafusion::catalog::{TableFunctionArgs, TableFunctionImpl};
 use datafusion::datasource::TableProvider;
 use datafusion::error::{DataFusionError, Result};
 use datafusion::prelude::Expr;
@@ -40,7 +40,13 @@ struct IssueReportFn {
 }
 
 impl TableFunctionImpl for IssueReportFn {
-    fn call(&self, args: &[Expr]) -> Result<Arc<dyn TableProvider>> {
+    fn call_with_args(&self, args: TableFunctionArgs) -> Result<Arc<dyn TableProvider>> {
+        self.provider(args.exprs())
+    }
+}
+
+impl IssueReportFn {
+    fn provider(&self, args: &[Expr]) -> Result<Arc<dyn TableProvider>> {
         let [arg] = args else {
             return Err(DataFusionError::Plan(
                 "issue_report(issue_id) takes exactly one argument".into(),

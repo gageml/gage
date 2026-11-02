@@ -10,7 +10,6 @@
 //! once enough rows have been produced, so a limited query reads only
 //! the sessions it needs.
 
-use std::any::Any;
 use std::fmt::{self, Formatter};
 use std::sync::Arc;
 
@@ -18,11 +17,13 @@ use async_trait::async_trait;
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::catalog::Session;
+use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::datasource::{TableProvider, TableType};
 use datafusion::error::{DataFusionError, Result};
 use datafusion::execution::context::TaskContext;
 use datafusion::logical_expr::TableProviderFilterPushDown;
 use datafusion::physical_expr::EquivalenceProperties;
+use datafusion::physical_expr::PhysicalExpr;
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{
@@ -110,10 +111,6 @@ impl StoredRowsTable {
 
 #[async_trait]
 impl TableProvider for StoredRowsTable {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }
@@ -153,12 +150,12 @@ impl TableProvider for StoredRowsTable {
             scope: Arc::clone(&self.scope),
             sessions: Arc::new(sessions),
             cache,
-            properties: PlanProperties::new(
+            properties: Arc::new(PlanProperties::new(
                 EquivalenceProperties::new(projected_schema.clone()),
                 Partitioning::UnknownPartitioning(1),
                 EmissionType::Incremental,
                 Boundedness::Bounded,
-            ),
+            )),
             projected_schema,
             projection: projection.cloned(),
             row_filter,
@@ -184,7 +181,7 @@ struct StoredRowsExec {
     projection: Option<Vec<usize>>,
     row_filter: Option<RowFilter>,
     limit: Option<usize>,
-    properties: PlanProperties,
+    properties: Arc<PlanProperties>,
 }
 
 impl fmt::Debug for StoredRowsExec {
@@ -208,18 +205,22 @@ impl ExecutionPlan for StoredRowsExec {
         "StoredRowsExec"
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
+    fn properties(&self) -> &Arc<PlanProperties> {
+        &self.properties
     }
 
-    fn properties(&self) -> &PlanProperties {
-        &self.properties
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> Result<TreeNodeRecursion>,
+    ) -> Result<TreeNodeRecursion> {
+        Ok(TreeNodeRecursion::Continue)
     }
 
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
         vec![]
     }
 
+    #[allow(deprecated)]
     fn with_new_children(
         self: Arc<Self>,
         _children: Vec<Arc<dyn ExecutionPlan>>,

@@ -7,7 +7,6 @@
 //! through unchanged, so a caller may pass either a directory or a
 //! project name and filter with `project = project_for_path(<value>)`.
 
-use std::any::Any;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -43,10 +42,6 @@ impl ProjectForPath {
 }
 
 impl ScalarUDFImpl for ProjectForPath {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &str {
         "project_for_path"
     }

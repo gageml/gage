@@ -23,7 +23,7 @@ use crate::{IssueFull, IssueStore, Store, StoreError};
 use datafusion::arrow::array::{Float64Builder, StringBuilder};
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
-use datafusion::catalog::TableFunctionImpl;
+use datafusion::catalog::{TableFunctionArgs, TableFunctionImpl};
 use datafusion::datasource::TableProvider;
 use datafusion::error::{DataFusionError, Result};
 use datafusion::prelude::Expr;
@@ -53,7 +53,13 @@ struct RelatedIssueFn {
 }
 
 impl TableFunctionImpl for RelatedIssueFn {
-    fn call(&self, args: &[Expr]) -> Result<Arc<dyn TableProvider>> {
+    fn call_with_args(&self, args: TableFunctionArgs) -> Result<Arc<dyn TableProvider>> {
+        self.provider(args.exprs())
+    }
+}
+
+impl RelatedIssueFn {
+    fn provider(&self, args: &[Expr]) -> Result<Arc<dyn TableProvider>> {
         let (id_arg, min_score) = match args {
             [id] => (id, MIN_SCORE),
             [id, min_score] => {

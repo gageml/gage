@@ -8,7 +8,6 @@
 //! equality are applied before any object is read: `id` against the
 //! index rows, `name` through the index's attribute table.
 
-use std::any::Any;
 use std::collections::HashMap;
 use std::fmt::{self, Formatter};
 use std::sync::{Arc, Mutex};
@@ -20,10 +19,12 @@ use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit}
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::catalog::Session;
 use datafusion::common::ScalarValue;
+use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::datasource::{TableProvider, TableType};
 use datafusion::error::{DataFusionError, Result};
 use datafusion::execution::context::TaskContext;
 use datafusion::logical_expr::{BinaryExpr, Operator, TableProviderFilterPushDown};
+use datafusion::physical_expr::PhysicalExpr;
 use datafusion::physical_expr::expressions::col;
 use datafusion::physical_expr::{EquivalenceProperties, PhysicalSortExpr};
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
@@ -117,10 +118,6 @@ impl StoredNoteTable {
 
 #[async_trait]
 impl TableProvider for StoredNoteTable {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }
@@ -206,7 +203,7 @@ struct StoredNoteExec {
     projection: Option<Vec<usize>>,
     filters: Vec<Expr>,
     limit: Option<usize>,
-    properties: PlanProperties,
+    properties: Arc<PlanProperties>,
 }
 
 impl fmt::Debug for StoredNoteExec {
@@ -227,12 +224,12 @@ impl StoredNoteExec {
         filters: Vec<Expr>,
         limit: Option<usize>,
     ) -> Self {
-        let properties = PlanProperties::new(
+        let properties = Arc::new(PlanProperties::new(
             created_desc_eq_properties(&projected_schema),
             Partitioning::UnknownPartitioning(1),
             EmissionType::Incremental,
             Boundedness::Bounded,
-        );
+        ));
         Self {
             store,
             full_schema,
@@ -486,18 +483,22 @@ impl ExecutionPlan for StoredNoteExec {
         "StoredNoteExec"
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
+    fn properties(&self) -> &Arc<PlanProperties> {
+        &self.properties
     }
 
-    fn properties(&self) -> &PlanProperties {
-        &self.properties
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> Result<TreeNodeRecursion>,
+    ) -> Result<TreeNodeRecursion> {
+        Ok(TreeNodeRecursion::Continue)
     }
 
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
         vec![]
     }
 
+    #[allow(deprecated)]
     fn with_new_children(
         self: Arc<Self>,
         _children: Vec<Arc<dyn ExecutionPlan>>,

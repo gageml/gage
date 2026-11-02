@@ -9,13 +9,12 @@
 //! comes back unquoted; a number, boolean, object, or array comes back
 //! as its JSON text; a JSON null or a missing step is SQL NULL.
 
-use std::any::Any;
 use std::sync::Arc;
 
 use datafusion::arrow::datatypes::{DataType, Field};
 use datafusion::error::{DataFusionError, Result};
 use datafusion::logical_expr::expr::ScalarFunction;
-use datafusion::logical_expr::simplify::{ExprSimplifyResult, SimplifyInfo};
+use datafusion::logical_expr::simplify::{ExprSimplifyResult, SimplifyContext};
 use datafusion::logical_expr::{
     ColumnarValue, Expr, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature, Volatility,
 };
@@ -44,10 +43,6 @@ impl JsonExtract {
 }
 
 impl ScalarUDFImpl for JsonExtract {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &str {
         "json_extract"
     }
@@ -60,7 +55,7 @@ impl ScalarUDFImpl for JsonExtract {
         Ok(DataType::Utf8)
     }
 
-    fn simplify(&self, args: Vec<Expr>, _info: &dyn SimplifyInfo) -> Result<ExprSimplifyResult> {
+    fn simplify(&self, args: Vec<Expr>, _info: &SimplifyContext) -> Result<ExprSimplifyResult> {
         let [json, path] = <[Expr; 2]>::try_from(args).map_err(|args| {
             DataFusionError::Plan(format!(
                 "json_extract takes two arguments, got {}",

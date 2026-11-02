@@ -1,6 +1,5 @@
 //! A table provider over one batch computed on each scan.
 
-use std::any::Any;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -40,10 +39,6 @@ impl BatchTable {
 
 #[async_trait]
 impl TableProvider for BatchTable {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         self.source.schema()
     }

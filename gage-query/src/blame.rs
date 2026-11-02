@@ -22,7 +22,6 @@
 //! file's directory and its ancestors, as the driver names projects,
 //! that wrote the file under any of its paths.
 
-use std::any::Any;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -37,7 +36,7 @@ use datafusion::arrow::array::{
 };
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use datafusion::arrow::record_batch::RecordBatch;
-use datafusion::catalog::{Session, TableFunctionImpl};
+use datafusion::catalog::{Session, TableFunctionArgs, TableFunctionImpl};
 use datafusion::common::ScalarValue;
 use datafusion::datasource::{MemTable, TableProvider, TableType};
 use datafusion::error::{DataFusionError, Result};
@@ -111,7 +110,13 @@ struct BlameFn {
 }
 
 impl TableFunctionImpl for BlameFn {
-    fn call(&self, args: &[Expr]) -> Result<Arc<dyn TableProvider>> {
+    fn call_with_args(&self, args: TableFunctionArgs) -> Result<Arc<dyn TableProvider>> {
+        self.provider(args.exprs())
+    }
+}
+
+impl BlameFn {
+    fn provider(&self, args: &[Expr]) -> Result<Arc<dyn TableProvider>> {
         let (name, usage) = match self.scope {
             Scope::Native { .. } => ("native_blame", "native_blame(source, file [, lines])"),
             Scope::Stored(_) => ("blame", "blame(file [, lines])"),
@@ -168,10 +173,6 @@ struct BlameTable {
 
 #[async_trait]
 impl TableProvider for BlameTable {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         blame_schema()
     }
@@ -1293,21 +1294,24 @@ filename f.rs
         let file = dir.path().join("f.txt");
         std::fs::write(&file, "x\n").unwrap();
         let file = file.to_str().unwrap();
-        let native = native_blame_fn(false, None);
-        let err = native.call(&[lit(file)]).err().unwrap();
+        let native = BlameFn {
+            scope: Scope::Native { show_agents: false },
+            cache_root: None,
+        };
+        let err = native.provider(&[lit(file)]).err().unwrap();
         assert!(
             err.to_string()
                 .contains("usage native_blame(source, file [, lines])"),
             "{err}"
         );
         let err = native
-            .call(&[lit(""), lit("/nonexistent/f.txt")])
+            .provider(&[lit(""), lit("/nonexistent/f.txt")])
             .err()
             .unwrap();
         assert!(err.to_string().contains("/nonexistent/f.txt"), "{err}");
-        assert!(native.call(&[lit(""), lit(file), lit(1i64)]).is_ok());
+        assert!(native.provider(&[lit(""), lit(file), lit(1i64)]).is_ok());
         let err = native
-            .call(&[lit(""), lit(file), lit(1i64), lit(2i64)])
+            .provider(&[lit(""), lit(file), lit(1i64), lit(2i64)])
             .err()
             .unwrap();
         assert!(err.to_string().contains("usage"), "{err}");

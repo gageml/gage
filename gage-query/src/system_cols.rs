@@ -6,7 +6,6 @@
 //! wraps a provider and removes those fields, so in a user-facing
 //! context the columns are absent, not merely hidden from `SELECT *`.
 
-use std::any::Any;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -55,10 +54,6 @@ impl SkipSystemCols {
 
 #[async_trait]
 impl TableProvider for SkipSystemCols {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }

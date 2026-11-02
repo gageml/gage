@@ -8,6 +8,7 @@ use datafusion::common::DFSchema;
 use datafusion::common::ScalarValue;
 use datafusion::error::Result;
 use datafusion::execution::context::ExecutionProps;
+use datafusion::logical_expr::physical_planning_context::PhysicalPlanningContext;
 use datafusion::logical_expr::{Operator, TableProviderFilterPushDown};
 use datafusion::physical_expr::{PhysicalExpr, create_physical_expr};
 use datafusion::prelude::Expr;
@@ -44,7 +45,12 @@ impl IdFilter {
         };
         let schema = id_schema(col_name);
         let df_schema = DFSchema::try_from(schema.clone())?;
-        let predicate = create_physical_expr(&combined, &df_schema, &ExecutionProps::new())?;
+        let predicate = create_physical_expr(
+            &combined,
+            &df_schema,
+            &ExecutionProps::new(),
+            &PhysicalPlanningContext::default(),
+        )?;
         Ok(Some(Self { predicate, schema }))
     }
 
@@ -171,7 +177,12 @@ impl RowFilter {
             Field::new(LINE_COL, DataType::Int64, false),
         ]));
         let df_schema = DFSchema::try_from(schema.clone())?;
-        let predicate = create_physical_expr(&combined, &df_schema, &ExecutionProps::new())?;
+        let predicate = create_physical_expr(
+            &combined,
+            &df_schema,
+            &ExecutionProps::new(),
+            &PhysicalPlanningContext::default(),
+        )?;
         Ok(Some(Self { predicate, schema }))
     }
 
@@ -231,7 +242,12 @@ impl ColumnFilter {
             return Ok(None);
         };
         let df_schema = DFSchema::try_from(schema.clone())?;
-        let predicate = create_physical_expr(&combined, &df_schema, &ExecutionProps::new())?;
+        let predicate = create_physical_expr(
+            &combined,
+            &df_schema,
+            &ExecutionProps::new(),
+            &PhysicalPlanningContext::default(),
+        )?;
         Ok(Some(Self { predicate, schema }))
     }
 

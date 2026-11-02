@@ -1,4 +1,3 @@
-use std::any::Any;
 use std::fmt::{self, Formatter};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -13,10 +12,12 @@ use datafusion::arrow::compute::SortOptions;
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::catalog::Session;
+use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::datasource::{TableProvider, TableType};
 use datafusion::error::{DataFusionError, Result};
 use datafusion::execution::context::TaskContext;
 use datafusion::logical_expr::TableProviderFilterPushDown;
+use datafusion::physical_expr::PhysicalExpr;
 use datafusion::physical_expr::expressions::col;
 use datafusion::physical_expr::{EquivalenceProperties, PhysicalSortExpr};
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
@@ -112,10 +113,6 @@ impl SessionTable {
 
 #[async_trait]
 impl TableProvider for SessionTable {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }
@@ -173,7 +170,7 @@ struct SessionExec {
     projection: Option<Vec<usize>>,
     filters: Vec<Expr>,
     limit: Option<usize>,
-    properties: PlanProperties,
+    properties: Arc<PlanProperties>,
 }
 
 impl fmt::Debug for SessionExec {
@@ -197,12 +194,12 @@ impl SessionExec {
         limit: Option<usize>,
     ) -> Self {
         let eq_properties = mtime_desc_eq_properties(&projected_schema);
-        let properties = PlanProperties::new(
+        let properties = Arc::new(PlanProperties::new(
             eq_properties,
             Partitioning::UnknownPartitioning(1),
             EmissionType::Incremental,
             Boundedness::Bounded,
-        );
+        ));
         Self {
             store,
             cache,
@@ -263,18 +260,22 @@ impl ExecutionPlan for SessionExec {
         "SessionExec"
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
+    fn properties(&self) -> &Arc<PlanProperties> {
+        &self.properties
     }
 
-    fn properties(&self) -> &PlanProperties {
-        &self.properties
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> Result<TreeNodeRecursion>,
+    ) -> Result<TreeNodeRecursion> {
+        Ok(TreeNodeRecursion::Continue)
     }
 
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
         vec![]
     }
 
+    #[allow(deprecated)]
     fn with_new_children(
         self: Arc<Self>,
         _children: Vec<Arc<dyn ExecutionPlan>>,

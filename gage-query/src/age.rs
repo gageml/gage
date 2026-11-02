@@ -1,7 +1,6 @@
 //! `age(timestamp)` --- the time since a timestamp as the CLI shows it:
 //! `12s ago`, `5m ago`, `3h ago`, `2d ago`.
 
-use std::any::Any;
 use std::sync::Arc;
 
 use datafusion::arrow::array::{Array, StringBuilder, TimestampMillisecondArray};
@@ -41,10 +40,6 @@ impl Age {
 }
 
 impl ScalarUDFImpl for Age {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &str {
         "age"
     }

@@ -4,7 +4,6 @@
 //! --- and `patch_lines(result_raw, op)`, the lines of that patch with
 //! `op` of `add`, `remove`, or `context`.
 
-use std::any::Any;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -111,10 +110,6 @@ impl PatchLines {
 }
 
 impl ScalarUDFImpl for PatchLines {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &str {
         "patch_lines"
     }

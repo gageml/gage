@@ -13,7 +13,6 @@
 //! stands. `LIMIT n` is pushed through to the search; without one the
 //! default cap is [`DEFAULT_LIMIT`].
 
-use std::any::Any;
 use std::collections::HashSet;
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -25,7 +24,7 @@ use datafusion::arrow::array::{
 };
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
-use datafusion::catalog::{Session, TableFunctionImpl};
+use datafusion::catalog::{Session, TableFunctionArgs, TableFunctionImpl};
 use datafusion::common::ScalarValue;
 use datafusion::datasource::{MemTable, TableProvider, TableType};
 use datafusion::error::{DataFusionError, Result};
@@ -79,7 +78,13 @@ pub struct NativeMessageTextFn {
 }
 
 impl TableFunctionImpl for NativeMessageTextFn {
-    fn call(&self, args: &[Expr]) -> Result<Arc<dyn TableProvider>> {
+    fn call_with_args(&self, args: TableFunctionArgs) -> Result<Arc<dyn TableProvider>> {
+        self.provider(args.exprs())
+    }
+}
+
+impl NativeMessageTextFn {
+    fn provider(&self, args: &[Expr]) -> Result<Arc<dyn TableProvider>> {
         let usage = "native_message_text(source, query [, snippet_len])";
         let [source, rest @ ..] = args else {
             return Err(DataFusionError::Plan(format!("usage {usage}")));
@@ -118,7 +123,13 @@ impl MessageTextFn {
 }
 
 impl TableFunctionImpl for MessageTextFn {
-    fn call(&self, args: &[Expr]) -> Result<Arc<dyn TableProvider>> {
+    fn call_with_args(&self, args: TableFunctionArgs) -> Result<Arc<dyn TableProvider>> {
+        self.provider(args.exprs())
+    }
+}
+
+impl MessageTextFn {
+    fn provider(&self, args: &[Expr]) -> Result<Arc<dyn TableProvider>> {
         let (query, snippet_len) = query_args("message_text(query [, snippet_len])", args)?;
         Ok(Arc::new(MessageTextTable {
             query,
@@ -211,10 +222,6 @@ impl fmt::Debug for MessageTextTable {
 
 #[async_trait]
 impl TableProvider for MessageTextTable {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         MESSAGE_TEXT_SCHEMA.clone()
     }

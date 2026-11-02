@@ -12,7 +12,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use datafusion::catalog::TableFunctionImpl;
+use datafusion::catalog::{TableFunctionArgs, TableFunctionImpl};
 use datafusion::common::ScalarValue;
 use datafusion::datasource::TableProvider;
 use datafusion::error::{DataFusionError, Result};
@@ -64,7 +64,13 @@ pub struct NativeTableFn {
 }
 
 impl TableFunctionImpl for NativeTableFn {
-    fn call(&self, args: &[Expr]) -> Result<Arc<dyn TableProvider>> {
+    fn call_with_args(&self, args: TableFunctionArgs) -> Result<Arc<dyn TableProvider>> {
+        self.provider(args.exprs())
+    }
+}
+
+impl NativeTableFn {
+    fn provider(&self, args: &[Expr]) -> Result<Arc<dyn TableProvider>> {
         let name = self.table.function_name();
         let [arg] = args else {
             return Err(DataFusionError::Plan(format!(
@@ -122,7 +128,7 @@ mod tests {
 
     #[test]
     fn source_argument_is_required() {
-        let err = session_fn().call(&[]).err().unwrap();
+        let err = session_fn().provider(&[]).err().unwrap();
         assert!(
             matches!(err, DataFusionError::Plan(ref m) if m.contains("'' names the default source")),
             "{err}"
@@ -131,13 +137,13 @@ mod tests {
 
     #[test]
     fn a_second_argument_is_rejected() {
-        let err = session_fn().call(&[lit(""), lit("")]).err().unwrap();
+        let err = session_fn().provider(&[lit(""), lit("")]).err().unwrap();
         assert!(matches!(err, DataFusionError::Plan(_)), "{err}");
     }
 
     #[test]
     fn source_must_be_a_string_literal() {
-        let err = session_fn().call(&[lit(1)]).err().unwrap();
+        let err = session_fn().provider(&[lit(1)]).err().unwrap();
         assert!(
             matches!(err, DataFusionError::Plan(ref m) if m.contains("string literal")),
             "{err}"

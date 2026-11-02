@@ -12,7 +12,7 @@ arrow = { workspace = true, features = ["prettyprint"] }
 async-trait = { workspace = true }
 clap = { workspace = true }
 datafusion = { workspace = true }
-datafusion-functions-json = "0.52"
+datafusion-functions-json = "0.55"
 futures = { workspace = true }
 gage-core = { path = "../gage-core" }
 gage-index = { path = "../gage-index" }

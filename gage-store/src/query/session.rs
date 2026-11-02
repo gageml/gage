@@ -11,7 +11,6 @@
 //! round trip each. Filters on `id` and lower bounds on `modified` are
 //! applied to the index rows before any object is read.
 
-use std::any::Any;
 use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::fmt::{self, Formatter};
@@ -25,10 +24,12 @@ use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit}
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::catalog::Session;
 use datafusion::common::ScalarValue;
+use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::datasource::{TableProvider, TableType};
 use datafusion::error::{DataFusionError, Result};
 use datafusion::execution::context::TaskContext;
 use datafusion::logical_expr::{BinaryExpr, Operator, TableProviderFilterPushDown};
+use datafusion::physical_expr::PhysicalExpr;
 use datafusion::physical_expr::expressions::col;
 use datafusion::physical_expr::{EquivalenceProperties, PhysicalSortExpr};
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
@@ -171,10 +172,6 @@ impl StoredSessionTable {
 
 #[async_trait]
 impl TableProvider for StoredSessionTable {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }
@@ -271,7 +268,7 @@ struct StoredSessionExec {
     projection: Option<Vec<usize>>,
     filters: Vec<Expr>,
     limit: Option<usize>,
-    properties: PlanProperties,
+    properties: Arc<PlanProperties>,
 }
 
 impl fmt::Debug for StoredSessionExec {
@@ -299,12 +296,12 @@ impl StoredSessionExec {
         } else {
             EquivalenceProperties::new(projected_schema.clone())
         };
-        let properties = PlanProperties::new(
+        let properties = Arc::new(PlanProperties::new(
             equivalence,
             Partitioning::UnknownPartitioning(1),
             EmissionType::Incremental,
             Boundedness::Bounded,
-        );
+        ));
         Self {
             store,
             rows,
@@ -563,18 +560,22 @@ impl ExecutionPlan for StoredSessionExec {
         "StoredSessionExec"
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
+    fn properties(&self) -> &Arc<PlanProperties> {
+        &self.properties
     }
 
-    fn properties(&self) -> &PlanProperties {
-        &self.properties
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> Result<TreeNodeRecursion>,
+    ) -> Result<TreeNodeRecursion> {
+        Ok(TreeNodeRecursion::Continue)
     }
 
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
         vec![]
     }
 
+    #[allow(deprecated)]
     fn with_new_children(
         self: Arc<Self>,
         _children: Vec<Arc<dyn ExecutionPlan>>,
