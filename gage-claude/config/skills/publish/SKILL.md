@@ -39,8 +39,8 @@ ways:
 2. Understand the audience and intended use of each published session
 3. Run `gage publish init <SESSION>` for each session with an initial set of
    options
-4. Identify text to redact for each session
-5. Finalize the publish definition by adding text redaction
+4. Redact text for each session
+5. Assign a new title to each session if applicable
 6. Apply the publish command to add each session to the store
 
 ### Sessions to publish
@@ -80,3 +80,11 @@ preview staged sessions.
 Use `gage publish apply <SESSION> -y` to add the staged publish session to the
 store. This finalized the publish operation and removed the session from the
 pending list.
+
+## Text redaction
+
+Use `gage publish candidate <SESSION> -y` to split candidate text into files
+that are provided to `redact` agents.
+
+Each agent returns a list of text to redact, which is added to the publish
+definition.

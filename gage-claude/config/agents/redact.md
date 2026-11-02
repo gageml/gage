@@ -1,5 +1,5 @@
 ---
-name: redacted-text
+name: redact
 description: Identify text to redact.
 model: claude-haiku-5-5
 ---
