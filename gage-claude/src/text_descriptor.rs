@@ -31,6 +31,10 @@ struct FilterLists {
     value: Vec<String>,
     #[serde(default)]
     entries: Vec<String>,
+    /// Named tag sets whose tags the filter removes as spans wherever
+    /// they appear in a text value.
+    #[serde(default)]
+    remove_tags: Vec<String>,
 }
 
 pub(crate) fn text_descriptor() -> TextDescriptor {
@@ -44,16 +48,38 @@ pub(crate) fn text_descriptor() -> TextDescriptor {
         .with_allow(&strs(&lists.allow))
         .expect("descriptor allow patterns should be regexes");
     for (name, paths) in &lists.filters {
+        let removes: Vec<String> = paths
+            .remove_tags
+            .iter()
+            .flat_map(|set| tag_set(set).iter().map(|tag| tag_span_regex(tag)))
+            .collect();
         descriptor = descriptor
             .with_filter(
                 name,
                 &strs(&paths.literal),
                 &strs(&paths.value),
                 &strs(&paths.entries),
+                &strs(&removes),
             )
             .expect("descriptor filter patterns should be JSONPath");
     }
     descriptor
+}
+
+/// The tag names of a named tag set the descriptor references. The
+/// descriptor is fixed, so an unknown set is a build error.
+fn tag_set(name: &str) -> &'static [String] {
+    match name {
+        "ide_tags" => crate::entry::ide_tag_names(),
+        _ => panic!("descriptor references unknown tag set {name:?}"),
+    }
+}
+
+/// The regex that matches a `<tag>...</tag>` block, dot including
+/// newlines and the body non-greedy so the first close wins.
+fn tag_span_regex(tag: &str) -> String {
+    let tag = regex::escape(tag);
+    format!("(?s)<{tag}>.*?</{tag}>")
 }
 
 #[cfg(test)]
@@ -306,6 +332,22 @@ mod tests {
                 .dropped;
             assert!(!dropped, "{line}");
         }
+    }
+
+    /// The harness-record filter removes an IDE tag block that rides
+    /// inside a user message, through the `ide_tags` set, as a span.
+    #[test]
+    fn harness_record_removes_ide_tag_spans_in_a_user_message() {
+        let descriptor = text_descriptor();
+        let line = r#"{"type":"user","message":{"content":"<ide_opened_file>opened /x</ide_opened_file> the prompt"}}"#;
+        let found = descriptor.filter_values("harness-record", line).unwrap();
+        assert!(!found.dropped, "{found:?}");
+        let hit = found.spans.first().expect("one ide-tag span");
+        let text = "<ide_opened_file>opened /x</ide_opened_file> the prompt";
+        assert_eq!(
+            text.get(hit.start..=hit.end),
+            Some("<ide_opened_file>opened /x</ide_opened_file>")
+        );
     }
 
     #[test]

@@ -62,6 +62,16 @@ const CONTEXT_SESSION: &str = concat!(
     "\n",
 );
 
+/// A session whose first user turn carries a leading IDE tag block
+/// prepended to the real prompt, the kind the harness injects inside a
+/// conversation entry.
+const IDE_SESSION: &str = concat!(
+    r#"{"type":"user","uuid":"u1","timestamp":"2025-01-01T00:00:00Z","cwd":"/home/garrett/proj","message":{"role":"user","content":"<ide_opened_file>The user opened the file notes.md</ide_opened_file> please review the change"}}"#,
+    "\n",
+    r#"{"type":"assistant","uuid":"a1","timestamp":"2025-01-01T00:00:01Z","message":{"id":"m1","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":10,"output_tokens":1}}}"#,
+    "\n",
+);
+
 struct Fixture {
     _home: tempfile::TempDir,
     _claude: tempfile::TempDir,
@@ -490,6 +500,44 @@ fn harness_records_filter_leaves_out_run_records_and_descriptive_fields() {
         d.push_redact("home_dir", "system", "user:test", true);
     });
     assert_eq!(refreshed.unmatched, [(1, "home_dir".to_string())]);
+}
+
+/// The `harness-record` filter removes a leading IDE tag block from a
+/// user turn as an unmarked span, leaving the real prompt, and records
+/// the removal as a `text` change under the filter.
+#[test]
+fn harness_record_removes_an_ide_tag_block_from_a_user_turn() {
+    let f = fixture_with(IDE_SESSION);
+    let publisher = Publisher::with_root(&f.store, &f.publish_root);
+    let id = stage(
+        &publisher,
+        &f.original,
+        &["harness-record".parse::<FilterSpec>().unwrap()],
+    );
+    let lines = staged_lines(&f.publish_root, &id);
+    assert!(
+        !lines[0].contains("ide_opened_file"),
+        "the IDE block should be gone: {}",
+        lines[0]
+    );
+    assert!(
+        lines[0].contains("please review the change"),
+        "the prompt should stay: {}",
+        lines[0]
+    );
+    assert!(
+        !lines[0].contains("[REDACTED]"),
+        "the removal is unmarked: {}",
+        lines[0]
+    );
+    let records = changes(&f.publish_root, &id);
+    assert!(
+        records.iter().any(|r| r.kind == ChangeKind::Text
+            && r.reason.as_deref() == Some("harness-record")
+            && r.author == "filter:harness-record"),
+        "{records:#?}"
+    );
+    publisher.check(&id).unwrap();
 }
 
 /// The `harness-context` filter leaves out exactly what the harness put

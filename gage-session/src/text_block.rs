@@ -198,6 +198,9 @@ struct FilterPaths {
     /// entry's own fields through the root, as in
     /// `$[?$.type == 'progress']`.
     entries: Vec<JsonPath>,
+    /// Regexes whose every match in a text value is a span the filter
+    /// removes, for out-of-band content that rides inside a value.
+    removes: Vec<Regex>,
 }
 
 /// What a filter's typed-sensitive paths select in one entry.
@@ -207,6 +210,8 @@ pub struct FilterValues {
     pub literals: Vec<String>,
     /// The string values at the filter's `value` paths
     pub values: Vec<ValueHit>,
+    /// The spans the filter's `removes` regexes match in text values
+    pub spans: Vec<SpanHit>,
     /// Whether one of the filter's entry selectors selected the entry
     pub dropped: bool,
 }
@@ -218,6 +223,16 @@ pub struct ValueHit {
     pub path: String,
     /// JSON Pointer (RFC 6901) of the value from the entry root
     pub pointer: String,
+}
+
+/// One span a filter's `removes` regex matches in a text value, as
+/// zero-based byte offsets into that value's text with `end` inclusive.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpanHit {
+    /// JSON Pointer (RFC 6901) of the value from the entry root
+    pub pointer: String,
+    pub start: usize,
+    pub end: usize,
 }
 
 /// A text value of one entry.
@@ -272,12 +287,15 @@ impl TextDescriptor {
     }
 
     /// Add the typed-sensitive paths of the named filter `name`.
+    /// `removes` are regexes whose matches in a text value are spans the
+    /// filter removes.
     pub fn with_filter(
         mut self,
         name: &str,
         literal: &[&str],
         value: &[&str],
         entries: &[&str],
+        removes: &[&str],
     ) -> std::result::Result<Self, DescriptorError> {
         self.filters.push(FilterPaths {
             name: name.to_string(),
@@ -287,6 +305,15 @@ impl TextDescriptor {
                 .map(|p| compile_one(p).map(|c| (p.to_string(), c)))
                 .collect::<std::result::Result<_, _>>()?,
             entries: compile(entries)?,
+            removes: removes
+                .iter()
+                .map(|p| {
+                    Regex::new(p).map_err(|e| DescriptorError {
+                        pattern: (*p).to_string(),
+                        message: e.to_string(),
+                    })
+                })
+                .collect::<std::result::Result<_, _>>()?,
         });
         Ok(self)
     }
@@ -333,9 +360,29 @@ impl TextDescriptor {
             })
             .collect();
         let dropped = paths.entries.iter().any(|p| !p.query(&entry).is_empty());
+        let spans = if paths.removes.is_empty() {
+            Vec::new()
+        } else {
+            self.text_values(json)?
+                .iter()
+                .flat_map(|value| {
+                    paths.removes.iter().flat_map(move |re| {
+                        re.find_iter(&value.text)
+                            .filter(|m| m.end() > m.start())
+                            .map(|m| SpanHit {
+                                pointer: value.pointer.clone(),
+                                start: m.start(),
+                                end: m.end() - 1,
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect()
+        };
         Ok(FilterValues {
             literals,
             values,
+            spans,
             dropped,
         })
     }
@@ -537,7 +584,7 @@ mod tests {
         let descriptor = descriptor()
             .with_allow(&["^.{0,2}$", "^/(tmp|home)/?$"])
             .unwrap()
-            .with_filter("system", &["$.cwd", "$..home_dir"], &["$.cwd"], &[])
+            .with_filter("system", &["$.cwd", "$..home_dir"], &["$.cwd"], &[], &[])
             .unwrap();
         let line = r#"{"cwd":"/","params":{"home_dir":"/HOME/"}}"#;
         let found = descriptor.filter_values("system", line).unwrap();
@@ -556,9 +603,9 @@ mod tests {
     #[test]
     fn filter_values_select_literals_and_whole_values() {
         let descriptor = descriptor()
-            .with_filter("pii", &["$..user_identity"], &["$.context.email"], &[])
+            .with_filter("pii", &["$..user_identity"], &["$.context.email"], &[], &[])
             .unwrap()
-            .with_filter("metadata", &[], &["$.n", "$.params.n"], &[])
+            .with_filter("metadata", &[], &["$.n", "$.params.n"], &[], &[])
             .unwrap();
         let line = r#"{"context":{"email":"The user is a@b.c"},"params":{"classifier":{"user_identity":"garrett"},"n":3},"n":{"user_identity":5}}"#;
         let found = descriptor.filter_values("pii", line).unwrap();
@@ -584,6 +631,22 @@ mod tests {
         );
     }
 
+    /// A `removes` regex reports each match in a text value as a span
+    /// hit, with the value's pointer and inclusive byte offsets.
+    #[test]
+    fn removes_regexes_report_span_hits_in_text_values() {
+        let descriptor = descriptor()
+            .with_filter("harness", &[], &[], &[], &["(?s)<tag>.*?</tag>"])
+            .unwrap();
+        let line = r#"{"message":{"content":"<tag>drop me</tag> keep"}}"#;
+        let found = descriptor.filter_values("harness", line).unwrap();
+        let hit = found.spans.first().expect("one span");
+        assert_eq!(found.spans.len(), 1);
+        assert_eq!(hit.pointer, "/message/content");
+        let text = "<tag>drop me</tag> keep";
+        assert_eq!(text.get(hit.start..=hit.end), Some("<tag>drop me</tag>"));
+    }
+
     /// An entry selector tests the entry's own fields through the root
     /// and marks the whole entry; a missing field compares as unequal.
     #[test]
@@ -597,6 +660,7 @@ mod tests {
                     "$[?$.type == 'progress']",
                     "$[?$.type == 'system' && $.subtype != 'informational']",
                 ],
+                &[],
             )
             .unwrap();
         let dropped = |line: &str| descriptor.filter_values("harness", line).unwrap().dropped;

@@ -677,6 +677,15 @@ fn expand(definition: &PublishDefinition, session: &SessionText) -> Result<Expan
                     }));
                 }
             }
+            for span in values.spans {
+                instances.push(instance(InstanceKind::Span {
+                    line,
+                    pointer: span.pointer,
+                    start: span.start,
+                    end: span.end,
+                    mark: false,
+                }));
+            }
         }
         rules.extend(paths.into_iter().map(|path| ChangeRecord {
             kind: ChangeKind::Value,

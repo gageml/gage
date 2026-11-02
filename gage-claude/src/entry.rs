@@ -1,5 +1,7 @@
 //! Helpers for rendering Claude Code session entries as readable text.
 
+use std::sync::LazyLock;
+
 use serde_json::Value;
 
 /// Render a single message-content block as human-readable text.
@@ -175,19 +177,16 @@ pub fn entry_attachment_blocks(entry: &Value) -> Vec<&Value> {
 /// prepended by the client, harness, or slash-command machinery.
 /// Restricting the split to known names keeps tag-shaped content —
 /// a `<tool_use_error>` tool result, pasted XML — in the body.
-const IDE_TAG_NAMES: &[&str] = &[
-    "system-reminder",
-    "ide_opened_file",
-    "ide_selection",
-    "command-name",
-    "command-message",
-    "command-args",
-    "command-contents",
-    "local-command-stdout",
-    "local-command-stderr",
-    "local-command-caveat",
-    "task-notification",
-];
+static IDE_TAG_NAMES: LazyLock<Vec<String>> = LazyLock::new(|| {
+    serde_json::from_str(include_str!("../schema/claude-jsonl-1/ide_tags.json"))
+        .expect("schema/claude-jsonl-1/ide_tags.json is a fixed list of tag names")
+});
+
+/// The tag names the `claude-jsonl-1` schema lists as out-of-band
+/// leading tags, the `ide_tags` set.
+pub fn ide_tag_names() -> &'static [String] {
+    &IDE_TAG_NAMES
+}
 
 /// Split a message text into `(body, ide_tags)`. `ide_tags` captures
 /// any leading `<tag>...</tag>` pairs prepended by the client or IDE
@@ -216,7 +215,7 @@ pub fn split_ide_tags(input: &str) -> (String, Option<String>) {
             .find(|c: char| c == '>' || c == '/' || c.is_whitespace())
             .unwrap_or(after_lt.len());
         let tag_name = &after_lt[..name_end];
-        if !IDE_TAG_NAMES.contains(&tag_name) {
+        if !IDE_TAG_NAMES.iter().any(|n| n == tag_name) {
             break;
         }
         let close = format!("</{}>", tag_name);

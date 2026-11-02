@@ -1,0 +1,13 @@
+[
+  "command-args",
+  "command-contents",
+  "command-message",
+  "command-name",
+  "ide_opened_file",
+  "ide_selection",
+  "local-command-caveat",
+  "local-command-stderr",
+  "local-command-stdout",
+  "system-reminder",
+  "task-notification"
+]
