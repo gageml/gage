@@ -227,8 +227,9 @@ impl<'a> Publisher<'a> {
         })
     }
 
-    /// Every text value the pending publish `id` discloses, with the
-    /// spans redacted in each. Reads only.
+    /// Every text value the pending publish `id` discloses. The text
+    /// is the full value; the spans mark the substrings redaction
+    /// removes, carried beside it. Reads only.
     pub fn candidates(&self, id: &str) -> Result<Vec<Candidate>, PublishError> {
         let definition = self.definition(id)?;
         let session = self.open_original(id)?;

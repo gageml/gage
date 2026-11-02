@@ -38,10 +38,7 @@ its section names.
 
 Each item you return is an exact substring of a decoded value. A redaction
 removes every copy of that substring in the session, so choose the shortest
-substring that is the sensitive value itself and not its surrounding words. Do
-not return a value the pattern filters already redact unless the instructions
-say to; an item already redacted is reported as already present and does no
-harm.
+substring that is the sensitive value itself and not its surrounding words.
 
 `no_mark_flag` is `true` when the text is removed with no marker and `false`
 when a `[REDACTED]` marker takes its place. Use `false` unless a filter's
