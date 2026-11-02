@@ -250,6 +250,7 @@ pub fn build(
     instances.sort_by(|a, b| a.order().cmp(&b.order()));
     let dropped = dropped_of(&instances);
     let counts = counts_of(definition, &instances);
+    let spans = value_spans(&instances);
 
     let mut replaced = BTreeMap::new();
     let mut published = HashMap::new();
@@ -257,7 +258,7 @@ pub fn build(
         if dropped.contains(&entry.line) {
             continue;
         }
-        let edits = line_edits(entry, &instances, &mut published)?;
+        let edits = line_edits(entry, &instances, &spans, &mut published)?;
         if let Some(json) = edits.apply(&entry.json)? {
             replaced.insert(entry.line, json);
         }
@@ -304,7 +305,7 @@ pub type Span = (usize, usize, bool);
 
 /// One text value of the published session as a candidate for
 /// redaction: its original line and pointer, its text as the original
-/// holds it, and the spans the definition redacts in it, merged, as
+/// holds it, and the spans the definition redacts in it, resolved, as
 /// byte offsets into that text with `end` inclusive.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Candidate {
@@ -323,63 +324,108 @@ pub fn candidates(
 ) -> Result<Vec<Candidate>, PublishError> {
     let Expanded { instances, .. } = expand(definition, session)?;
     let dropped = dropped_of(&instances);
-    let mut deleted: HashSet<(u32, &str)> = HashSet::new();
-    let mut spans: HashMap<(u32, &str), Vec<Span>> = HashMap::new();
-    for i in &instances {
-        match &i.kind {
-            InstanceKind::Value { line, pointer } => {
-                deleted.insert((*line, pointer.as_str()));
-            }
-            InstanceKind::Span {
-                line,
-                pointer,
-                start,
-                end,
-                mark,
-            } => spans
-                .entry((*line, pointer.as_str()))
-                .or_default()
-                .push((*start, *end, *mark)),
-            InstanceKind::Line { .. } | InstanceKind::Attr { .. } => {}
-        }
-    }
+    let deleted: HashSet<(u32, &str)> = instances
+        .iter()
+        .filter_map(|i| match &i.kind {
+            InstanceKind::Value { line, pointer } => Some((*line, pointer.as_str())),
+            _ => None,
+        })
+        .collect();
+    let spans = value_spans(&instances);
     let mut out = Vec::new();
     for entry in &session.entries {
         if dropped.contains(&entry.line) {
             continue;
         }
         for value in &entry.values {
-            let key = (entry.line, value.pointer.as_str());
-            if deleted.contains(&key) {
+            if deleted.contains(&(entry.line, value.pointer.as_str())) {
                 continue;
             }
-            let ranges = spans.remove(&key).unwrap_or_default();
             out.push(Candidate {
                 line: entry.line,
                 pointer: value.pointer.clone(),
                 text: value.text.clone(),
-                spans: merge_spans(ranges),
+                spans: spans
+                    .get(&(entry.line, value.pointer.clone()))
+                    .cloned()
+                    .unwrap_or_default(),
             });
         }
     }
     Ok(out)
 }
 
-/// `ranges` in order with overlapping and adjacent spans merged; a
-/// merged span is marked when any part of it was.
-fn merge_spans(mut ranges: Vec<Span>) -> Vec<Span> {
-    ranges.sort_by_key(|(start, _, _)| *start);
-    let mut merged: Vec<Span> = Vec::new();
-    for (start, end, mark) in ranges {
-        match merged.last_mut() {
-            Some(last) if start <= last.1 + 1 => {
-                last.1 = last.1.max(end);
-                last.2 |= mark;
-            }
-            _ => merged.push((start, end, mark)),
+/// The resolved spans of every text value a redaction touches, keyed
+/// by line and pointer. Built once from `instances` so the review view
+/// and the staged content apply the same spans.
+fn value_spans(instances: &[Instance]) -> HashMap<(u32, String), Vec<Span>> {
+    let mut grouped: HashMap<(u32, String), Vec<Span>> = HashMap::new();
+    for i in instances {
+        if let InstanceKind::Span {
+            line,
+            pointer,
+            start,
+            end,
+            mark,
+        } = &i.kind
+        {
+            grouped
+                .entry((*line, pointer.clone()))
+                .or_default()
+                .push((*start, *end, *mark));
         }
     }
-    merged
+    grouped
+        .into_iter()
+        .map(|(key, ranges)| (key, resolve_spans(ranges)))
+        .collect()
+}
+
+/// The disjoint, ordered spans the published text applies, resolved
+/// from the overlapping `ranges` a value's redactions produce. A span
+/// strictly inside another is dropped from the geometry, so its
+/// container governs the range. Over what remains, a byte a marker
+/// covers is marked and a byte only a removal covers is removed.
+/// Contiguous bytes of one disposition are one span, and a marked
+/// stretch and a removed stretch stay apart, so a marker never spreads
+/// over a silent removal.
+fn resolve_spans(ranges: Vec<Span>) -> Vec<Span> {
+    let survivors: Vec<Span> = ranges
+        .iter()
+        .copied()
+        .filter(|&(start, end, _)| {
+            !ranges
+                .iter()
+                .any(|&(os, oe, _)| os <= start && end <= oe && (os < start || end < oe))
+        })
+        .collect();
+    let mut points: Vec<usize> = Vec::with_capacity(survivors.len() * 2);
+    for &(start, end, _) in &survivors {
+        points.push(start);
+        points.push(end + 1);
+    }
+    points.sort_unstable();
+    points.dedup();
+    let covers = |pos: usize, want: bool| {
+        survivors
+            .iter()
+            .any(|&(s, e, mark)| mark == want && s <= pos && pos <= e)
+    };
+    let mut out: Vec<Span> = Vec::new();
+    for (&lo, &hi) in points.iter().zip(points.iter().skip(1)) {
+        let mark = if covers(lo, true) {
+            true
+        } else if covers(lo, false) {
+            false
+        } else {
+            continue;
+        };
+        match out.last_mut() {
+            Some(last) if last.2 == mark && last.1 + 1 == lo => last.1 = hi - 1,
+            _ => out.push((lo, hi - 1, mark)),
+        }
+    }
+    out
 }
 
 /// The number of spans each text redaction of `definition` produces
@@ -776,19 +822,19 @@ impl LineEdits {
     }
 }
 
-/// The edits of one entry from the instances on its line. A value
-/// with a `Value` instance is left out; spans are merged where they
-/// overlap, a merged span is marked when any part of it was, and they
-/// are applied in order. Every `Span` instance on the line records in
-/// `published`, by its index in `instances`, the position of its
-/// merged span in the published value.
+/// The edits of one entry from the instances on its line, applying the
+/// resolved `spans` of each value. A value with a `Value` instance is
+/// left out. Every `Span` instance on the line records in `published`,
+/// by its index in `instances`, the position of the resolved span its
+/// start lies in, so every redaction keeps a change record.
 fn line_edits(
     entry: &EntryText,
     instances: &[Instance],
+    spans: &HashMap<(u32, String), Vec<Span>>,
     published: &mut HashMap<usize, (usize, usize)>,
 ) -> Result<LineEdits, PublishError> {
     let mut deleted: Vec<String> = Vec::new();
-    let mut spans: BTreeMap<&str, Vec<(usize, usize, bool, usize)>> = BTreeMap::new();
+    let mut members: BTreeMap<&str, Vec<(usize, usize)>> = BTreeMap::new();
     for (index, i) in instances
         .iter()
         .enumerate()
@@ -796,21 +842,14 @@ fn line_edits(
     {
         match &i.kind {
             InstanceKind::Value { pointer, .. } => deleted.push(pointer.clone()),
-            InstanceKind::Span {
-                pointer,
-                start,
-                end,
-                mark,
-                ..
-            } => spans
-                .entry(pointer)
-                .or_default()
-                .push((*start, *end, *mark, index)),
+            InstanceKind::Span { pointer, start, .. } => {
+                members.entry(pointer).or_default().push((index, *start));
+            }
             InstanceKind::Line { .. } | InstanceKind::Attr { .. } => {}
         }
     }
     let mut replaced = Vec::new();
-    for (pointer, mut ranges) in spans {
+    for (pointer, members) in members {
         let value = entry
             .values
             .iter()
@@ -818,30 +857,19 @@ fn line_edits(
             .ok_or_else(|| {
                 PublishError::Input(format!("line {}: no value at {pointer}", entry.line))
             })?;
-        ranges.sort_by_key(|(start, _, _, _)| *start);
-        let mut merged: Vec<(usize, usize, bool)> = Vec::new();
-        let mut members: Vec<Vec<usize>> = Vec::new();
-        for (start, end, mark, index) in ranges {
-            match merged.last_mut() {
-                Some(last) if start <= last.1 + 1 => {
-                    last.1 = last.1.max(end);
-                    last.2 |= mark;
-                    members
-                        .last_mut()
-                        .expect("one member list per merged span")
-                        .push(index);
-                }
-                _ => {
-                    merged.push((start, end, mark));
-                    members.push(vec![index]);
-                }
-            }
-        }
-        let (text, positions) = apply_spans(&value.text, &merged);
-        for (indexes, position) in members.iter().zip(positions) {
-            for index in indexes {
-                published.insert(*index, position);
-            }
+        let resolved = spans
+            .get(&(entry.line, pointer.to_string()))
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let (text, positions) = apply_spans(&value.text, resolved);
+        for (index, start) in members {
+            let position = resolved
+                .iter()
+                .zip(&positions)
+                .find(|&(&(s, e, _), _)| s <= start && start <= e)
+                .map(|(_, &pos)| pos)
+                .expect("each span's start lies within a resolved span");
+            published.insert(index, position);
         }
         replaced.push((pointer.to_string(), text));
     }
@@ -1026,17 +1054,73 @@ mod tests {
     }
 
     #[test]
-    fn spans_merge_where_they_overlap_or_touch() {
+    fn resolving_keeps_like_spans_together_and_splits_unlike() {
         assert_eq!(
-            merge_spans(vec![
+            resolve_spans(vec![
                 (10, 12, false),
                 (0, 3, true),
                 (4, 6, false),
                 (11, 20, true)
             ]),
-            [(0, 6, true), (10, 20, true)]
+            [(0, 3, true), (4, 6, false), (10, 10, false), (11, 20, true)]
         );
-        assert!(merge_spans(Vec::new()).is_empty());
+        assert!(resolve_spans(Vec::new()).is_empty());
+    }
+
+    #[test]
+    fn resolving_drops_a_span_inside_another() {
+        assert_eq!(
+            resolve_spans(vec![(0, 20, false), (8, 12, true)]),
+            [(0, 20, false)]
+        );
+        assert_eq!(
+            resolve_spans(vec![(0, 20, true), (8, 12, false)]),
+            [(0, 20, true)]
+        );
+    }
+
+    #[test]
+    fn resolving_unlike_overlap_marks_only_the_marked_part() {
+        assert_eq!(
+            resolve_spans(vec![(0, 10, false), (5, 15, true)]),
+            [(0, 4, false), (5, 15, true)]
+        );
+    }
+
+    /// An unmarked span that contains a marked one removes the whole
+    /// range with no marker, and both redactions keep a change record.
+    #[test]
+    fn a_contained_mark_leaves_a_silent_removal_and_keeps_both_records() {
+        let entry = EntryText {
+            line: 1,
+            json: String::new(),
+            values: vec![TextValue {
+                pointer: "/v".to_string(),
+                text: "A <B>x</B> C".to_string(),
+            }],
+        };
+        let span = |start, end, mark| Instance {
+            entry: None,
+            reason: "r".to_string(),
+            author: "a".to_string(),
+            kind: InstanceKind::Span {
+                line: 1,
+                pointer: "/v".to_string(),
+                start,
+                end,
+                mark,
+            },
+        };
+        let instances = vec![span(2, 9, false), span(5, 5, true)];
+        let spans = value_spans(&instances);
+        let mut published = HashMap::new();
+        let edits = line_edits(&entry, &instances, &spans, &mut published).unwrap();
+        let (pointer, text) = edits.replaced.first().expect("one value rewritten");
+        assert_eq!(pointer, "/v");
+        assert_eq!(text, "A C");
+        assert!(!text.contains(MARKER), "{text}");
+        assert_eq!(published.get(&0), Some(&(2, 2)));
+        assert_eq!(published.get(&1), Some(&(2, 2)));
     }
 
     #[test]
