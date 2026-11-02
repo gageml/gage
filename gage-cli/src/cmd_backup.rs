@@ -112,7 +112,7 @@ pub async fn main(args: BackupArgs) -> Result<(), CliError> {
                     "gage backup: remote {arg} is not a backup target; add one with gage remote add --backup"
                 )));
             }
-            None => Repository::from_url(arg),
+            None => Repository::from_url(arg).context("gage backup")?,
         },
         None => match backups.as_slice() {
             [one] => Repository::from_remote(one),

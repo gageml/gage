@@ -17,6 +17,7 @@
 //! a fetch's refs land under.
 
 use std::collections::BTreeMap;
+use std::path;
 use std::process::{Command, ExitStatus, Stdio};
 
 use gage_core::uuid::new_uuid;
@@ -120,13 +121,18 @@ impl Repository {
         }
     }
 
-    /// A Git URL or path with no configuration.
-    pub fn from_url(url: &str) -> Repository {
-        Repository {
-            spec: url.to_string(),
-            name: redact_userinfo(url),
+    /// A Git URL or path with no configuration. A path is made
+    /// absolute against the process working directory before git
+    /// sees it: git resolves a relative path against the directory it
+    /// runs in, which is the store, so `.` would name the store
+    /// itself.
+    pub fn from_url(url: &str) -> Result<Repository, StoreError> {
+        let spec = repository_spec(url)?;
+        Ok(Repository {
+            name: redact_userinfo(&spec),
+            spec,
             remote: false,
-        }
+        })
     }
 
     /// What git is given: the remote name or the URL.
@@ -144,6 +150,32 @@ impl Repository {
     /// True for a configured remote.
     pub fn is_remote(&self) -> bool {
         self.remote
+    }
+}
+
+/// `url` as git is given it: a URL unchanged, a path made absolute
+/// against the working directory.
+fn repository_spec(url: &str) -> Result<String, StoreError> {
+    if is_url(url) {
+        return Ok(url.to_string());
+    }
+    let absolute = path::absolute(url).map_err(|source| StoreError::RepositoryPath {
+        path: url.to_string(),
+        source,
+    })?;
+    Ok(absolute.to_string_lossy().into_owned())
+}
+
+/// True when git reads `spec` as a URL rather than a local path: a
+/// scheme (`https://`, `file://`), a transport helper (`hg::...`), or
+/// the scp form `host:path`. Git's rule is a colon before any slash;
+/// `./host:path` is the path form git itself requires for a local
+/// directory with a colon in its name.
+fn is_url(spec: &str) -> bool {
+    match (spec.find(':'), spec.find('/')) {
+        (Some(colon), Some(slash)) => colon < slash,
+        (Some(_), None) => true,
+        (None, _) => false,
     }
 }
 
@@ -217,13 +249,17 @@ impl FetchSource {
 
 impl RemoteStore<'_> {
     /// Add the remote `name` at `url`, as a backup target when `backup`.
-    /// A name git's remote rules reject is [`StoreError::RemoteName`];
-    /// a name in use is [`StoreError::RemoteExists`].
+    /// A path is recorded absolute, so it names the same directory on
+    /// every later use. A name git's remote rules reject is
+    /// [`StoreError::RemoteName`]; a name in use is
+    /// [`StoreError::RemoteExists`].
     pub fn add(&self, name: &str, url: &str, backup: bool) -> Result<Remote, StoreError> {
         self.validate_name(name)?;
         if self.list()?.iter().any(|r| r.name == name) {
             return Err(StoreError::RemoteExists(name.to_string()));
         }
+        let url = repository_spec(url)?;
+        let url = url.as_str();
         let path = self.store.path();
         run(git_in(path, ["remote", "add", name, url]))?;
         let fetch = format!("+{ROOT}*:{}*", tracking_prefix(name));
@@ -273,7 +309,7 @@ impl RemoteStore<'_> {
         if self.list()?.iter().any(|r| r.name == arg) {
             Ok(Repository::from_remote(arg))
         } else {
-            Ok(Repository::from_url(arg))
+            Repository::from_url(arg)
         }
     }
 
@@ -569,7 +605,7 @@ fn parse_remote_config(output: &str) -> Vec<Remote> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::path::{Component, Path, PathBuf};
 
     use super::*;
     use crate::test_support::open_store;
@@ -911,7 +947,7 @@ mod tests {
 
     #[test]
     fn url_repository_redacts_the_userinfo_and_names_a_valid_transient_prefix() {
-        let url = Repository::from_url("https://me:s3cret@host/x.git");
+        let url = Repository::from_url("https://me:s3cret@host/x.git").unwrap();
         assert_eq!(url.spec(), "https://me:s3cret@host/x.git");
         assert_eq!(url.name(), "https://host/x.git");
         assert!(!url.is_remote());
@@ -928,20 +964,23 @@ mod tests {
             ("git@host:x.git", "host:x.git"),
             ("me:s3cret@host:x.git", "host:x.git"),
         ] {
-            assert_eq!(Repository::from_url(with_userinfo).name(), redacted);
+            assert_eq!(
+                Repository::from_url(with_userinfo).unwrap().name(),
+                redacted
+            );
         }
         for plain in [
             "/srv/x.git",
-            "./me@host/x.git",
+            "/srv/me@host/x.git",
             "https://host/x.git",
             "https://host/me@x.git",
             "https://host",
         ] {
-            assert_eq!(Repository::from_url(plain).name(), plain);
+            assert_eq!(Repository::from_url(plain).unwrap().name(), plain);
         }
         assert_ne!(
-            FetchSource::from(Repository::from_url("/x")).tracking(),
-            FetchSource::from(Repository::from_url("/x")).tracking()
+            FetchSource::from(Repository::from_url("/x").unwrap()).tracking(),
+            FetchSource::from(Repository::from_url("/x").unwrap()).tracking()
         );
         let dir = tempfile::tempdir().unwrap();
         let ref_name = format!("{}object/x", source.tracking());
@@ -953,6 +992,112 @@ mod tests {
         assert!(remote.repository().is_remote());
         assert_eq!(remote.tracking(), "refs/remotes/share/gage/1/");
         assert!(!remote.is_transient());
+    }
+
+    #[test]
+    fn path_repository_is_absolute_against_the_working_directory() {
+        let cwd = std::env::current_dir().unwrap();
+        for (relative, expected) in [
+            (".", cwd.clone()),
+            ("./x", cwd.join("x")),
+            ("x/y", cwd.join("x/y")),
+            ("../x", cwd.join("../x")),
+            ("./host:x", cwd.join("host:x")),
+        ] {
+            let repository = Repository::from_url(relative).unwrap();
+            assert_eq!(repository.spec(), expected.to_str().unwrap(), "{relative}");
+            assert_eq!(repository.name(), expected.to_str().unwrap(), "{relative}");
+            assert!(!repository.is_remote());
+        }
+        for url in [
+            "/srv/x.git",
+            "https://host/x.git",
+            "file:///srv/x.git",
+            "git@host:x.git",
+            "host:x",
+            "hg::https://host/x",
+        ] {
+            assert_eq!(Repository::from_url(url).unwrap().spec(), url);
+        }
+        let err = Repository::from_url("").unwrap_err();
+        assert!(
+            matches!(&err, StoreError::RepositoryPath { path, .. } if path.is_empty()),
+            "{err}"
+        );
+    }
+
+    /// The path the user typed names a directory under the working
+    /// directory, not under the store. Before the fix, `.` resolved to
+    /// the store itself and a push reported every ref up to date.
+    #[test]
+    fn relative_path_names_the_working_directory_repository_not_the_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let (source, _fsck) = open_store(&dir.path().join("source"));
+        run(git_in(dir.path(), ["init", "--bare", "-q", "target.git"])).unwrap();
+        let target = dir.path().join("target.git");
+        let relative = relative_from_cwd(&target);
+        assert!(relative.is_relative(), "{}", relative.display());
+        let remotes = RemoteStore::from(&source);
+        let (ref_name, tip) = note_ref(&source, "v");
+
+        let repository = remotes.resolve(relative.to_str().unwrap()).unwrap();
+        assert!(Path::new(repository.spec()).is_absolute());
+        assert_eq!(canonical(repository.spec()), canonical(&target));
+        assert!(remotes.ls_remote(&repository).unwrap().is_empty());
+        let set = PushSet {
+            send: vec![ref_name.clone()],
+            ..PushSet::default()
+        };
+        let digest = remotes.approval_digest(&set.names()).unwrap();
+        assert!(remotes.push(&repository, &set, &digest).unwrap().success());
+        assert_eq!(
+            remotes.ls_remote(&repository).unwrap(),
+            BTreeMap::from([(ref_name.clone(), tip.clone())])
+        );
+        assert_eq!(
+            run(git_in(&target, ["rev-parse", &ref_name]))
+                .unwrap()
+                .trim(),
+            tip
+        );
+
+        let added = remotes
+            .add("proj", relative.to_str().unwrap(), false)
+            .unwrap();
+        assert!(Path::new(&added.url).is_absolute());
+        assert_eq!(canonical(&added.url), canonical(&target));
+        assert_eq!(remotes.list().unwrap()[0].url, added.url);
+        let named = remotes.resolve("proj").unwrap();
+        assert!(named.is_remote());
+        assert_eq!(
+            remotes.ls_remote(&named).unwrap(),
+            BTreeMap::from([(ref_name, tip)])
+        );
+    }
+
+    fn canonical(path: impl AsRef<Path>) -> PathBuf {
+        std::fs::canonicalize(path).unwrap()
+    }
+
+    /// `target` as a path relative to the working directory: one `..`
+    /// per working-directory component, then `target` without its
+    /// root. `current_dir` is the physical path, so each `..` steps to
+    /// the directory the next component was joined to.
+    fn relative_from_cwd(target: &Path) -> PathBuf {
+        let cwd = std::env::current_dir().unwrap();
+        let mut relative = PathBuf::new();
+        for _ in cwd
+            .components()
+            .filter(|c| matches!(c, Component::Normal(_)))
+        {
+            relative.push("..");
+        }
+        for component in target.components() {
+            if let Component::Normal(part) = component {
+                relative.push(part);
+            }
+        }
+        relative
     }
 
     #[test]

@@ -675,7 +675,7 @@ mod tests {
     }
 
     fn url(store: &Store) -> FetchSource {
-        FetchSource::from(Repository::from_url(store.path().to_str().unwrap()))
+        FetchSource::from(Repository::from_url(store.path().to_str().unwrap()).unwrap())
     }
 
     fn outcome<'a>(report: &'a FetchReport, id: &str) -> &'a Outcome {

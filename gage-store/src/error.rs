@@ -33,6 +33,9 @@ pub enum StoreError {
     MissingObject(String),
     /// A Gage URL has no scheme or a malformed one
     BadUrl(String),
+    /// A repository path could not be made absolute against the
+    /// working directory
+    RepositoryPath { path: String, source: io::Error },
     /// A line selection fragment does not follow the grammar
     BadLineSelection(String),
     /// A target URL is well-formed but not allowed here, e.g. a
@@ -143,6 +146,9 @@ impl fmt::Display for StoreError {
             StoreError::Parse(what) => write!(f, "unexpected git output: {what}"),
             StoreError::MissingObject(name) => write!(f, "no such object: {name}"),
             StoreError::BadUrl(u) => write!(f, "not a Gage URL (scheme:body): {u}"),
+            StoreError::RepositoryPath { path, source } => {
+                write!(f, "repository path {path:?}: {source}")
+            }
             StoreError::BadLineSelection(sel) => {
                 write!(f, "invalid line selection: {sel}")
             }
@@ -250,6 +256,7 @@ impl std::error::Error for StoreError {
             StoreError::Write { source, .. } => Some(source),
             StoreError::Read { source, .. } => Some(source),
             StoreError::ReadContent(e) => Some(e),
+            StoreError::RepositoryPath { source, .. } => Some(source),
             StoreError::NotFound(_)
             | StoreError::VersionMissing(_)
             | StoreError::VersionMismatch { .. }
