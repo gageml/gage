@@ -1044,7 +1044,7 @@ pub(crate) fn apply_scan_dir(store: &Store, scan_dir: &ScanDir) -> Result<String
         issue_shas.push(sha);
     }
     scan_dir.write_issues_link(&issue_shas)?;
-    let commit_sha = ScanStore::from(store).create(scan_dir.id(), &scan_dir.object_dir())?;
+    let commit_sha = ScanStore::from(store).create_from_dir(scan_dir.dir())?;
     tracing::info!(
         notes = note_shas.len(),
         issues = issue_shas.len(),

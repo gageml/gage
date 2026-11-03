@@ -33,6 +33,9 @@ use gage_store::{
 
 const BUNDLE: &str = "tests/fixtures/generation-1.bundle";
 const SESSION_CONTENT: &str = "{\"type\":\"user\",\"message\":\"hello\"}\n";
+/// The fixture scan's id, in the shape `ScanStore::create_from_dir`
+/// asserts on.
+const FIXTURE_SCAN_ID: &str = "0000000000000000f1xt5can01";
 
 fn bundle_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(BUNDLE)
@@ -191,7 +194,7 @@ fn write_generation_1_fixture() {
 
     let datasets = DatasetStore::from(&store);
     let dataset_id = datasets
-        .create_with_origin(&DatasetOrigin::Scan("FIXTURESCAN1".into()))
+        .create_with_origin(&DatasetOrigin::Scan(FIXTURE_SCAN_ID.into()))
         .unwrap();
     datasets
         .sessions_link(&dataset_id, std::slice::from_ref(&session.id))
@@ -238,29 +241,28 @@ fn write_generation_1_fixture() {
         .set_status(&issue_id, IssueStatus::Open, None, "user:fixture", None)
         .unwrap();
 
-    let scan_dir = tmp.path().join("scan");
+    let scan_dir = tmp.path().join(FIXTURE_SCAN_ID);
+    let scan = scan_dir.join("scan");
     write(
-        &scan_dir.join("attrs.json"),
+        &scan.join("attrs.json"),
         r#"{"runtime":"gage fixture","started":1000,"stopped":2000,"canceled":false,"tasks":{"total":1,"completed":1,"failed":0}}"#,
     );
     write(
-        &scan_dir.join("tasks/fixture/run/attrs.json"),
+        &scan.join("tasks/fixture/run/attrs.json"),
         r#"{"status":"completed","started":1000,"stopped":2000,"worked_ms":1000}"#,
     );
-    write(&scan_dir.join("logs/out"), "fixture\n");
-    write(&scan_dir.join("dataset.link"), &format!("{dataset_sha}\n"));
+    write(&scan.join("logs/out"), "fixture\n");
+    write(&scan.join("dataset.link"), &format!("{dataset_sha}\n"));
     let note_sha = git(
         &path,
         &["rev-parse", &format!("refs/gage/1/object/{note_id}")],
     );
-    write(&scan_dir.join("notes.link"), &note_sha);
+    write(&scan.join("notes.link"), &note_sha);
     write(
-        &scan_dir.join(format!("watermarks/{}/fixture:run:1", session.id)),
+        &scan.join(format!("watermarks/{}/fixture:run:1", session.id)),
         &format!("{} 1\n", session.commit_sha),
     );
-    ScanStore::from(&store)
-        .create("FIXTURESCAN1", &scan_dir)
-        .unwrap();
+    ScanStore::from(&store).create_from_dir(&scan_dir).unwrap();
 
     TagStore::from(&store)
         .add("fixture-tag", &note_id, false)
@@ -351,7 +353,7 @@ fn reads_the_generation_1_fixture() {
     let dataset = &dataset_list[0];
     assert_eq!(
         dataset.origin,
-        Some(DatasetOrigin::Scan("FIXTURESCAN1".into()))
+        Some(DatasetOrigin::Scan(FIXTURE_SCAN_ID.into()))
     );
     let members = datasets.sessions(&dataset.id).unwrap();
     assert_eq!(members.len(), 1);
@@ -398,7 +400,7 @@ fn reads_the_generation_1_fixture() {
     );
 
     let scans = ScanStore::from(&store);
-    let scan = scans.get("FIXTURESCAN1").unwrap();
+    let scan = scans.get(FIXTURE_SCAN_ID).unwrap();
     assert_eq!(scan.content.attrs.runtime, "gage fixture");
     assert_eq!(scan.content.tasks.len(), 1);
     assert_eq!(scan.content.tasks[0].attrs.status, TaskStatus::Completed);

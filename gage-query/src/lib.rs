@@ -607,6 +607,7 @@ mod tests {
     use datafusion::arrow::compute::cast;
     use datafusion::arrow::datatypes::DataType;
     use datafusion::prelude::SessionContext;
+    use gage_core::uuid::new_uuid;
     use gage_registry::driver::DriverRegistry;
     use gage_session::SourceOptions;
     use gage_store::{
@@ -1553,12 +1554,12 @@ mod tests {
         assert!(user.sql("SELECT commit FROM tag").await.is_err());
     }
 
-    /// A scan directory `scans/SCAN1/` whose `scan/` tree holds three
+    /// A scan directory `scans/<id>/` whose `scan/` tree holds three
     /// tasks and one agent record, with a plan ordering the tasks
     /// differently from tree order. The root `attrs.json` is absent,
     /// as for an active scan.
-    fn write_scan_dir(home: &std::path::Path) -> std::path::PathBuf {
-        let root = home.join("scans").join("SCAN1");
+    fn write_scan_dir(home: &std::path::Path, id: &str) -> std::path::PathBuf {
+        let root = home.join("scans").join(id);
         let scan = root.join("scan");
         let write = |path: &str, content: &str| {
             let path = scan.join(path);
@@ -1605,7 +1606,8 @@ mod tests {
     #[tokio::test]
     async fn scan_dir_scope_serves_tasks_and_agents() {
         let (tmp, store) = open_store();
-        let root = write_scan_dir(tmp.path());
+        let id = new_uuid();
+        let root = write_scan_dir(tmp.path(), &id);
         let ctx = ContextBuilder::new(Some(store))
             .scope(ScanScope::scan_dir(&root))
             .build()
@@ -1632,7 +1634,7 @@ mod tests {
                 "SELECT scan_id FROM scan_task WHERE scan_commit IS NULL"
             )
             .await,
-            ["SCAN1", "SCAN1", "SCAN1"]
+            vec![id.clone(); 3]
         );
         assert_eq!(
             strings(
@@ -1669,7 +1671,8 @@ mod tests {
     #[tokio::test]
     async fn scan_log_serves_the_logs_a_scan_wrote_in_every_scope() {
         let (tmp, store) = open_store();
-        let root = write_scan_dir(tmp.path());
+        let id = new_uuid();
+        let root = write_scan_dir(tmp.path(), &id);
         let active = ContextBuilder::new(Some(Arc::clone(&store)))
             .scope(ScanScope::scan_dir(&root))
             .build()
@@ -1690,9 +1693,7 @@ mod tests {
         .unwrap();
         {
             let store = store.lock().unwrap();
-            ScanStore::from(&*store)
-                .create("SCAN1", &root.join("scan"))
-                .unwrap();
+            ScanStore::from(&*store).create_from_dir(&root).unwrap();
         }
         let ctx = ContextBuilder::new(Some(Arc::clone(&store))).build().await;
         assert_eq!(
@@ -1701,14 +1702,14 @@ mod tests {
                 "SELECT scan_id || ' ' || name FROM scan_log ORDER BY name"
             )
             .await,
-            ["SCAN1 err", "SCAN1 out"]
+            [format!("{id} err"), format!("{id} out")]
         );
         assert_eq!(
             strings(&ctx, "SELECT text FROM scan_log WHERE name = 'out'").await,
             ["hello, world\n"]
         );
         let scoped = ContextBuilder::new(Some(store))
-            .scope(ScanScope::stored("SCAN1"))
+            .scope(ScanScope::stored(&id))
             .build()
             .await;
         assert_eq!(
@@ -1723,7 +1724,8 @@ mod tests {
     #[tokio::test]
     async fn stored_scans_serve_tasks_and_agents_in_both_scopes() {
         let (tmp, store) = open_store();
-        let root = write_scan_dir(tmp.path());
+        let id = new_uuid();
+        let root = write_scan_dir(tmp.path(), &id);
         std::fs::write(
             root.join("scan").join("attrs.json"),
             r#"{"runtime":"gage 1","started":1000,"stopped":1500,"canceled":false,"tasks":{"total":3,"completed":1,"failed":1}}"#,
@@ -1731,9 +1733,7 @@ mod tests {
         .unwrap();
         let commit = {
             let store = store.lock().unwrap();
-            ScanStore::from(&*store)
-                .create("SCAN1", &root.join("scan"))
-                .unwrap()
+            ScanStore::from(&*store).create_from_dir(&root).unwrap()
         };
 
         let ctx = ContextBuilder::new(Some(Arc::clone(&store))).build().await;
@@ -1766,7 +1766,7 @@ mod tests {
         );
 
         let scoped = ContextBuilder::new(Some(store))
-            .scope(ScanScope::stored("SCAN1"))
+            .scope(ScanScope::stored(&id))
             .build()
             .await;
         assert_eq!(
@@ -1785,7 +1785,8 @@ mod tests {
     #[tokio::test]
     async fn stored_scan_scope_serves_issues_at_their_tip() {
         let (tmp, store) = open_store();
-        let root = write_scan_dir(tmp.path());
+        let id = new_uuid();
+        let root = write_scan_dir(tmp.path(), &id);
         std::fs::write(
             root.join("scan").join("attrs.json"),
             r#"{"runtime":"gage 1","started":1000,"stopped":1500,"canceled":false,"tasks":{"total":3,"completed":1,"failed":1}}"#,
@@ -1811,9 +1812,7 @@ mod tests {
                 format!("{written}\n"),
             )
             .unwrap();
-            ScanStore::from(&*store)
-                .create("SCAN1", &root.join("scan"))
-                .unwrap();
+            ScanStore::from(&*store).create_from_dir(&root).unwrap();
             issues
                 .set_status(
                     &issue_id,
@@ -1827,7 +1826,7 @@ mod tests {
         };
 
         let scoped = ContextBuilder::new(Some(store))
-            .scope(ScanScope::stored("SCAN1"))
+            .scope(ScanScope::stored(&id))
             .build()
             .await;
         assert_eq!(

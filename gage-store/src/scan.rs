@@ -23,6 +23,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use gage_core::uuid::is_id;
 use serde::{Deserialize, Serialize};
 
 use crate::dataset::OBJECT_TYPE as DATASET_TYPE;
@@ -31,6 +32,7 @@ use crate::index::{ObjectQuery, Order, SelectedTip};
 use crate::issue::{IssueStore, OBJECT_TYPE as ISSUE_TYPE};
 use crate::note::{NoteStore, OBJECT_TYPE as NOTE_TYPE};
 use crate::object::{ObjectTree, require_type};
+use crate::scan_dir::ScanDirLayout;
 use crate::session::{OBJECT_TYPE as SESSION_TYPE, build_files_tree_inner};
 use crate::writer::{TreeInput, mktree, write_blob};
 use crate::{Store, StoreError};
@@ -293,14 +295,21 @@ pub trait ScanFiles {
 }
 
 impl ScanStore<'_> {
-    /// Write a scan from its scan directory's `scan/` tree under the given
-    /// id. The directory is validated first: every task status must be
-    /// terminal, a task directory may hold only `attrs.json`,
-    /// `agents.link`, and `agents/`, every linked agent session must be
-    /// live, and `dataset.link`, when present, must name a live dataset
-    /// commit. Returns the commit SHA.
-    pub fn create(&self, id: &str, scan_dir: &Path) -> Result<String, StoreError> {
-        let content = ScanContent::from_files(&DirFiles::new(scan_dir))?;
+    /// Write the scan under `dir`, a scan directory `scans/<id>/`: the
+    /// directory name is the scan's id and the `scan/` tree is the
+    /// object's content. The tree is validated first: every task
+    /// status must be terminal, a task directory may hold only
+    /// `attrs.json`, `agents.link`, and `agents/`, every linked agent
+    /// session must be live, and `dataset.link`, when present, must
+    /// name a live dataset commit. Returns the commit SHA.
+    pub fn create_from_dir(&self, dir: &Path) -> Result<String, StoreError> {
+        let layout = ScanDirLayout::new(dir);
+        let id = layout
+            .scan_id()
+            .expect("a scan directory is named by its id");
+        assert!(is_id(id), "a scan directory is named by its id: {id:?}");
+        let scan_dir = layout.object_dir();
+        let content = ScanContent::from_files(&DirFiles::new(&scan_dir))?;
         for task in &content.tasks {
             if !task.attrs.status.is_terminal() {
                 return Err(StoreError::Parse(format!(
@@ -1190,17 +1199,19 @@ mod tests {
     use super::*;
     use crate::test_support::open_store;
     use crate::{DatasetStore, SessionStore};
+    use gage_core::uuid::new_uuid;
 
     fn write(path: &Path, content: &str) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, content).unwrap();
     }
 
-    /// A scan directory's `scan/` tree with one completed and one
-    /// failed task. The attrs carry the `skipped` count an earlier
-    /// runtime wrote; a reader ignores it.
-    fn new_scan_dir(dir: &Path) -> PathBuf {
-        let scan = dir.join("scan");
+    /// A scan directory `root/<id>/` whose `scan/` tree has one
+    /// completed and one failed task. The attrs carry the `skipped`
+    /// count an earlier runtime wrote; a reader ignores it.
+    fn new_scan_dir(root: &Path, id: &str) -> PathBuf {
+        let scan_dir = root.join(id);
+        let scan = scan_dir.join("scan");
         write(
             &scan.join("attrs.json"),
             r#"{"runtime":"gage git-abc123","started":1000,"stopped":1500,"canceled":false,"tasks":{"total":2,"completed":1,"failed":1,"skipped":0}}"#,
@@ -1230,16 +1241,17 @@ mod tests {
             &scan.join("logs/records"),
             "2026-09-24T15:04:05.000Z INFO gage_scan: scan started\n2026-09-24T15:04:05.123Z INFO hello:greet: started\n",
         );
-        scan
+        scan_dir
     }
 
     #[test]
     fn create_writes_the_scan_dir_layout_and_get_reads_it_back() {
         let tmp = tempfile::tempdir().unwrap();
         let (store, _fsck) = open_store(tmp.path());
-        let scan_dir = new_scan_dir(tmp.path());
+        let id = new_uuid();
+        let scan_dir = new_scan_dir(tmp.path(), &id);
         let scans = ScanStore::from(&store);
-        let commit = scans.create("SCAN1", &scan_dir).unwrap();
+        let commit = scans.create_from_dir(&scan_dir).unwrap();
 
         let paths: Vec<String> = store
             .ls(&commit)
@@ -1276,12 +1288,12 @@ mod tests {
         assert_eq!(header.object_type, OBJECT_TYPE);
         assert_eq!(header.version, OBJECT_VERSION);
 
-        let record = scans.get("SCAN1").unwrap();
-        assert_eq!(record.id, "SCAN1");
+        let record = scans.get(&id).unwrap();
+        assert_eq!(record.id, id);
         assert_eq!(record.commit_sha, commit);
         assert_eq!(
             record.content,
-            ScanContent::from_files(&DirFiles::new(&scan_dir)).unwrap()
+            ScanContent::from_files(&DirFiles::new(&scan_dir.join("scan"))).unwrap()
         );
         assert_eq!(
             record.content.attrs,
@@ -1453,8 +1465,10 @@ mod tests {
             "session+task:SCANA/hello:greet/agent-native-1"
         );
 
-        let scan_dir = new_scan_dir(tmp.path());
-        let agent_dir = scan_dir.join(format!("tasks/hello/greet/agents/{}", added.id));
+        let id = new_uuid();
+
+        let scan_dir = new_scan_dir(tmp.path(), &id);
+        let agent_dir = scan_dir.join(format!("scan/tasks/hello/greet/agents/{}", added.id));
         write(&agent_dir.join("attrs.json"), r#"{"exit_code":0}"#);
         write(&agent_dir.join("stderr"), "warn: x\n");
         write(
@@ -1462,13 +1476,13 @@ mod tests {
             r#"{"type":"result","result":"ok"}"#,
         );
         write(
-            &scan_dir.join("tasks/hello/greet/agents.link"),
+            &scan_dir.join("scan/tasks/hello/greet/agents.link"),
             &format!("{}\n", added.commit_sha),
         );
         // An agent still running when the scan ends: its record is
         // the native id alone, read live and left out of the store
         write(
-            &scan_dir.join("tasks/hello/greet/agents/zzz-running/native_id"),
+            &scan_dir.join("scan/tasks/hello/greet/agents/zzz-running/native_id"),
             "native-2\n",
         );
         let ended = TaskAgent {
@@ -1484,7 +1498,7 @@ mod tests {
                 cost_usd: None,
             }),
         };
-        let live = read_tasks(&DirFiles::new(&scan_dir)).unwrap();
+        let live = read_tasks(&DirFiles::new(&scan_dir.join("scan"))).unwrap();
         assert_eq!(
             live[1].agents,
             [
@@ -1498,9 +1512,9 @@ mod tests {
             ]
         );
         let scans = ScanStore::from(&store);
-        let commit = scans.create("SCANA", &scan_dir).unwrap();
+        let commit = scans.create_from_dir(&scan_dir).unwrap();
 
-        let greet = &scans.get("SCANA").unwrap().content.tasks[1];
+        let greet = &scans.get(&id).unwrap().content.tasks[1];
         assert_eq!(greet.task, "greet");
         assert_eq!(greet.agent_sessions, slice::from_ref(&added.commit_sha));
         assert_eq!(greet.agents, [ended]);
@@ -1529,7 +1543,7 @@ mod tests {
         // rejected
         write(&agent_dir.join("notes.txt"), "x");
         let err = ScanStore::from(&store)
-            .create("SCANB", &scan_dir)
+            .create_from_dir(&scan_dir)
             .unwrap_err();
         assert!(matches!(err, StoreError::InvalidPath { .. }), "{err:?}");
     }
@@ -1538,13 +1552,14 @@ mod tests {
     fn create_without_tasks_writes_no_tasks_tree() {
         let tmp = tempfile::tempdir().unwrap();
         let (store, _fsck) = open_store(tmp.path());
-        let scan_dir = tmp.path().join("scan");
+        let id = new_uuid();
+        let scan_dir = tmp.path().join(&id);
         write(
-            &scan_dir.join("attrs.json"),
+            &scan_dir.join("scan/attrs.json"),
             r#"{"runtime":"gage 0.2.0","started":1,"stopped":2,"canceled":false,"tasks":{"total":0,"completed":0,"failed":0}}"#,
         );
         let scans = ScanStore::from(&store);
-        let commit = scans.create("SCAN2", &scan_dir).unwrap();
+        let commit = scans.create_from_dir(&scan_dir).unwrap();
         let paths: Vec<String> = store
             .ls(&commit)
             .unwrap()
@@ -1552,31 +1567,33 @@ mod tests {
             .map(|e| e.name)
             .collect();
         assert_eq!(paths, ["attrs.json", "created", "id", "modified", "type"]);
-        assert!(scans.get("SCAN2").unwrap().content.tasks.is_empty());
+        assert!(scans.get(&id).unwrap().content.tasks.is_empty());
     }
 
     #[test]
     fn query_lists_scans_newest_first_with_count_ignoring_limit() {
         let tmp = tempfile::tempdir().unwrap();
         let (store, _fsck) = open_store(tmp.path());
-        let scan_dir = new_scan_dir(tmp.path());
+        let ids: Vec<String> = (0..3).map(|_| new_uuid()).collect();
         let scans = ScanStore::from(&store);
-        for id in ["SCANA", "SCANB", "SCANC"] {
-            scans.create(id, &scan_dir).unwrap();
+        for id in &ids {
+            scans
+                .create_from_dir(&new_scan_dir(tmp.path(), id))
+                .unwrap();
             // Distinct `created` stamps so the order is deterministic
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
         assert_eq!(scans.query().limit(2).count().unwrap(), 3);
-        let ids: Vec<String> = scans
+        let listed: Vec<String> = scans
             .query()
             .limit(2)
             .iter()
             .unwrap()
             .map(|r| r.unwrap().id)
             .collect();
-        assert_eq!(ids, ["SCANC", "SCANB"]);
+        assert_eq!(listed, [ids[2].clone(), ids[1].clone()]);
         let all: Vec<String> = scans.iter().unwrap().map(|r| r.unwrap().id).collect();
-        assert_eq!(all, ["SCANC", "SCANB", "SCANA"]);
+        assert_eq!(all, [ids[2].clone(), ids[1].clone(), ids[0].clone()]);
         assert_eq!(
             scans
                 .query()
@@ -1592,13 +1609,14 @@ mod tests {
     fn create_rejects_an_in_flight_task_status() {
         let tmp = tempfile::tempdir().unwrap();
         let (store, _fsck) = open_store(tmp.path());
-        let scan_dir = new_scan_dir(tmp.path());
+        let id = new_uuid();
+        let scan_dir = new_scan_dir(tmp.path(), &id);
         write(
-            &scan_dir.join("tasks/hello/greet/attrs.json"),
+            &scan_dir.join("scan/tasks/hello/greet/attrs.json"),
             r#"{"status":"started","started":1000}"#,
         );
         let err = ScanStore::from(&store)
-            .create("SCAN3", &scan_dir)
+            .create_from_dir(&scan_dir)
             .unwrap_err();
         assert!(
             err.to_string().contains("hello:greet has status started"),
@@ -1611,10 +1629,11 @@ mod tests {
     fn create_rejects_a_stray_file_in_a_scanner_directory() {
         let tmp = tempfile::tempdir().unwrap();
         let (store, _fsck) = open_store(tmp.path());
-        let scan_dir = new_scan_dir(tmp.path());
-        write(&scan_dir.join("scanners/hello/notes.txt"), "x");
+        let id = new_uuid();
+        let scan_dir = new_scan_dir(tmp.path(), &id);
+        write(&scan_dir.join("scan/scanners/hello/notes.txt"), "x");
         let err = ScanStore::from(&store)
-            .create("SCAN5", &scan_dir)
+            .create_from_dir(&scan_dir)
             .unwrap_err();
         assert!(matches!(err, StoreError::InvalidPath { .. }), "{err}");
     }
@@ -1624,10 +1643,11 @@ mod tests {
         for path in ["tasks/hello/greet/logs/out", "logs/trace"] {
             let tmp = tempfile::tempdir().unwrap();
             let (store, _fsck) = open_store(tmp.path());
-            let scan_dir = new_scan_dir(tmp.path());
-            write(&scan_dir.join(path), "x");
+            let id = new_uuid();
+            let scan_dir = new_scan_dir(tmp.path(), &id);
+            write(&scan_dir.join("scan").join(path), "x");
             let err = ScanStore::from(&store)
-                .create("SCAN6", &scan_dir)
+                .create_from_dir(&scan_dir)
                 .unwrap_err();
             assert!(
                 matches!(err, StoreError::InvalidPath { .. }),
@@ -1640,10 +1660,11 @@ mod tests {
     fn create_rejects_an_unexpected_task_file() {
         let tmp = tempfile::tempdir().unwrap();
         let (store, _fsck) = open_store(tmp.path());
-        let scan_dir = new_scan_dir(tmp.path());
-        write(&scan_dir.join("tasks/hello/greet/notes.txt"), "x");
+        let id = new_uuid();
+        let scan_dir = new_scan_dir(tmp.path(), &id);
+        write(&scan_dir.join("scan/tasks/hello/greet/notes.txt"), "x");
         let err = ScanStore::from(&store)
-            .create("SCAN4", &scan_dir)
+            .create_from_dir(&scan_dir)
             .unwrap_err();
         assert!(matches!(err, StoreError::InvalidPath { .. }), "{err}");
     }
@@ -1655,20 +1676,24 @@ mod tests {
         let datasets = DatasetStore::from(&store);
         let dataset_id = datasets.create().unwrap();
         let dataset_sha = datasets.get(&dataset_id).unwrap().commit_sha;
-        let scan_dir = new_scan_dir(tmp.path());
-        write(&scan_dir.join("dataset.link"), &format!("{dataset_sha}\n"));
+        let id = new_uuid();
+        let scan_dir = new_scan_dir(tmp.path(), &id);
+        write(
+            &scan_dir.join("scan/dataset.link"),
+            &format!("{dataset_sha}\n"),
+        );
         let scans = ScanStore::from(&store);
-        let commit = scans.create("SCAN7", &scan_dir).unwrap();
+        let commit = scans.create_from_dir(&scan_dir).unwrap();
 
         assert_eq!(
             store.read_commit(&commit).unwrap().parents,
             slice::from_ref(&dataset_sha)
         );
-        let record = scans.get("SCAN7").unwrap();
+        let record = scans.get(&id).unwrap();
         assert_eq!(record.content.dataset, Some(dataset_sha));
         assert_eq!(
             record.content,
-            ScanContent::from_files(&DirFiles::new(&scan_dir)).unwrap()
+            ScanContent::from_files(&DirFiles::new(&scan_dir.join("scan"))).unwrap()
         );
     }
 
@@ -1676,22 +1701,25 @@ mod tests {
     fn create_without_a_dataset_link_has_no_parents() {
         let tmp = tempfile::tempdir().unwrap();
         let (store, _fsck) = open_store(tmp.path());
-        let scan_dir = new_scan_dir(tmp.path());
+        let id = new_uuid();
+        let scan_dir = new_scan_dir(tmp.path(), &id);
         let scans = ScanStore::from(&store);
-        let commit = scans.create("SCAN8", &scan_dir).unwrap();
+        let commit = scans.create_from_dir(&scan_dir).unwrap();
         assert!(store.read_commit(&commit).unwrap().parents.is_empty());
-        assert_eq!(scans.get("SCAN8").unwrap().content.dataset, None);
+        assert_eq!(scans.get(&id).unwrap().content.dataset, None);
     }
 
     #[test]
     fn create_rejects_a_dataset_link_to_a_non_dataset() {
         let tmp = tempfile::tempdir().unwrap();
         let (store, _fsck) = open_store(tmp.path());
-        let scan_dir = new_scan_dir(tmp.path());
-        let other = ScanStore::from(&store).create("SCAN9", &scan_dir).unwrap();
-        write(&scan_dir.join("dataset.link"), &format!("{other}\n"));
+        let other = ScanStore::from(&store)
+            .create_from_dir(&new_scan_dir(tmp.path(), &new_uuid()))
+            .unwrap();
+        let scan_dir = new_scan_dir(tmp.path(), &new_uuid());
+        write(&scan_dir.join("scan/dataset.link"), &format!("{other}\n"));
         let err = ScanStore::from(&store)
-            .create("SCAN10", &scan_dir)
+            .create_from_dir(&scan_dir)
             .unwrap_err();
         assert!(
             matches!(&err, StoreError::WrongType { expected, actual, .. }
@@ -1714,10 +1742,11 @@ mod tests {
             ("\n".to_string(), "expected one SHA, found 0"),
             ("not-a-sha\n".to_string(), "is not a commit SHA"),
         ] {
-            let scan_dir = new_scan_dir(tmp.path());
-            write(&scan_dir.join("dataset.link"), &content);
+            let id = new_uuid();
+            let scan_dir = new_scan_dir(tmp.path(), &id);
+            write(&scan_dir.join("scan/dataset.link"), &content);
             let err = ScanStore::from(&store)
-                .create("SCAN11", &scan_dir)
+                .create_from_dir(&scan_dir)
                 .unwrap_err();
             assert!(
                 matches!(&err, StoreError::Parse(m) if m.contains(what)),
@@ -1751,15 +1780,16 @@ mod tests {
                     .unwrap(),
             );
         }
-        let scan_dir = new_scan_dir(tmp.path());
+        let id = new_uuid();
+        let scan_dir = new_scan_dir(tmp.path(), &id);
         write(
-            &scan_dir.join("notes.link"),
+            &scan_dir.join("scan/notes.link"),
             &format!("{}\n{}\n", shas[0], shas[1]),
         );
         let scans = ScanStore::from(&store);
-        let commit = scans.create("SCAN12", &scan_dir).unwrap();
+        let commit = scans.create_from_dir(&scan_dir).unwrap();
         assert_eq!(store.read_commit(&commit).unwrap().parents, shas);
-        assert_eq!(scans.get("SCAN12").unwrap().content.notes, shas);
+        assert_eq!(scans.get(&id).unwrap().content.notes, shas);
     }
 
     #[test]
@@ -1782,19 +1812,20 @@ mod tests {
             .rev_parse(&crate::object::object_ref(&id))
             .unwrap()
             .unwrap();
-        let scan_dir = new_scan_dir(tmp.path());
-        write(&scan_dir.join("issues.link"), &format!("{sha}\n"));
+        let id = new_uuid();
+        let scan_dir = new_scan_dir(tmp.path(), &id);
+        write(&scan_dir.join("scan/issues.link"), &format!("{sha}\n"));
         let scans = ScanStore::from(&store);
-        let commit = scans.create("SCAN12I", &scan_dir).unwrap();
+        let commit = scans.create_from_dir(&scan_dir).unwrap();
         assert_eq!(
             store.read_commit(&commit).unwrap().parents,
             slice::from_ref(&sha)
         );
-        assert_eq!(scans.get("SCAN12I").unwrap().content.issues, [sha]);
+        assert_eq!(scans.get(&id).unwrap().content.issues, [sha]);
 
-        let other_dir = new_scan_dir(tmp.path());
-        write(&other_dir.join("issues.link"), &format!("{commit}\n"));
-        let err = scans.create("SCAN13I", &other_dir).unwrap_err();
+        let other_dir = new_scan_dir(tmp.path(), &new_uuid());
+        write(&other_dir.join("scan/issues.link"), &format!("{commit}\n"));
+        let err = scans.create_from_dir(&other_dir).unwrap_err();
         assert!(
             matches!(&err, StoreError::WrongType { expected, .. } if expected == "gage::issue"),
             "{err}"
@@ -1805,11 +1836,13 @@ mod tests {
     fn create_rejects_a_notes_link_to_a_non_note() {
         let tmp = tempfile::tempdir().unwrap();
         let (store, _fsck) = open_store(tmp.path());
-        let scan_dir = new_scan_dir(tmp.path());
-        let other = ScanStore::from(&store).create("SCAN13", &scan_dir).unwrap();
-        write(&scan_dir.join("notes.link"), &format!("{other}\n"));
+        let other = ScanStore::from(&store)
+            .create_from_dir(&new_scan_dir(tmp.path(), &new_uuid()))
+            .unwrap();
+        let scan_dir = new_scan_dir(tmp.path(), &new_uuid());
+        write(&scan_dir.join("scan/notes.link"), &format!("{other}\n"));
         let err = ScanStore::from(&store)
-            .create("SCAN14", &scan_dir)
+            .create_from_dir(&scan_dir)
             .unwrap_err();
         assert!(
             matches!(&err, StoreError::WrongType { expected, .. } if expected == NOTE_TYPE),
@@ -1821,25 +1854,26 @@ mod tests {
     fn create_imports_watermarks_and_decodes_them() {
         let tmp = tempfile::tempdir().unwrap();
         let (store, _fsck) = open_store(tmp.path());
-        let scan_dir = new_scan_dir(tmp.path());
+        let id = new_uuid();
+        let scan_dir = new_scan_dir(tmp.path(), &id);
         let session_sha = "0123456789abcdef0123456789abcdef01234567";
         let note_sha = "89abcdef0123456789abcdef0123456789abcdef";
         let digest = "0123456789abcdef";
         write(
-            &scan_dir.join("watermarks/SESSION1/s:t:1"),
+            &scan_dir.join("scan/watermarks/SESSION1/s:t:1"),
             &format!("{session_sha} 120\n"),
         );
         write(
-            &scan_dir.join("watermarks/NOTE1/s:t:1"),
+            &scan_dir.join("scan/watermarks/NOTE1/s:t:1"),
             &format!("{note_sha} 1\n"),
         );
         write(
-            &scan_dir.join("watermarks/ATTACHMENT1/s:t:1"),
+            &scan_dir.join("scan/watermarks/ATTACHMENT1/s:t:1"),
             &format!("{digest} 1\n"),
         );
         let scans = ScanStore::from(&store);
-        let commit = scans.create("SCAN15", &scan_dir).unwrap();
-        let record = scans.get("SCAN15").unwrap();
+        let commit = scans.create_from_dir(&scan_dir).unwrap();
+        let record = scans.get(&id).unwrap();
         assert_eq!(
             record.content.watermarks,
             [
@@ -1865,7 +1899,7 @@ mod tests {
         );
         assert_eq!(
             record.content,
-            ScanContent::from_files(&DirFiles::new(&scan_dir)).unwrap()
+            ScanContent::from_files(&DirFiles::new(&scan_dir.join("scan"))).unwrap()
         );
         assert!(
             store
@@ -1880,7 +1914,8 @@ mod tests {
     fn create_rejects_a_watermark_without_a_version_and_a_mark() {
         let tmp = tempfile::tempdir().unwrap();
         let (store, _fsck) = open_store(tmp.path());
-        let scan_dir = new_scan_dir(tmp.path());
+        let id = new_uuid();
+        let scan_dir = new_scan_dir(tmp.path(), &id);
         let sha = "0123456789abcdef0123456789abcdef01234567";
         for content in [
             "1234 7\n",
@@ -1888,9 +1923,9 @@ mod tests {
             &format!("{sha}\n"),
             &format!("{sha} x\n"),
         ] {
-            write(&scan_dir.join("watermarks/SESSION1/s:t:1"), content);
+            write(&scan_dir.join("scan/watermarks/SESSION1/s:t:1"), content);
             let err = ScanStore::from(&store)
-                .create("SCAN16", &scan_dir)
+                .create_from_dir(&scan_dir)
                 .unwrap_err();
             assert!(
                 matches!(&err, StoreError::Parse(m) if m.contains("is not <version> <mark>")),
@@ -1940,17 +1975,20 @@ mod tests {
                 key: None,
             })
             .unwrap();
-        let scan_dir = new_scan_dir(tmp);
+        let scan_dir = new_scan_dir(tmp, id);
         write(
-            &scan_dir.join("notes.link"),
+            &scan_dir.join("scan/notes.link"),
             &format!("{}\n{}\n", sha(&written[0]), sha(&written[1])),
         );
         write(
-            &scan_dir.join("notes_carried.link"),
+            &scan_dir.join("scan/notes_carried.link"),
             &format!("{}\n", sha(&carried)),
         );
-        write(&scan_dir.join("issues.link"), &format!("{}\n", sha(&issue)));
-        let commit = ScanStore::from(store).create(id, &scan_dir).unwrap();
+        write(
+            &scan_dir.join("scan/issues.link"),
+            &format!("{}\n", sha(&issue)),
+        );
+        let commit = ScanStore::from(store).create_from_dir(&scan_dir).unwrap();
         (commit, written, carried, issue)
     }
 
@@ -1959,14 +1997,15 @@ mod tests {
         use crate::{IssueStore, NoteStore};
         let tmp = tempfile::tempdir().unwrap();
         let (store, _fsck) = open_store(tmp.path());
-        let (_, written, carried, issue) = scan_with_links(tmp.path(), &store, "SCAN17");
+        let id = new_uuid();
+        let (_, written, carried, issue) = scan_with_links(tmp.path(), &store, &id);
         let scans = ScanStore::from(&store);
 
-        assert_eq!(scans.delete("SCAN17").unwrap(), "SCAN17");
+        assert_eq!(scans.delete(&id).unwrap(), id);
 
         assert!(matches!(
-            scans.get("SCAN17").unwrap_err(),
-            StoreError::ObjectDeleted(id) if id == "SCAN17"
+            scans.get(&id).unwrap_err(),
+            StoreError::ObjectDeleted(found) if found == id
         ));
         assert_eq!(scans.query().count().unwrap(), 0);
         let notes = NoteStore::from(&store);
@@ -1975,8 +2014,8 @@ mod tests {
         }
         IssueStore::from(&store).get(&issue).unwrap();
         assert!(matches!(
-            scans.delete("SCAN17").unwrap_err(),
-            StoreError::ObjectDeleted(id) if id == "SCAN17"
+            scans.delete(&id).unwrap_err(),
+            StoreError::ObjectDeleted(found) if found == id
         ));
     }
 
@@ -1985,26 +2024,27 @@ mod tests {
         use crate::{IssueStore, NoteStore};
         let tmp = tempfile::tempdir().unwrap();
         let (store, _fsck) = open_store(tmp.path());
-        let (_, written, carried, issue) = scan_with_links(tmp.path(), &store, "SCAN18");
+        let id = new_uuid();
+        let (_, written, carried, issue) = scan_with_links(tmp.path(), &store, &id);
         let scans = ScanStore::from(&store);
         let notes = NoteStore::from(&store);
         let issues = IssueStore::from(&store);
         // A note deleted after the scan wrote it is skipped, not an error
         notes.delete(&written[1]).unwrap();
 
-        let deleted = scans.delete_cascade("SCAN18").unwrap();
+        let deleted = scans.delete_cascade(&id).unwrap();
 
         assert_eq!(
             deleted,
             ScanDeleted {
-                scan: "SCAN18".into(),
+                scan: id.clone(),
                 notes: vec![written[0].clone()],
                 issues: vec![issue.clone()],
             }
         );
         assert!(matches!(
-            scans.get("SCAN18").unwrap_err(),
-            StoreError::ObjectDeleted(id) if id == "SCAN18"
+            scans.get(&id).unwrap_err(),
+            StoreError::ObjectDeleted(found) if found == id
         ));
         for id in &written {
             assert!(matches!(

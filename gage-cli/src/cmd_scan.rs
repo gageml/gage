@@ -2339,6 +2339,7 @@ mod tests {
     use std::path::Path;
 
     use clap::Parser;
+    use gage_core::uuid::new_uuid;
     use gage_store::{ScanStore, Store};
 
     use super::*;
@@ -2418,7 +2419,9 @@ mod tests {
                 ),
             );
         }
-        ScanStore::from(store).create(id, &scan).unwrap();
+        ScanStore::from(store)
+            .create_from_dir(&home.join(id))
+            .unwrap();
     }
 
     /// The Cost column sums a scan's agent spend, marks a total with
@@ -2430,19 +2433,20 @@ mod tests {
         let path = tmp.path().join("store.git");
         gage_store::init(&path).unwrap();
         let store = Store::open(&path).unwrap();
+        let ids: Vec<String> = (0..3).map(|_| new_uuid()).collect();
         store_scan(
             &store,
             tmp.path(),
-            "SCAN1",
+            &ids[0],
             &[("AGENT1", Some(0.5)), ("AGENT2", Some(0.25))],
         );
         store_scan(
             &store,
             tmp.path(),
-            "SCAN2",
+            &ids[1],
             &[("AGENT3", Some(1.0)), ("AGENT4", None)],
         );
-        store_scan(&store, tmp.path(), "SCAN3", &[]);
+        store_scan(&store, tmp.path(), &ids[2], &[]);
         let ctx = ContextBuilder::new(Some(Arc::new(Mutex::new(store))))
             .build()
             .await;
@@ -2458,13 +2462,12 @@ mod tests {
             })
             .collect();
         costs.sort();
-        assert_eq!(
-            costs,
-            [
-                ("SCAN1".to_string(), "$0.75".to_string()),
-                ("SCAN2".to_string(), "$1.00+".to_string()),
-                ("SCAN3".to_string(), "$0.00".to_string()),
-            ]
-        );
+        let mut expected = [
+            (ids[0].clone(), "$0.75".to_string()),
+            (ids[1].clone(), "$1.00+".to_string()),
+            (ids[2].clone(), "$0.00".to_string()),
+        ];
+        expected.sort();
+        assert_eq!(costs, expected);
     }
 }

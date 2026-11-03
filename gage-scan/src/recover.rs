@@ -184,6 +184,7 @@ mod tests {
 
     use super::*;
     use crate::scan_dir::ScannerPlan;
+    use gage_core::uuid::new_uuid;
 
     fn open_store() -> (TempDir, Store) {
         let tmp = tempfile::tempdir().unwrap();
@@ -243,7 +244,8 @@ mod tests {
     fn a_dead_run_is_applied_as_canceled() {
         let (tmp, store) = open_store();
         let scans = tmp.path().join("scans");
-        let scan_dir = running_scan_dir(&scans, "DEAD");
+        let id = new_uuid();
+        let scan_dir = running_scan_dir(&scans, &id);
         // One task had started when the process died
         scan_dir
             .write_task(
@@ -263,7 +265,7 @@ mod tests {
         assert_eq!(
             orphans,
             [(
-                "DEAD".to_string(),
+                id.clone(),
                 OrphanReason::DeadWriter {
                     pid: Some(DEAD_PID)
                 }
@@ -288,9 +290,9 @@ mod tests {
                 failed: 0,
             }
         );
-        assert!(!scans.join("DEAD").exists(), "the directory is removed");
+        assert!(!scans.join(&id).exists(), "the directory is removed");
 
-        let record = ScanStore::from(&store).get("DEAD").unwrap();
+        let record = ScanStore::from(&store).get(&id).unwrap();
         assert_eq!(record.content.attrs, attrs);
         let statuses: Vec<(String, TaskStatus, Option<i64>)> = record
             .content
@@ -320,7 +322,8 @@ mod tests {
     fn an_unapplied_terminal_run_is_applied_as_it_stands() {
         let (tmp, store) = open_store();
         let scans = tmp.path().join("scans");
-        let scan_dir = running_scan_dir(&scans, "DONE");
+        let id = new_uuid();
+        let scan_dir = running_scan_dir(&scans, &id);
         for task in ["one", "two"] {
             scan_dir
                 .write_task(
@@ -352,10 +355,7 @@ mod tests {
 
         assert_eq!(
             orphan_ids(&scans),
-            [(
-                "DONE".to_string(),
-                OrphanReason::Unapplied(State::Completed)
-            )]
+            [(id.clone(), OrphanReason::Unapplied(State::Completed))]
         );
         let orphan = find_orphans(&scans).unwrap().pop().unwrap();
         let recovered = recover(&store, orphan, "test-version").unwrap();
@@ -364,10 +364,10 @@ mod tests {
         };
         assert_eq!(applied, attrs);
         assert_eq!(
-            ScanStore::from(&store).get("DONE").unwrap().content.attrs,
+            ScanStore::from(&store).get(&id).unwrap().content.attrs,
             attrs
         );
-        assert!(!scans.join("DONE").exists());
+        assert!(!scans.join(&id).exists());
     }
 
     #[test]

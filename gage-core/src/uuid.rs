@@ -25,6 +25,12 @@ pub fn short_uuid(id: &str) -> &str {
     id.get(..8).unwrap_or(id)
 }
 
+/// Whether `s` has the shape of a Gage id: 26 chars of the lowercase
+/// Crockford alphabet.
+pub fn is_id(s: &str) -> bool {
+    s.len() == 26 && s.bytes().all(|b| CROCKFORD.contains(&b))
+}
+
 /// Generate a ULID: 26 chars of Crockford base32 whose first 10 chars
 /// encode the current time in milliseconds and whose last 16 are
 /// random. Sorting ULIDs as strings sorts them by creation time, so a
@@ -77,6 +83,18 @@ mod tests {
         let id = new_uuid();
         assert_eq!(id.len(), 26);
         assert!(id.bytes().all(|b| CROCKFORD.contains(&b)));
+    }
+
+    #[test]
+    fn is_id_accepts_generated_ids_and_rejects_other_shapes() {
+        assert!(is_id(&new_uuid()));
+        assert!(is_id(&derive_id("key")));
+        assert!(is_id(&new_ulid()));
+        assert!(!is_id("SCAN1"));
+        assert!(!is_id(&"a".repeat(25)));
+        assert!(!is_id(&"a".repeat(27)));
+        assert!(!is_id(&"A".repeat(26)));
+        assert!(!is_id(&"i".repeat(26)));
     }
 
     #[test]
