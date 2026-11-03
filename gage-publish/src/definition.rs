@@ -492,6 +492,29 @@ impl PublishDefinition {
         });
     }
 
+    /// Set the title, replacing any existing one.
+    pub fn set_title(&mut self, text: &str, author: &str) {
+        self.title = Some(TitleEntry {
+            text: text.to_string(),
+            author: author.to_string(),
+        });
+    }
+
+    /// Append each redaction not already recorded, and return the
+    /// number added. A row equal to one already in `redact` on text,
+    /// reason, author, and mark together is an exact duplicate and is
+    /// skipped; a difference in any field is a distinct record kept.
+    pub fn add_redactions(&mut self, rows: &[TextEntry]) -> usize {
+        let mut added = 0;
+        for row in rows {
+            if !self.redact.contains(row) {
+                self.redact.push(row.clone());
+                added += 1;
+            }
+        }
+        added
+    }
+
     /// Give every redaction, and the title, written without an author
     /// `author`. Returns the number of rows filled.
     pub fn fill_authors(&mut self, author: &str) -> usize {
@@ -1121,6 +1144,42 @@ mod tests {
             PublishDefinition::from_jsonc(&empty).unwrap(),
             PublishDefinition::new("abc", &[])
         );
+    }
+
+    #[test]
+    fn add_redactions_skips_exact_duplicates_only() {
+        let row = |literal: &str, reason: &str, author: &str, mark: bool| TextEntry {
+            literal: literal.into(),
+            reason: reason.into(),
+            author: author.into(),
+            mark,
+        };
+        let mut d = PublishDefinition::new("abc", &[]);
+        let added = d.add_redactions(&[
+            row("secret", "secret", "session:a", true),
+            row("secret", "secret", "session:a", true),
+            row("secret", "secret", "session:b", true),
+            row("secret", "pii", "session:a", true),
+            row("secret", "secret", "session:a", false),
+        ]);
+        assert_eq!(added, 4);
+        assert_eq!(d.redact.len(), 4);
+        assert_eq!(
+            d.add_redactions(&[row("secret", "secret", "session:a", true)]),
+            0
+        );
+        assert_eq!(d.redact.len(), 4);
+    }
+
+    #[test]
+    fn set_title_replaces_any_existing_title() {
+        let mut d = PublishDefinition::new("abc", &[]);
+        d.set_title("First", "user:a");
+        assert_eq!(d.title.as_ref().unwrap().text, "First");
+        d.set_title("Second", "user:b");
+        let t = d.title.as_ref().unwrap();
+        assert_eq!(t.text, "Second");
+        assert_eq!(t.author, "user:b");
     }
 
     /// A missing list reads as empty, and a redaction or title without

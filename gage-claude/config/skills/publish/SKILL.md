@@ -70,9 +70,11 @@ gage publish init --help
 
 This creates a staged session under `~/.gage/publish/<SESSION>`.
 
-The file `~/.gage/publish/<SESSION>.jsonc`.
-
-Edit this file in preparation for publishing the session.
+Common edits use `gage publish edit`: `--redact` adds text redactions and
+`--title` sets the title. Any other change is a direct edit of the definition
+file. `gage publish edit <SESSION> --path` prints the file path, and
+`gage publish edit <SESSION> --check` validates the file and reports problems by
+line.
 
 Use `mcp__plugin_gage_gage__Query` with the `publish` flag set to `true` to
 preview staged sessions.
@@ -86,5 +88,21 @@ pending list.
 Use `gage publish candidate <SESSION> -y` to split candidate text into files
 that are provided to `redact` agents.
 
-Each agent returns a list of text to redact, which is added to the publish
-definition.
+Each agent returns a list of rows to redact, each `[text, reason, mark]`.
+Collect the lists from every agent into one JSON array and add them in one call:
+
+```bash
+gage publish edit <SESSION> --redact @FILE
+```
+
+`gage publish edit <SESSION> --redact -` reads the array from stdin. The command
+fills the author of each row from the current session and drops rows that
+exactly duplicate a row already present. Do not set the author yourself.
+
+## Title
+
+Set or change the published session's title:
+
+```bash
+gage publish edit <SESSION> --title "<TEXT>"
+```

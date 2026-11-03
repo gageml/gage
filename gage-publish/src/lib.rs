@@ -205,7 +205,44 @@ impl<'a> Publisher<'a> {
     /// deleted by hand comes back unless its literal is allowed. The
     /// file is rewritten with what the refresh changed.
     pub fn refresh(&self, id: &str, author: &str) -> Result<Refreshed, PublishError> {
+        let definition = self.definition(id)?;
+        self.rebuild(id, definition, author)
+    }
+
+    /// Apply edits to the definition of the pending publish `id` and
+    /// rebuild it as [`refresh`] does. The title is set when `title`
+    /// is given, replacing any existing one. Each of `redactions` not
+    /// already recorded is added. A row this edit writes without an
+    /// author takes `author`.
+    ///
+    /// [`refresh`]: Publisher::refresh
+    pub fn edit(
+        &self,
+        id: &str,
+        author: &str,
+        title: Option<&str>,
+        redactions: &[TextEntry],
+    ) -> Result<Refreshed, PublishError> {
         let mut definition = self.definition(id)?;
+        if let Some(text) = title {
+            definition.set_title(text, author);
+        }
+        definition.add_redactions(redactions);
+        self.rebuild(id, definition, author)
+    }
+
+    /// Fill authors, check, run every named filter, build the staged
+    /// session, and write the definition back. Shared by [`refresh`]
+    /// and [`edit`].
+    ///
+    /// [`refresh`]: Publisher::refresh
+    /// [`edit`]: Publisher::edit
+    fn rebuild(
+        &self,
+        id: &str,
+        mut definition: PublishDefinition,
+        author: &str,
+    ) -> Result<Refreshed, PublishError> {
         let authored = definition.fill_authors(author);
         definition.validate()?;
         let session = self.open_original(id)?;

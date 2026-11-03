@@ -40,15 +40,15 @@ Each item you return is an exact substring of a decoded value. A redaction
 removes every copy of that substring in the session, so choose the shortest
 substring that is the sensitive value itself and not its surrounding words.
 
-`no_mark_flag` is `true` when the text is removed with no marker and `false`
-when a `[REDACTED]` marker takes its place. Use `false` unless a filter's
-instructions say when to omit the marker.
+`mark` is `true` when a `[REDACTED]` marker replaces the text and `false` when
+the text is removed with no marker. Use `true` unless a filter's instructions
+say to remove the text with no marker.
 
 Return only a JSON encoded list of lists, no prose, in this format:
 
 ```json
 [
-    [text_to_redact, reason_code, no_mark_flag],
+    [text_to_redact, reason_code, mark],
     ...
 ]
 ```

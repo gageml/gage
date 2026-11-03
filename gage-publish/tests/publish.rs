@@ -6,8 +6,8 @@
 use std::fs;
 
 use gage_publish::{
-    Allow, FilterSpec, InitArgs, PublishDefinition, PublishError, Publisher, Refreshed, TitleEntry,
-    candidate, format_lines,
+    Allow, FilterSpec, InitArgs, PublishDefinition, PublishError, Publisher, Refreshed, TextEntry,
+    TitleEntry, candidate, format_lines,
 };
 use gage_registry::driver::DriverRegistry;
 use gage_session::SourceOptions;
@@ -297,6 +297,59 @@ fn init_writes_the_annotated_file_with_the_title_and_init_args() {
 /// A redaction row added by hand takes effect everywhere its text
 /// appears, a row without an author takes the refresh's, a row that
 /// matches nothing is reported by position and kept, and a changed
+/// `Publisher::edit` sets the title and adds redactions in one
+/// rebuild, fills the author it is given into a row left without one,
+/// keeps the marker when mark is true, and skips an exact duplicate
+/// on a later call.
+#[test]
+fn edit_sets_the_title_and_adds_a_redaction_once() {
+    let f = fixture();
+    let publisher = Publisher::with_root(&f.store, &f.publish_root);
+    let id = stage(&publisher, &f.original, &[]);
+
+    let row = TextEntry {
+        literal: "garrett".into(),
+        reason: "pii".into(),
+        author: String::new(),
+        mark: true,
+    };
+    let refreshed = publisher
+        .edit(
+            &id,
+            "session:s",
+            Some("A shared title"),
+            std::slice::from_ref(&row),
+        )
+        .unwrap();
+    assert_eq!(refreshed.instances, 3);
+
+    let definition = publisher.definition(&id).unwrap();
+    let title = definition.title.as_ref().unwrap();
+    assert_eq!(title.text, "A shared title");
+    assert_eq!(title.author, "session:s");
+    assert_eq!(definition.redact.len(), 1);
+    assert_eq!(definition.redact[0].author, "session:s");
+    assert!(definition.redact[0].mark);
+
+    let lines = staged_lines(&f.publish_root, &id);
+    assert!(
+        lines[0].contains(r#""cwd":"/home/[REDACTED]/proj""#),
+        "{}",
+        lines[0]
+    );
+
+    let filled = TextEntry {
+        literal: "garrett".into(),
+        reason: "pii".into(),
+        author: "session:s".into(),
+        mark: true,
+    };
+    publisher
+        .edit(&id, "session:s", None, std::slice::from_ref(&filled))
+        .unwrap();
+    assert_eq!(publisher.definition(&id).unwrap().redact.len(), 1);
+}
+
 /// reason or mark takes effect.
 #[test]
 fn refresh_applies_redact_rows_and_reports_an_unmatched_row() {

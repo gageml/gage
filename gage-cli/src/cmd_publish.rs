@@ -28,7 +28,7 @@ use gage_core::style::IdHighlighter;
 use gage_core::uuid::short_uuid;
 use gage_publish::{
     Audience, Filter, FilterSpec, InitArgs as InitRecord, NAMED_FILTERS, Problem, PublishError,
-    Publisher, Use, candidate,
+    Publisher, TextEntry, Use, candidate,
 };
 use gage_session::{Driver, NativeSession, SkillMode, SkillSession, SourceOptions};
 use gage_store::url::parse_session_origin;
@@ -207,17 +207,19 @@ pub enum PublishCommand {
     /// Show definition of a pending publish
     ///
     /// Show definition of a pending publish. Prints definition file.
-    /// With --check, prints nothing and reports each problem of
-    /// definition file by line instead.
     Show(ShowArgs),
 
-    /// Edit definition of a pending publish in system editor
+    /// Edit definition of a pending publish
     ///
-    /// Edit definition of a pending publish in system editor. Opens
-    /// definition file in $VISUAL or $EDITOR and rebuilds staged
-    /// session when editor exits, as refresh does. An invalid
-    /// definition is reported and nothing changes; file is kept as
-    /// saved.
+    /// Edit definition of a pending publish. Opens definition file in
+    /// $VISUAL or $EDITOR and rebuilds staged session when editor
+    /// exits, as refresh does. An invalid definition is reported and
+    /// nothing changes; file is kept as saved. With --check, reports
+    /// each problem of definition file by line and makes no change
+    /// instead. With --path, prints definition file path and makes no
+    /// change. With --title, sets published session title and
+    /// rebuilds without opening editor. With --redact, adds text
+    /// redactions from a file and rebuilds.
     Edit(EditArgs),
 
     /// Rebuild a pending publish from its definition
@@ -358,6 +360,13 @@ pub struct ShowArgs {
     /// Pending publish session to show (ID or prefix)
     #[arg(value_name = "SESSION")]
     session: String,
+}
+
+#[derive(Args)]
+pub struct EditArgs {
+    /// Pending publish session to edit (ID or prefix)
+    #[arg(value_name = "SESSION")]
+    session: String,
 
     /// Check definition file and report each problem by line
     ///
@@ -367,13 +376,42 @@ pub struct ShowArgs {
     /// status is 1 when there is a problem.
     #[arg(long)]
     check: bool,
-}
 
-#[derive(Args)]
-pub struct EditArgs {
-    /// Pending publish session to edit (ID or prefix)
-    #[arg(value_name = "SESSION")]
-    session: String,
+    /// Print definition file path
+    ///
+    /// Print definition file path and make no other change. Prints
+    /// the absolute path of the definition file on standard output.
+    #[arg(long, conflicts_with = "check")]
+    path: bool,
+
+    /// Set published session title
+    ///
+    /// Set published session title and rebuild without opening
+    /// editor. Read from a file as @PATH.
+    #[arg(long, value_name = "TEXT", conflicts_with_all = ["check", "path"])]
+    title: Option<String>,
+
+    /// Add text redactions from a file
+    ///
+    /// Add text redactions read as JSON from @PATH, or from standard
+    /// input as -. Each row is [text, reason], [text, reason, mark],
+    /// or [text, reason, author, mark]. A missing author takes edit
+    /// author; a missing mark keeps the marker. An exact duplicate of
+    /// a recorded row is skipped.
+    #[arg(long, value_name = "FILE", conflicts_with_all = ["check", "path"])]
+    redact: Option<String>,
+
+    /// Author for rows this edit writes
+    ///
+    /// Author for rows this edit writes, as given. Without it the
+    /// session or user is used. A row that already names an author
+    /// keeps it.
+    #[arg(long, value_name = "AUTHOR")]
+    author: Option<String>,
+
+    /// Skip confirmation prompt
+    #[arg(short, long)]
+    yes: bool,
 }
 
 #[derive(Args)]
@@ -981,6 +1019,16 @@ fn default_author() -> String {
     }
 }
 
+/// The author a publish edit stamps on the rows it writes: the
+/// `--author` value as given, else the session or user from
+/// [`default_author`].
+fn edit_author(explicit: Option<&str>) -> String {
+    match explicit {
+        Some(author) => author.to_string(),
+        None => default_author(),
+    }
+}
+
 /// Print the named filters as a table, the way `gage scan
 /// --list-scanners` prints scanners.
 fn list_filters() {
@@ -1168,18 +1216,6 @@ fn show(args: ShowArgs) -> Result<(), CliError> {
         .get(&args.session)
         .map_err(|e| fail(e.to_string()))?;
     let path = publisher.store().definition_file(&pending.id);
-    if args.check {
-        return match publisher.definition(&pending.id) {
-            Ok(_) => Ok(()),
-            Err(PublishError::Definition(problems)) => {
-                for problem in &problems {
-                    eprintln!("{}", diagnostic(&path, problem));
-                }
-                Err(CliError::exit(1))
-            }
-            Err(e) => Err(fail(e.to_string())),
-        };
-    }
     let text = fs::read_to_string(&path).map_err(|e| fail(format!("{}: {e}", path.display())))?;
     print!("{text}");
     Ok(())
@@ -1209,6 +1245,46 @@ fn edit(args: EditArgs) -> Result<(), CliError> {
         .get(&args.session)
         .map_err(|e| fail(e.to_string()))?;
     let path = publisher.store().definition_file(&pending.id);
+    if args.check {
+        return match publisher.definition(&pending.id) {
+            Ok(_) => Ok(()),
+            Err(PublishError::Definition(problems)) => {
+                for problem in &problems {
+                    eprintln!("{}", diagnostic(&path, problem));
+                }
+                Err(CliError::exit(1))
+            }
+            Err(e) => Err(fail(e.to_string())),
+        };
+    }
+    if args.path {
+        println!("{}", path.display());
+        return Ok(());
+    }
+    if args.title.is_some() || args.redact.is_some() {
+        let author = edit_author(args.author.as_deref());
+        let title = match &args.title {
+            Some(t) => Some(
+                text_value("gage publish edit", "--title", t)
+                    .map(|t| t.trim().to_string())
+                    .map_err(|e| fail(e.to_string()))?,
+            ),
+            None => None,
+        };
+        let redactions = match &args.redact {
+            Some(src) => parse_redactions("gage publish edit", src, &author).map_err(fail)?,
+            None => Vec::new(),
+        };
+        return refresh_dialog(
+            "Edit publish",
+            &publisher,
+            &pending,
+            &author,
+            title.as_deref(),
+            &redactions,
+            !args.yes,
+        );
+    }
     let read =
         |path: &PathBuf| fs::read(path).map_err(|e| fail(format!("{}: {e}", path.display())));
     let before = read(&path)?;
@@ -1229,7 +1305,93 @@ fn edit(args: EditArgs) -> Result<(), CliError> {
         println!("No change");
         return Ok(());
     }
-    refresh_dialog("Edit publish", &publisher, &pending, false)
+    refresh_dialog(
+        "Edit publish",
+        &publisher,
+        &pending,
+        &default_author(),
+        None,
+        &[],
+        false,
+    )
+}
+
+/// The redaction rows a `--redact` value carries. The value is `-`
+/// for standard input or `@PATH` for a file. A row without an author
+/// takes `author`, and a row without a mark keeps the marker.
+fn parse_redactions(command: &str, value: &str, author: &str) -> Result<Vec<TextEntry>, String> {
+    let text = read_redact_input(command, value)?;
+    parse_redaction_rows(command, &text, author)
+}
+
+/// The redaction rows of `text`, a JSON array of rows. Each row is
+/// `[text, reason]`, `[text, reason, mark]`, or
+/// `[text, reason, author, mark]`; the shorter forms take `author`
+/// and a kept marker.
+fn parse_redaction_rows(command: &str, text: &str, author: &str) -> Result<Vec<TextEntry>, String> {
+    let rows: Vec<Vec<serde_json::Value>> =
+        serde_json::from_str(text).map_err(|e| format!("{command}: --redact: {e}"))?;
+    let mut out = Vec::with_capacity(rows.len());
+    for (i, row) in rows.iter().enumerate() {
+        let at = |m: &str| format!("{command}: --redact row {}: {m}", i + 1);
+        if row.len() < 2 || row.len() > 4 {
+            return Err(at(
+                "row is [text, reason], [text, reason, mark], or [text, reason, author, mark]",
+            ));
+        }
+        let literal = row
+            .first()
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| at("text is a string"))?;
+        let reason = row
+            .get(1)
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| at("reason is a string"))?;
+        let (row_author, mark) = match row.len() {
+            2 => (author.to_string(), true),
+            3 => (
+                author.to_string(),
+                row.get(2)
+                    .and_then(serde_json::Value::as_bool)
+                    .ok_or_else(|| at("mark is a bool"))?,
+            ),
+            _ => (
+                row.get(2)
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| at("author is a string"))?
+                    .to_string(),
+                row.get(3)
+                    .and_then(serde_json::Value::as_bool)
+                    .ok_or_else(|| at("mark is a bool"))?,
+            ),
+        };
+        out.push(TextEntry {
+            literal: literal.to_string(),
+            reason: reason.to_string(),
+            author: row_author,
+            mark,
+        });
+    }
+    Ok(out)
+}
+
+/// The text a `--redact` value names: standard input for `-`, or the
+/// file named after `@`.
+fn read_redact_input(command: &str, value: &str) -> Result<String, String> {
+    use std::io::Read;
+    if value == "-" {
+        let mut buf = String::new();
+        io::stdin()
+            .read_to_string(&mut buf)
+            .map_err(|e| format!("{command}: --redact -: {e}"))?;
+        return Ok(buf);
+    }
+    match value.strip_prefix('@') {
+        Some(path) => {
+            fs::read_to_string(path).map_err(|e| format!("{command}: --redact {path}: {e}"))
+        }
+        None => Err(format!("{command}: --redact takes - or @PATH")),
+    }
 }
 
 /// Rebuild a pending publish from its definition after confirmation.
@@ -1241,25 +1403,35 @@ fn refresh(args: RefreshArgs) -> Result<(), CliError> {
         .store()
         .get(&args.session)
         .map_err(|e| fail(e.to_string()))?;
-    refresh_dialog("Refresh publish", &publisher, &pending, !args.yes)
+    refresh_dialog(
+        "Refresh publish",
+        &publisher,
+        &pending,
+        &default_author(),
+        None,
+        &[],
+        !args.yes,
+    )
 }
 
 /// The dialog that rebuilds `pending` from its definition: the
 /// definition is read and checked, its counts shown, the rebuild
 /// confirmed when `confirm` is set and run under a spinner, and every
-/// redaction that matches nothing reported by its position. A definition with problems ends
-/// the dialog, and the problems follow it one per line as `show
-/// --check` prints them.
+/// redaction that matches nothing reported by its position. A
+/// definition with problems ends the dialog, and the problems follow
+/// it one per line as `edit --check` prints them.
 fn refresh_dialog(
-    title: &str,
+    heading: &str,
     publisher: &Publisher<'_>,
     pending: &PendingPublish,
+    author: &str,
+    new_title: Option<&str>,
+    redactions: &[TextEntry],
     confirm: bool,
 ) -> Result<(), CliError> {
-    let author = default_author();
     let path = publisher.store().definition_file(&pending.id);
     let mut problems = Vec::new();
-    let result = dialog::run(title, || {
+    let result = dialog::run(heading, || {
         dialog::step_value("Session", short_uuid(&pending.id))?;
         let mut definition = publisher.definition(&pending.id).map_err(|e| match e {
             PublishError::Definition(found) => {
@@ -1271,7 +1443,11 @@ fn refresh_dialog(
             }
             e => DialogError::Failed(e.to_string()),
         })?;
-        definition.fill_authors(&author);
+        if let Some(text) = new_title {
+            definition.set_title(text, author);
+        }
+        definition.add_redactions(redactions);
+        definition.fill_authors(author);
         definition
             .validate()
             .map_err(|e| DialogError::Failed(e.to_string()))?;
@@ -1292,7 +1468,7 @@ fn refresh_dialog(
         }
         let spinner = cli::spinner();
         spinner.start("Refreshing session");
-        let refreshed = publisher.refresh(&pending.id, &author);
+        let refreshed = publisher.edit(&pending.id, author, new_title, redactions);
         spinner.clear();
         let refreshed = refreshed.map_err(|e| DialogError::Failed(e.to_string()))?;
         for (position, literal) in &refreshed.unmatched {
@@ -1721,7 +1897,13 @@ mod tests {
         }
         for argv in [
             vec!["show", "abc"],
-            vec!["show", "abc", "--check"],
+            vec!["edit", "abc", "--check"],
+            vec!["edit", "abc", "--path"],
+            vec!["edit", "abc", "--title", "New"],
+            vec!["edit", "abc", "--title", "New", "-y"],
+            vec!["edit", "abc", "--redact", "@/tmp/r.json"],
+            vec!["edit", "abc", "--redact", "-"],
+            vec!["edit", "abc", "--title", "New", "--redact", "-", "-y"],
             vec!["edit", "abc"],
             vec!["refresh", "abc", "-y"],
             vec!["candidate", "abc", "--split-files"],
@@ -1772,6 +1954,18 @@ mod tests {
         assert!(Cli::try_parse_from(["gage", "publish", "show", "--stored", "abc"]).is_err());
         // Instructions are a mode of candidate, apart from its splits
         assert!(Cli::try_parse_from(["gage", "publish", "show", "abc", "--instructions"]).is_err());
+        assert!(Cli::try_parse_from(["gage", "publish", "show", "abc", "--check"]).is_err());
+        assert!(
+            Cli::try_parse_from(["gage", "publish", "edit", "abc", "--title", "X", "--check"])
+                .is_err()
+        );
+        assert!(
+            Cli::try_parse_from(["gage", "publish", "edit", "abc", "--redact", "-", "--check"])
+                .is_err()
+        );
+        assert!(
+            Cli::try_parse_from(["gage", "publish", "edit", "abc", "--check", "--path"]).is_err()
+        );
         for argv in [
             vec!["candidate", "abc", "--instructions", "--split", "10"],
             vec!["candidate", "abc", "--instructions", "--split-files"],
@@ -1987,6 +2181,47 @@ mod tests {
             Err("--batch requires a filter or segment".to_string())
         );
     }
+    #[test]
+    fn redact_rows_fill_author_and_mark_by_arity() {
+        let json = r#"[
+            ["a", "pii"],
+            ["b", "secret", false],
+            ["c", "language", "user:x", false]
+        ]"#;
+        let rows = parse_redaction_rows("cmd", json, "session:s").unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                TextEntry {
+                    literal: "a".into(),
+                    reason: "pii".into(),
+                    author: "session:s".into(),
+                    mark: true,
+                },
+                TextEntry {
+                    literal: "b".into(),
+                    reason: "secret".into(),
+                    author: "session:s".into(),
+                    mark: false,
+                },
+                TextEntry {
+                    literal: "c".into(),
+                    reason: "language".into(),
+                    author: "user:x".into(),
+                    mark: false,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn redact_rows_reject_bad_arity_and_types() {
+        assert!(parse_redaction_rows("cmd", r#"[["only"]]"#, "a").is_err());
+        assert!(parse_redaction_rows("cmd", r#"[["a", "b", "c", "d", "e"]]"#, "a").is_err());
+        assert!(parse_redaction_rows("cmd", r#"[["a", 5]]"#, "a").is_err());
+        assert!(parse_redaction_rows("cmd", r#"[["a", "b", "x"]]"#, "a").is_err());
+    }
+
     /// `apply --force` stands alone; `--force-tag` still needs `--tag`.
     #[test]
     fn apply_force_is_separate_from_force_tag() {
