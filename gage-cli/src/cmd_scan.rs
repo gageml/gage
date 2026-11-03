@@ -397,19 +397,14 @@ async fn list(args: ScanListArgs) -> Result<(), CliError> {
     .map(|s| s.to_string())
     .collect();
 
-    let term_width = console::Term::stdout().size().1 as usize;
-    let table = Table::from_iter(std::iter::once(header).chain(rows))
-        .with(Style::rounded())
-        .with(
-            Width::truncate(term_width)
-                .suffix("…")
-                .priority(s::IdAwarePriority::new(true)),
-        )
+    let mut table = Table::from_iter(std::iter::once(header).chain(rows));
+    table.with(Style::rounded());
+    s::truncate_to(&mut table, s::stdout_width(), s::IdAwarePriority::new(true));
+    table
         .modify(Rows::first(), s::tty(Color::FG_BRIGHT_YELLOW))
         .modify(Columns::new(1..7), Alignment::right())
         .modify(Columns::one(7).not(Rows::first()), s::dim())
-        .modify(Columns::last().not(Rows::first()), s::dim())
-        .to_string();
+        .modify(Columns::last().not(Rows::first()), s::dim());
     println!("{table}");
 
     args.limit.print_summary(shown, total, "scan run");
@@ -2280,16 +2275,16 @@ pub(crate) fn list_scanners(registry: &ScannerRegistry) -> Result<(), CliError> 
         })
         .collect();
 
-    let term_width = console::Term::stdout().size().1 as usize;
-    let table = Table::from_iter(std::iter::once(header).chain(rows))
-        .with(Style::rounded())
-        .with(
-            Width::wrap(term_width)
+    let mut table = Table::from_iter(std::iter::once(header).chain(rows));
+    table.with(Style::rounded());
+    if let Some(width) = s::stdout_width() {
+        table.with(
+            Width::wrap(width)
                 .keep_words(true)
                 .priority(Priority::max(true)),
-        )
-        .modify(Rows::first(), s::tty(Color::FG_BRIGHT_YELLOW))
-        .to_string();
+        );
+    }
+    table.modify(Rows::first(), s::tty(Color::FG_BRIGHT_YELLOW));
     println!("{table}");
 
     let errors: Vec<_> = registry.parse_errors().collect();

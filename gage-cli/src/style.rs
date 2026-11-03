@@ -1,6 +1,9 @@
+use std::io::{self, IsTerminal};
+
 use gage_core::uuid::short_uuid;
 use gage_store::Store;
-use tabled::settings::{Color, peaker::Peaker};
+use tabled::Table;
+use tabled::settings::{Color, Width, peaker::Peaker};
 
 pub use gage_core::style::{IdHighlighter, IdKind};
 
@@ -37,6 +40,35 @@ pub fn tty(c: Color) -> Color {
         c
     } else {
         Color::new("", "")
+    }
+}
+
+/// The width to fit output to: the terminal's columns, or `None` when
+/// standard output is not a terminal and nothing is cut or wrapped, so
+/// a piped listing carries every cell whole.
+pub fn stdout_width() -> Option<usize> {
+    io::stdout()
+        .is_terminal()
+        .then(|| console::Term::stdout().size().1 as usize)
+}
+
+/// Cut `table` to `width` columns, the widest column first under
+/// `priority`, marking a cut cell with an ellipsis. Without a width
+/// the table stays whole.
+pub fn truncate_to(table: &mut Table, width: Option<usize>, priority: IdAwarePriority) {
+    if let Some(width) = width {
+        table.with(Width::truncate(width).suffix("…").priority(priority));
+    }
+}
+
+/// The width of the value column of a two-column `label | value`
+/// table at `width` columns with labels `label_width` wide: the rest
+/// after the borders and padding, `"│ " + " │ " + " │"`, and never
+/// under 20. Without a width the value is not wrapped.
+pub fn value_width(width: Option<usize>, label_width: usize) -> usize {
+    match width {
+        Some(width) => width.saturating_sub(label_width + 8).max(20),
+        None => usize::MAX,
     }
 }
 
@@ -125,4 +157,48 @@ pub fn styled_target(shown: &str, prefix: &str, kind: IdKind, suffix: &str) -> S
         .unwrap_or(shown.len());
     let (head, tail) = shown.split_at(split);
     kind.style(head, &format!("{tail}{suffix}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use tabled::settings::Style;
+
+    use super::*;
+
+    /// A width cuts the widest column to fit and marks the cut; no
+    /// width leaves every cell whole, which is what a piped listing
+    /// needs.
+    #[test]
+    fn truncate_to_cuts_only_when_a_width_is_given() {
+        let id = "0123456789abcdefghjkmnpqrs";
+        let title = "a title long enough to be the widest column by far";
+        let rows = vec![
+            vec!["Id".to_string(), "Title".to_string()],
+            vec![id.to_string(), title.to_string()],
+        ];
+
+        let mut cut = Table::from_iter(rows.clone());
+        cut.with(Style::rounded());
+        truncate_to(&mut cut, Some(50), IdAwarePriority::new(true));
+        let cut = cut.to_string();
+        assert!(cut.contains(id), "{cut}");
+        assert!(cut.contains('…'), "{cut}");
+        assert!(!cut.contains(title), "{cut}");
+        assert!(cut.lines().all(|l| console::measure_text_width(l) <= 50));
+
+        let mut whole = Table::from_iter(rows);
+        whole.with(Style::rounded());
+        truncate_to(&mut whole, None, IdAwarePriority::new(true));
+        let whole = whole.to_string();
+        assert!(whole.contains(id), "{whole}");
+        assert!(whole.contains(title), "{whole}");
+        assert!(!whole.contains('…'), "{whole}");
+    }
+
+    #[test]
+    fn value_width_leaves_room_for_the_label_and_never_wraps_without_a_width() {
+        assert_eq!(value_width(Some(80), 5), 67);
+        assert_eq!(value_width(Some(30), 5), 20);
+        assert_eq!(value_width(None, 5), usize::MAX);
+    }
 }

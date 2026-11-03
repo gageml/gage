@@ -23,7 +23,7 @@ use gage_store::{
 use tabled::{
     Table,
     settings::{
-        Color, Style, Width,
+        Color, Style,
         object::{Columns, Object, Rows},
     },
 };
@@ -307,21 +307,20 @@ pub async fn list(args: IssueListArgs) -> Result<(), CliError> {
     }
     let shown = rows.len();
 
-    let term_width = console::Term::stdout().size().1 as usize;
-    let table = Table::from_iter(std::iter::once(header).chain(rows))
-        .with(Style::rounded())
-        .with(
-            Width::truncate(term_width)
-                .suffix("…")
-                .priority(style::IdAwarePriority::new(args.full_id)),
-        )
+    let mut table = Table::from_iter(std::iter::once(header).chain(rows));
+    table.with(Style::rounded());
+    style::truncate_to(
+        &mut table,
+        style::stdout_width(),
+        style::IdAwarePriority::new(args.full_id),
+    );
+    table
         .modify(Rows::first(), style::tty(Color::FG_BRIGHT_YELLOW))
         .modify(
             Columns::one(2).not(Rows::first()),
             style::tty(Color::FG_BRIGHT_CYAN),
         )
-        .modify(Columns::new(3..6).not(Rows::first()), style::dim())
-        .to_string();
+        .modify(Columns::new(3..6).not(Rows::first()), style::dim());
     println!("{table}");
 
     args.limit.print_summary(shown, total, "issue");
@@ -457,11 +456,7 @@ pub async fn show(args: IssueShowArgs) -> Result<(), CliError> {
         ])
         .max()
         .unwrap_or(0);
-    let (_, term_width) = console::Term::stdout().size();
-    // Borders + padding: "│ " + " │ " + " │" = 8 chars
-    let value_width = (term_width as usize)
-        .saturating_sub(label_width + 8)
-        .max(20);
+    let value_width = style::value_width(style::stdout_width(), label_width);
 
     let registry = DriverRegistry::builtin();
     let mut session_entries: Vec<String> = Vec::new();

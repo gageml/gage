@@ -1036,21 +1036,22 @@ fn list_filters() {
         .map(|s| s.to_string())
         .collect();
     let rows = filter_rows();
-    let term_width = console::Term::stdout().size().1 as usize;
-    let table = Table::from_iter(std::iter::once(header).chain(rows))
-        .with(Style::rounded())
-        .with(
-            Width::wrap(term_width)
+    let mut table = Table::from_iter(std::iter::once(header).chain(rows));
+    table.with(Style::rounded());
+    if let Some(width) = style::stdout_width() {
+        table.with(
+            Width::wrap(width)
                 .keep_words(true)
                 .priority(Priority::max(true)),
-        )
+        );
+    }
+    table
         .modify(Rows::first(), style::tty(Color::FG_BRIGHT_YELLOW))
         .modify(
             Columns::one(0).not(Rows::first()),
             style::tty(Color::FG_BRIGHT_YELLOW),
         )
-        .modify(Columns::one(3).not(Rows::first()), style::dim())
-        .to_string();
+        .modify(Columns::one(3).not(Rows::first()), style::dim());
     println!("{table}");
 }
 

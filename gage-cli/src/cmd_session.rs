@@ -30,7 +30,7 @@ use tabled::{
     Table,
     grid::{config::Position, records::RecordsMut},
     settings::{
-        Alignment, Color, Style, Width,
+        Alignment, Color, Style,
         object::{Columns, Object, Rows},
     },
 };
@@ -683,11 +683,10 @@ fn render_table(rows: &[Row], drivers: &[Arc<dyn Driver>], listing: Listing, ful
             Columns::new(messages_col..messages_col + 1),
             Alignment::right(),
         );
-    let term_width = console::Term::stdout().size().1 as usize;
-    table.with(
-        Width::truncate(term_width)
-            .suffix("…")
-            .priority(style::IdAwarePriority::new(full_id).weight(TITLE_COL, 2)),
+    style::truncate_to(
+        &mut table,
+        style::stdout_width(),
+        style::IdAwarePriority::new(full_id).weight(TITLE_COL, 2),
     );
     refit_project_cells(&mut table, rows, drivers);
     println!("{table}");
@@ -1343,14 +1342,13 @@ fn render_hits(hits: &[Hit], show_source: bool, full_id: bool) {
             Columns::new(type_col..date_col + 1).not(Rows::first()),
             style::dim(),
         );
-    let term_width = console::Term::stdout().size().1 as usize;
     // The message cell is the target a reader acts on; it is never cut
-    table.with(
-        Width::truncate(term_width).suffix("…").priority(
-            style::IdAwarePriority::new(true)
-                .id_column(message_col)
-                .weight(snippet_col, 3),
-        ),
+    style::truncate_to(
+        &mut table,
+        style::stdout_width(),
+        style::IdAwarePriority::new(true)
+            .id_column(message_col)
+            .weight(snippet_col, 3),
     );
     println!("{table}");
 }
