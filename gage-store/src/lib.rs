@@ -53,7 +53,6 @@ pub mod key;
 mod ls;
 mod note;
 pub mod object;
-mod publish;
 pub mod query;
 pub mod refs;
 mod remote;
@@ -99,11 +98,6 @@ pub use note::{
     OBJECT_TYPE as NOTE_TYPE,
 };
 pub use object::SHORT_PREFIX_SET_SIZE;
-pub use publish::{
-    ChangeKind, ChangeRecord, DEFINITION_ATTACHMENT as PUBLISH_DEFINITION_ATTACHMENT,
-    PendingPublish, PublishDirLayout, PublishInit, PublishStore, format_changes, parse_changes,
-    publish_root,
-};
 pub use query::{
     LinkKind, NoteDocRow, ScanSource, ScopedIssue, ScopedNote, StoredNoteTable, StoredSessionTable,
     attachment_file_table, attachment_table, dataset_table, issue_event_table, issue_report_fn,
@@ -122,8 +116,10 @@ pub use scan::{
 };
 pub use scan_dir::ScanDirLayout;
 pub use session::{
-    OBJECT_TYPE as SESSION_TYPE, SessionAddOutcome, SessionAttrsRecord, SessionOutcome,
-    SessionQuery, SessionRecord, SessionRemoveOutcome, SessionStore, session_object_id,
+    ChangeKind, ChangeRecord, ExternalSession, ExternalSessionRecord, OBJECT_TYPE as SESSION_TYPE,
+    SessionAddOutcome, SessionAttrsRecord, SessionDirLayout, SessionOutcome, SessionQuery,
+    SessionRecord, SessionRemoveOutcome, SessionStore, format_changes, parse_changes,
+    session_object_id,
 };
 pub use sqlite_index::INDEX_SCHEMA_VERSION;
 pub use store::{INDEX_FILE, Store};

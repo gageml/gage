@@ -2,11 +2,11 @@
 //! from, the named filters, and the derivation of the staged session
 //! from the original.
 //!
-//! gage-store stages the directory and knows where the definition file
-//! lives; this crate reads and writes the definition, expands it to
-//! instances over the original's text values, and writes the staged
-//! content and `changes.json` through the session's driver. The
-//! definition is edited by hand, and a refresh rebuilds the staged
+//! [`staging`] stages the directory and knows where the definition
+//! file lives; the engine reads and writes the definition, expands it
+//! to instances over the original's text values, and writes the
+//! staged content and `changes.json` through the session's driver.
+//! The definition is edited by hand, and a refresh rebuilds the staged
 //! session from the original plus the full definition. The original
 //! is named by the staged `attrs.json`.
 
@@ -14,6 +14,7 @@ pub mod candidate;
 mod definition;
 mod derive;
 mod filter;
+pub mod staging;
 
 use std::collections::BTreeMap;
 use std::error::Error;
@@ -25,8 +26,8 @@ use std::sync::Arc;
 use gage_registry::driver::DriverRegistry;
 use gage_session::{Driver, DriverError, EditError, StoredSession, TextDescriptor};
 use gage_store::{
-    DirContentSource, PublishDirLayout, PublishInit, PublishStore, SessionAttrsRecord,
-    SessionRecord, SessionStore, Store, StoreError,
+    DirContentSource, SessionAttrsRecord, SessionDirLayout, SessionRecord, SessionStore, Store,
+    StoreError,
 };
 
 pub use definition::{
@@ -35,6 +36,7 @@ pub use definition::{
 };
 pub use derive::{Built, Candidate, Instance, InstanceKind, Span};
 pub use filter::{Audience, Filter, Pattern, Use};
+pub use staging::{PublishInit, Staging};
 
 /// The marker a redacted span or value is replaced with.
 pub const MARKER: &str = "[REDACTED]";
@@ -132,7 +134,7 @@ impl From<EditError> for PublishError {
 /// The publish operations over an opened store.
 pub struct Publisher<'a> {
     store: &'a Store,
-    publish: PublishStore<'a>,
+    staging: Staging<'a>,
     drivers: DriverRegistry,
 }
 
@@ -150,7 +152,7 @@ impl<'a> Publisher<'a> {
     pub fn new(store: &'a Store) -> Self {
         Self {
             store,
-            publish: PublishStore::from(store),
+            staging: Staging::from(store),
             drivers: DriverRegistry::builtin(),
         }
     }
@@ -159,13 +161,13 @@ impl<'a> Publisher<'a> {
     pub fn with_root(store: &'a Store, root: impl Into<std::path::PathBuf>) -> Self {
         Self {
             store,
-            publish: PublishStore::with_root(store, root),
+            staging: Staging::with_root(store, root),
             drivers: DriverRegistry::builtin(),
         }
     }
 
-    pub fn store(&self) -> &PublishStore<'a> {
-        &self.publish
+    pub fn staging(&self) -> &Staging<'a> {
+        &self.staging
     }
 
     /// Start a publish of `original` under `filters`, with a segment
@@ -188,7 +190,7 @@ impl<'a> Publisher<'a> {
             definition.push_segment(description, &[], author);
         }
         definition.validate()?;
-        let init = self.publish.init(original)?;
+        let init = self.staging.init(original)?;
         let session = self.open_original(&init.id)?;
         let names = definition.named_filters();
         derive::run_filters(&mut definition, &session, &names)?;
@@ -297,7 +299,7 @@ impl<'a> Publisher<'a> {
     pub fn check(&self, id: &str) -> Result<(), PublishError> {
         let definition = self.definition(id)?;
         let original = self.original(id)?;
-        let layout = self.publish.layout(id);
+        let layout = self.staging.layout(id).session();
         let source = derive::SessionText::read(original.stored()?.as_mut(), &original.descriptor)?;
         let staged =
             derive::SessionText::read(original.staged(&layout)?.as_mut(), &original.descriptor)?;
@@ -333,11 +335,13 @@ impl<'a> Publisher<'a> {
     }
 
     /// Publish the pending publish `id`: verify it, commit the staged
-    /// directory as a new session object, and delete the staging
-    /// directory and the definition. Returns the new object's commit.
+    /// session as a new session object with the definition's values
+    /// attached, and delete the staging directory. Returns the new
+    /// object's commit.
     pub fn apply(&self, id: &str, force: bool) -> Result<String, PublishError> {
+        let definition = self.definition(id)?;
         self.verify(id, force)?;
-        Ok(self.publish.apply(id)?)
+        self.staging.apply(id, Some(&definition))
     }
 
     /// The definition of the pending publish `id`, as the file holds
@@ -346,7 +350,7 @@ impl<'a> Publisher<'a> {
     /// problems is [`PublishError::Definition`] with every problem at
     /// its position.
     pub fn definition(&self, id: &str) -> Result<PublishDefinition, PublishError> {
-        let path = self.publish.definition_file(id);
+        let path = self.staging.definition_file(id);
         let text = match fs::read_to_string(&path) {
             Ok(text) => text,
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
@@ -370,7 +374,7 @@ impl<'a> Publisher<'a> {
         let original = self.original(id)?;
         let title = original.record.attrs.summary.title.as_deref();
         fs::write(
-            self.publish.definition_file(id),
+            self.staging.definition_file(id),
             definition.to_jsonc_text(title),
         )?;
         Ok(())
@@ -384,7 +388,7 @@ impl<'a> Publisher<'a> {
         definition: &PublishDefinition,
         session: &derive::SessionText,
     ) -> Result<Built, PublishError> {
-        let layout = self.publish.layout(id);
+        let layout = self.staging.layout(id).session();
         let original = self.original(id)?;
         let title_entry = original.title_entry(definition)?;
         let built = derive::build(
@@ -420,7 +424,7 @@ impl<'a> Publisher<'a> {
     /// The original of the pending publish `id`, named by the staged
     /// `attrs.json`: its record, driver, and descriptor.
     fn original(&self, id: &str) -> Result<Original<'_>, PublishError> {
-        let path = self.publish.layout(id).attrs_file();
+        let path = self.staging.layout(id).session().attrs_file();
         let bytes = match fs::read(&path) {
             Ok(bytes) => bytes,
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
@@ -484,7 +488,7 @@ impl Original<'_> {
     }
 
     /// A reader over the staged content under `layout`.
-    fn staged(&self, layout: &PublishDirLayout) -> Result<Box<dyn StoredSession>, PublishError> {
+    fn staged(&self, layout: &SessionDirLayout) -> Result<Box<dyn StoredSession>, PublishError> {
         let content = Box::new(DirContentSource::new(layout.files_dir()));
         Ok(self.driver.read_stored(
             self.record.attrs.native_id().to_string(),

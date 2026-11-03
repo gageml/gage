@@ -5,8 +5,9 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
 use clap::Args;
+use gage_publish::Staging;
 use gage_query::{ContextBuilder, PrintFormat, ScanScope, exec_command, run_repl};
-use gage_store::{ScanStore, Store, publish_root};
+use gage_store::{ScanStore, Store};
 
 use crate::error::CliError;
 
@@ -90,7 +91,10 @@ pub async fn main(args: QueryArgs) -> Result<(), CliError> {
 /// tables over the pending set and nothing else.
 pub async fn publish(args: QueryRunArgs) -> Result<(), CliError> {
     let store = Store::open(&gage_store::store_path()).context("gage publish query")?;
-    let builder = ContextBuilder::new(Some(Arc::new(Mutex::new(store)))).publish(publish_root());
+    let sessions = Staging::from(&store)
+        .external()
+        .context("gage publish query")?;
+    let builder = ContextBuilder::new(Some(Arc::new(Mutex::new(store)))).external(sessions);
     run("gage publish query", builder, &args).await
 }
 

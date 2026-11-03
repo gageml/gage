@@ -23,7 +23,7 @@ use gage_core::style::IdKind;
 use gage_core::uuid::short_uuid;
 use gage_query::ContextBuilder;
 use gage_session::SourceOptions;
-use gage_store::{PendingPublish, SessionRecord, SessionStore, Store, StoreError};
+use gage_store::{ExternalSessionRecord, SessionRecord, SessionStore, Store, StoreError};
 use rand::seq::SliceRandom;
 
 use crate::dialog::{self, DialogError};
@@ -308,8 +308,8 @@ impl From<&SessionRecord> for SessionLine {
     }
 }
 
-impl From<&PendingPublish> for SessionLine {
-    fn from(pending: &PendingPublish) -> Self {
+impl From<&ExternalSessionRecord> for SessionLine {
+    fn from(pending: &ExternalSessionRecord) -> Self {
         SessionLine {
             id: pending.id.clone(),
             title: pending.attrs.summary.title.clone(),
@@ -596,7 +596,7 @@ mod tests {
     use gage_registry::driver::DriverRegistry;
     use gage_session::SourceOptions;
     use gage_store::{
-        PendingPublish, SessionAttrsRecord, SessionRecord, SessionStore, Store, SummaryAttrs,
+        ExternalSessionRecord, SessionAttrsRecord, SessionRecord, SessionStore, Store, SummaryAttrs,
     };
 
     use super::{
@@ -642,11 +642,11 @@ mod tests {
             ("stored1", Some("Fix the duck"))
         );
 
-        let pending = PendingPublish {
+        let pending = ExternalSessionRecord {
             id: "pending1".to_string(),
             attrs: attrs(None),
-            root: PathBuf::from("/tmp/publish/pending1"),
-            modified_ms: 0,
+            dir: PathBuf::from("/tmp/publish/pending1"),
+            attrs_modified_ms: 0,
         };
         let line = SessionLine::from(&pending);
         assert_eq!(

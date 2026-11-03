@@ -7,9 +7,10 @@ use std::time::Duration;
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 use gage_mcp::{
-    GageTool, IssueAssignConfig, IssueWriteConfig, IssuesFreeConfig, NoteWriteConfig, QueryConfig,
-    SessionLiveFn, StoreWriterConfig, ToolSpec, serve_stdio,
+    GageTool, IssueAssignConfig, IssueWriteConfig, IssuesFreeConfig, NoteWriteConfig,
+    PublishConfig, QueryConfig, SessionLiveFn, StoreWriterConfig, ToolSpec, serve_stdio,
 };
+use gage_publish::Staging;
 use gage_query::ContextBuilder;
 use gage_session::SourceOptions;
 use gage_store::{IssueStatus, Store, store_path};
@@ -481,7 +482,18 @@ async fn run_mcp() -> anyhow::Result<()> {
         gage: vec![
             GageTool::Query(QueryConfig {
                 context: Arc::new(context),
-                store: Some(Arc::clone(&writer.store)),
+                publish: Some(PublishConfig {
+                    store: Arc::clone(&writer.store),
+                    sessions: {
+                        let store = Arc::clone(&writer.store);
+                        Arc::new(move || {
+                            let store = store
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                            Staging::from(&*store).external().map_err(|e| e.to_string())
+                        })
+                    },
+                }),
             }),
             GageTool::IssueWrite(IssueWriteConfig::with_store(
                 writer.clone(),

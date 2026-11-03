@@ -27,7 +27,6 @@ use datafusion::prelude::SessionContext;
 use gage_core::config::default_cache_root;
 use gage_core::uuid::new_uuid;
 use gage_query::{ContextBuilder, write_yaml_capped};
-use gage_store::publish_root;
 use rmcp::ErrorData as McpError;
 use rmcp::handler::server::router::tool::ToolRoute;
 use rmcp::handler::server::tool::ToolCallContext;
@@ -83,32 +82,34 @@ fn handle(
                 None,
             ));
         };
-        let context = context_for(config, &request, &publish_root()).await?;
+        let context = context_for(config, &request).await?;
         execute(&context, &QueryCache::new(), request).await
     })
 }
 
 /// The context `request` runs on: the configured one, or for a
-/// `publish` call a fresh one scoped to the pending publishes under
-/// `publish_root`, built on each call so the set is current. A
-/// `publish` call where the configuration names no store is refused.
+/// `publish` call a fresh one scoped to the pending publishes, listed
+/// on each call so the set is current. A `publish` call where the
+/// configuration names no publish listing is refused.
 async fn context_for(
     config: &QueryConfig,
     request: &QueryRequest<'_>,
-    publish_root: &Path,
 ) -> Result<Arc<SessionContext>, McpError> {
     if !matches!(request, QueryRequest::PublishSql(_)) {
         return Ok(Arc::clone(&config.context));
     }
-    let Some(store) = &config.store else {
+    let Some(publish) = &config.publish else {
         return Err(McpError::invalid_params(
             "`publish` does not apply here: pending publish sessions are not readable in this \
              context",
             None,
         ));
     };
-    let context = ContextBuilder::new(Some(Arc::clone(store)))
-        .publish(publish_root)
+    let sessions = (publish.sessions)().map_err(|reason| {
+        McpError::internal_error(format!("pending publish sessions: {reason}"), None)
+    })?;
+    let context = ContextBuilder::new(Some(Arc::clone(&publish.store)))
+        .external(sessions)
         .skip_system_cols()
         .build()
         .await;
@@ -462,6 +463,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+    use crate::service::PublishConfig;
 
     fn context() -> SessionContext {
         let schema = Arc::new(Schema::new(vec![
@@ -740,11 +742,12 @@ mod tests {
     }
 
     /// A `publish` call runs on a fresh context over the pending
-    /// publishes, which has the session tables and no other store
-    /// table; any other call runs on the configured context. Without
-    /// a store the `publish` call is refused.
+    /// publishes the configured listing returns, which has the
+    /// session tables and no other store table; any other call runs
+    /// on the configured context. Without a publish listing the
+    /// `publish` call is refused.
     #[tokio::test]
-    async fn publish_calls_run_on_a_pending_scoped_context() {
+    async fn publish_calls_run_on_an_external_scoped_context() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("store.git");
         gage_store::init(&path).unwrap();
@@ -754,22 +757,20 @@ mod tests {
         let configured = Arc::new(context());
         let config = QueryConfig {
             context: Arc::clone(&configured),
-            store: Some(store),
+            publish: Some(PublishConfig {
+                store,
+                sessions: Arc::new(|| Ok(Vec::new())),
+            }),
         };
-        let publish_root = dir.path().join("publish");
 
-        let same = context_for(&config, &QueryRequest::Sql("SELECT 1"), &publish_root)
+        let same = context_for(&config, &QueryRequest::Sql("SELECT 1"))
             .await
             .unwrap();
         assert!(Arc::ptr_eq(&same, &configured));
 
-        let scoped = context_for(
-            &config,
-            &QueryRequest::PublishSql("SELECT 1"),
-            &publish_root,
-        )
-        .await
-        .unwrap();
+        let scoped = context_for(&config, &QueryRequest::PublishSql("SELECT 1"))
+            .await
+            .unwrap();
         assert!(!Arc::ptr_eq(&scoped, &configured));
         let names = |sql: &str| {
             let scoped = Arc::clone(&scoped);
@@ -796,15 +797,11 @@ mod tests {
 
         let without = QueryConfig {
             context: configured,
-            store: None,
+            publish: None,
         };
-        let refused = context_for(
-            &without,
-            &QueryRequest::PublishSql("SELECT 1"),
-            &publish_root,
-        )
-        .await
-        .map(|_| ());
+        let refused = context_for(&without, &QueryRequest::PublishSql("SELECT 1"))
+            .await
+            .map(|_| ());
         let Err(e) = refused else {
             panic!("a publish call without a store was accepted");
         };

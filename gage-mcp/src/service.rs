@@ -13,7 +13,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use datafusion::prelude::SessionContext;
-use gage_store::Store;
+use gage_store::{ExternalSession, Store};
 use rmcp::ErrorData;
 use rmcp::ServiceExt;
 use rmcp::handler::server::router::tool::{ToolRoute, ToolRouter};
@@ -113,13 +113,26 @@ pub struct IssuesFreeConfig {
 }
 
 /// The `Query` tool's data: the DataFusion context its SQL runs on,
-/// and the store a `publish` call scopes a fresh context to. `None`
-/// where pending publishes are not readable, as in a scan's tool.
+/// and what a `publish` call scopes a fresh context to. `None` where
+/// pending publishes are not readable, as in a scan's tool.
 #[derive(Clone)]
 pub struct QueryConfig {
     pub context: Arc<SessionContext>,
-    pub store: Option<Arc<Mutex<Store>>>,
+    pub publish: Option<PublishConfig>,
 }
+
+/// What a `publish` call reads: the store the context is built on and
+/// the listing of the pending publishes as external sessions, called
+/// on each request so the set is current.
+#[derive(Clone)]
+pub struct PublishConfig {
+    pub store: Arc<Mutex<Store>>,
+    pub sessions: ExternalSessionsFn,
+}
+
+/// Lists the pending publishes as the session directories they are.
+/// `Err(reason)` means the listing cannot be read.
+pub type ExternalSessionsFn = Arc<dyn Fn() -> Result<Vec<ExternalSession>, String> + Send + Sync>;
 
 /// The `IssueWrite` tool's data: the callback that writes the issue.
 /// The write path belongs to the runtime, which writes issues into the
@@ -395,7 +408,7 @@ mod tests {
         let spec = ToolSpec {
             gage: vec![GageTool::Query(QueryConfig {
                 context: Arc::new(SessionContext::new()),
-                store: None,
+                publish: None,
             })],
             custom: vec![CustomToolDef {
                 name: "secret".into(),

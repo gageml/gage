@@ -1,15 +1,14 @@
 //! What a context is scoped to, and how session rows are reached.
 //!
-//! A context has store scope, scan scope, or publish scope. Store
+//! A context has store scope, scan scope, or external scope. Store
 //! scope is every live object in the store. Scan scope, a
 //! [`ScanScope`], is one scan's objects: its dataset's sessions at the
 //! commits the scan links, the notes it wrote or carried, the issues
 //! it wrote, and the relations among them. The scan is an active one,
 //! named by its scan directory, or a stored one, named by id; the
-//! tables read either source on each query. Publish scope is the
-//! pending publish working trees under a publish root, read from the
-//! file system on each query, so a rebuilt working tree is served on
-//! the next read.
+//! tables read either source on each query. External scope is a
+//! given set of session directories, read from the file system on
+//! each query, so a rewritten directory is served on the next read.
 //!
 //! The core knows the store's layout, so it resolves the session set
 //! and plans every read. The driver that wrote a session is the only
@@ -28,8 +27,8 @@ use gage_registry::driver::DriverRegistry;
 use gage_session::filter::IdFilter;
 use gage_session::{ContentSource, Driver, StoredSession, tool_use_batch};
 use gage_store::{
-    DirContentSource, Order, PendingPublish, PublishDirLayout, PublishStore, ScanDirLayout,
-    ScanSource, SelectedTip, SessionRecord, SessionStore, Store, StoreError,
+    DirContentSource, ExternalSession, ExternalSessionRecord, Order, ScanDirLayout, ScanSource,
+    SelectedTip, SessionDirLayout, SessionRecord, SessionStore, Store, StoreError,
 };
 
 /// One scan's objects, as a context is scoped to them.
@@ -102,28 +101,63 @@ impl ScanScope {
 use crate::changes::changes_batch;
 use crate::rows::{RowCache, derive_batch};
 
-/// One stored session version selected for a scan
+/// One session selected for a scan
 #[derive(Debug, Clone)]
 pub struct StoredSessionRef {
     /// Gage object id; the value the rows carry as `session_id`
     pub id: String,
-    /// Commit of the version read; the row cache key
-    pub commit: String,
-    /// The `type` blob version at that commit
+    pub source: SessionSource,
+    /// The `type` blob version at the commit; empty for an external
+    /// session
     pub type_version: String,
-    /// The version's `created` and `modified` markers, UNIX millis
+    /// The version's `created` and `modified` markers, UNIX millis;
+    /// the `attrs.json` mtime for an external session
     pub created_ms: i64,
     pub modified_ms: i64,
     pub native_id: String,
     pub content_format: String,
     pub driver_name: String,
-    /// The working tree of a pending publish when this session is
-    /// staged on disk rather than committed; `None` for a stored
-    /// session, which reads from its commit.
-    pub root: Option<PathBuf>,
+}
+
+/// Where a session's bytes are read from.
+#[derive(Debug, Clone)]
+pub enum SessionSource {
+    /// A committed object. The commit is the session's version, and
+    /// a version never changes, so it is also the cache key of the
+    /// rows derived from it.
+    Stored { commit: String },
+    /// A session directory. It has no version: the directory is
+    /// mutable and nothing names a content state. The `attrs.json`
+    /// mtime read with the listing invalidates the rows derived from
+    /// it, since a writer that changes the session rewrites the file.
+    External {
+        dir: PathBuf,
+        attrs_modified_ms: i64,
+    },
 }
 
 impl StoredSessionRef {
+    /// The key the row caches hold this session's derived batches
+    /// under: the commit of a stored session, or the id and
+    /// `attrs.json` mtime of an external one.
+    pub(crate) fn cache_key(&self) -> String {
+        match &self.source {
+            SessionSource::Stored { commit } => commit.clone(),
+            SessionSource::External {
+                attrs_modified_ms, ..
+            } => format!("external:{}@{attrs_modified_ms}", self.id),
+        }
+    }
+
+    /// The commit of a stored session; `None` for an external one,
+    /// which has no version.
+    pub(crate) fn commit(&self) -> Option<&str> {
+        match &self.source {
+            SessionSource::Stored { commit } => Some(commit),
+            SessionSource::External { .. } => None,
+        }
+    }
+
     /// The reference to a session record at the commit it was read.
     /// A record without its markers is a malformed object.
     pub fn from_record(record: SessionRecord) -> Result<Self> {
@@ -139,45 +173,51 @@ impl StoredSessionRef {
             created_ms: marker("created", record.created_ms)?,
             modified_ms: marker("modified", record.modified_ms)?,
             id: record.id,
-            commit: record.commit_sha,
+            source: SessionSource::Stored {
+                commit: record.commit_sha,
+            },
             type_version: record.type_version,
             native_id: record.attrs.native_id().to_string(),
             content_format: record.attrs.content_format,
             driver_name: record.driver_name,
-            root: None,
         })
     }
 
-    /// The reference to a pending publish working tree. Its content
-    /// comes from the working tree's `files.d`, and its cache key
-    /// carries the working tree's mtime so a rebuild is not served a
-    /// stale batch.
-    fn from_pending(pending: PendingPublish) -> Self {
-        let driver_name = pending
+    /// The reference to an external session as one listing read it.
+    /// Its content comes from the directory's `files.d`, and its
+    /// created and modified are the `attrs.json` mtime of the read.
+    fn from_external(record: ExternalSessionRecord) -> Self {
+        let driver_name = record
             .attrs
             .driver
             .split_once(' ')
             .map(|(name, _)| name)
-            .unwrap_or(&pending.attrs.driver)
+            .unwrap_or(&record.attrs.driver)
             .to_string();
         StoredSessionRef {
-            commit: format!("publishing:{}@{}", pending.id, pending.modified_ms),
+            source: SessionSource::External {
+                dir: record.dir,
+                attrs_modified_ms: record.attrs_modified_ms,
+            },
             type_version: String::new(),
-            created_ms: pending.modified_ms,
-            modified_ms: pending.modified_ms,
-            native_id: pending.attrs.native_id().to_string(),
-            content_format: pending.attrs.content_format,
+            created_ms: record.attrs_modified_ms,
+            modified_ms: record.attrs_modified_ms,
+            native_id: record.attrs.native_id().to_string(),
+            content_format: record.attrs.content_format,
             driver_name,
-            id: pending.id,
-            root: Some(pending.root),
+            id: record.id,
         }
     }
 
-    /// The version as the `session` table takes it.
+    /// The version as the `session` table takes it. A fixed set holds
+    /// stored sessions only.
     fn as_version(&self) -> SelectedTip {
         SelectedTip {
             id: self.id.clone(),
-            sha: self.commit.clone(),
+            sha: self
+                .commit()
+                .expect("a fixed set is built from stored sessions")
+                .to_string(),
             version: self.type_version.clone(),
             created_ms: Some(self.created_ms),
             modified_ms: Some(self.modified_ms),
@@ -187,7 +227,7 @@ impl StoredSessionRef {
 
 /// The sessions the row tables serve: every live session at its tip
 /// in store scope, the fixed versions of a scan scope's members, or
-/// the pending publishes of a publish scope.
+/// the session directories of an external scope.
 pub struct SessionSet {
     store: Arc<Mutex<Store>>,
     drivers: DriverRegistry,
@@ -199,9 +239,8 @@ enum Members {
     All,
     /// Exactly these sessions, each at the version it names
     Fixed(Vec<StoredSessionRef>),
-    /// The pending publish working trees under this publish root,
-    /// listed on each read
-    Pending(PathBuf),
+    /// Exactly these session directories, each read on each listing
+    External(Vec<ExternalSession>),
 }
 
 impl SessionSet {
@@ -223,12 +262,12 @@ impl SessionSet {
         }
     }
 
-    /// The pending publish working trees under `publish_root`.
-    pub(crate) fn pending(store: Arc<Mutex<Store>>, publish_root: PathBuf) -> Self {
+    /// Exactly `sessions`, session directories read on each listing.
+    pub(crate) fn external(store: Arc<Mutex<Store>>, sessions: Vec<ExternalSession>) -> Self {
         Self {
             store,
             drivers: DriverRegistry::builtin(),
-            members: Members::Pending(publish_root),
+            members: Members::External(sessions),
         }
     }
 
@@ -237,15 +276,15 @@ impl SessionSet {
     pub(crate) fn fixed_versions(&self) -> Option<Vec<SelectedTip>> {
         match &self.members {
             Members::Fixed(refs) => Some(refs.iter().map(StoredSessionRef::as_version).collect()),
-            Members::All | Members::Pending(_) => None,
+            Members::All | Members::External(_) => None,
         }
     }
 
     /// The set's sessions, narrowed by the `session_id` predicates in
     /// `filters`. A store-wide set lists every live session newest
-    /// modified first; a fixed set keeps its own order; a pending set
-    /// lists the working trees newest modified first, re-read so a
-    /// rebuild changes each one's cache key.
+    /// modified first; a fixed set keeps its own order; an external
+    /// set lists its directories newest modified first, each read
+    /// again so a rewrite changes its cache key.
     pub(crate) fn sessions(&self, filters: &[Expr]) -> Result<Vec<StoredSessionRef>> {
         match &self.members {
             Members::Fixed(fixed) => {
@@ -255,15 +294,16 @@ impl SessionSet {
                 }
                 return Ok(sessions);
             }
-            Members::Pending(root) => {
-                let store = self.lock();
-                let mut pending = PublishStore::with_root(&store, root)
-                    .list()
+            Members::External(externals) => {
+                let mut records = externals
+                    .iter()
+                    .map(ExternalSession::read)
+                    .collect::<Result<Vec<_>, _>>()
                     .map_err(external)?;
-                pending.sort_by_key(|p| Reverse(p.modified_ms));
-                let mut sessions: Vec<StoredSessionRef> = pending
+                records.sort_by_key(|r| Reverse(r.attrs_modified_ms));
+                let mut sessions: Vec<StoredSessionRef> = records
                     .into_iter()
-                    .map(StoredSessionRef::from_pending)
+                    .map(StoredSessionRef::from_external)
                     .collect();
                 if let Some(id_filter) = IdFilter::new(filters, "session_id")? {
                     sessions = id_filter.retain(sessions, |s| s.id.as_str())?;
@@ -297,12 +337,13 @@ impl SessionSet {
         session: &StoredSessionRef,
         cache: &RowCache,
     ) -> Result<Arc<RecordBatch>> {
-        if let Some(batch) = cache.get(&session.commit) {
+        let key = session.cache_key();
+        if let Some(batch) = cache.get(&key) {
             return Ok(batch);
         }
         let mut stored = self.read_stored(session)?;
         let batch = Arc::new(derive_batch(&session.id, stored.entries())?);
-        cache.insert(&session.commit, Arc::clone(&batch));
+        cache.insert(&key, Arc::clone(&batch));
         Ok(batch)
     }
 
@@ -315,19 +356,20 @@ impl SessionSet {
         session: &StoredSessionRef,
         cache: &RowCache,
     ) -> Result<Arc<RecordBatch>> {
-        if let Some(batch) = cache.get_tool_uses(&session.commit) {
+        let key = session.cache_key();
+        if let Some(batch) = cache.get_tool_uses(&key) {
             return Ok(batch);
         }
         let mut stored = self.read_stored(session)?;
         let batch = Arc::new(tool_use_batch(&session.id, stored.tool_uses())?);
-        cache.insert_tool_uses(&session.commit, Arc::clone(&batch));
+        cache.insert_tool_uses(&key, Arc::clone(&batch));
         Ok(batch)
     }
 
     /// The `changes` batch of `session`: the records of its
-    /// `changes.json`, from the working tree of a pending publish or
-    /// the blob of a commit, cached as [`rows`] caches the derived
-    /// batch.
+    /// `changes.json`, from the session directory of an external
+    /// session or the blob of a commit, cached as [`rows`] caches the
+    /// derived batch.
     ///
     /// [`rows`]: SessionSet::rows
     pub(crate) fn changes(
@@ -335,31 +377,32 @@ impl SessionSet {
         session: &StoredSessionRef,
         cache: &RowCache,
     ) -> Result<Arc<RecordBatch>> {
-        if let Some(batch) = cache.get_changes(&session.commit) {
+        let key = session.cache_key();
+        if let Some(batch) = cache.get_changes(&key) {
             return Ok(batch);
         }
-        let records = match &session.root {
-            Some(root) => PublishDirLayout::new(root).read_changes(),
-            None => {
+        let records = match &session.source {
+            SessionSource::External { dir, .. } => SessionDirLayout::new(dir).read_changes(),
+            SessionSource::Stored { commit } => {
                 let store = self.lock();
-                SessionStore::from(&*store).changes(&session.commit)
+                SessionStore::from(&*store).changes(commit)
             }
         }
         .map_err(external)?;
         let batch = Arc::new(changes_batch(&session.id, &records)?);
-        cache.insert_changes(&session.commit, Arc::clone(&batch));
+        cache.insert_changes(&key, Arc::clone(&batch));
         Ok(batch)
     }
 
     fn read_stored(&self, session: &StoredSessionRef) -> Result<Box<dyn StoredSession>> {
         let driver = self.driver(&session.driver_name)?;
-        let content: Box<dyn ContentSource> = match &session.root {
-            Some(root) => Box::new(DirContentSource::new(
-                PublishDirLayout::new(root).files_dir(),
+        let content: Box<dyn ContentSource> = match &session.source {
+            SessionSource::External { dir, .. } => Box::new(DirContentSource::new(
+                SessionDirLayout::new(dir).files_dir(),
             )),
-            None => {
+            SessionSource::Stored { commit } => {
                 let store = self.lock();
-                SessionStore::from(&*store).content(&session.commit)
+                SessionStore::from(&*store).content(commit)
             }
         };
         driver

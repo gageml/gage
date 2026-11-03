@@ -381,7 +381,7 @@ impl StoreTextIndex {
         let live: HashSet<&str> = tips.iter().map(|s| s.id.as_str()).collect();
         let dirty: Vec<_> = tips
             .iter()
-            .filter(|s| text.sessions().get(&s.id) != Some(&s.commit))
+            .filter(|s| text.sessions().get(&s.id).map(String::as_str) != s.commit())
             .collect();
         let removed: Vec<String> = text
             .sessions()
@@ -406,7 +406,9 @@ impl StoreTextIndex {
                 .replace_session(
                     &session.id,
                     &self.session_url(&session.id),
-                    &session.commit,
+                    session
+                        .commit()
+                        .expect("a store-wide set holds stored sessions"),
                     message_rows_of(&messages)?,
                 )
                 .map_err(index_error)?;
@@ -449,7 +451,7 @@ impl StoreTextIndex {
         let text = self.open()?;
         let stale = tips
             .iter()
-            .filter(|s| text.sessions().get(&s.id) != Some(&s.commit))
+            .filter(|s| text.sessions().get(&s.id).map(String::as_str) != s.commit())
             .count();
         let status = text.status();
         Ok(StoreTextStatus {

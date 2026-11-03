@@ -1,29 +1,34 @@
 //! Session objects: `gage::session 1`, reached through [`SessionStore`].
 //!
 //! Content is `attrs.json` (driver, native session id, session type,
-//! content format) and the opaque `files.d/**` subtree holding the
-//! session content as provided by the driver. The object id is
-//! derived from `(driver_name, native_session_id)`, so the same
-//! native session maps to the same object over time. Adding a session
-//! whose content matches the stored version writes nothing; changed
-//! content writes an edit commit. Tree construction, commit parents,
-//! and edits are the generic object model's job; see
-//! [`crate::object`].
+//! content format), the opaque `files.d/**` subtree holding the
+//! session content as provided by the driver, and `changes.json`, the
+//! records of what a derived session left out of its original. A
+//! session added from a native source has an id derived from
+//! `(driver_name, native_session_id)`, so the same native session
+//! maps to the same object over time; adding one whose content
+//! matches the stored version writes nothing, and changed content
+//! writes an edit commit. A session created from a directory takes
+//! the directory's name as its id and its tree as it stands. Tree
+//! construction, commit parents, and edits are the generic object
+//! model's job; see [`crate::object`].
 
 use std::collections::{BTreeMap, HashSet};
+use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use gage_core::uuid::derive_id;
+use gage_core::uuid::{derive_id, is_id};
 use gage_session::{ContentSink, ContentSource, Driver, NativeSession, SummaryAttrs};
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 
 use crate::content::GitContentSource;
 use crate::dataset::{DatasetMembers, DatasetStore};
 use crate::index::{ObjectQuery, Order, SelectedTip};
 use crate::object::{EditOutcome, Object, ObjectTree, object_ref, require_type};
-use crate::publish::{CHANGES_FILE, ChangeRecord, parse_changes};
+use crate::scan::import_opaque_tree;
 use crate::writer::{TreeInput, is_dot_git, mktree, write_blob_stream};
 use crate::{Store, StoreError};
 
@@ -35,6 +40,10 @@ pub(crate) const INDEXED_ATTRS: &[&str] = &["summary.model"];
 /// `.d` suffix marks the subtree as producer-owned; Gage schema
 /// walkers do not descend into it.
 pub(crate) const FILES_TREE: &str = "files.d";
+const ATTRS_FILE: &str = "attrs.json";
+pub(crate) const CHANGES_FILE: &str = "changes.json";
+/// The session object's tree under a session directory
+pub const OBJECT_DIR: &str = "session";
 
 /// Session operations over an opened store.
 pub struct SessionStore<'a> {
@@ -329,6 +338,48 @@ impl<'a> SessionStore<'a> {
         }
     }
 
+    /// Write the session under `dir`, a session directory `<id>/`: the
+    /// directory name is the session's id and the `session/` tree is
+    /// the object's content as it stands, `attrs.json` as the attrs,
+    /// `changes.json` as a root blob, and `files.d` as the content
+    /// subtree. The attrs and the records are checked to decode; the
+    /// content is not inspected. The object's ref must not exist.
+    /// Returns the commit SHA.
+    pub fn create_from_dir(&self, dir: &Path) -> Result<String, StoreError> {
+        let layout = SessionDirLayout::new(dir);
+        let id = layout
+            .session_id()
+            .expect("a session directory is named by its id");
+        assert!(is_id(id), "a session directory is named by its id: {id:?}");
+        if self.store.rev_parse(&object_ref(id))?.is_some() {
+            return Err(StoreError::ObjectExists(id.to_string()));
+        }
+        let read = |path: &Path| fs::read(path).map_err(StoreError::ReadContent);
+        let attrs_value: Value = serde_json::from_slice(&read(&layout.attrs_file())?)
+            .map_err(|e| StoreError::Parse(format!("session attrs {id}: {e}")))?;
+        let attrs: SessionAttrsRecord = serde_json::from_value(attrs_value.clone())
+            .map_err(|e| StoreError::Parse(format!("session attrs {id}: {e}")))?;
+        let changes = read(&layout.changes_file())?;
+        parse_changes(&changes)?;
+        let files_tree =
+            import_opaque_tree(self.store.path(), &layout.files_dir())?.ok_or_else(|| {
+                StoreError::Parse(format!(
+                    "session {id}: no {} directory",
+                    layout.files_dir().display()
+                ))
+            })?;
+
+        let mut tree = ObjectTree {
+            attrs: Some(attrs_value),
+            ..ObjectTree::default()
+        };
+        tree.blobs.insert(CHANGES_FILE.to_string(), changes);
+        tree.subtrees.insert(FILES_TREE.to_string(), files_tree);
+        let message = format!("session: {}", attrs.origin);
+        self.store
+            .create(OBJECT_TYPE, OBJECT_VERSION, id, &tree, &message)
+    }
+
     /// Remove stored sessions. Every id or prefix is resolved to a live
     /// session before anything is written. Each dataset that currently
     /// holds any of the sessions is edited once to unlink all of them,
@@ -492,6 +543,367 @@ fn decode_attrs(object: &Object) -> Result<SessionAttrsRecord, StoreError> {
         })?;
     serde_json::from_value(attrs_value.clone())
         .map_err(|e| StoreError::Parse(format!("session attrs {commit_sha}: {e}")))
+}
+
+/// The layout of a session directory: a directory named by the
+/// session's id holding the object's tree under `session/`.
+///
+/// ```text
+/// session/attrs.json
+/// session/changes.json
+/// session/files.d/**
+/// ```
+///
+/// A publish stages the derived session this way, and the query layer
+/// reads it, so both take the paths from here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionDirLayout {
+    root: PathBuf,
+}
+
+impl SessionDirLayout {
+    /// The layout rooted at `root`, `<id>/`.
+    pub fn new(root: impl Into<PathBuf>) -> Self {
+        Self { root: root.into() }
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// The session's id: the directory name.
+    pub fn session_id(&self) -> Option<&str> {
+        self.root.file_name().and_then(|n| n.to_str())
+    }
+
+    /// The session object's tree, `session/`.
+    pub fn object_dir(&self) -> PathBuf {
+        self.root.join(OBJECT_DIR)
+    }
+
+    pub fn attrs_file(&self) -> PathBuf {
+        self.object_dir().join(ATTRS_FILE)
+    }
+
+    pub fn changes_file(&self) -> PathBuf {
+        self.object_dir().join(CHANGES_FILE)
+    }
+
+    /// The opaque content subtree, `session/files.d/`.
+    pub fn files_dir(&self) -> PathBuf {
+        self.object_dir().join(FILES_TREE)
+    }
+
+    /// The records of the directory's `changes.json`.
+    pub fn read_changes(&self) -> Result<Vec<ChangeRecord>, StoreError> {
+        let bytes = fs::read(self.changes_file()).map_err(StoreError::ReadContent)?;
+        parse_changes(&bytes)
+    }
+}
+
+/// A session read from a session directory rather than a commit. It
+/// has no version: the directory is mutable and nothing names a
+/// content state. A writer that changes the session rewrites
+/// `attrs.json`, whose mtime is what a reader keys its derived state
+/// on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalSession {
+    pub id: String,
+    /// The session directory, `<id>/`.
+    pub dir: PathBuf,
+}
+
+impl ExternalSession {
+    pub fn layout(&self) -> SessionDirLayout {
+        SessionDirLayout::new(&self.dir)
+    }
+
+    /// The session's `attrs.json` as it is now, with the file's mtime.
+    pub fn read(&self) -> Result<ExternalSessionRecord, StoreError> {
+        let path = self.layout().attrs_file();
+        let bytes = fs::read(&path).map_err(StoreError::ReadContent)?;
+        let attrs: SessionAttrsRecord = serde_json::from_slice(&bytes)
+            .map_err(|e| StoreError::Parse(format!("session attrs {}: {e}", path.display())))?;
+        Ok(ExternalSessionRecord {
+            id: self.id.clone(),
+            dir: self.dir.clone(),
+            attrs,
+            attrs_modified_ms: mtime_ms(&path),
+        })
+    }
+}
+
+/// One read of an [`ExternalSession`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExternalSessionRecord {
+    pub id: String,
+    pub dir: PathBuf,
+    pub attrs: SessionAttrsRecord,
+    /// UNIX time millis of the `attrs.json` mtime at this read.
+    pub attrs_modified_ms: i64,
+}
+
+/// The mtime of `path` in UNIX millis; 0 when it cannot be read.
+fn mtime_ms(path: &Path) -> i64 {
+    fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// One change of a session's `changes.json`: what its publish applied
+/// to the original. A line number is the original's, except on a
+/// `Title` record, whose line exists only in the derived session; the
+/// derived session's lines are renumbered around the dropped ones.
+/// Span offsets are positions in the published text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChangeRecord {
+    pub kind: ChangeKind,
+    /// The original line, 1-based: the first dropped line of a `Line`
+    /// record, the line of a `Text` record. A `Title` record's line is
+    /// the derived session's line of the added entry. A `Value` or
+    /// `Attr` record is on no line and carries 0.
+    pub line: u32,
+    /// The last dropped line of a `Line` record, inclusive.
+    pub line_end: Option<u32>,
+    /// What the record refers to: nothing for a `Line`, the JSONPath
+    /// selector of a `Value`, the JSON Pointer to the text value of a
+    /// `Text`, the attribute name of an `Attr`.
+    pub reference: Option<String>,
+    /// Zero-based UTF-8 byte offsets of a `Text` record's span in the
+    /// published value, `span_end` exclusive. A removal is a span of
+    /// zero length.
+    pub span_start: Option<u64>,
+    pub span_end: Option<u64>,
+    /// The reason code; a `Title` record has none.
+    pub reason: Option<String>,
+    pub author: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChangeKind {
+    /// One or more lines were left out of the derived session.
+    Line,
+    /// Every value a JSONPath selects was left out of its entry.
+    Value,
+    /// A byte span of one text value was removed or replaced by the
+    /// marker.
+    Text,
+    /// An attribute of `attrs.json` was left out.
+    Attr,
+    /// An entry that sets the session's title was added at the end.
+    Title,
+}
+
+impl ChangeKind {
+    /// The tag that opens a record of this kind.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ChangeKind::Line => "line",
+            ChangeKind::Value => "value",
+            ChangeKind::Text => "text",
+            ChangeKind::Attr => "attr",
+            ChangeKind::Title => "title",
+        }
+    }
+
+    /// The kind a record's tag names; `None` for a tag this build does
+    /// not know.
+    fn from_tag(tag: &str) -> Option<ChangeKind> {
+        match tag {
+            "line" => Some(ChangeKind::Line),
+            "value" => Some(ChangeKind::Value),
+            "text" => Some(ChangeKind::Text),
+            "attr" => Some(ChangeKind::Attr),
+            "title" => Some(ChangeKind::Title),
+            _ => None,
+        }
+    }
+}
+
+/// Decode the `changes.json` text: a list of records, each a list
+/// whose first element names its kind:
+/// `["line", line or [line, line_end], reason, author]`,
+/// `["value", path, reason, author]`,
+/// `["text", line, pointer, span_start, span_end, reason, author]`,
+/// `["attr", name, reason, author]`, and `["title", line, author]`. A
+/// record whose tag this build does not know is passed over. Records
+/// come back in file order.
+pub fn parse_changes(bytes: &[u8]) -> Result<Vec<ChangeRecord>, StoreError> {
+    let value: Value = serde_json::from_slice(bytes)
+        .map_err(|e| StoreError::Parse(format!("{CHANGES_FILE}: {e}")))?;
+    let Some(records) = value.as_array() else {
+        return Err(StoreError::Parse(format!(
+            "{CHANGES_FILE}: expected a list of records"
+        )));
+    };
+    let mut out = Vec::new();
+    for (i, record) in records.iter().enumerate() {
+        let at = |e: String| StoreError::Parse(format!("{CHANGES_FILE} record {i}: {e}"));
+        let fields = record
+            .as_array()
+            .ok_or_else(|| at("expected a list".to_string()))?;
+        let tag = fields
+            .first()
+            .and_then(Value::as_str)
+            .ok_or_else(|| at("field 0 is not a kind tag".to_string()))?;
+        let Some(kind) = ChangeKind::from_tag(tag) else {
+            continue;
+        };
+        out.push(parse_change(kind, fields).map_err(at)?);
+    }
+    Ok(out)
+}
+
+/// Decode the fields of one record of `kind`, tag included.
+fn parse_change(kind: ChangeKind, fields: &[Value]) -> Result<ChangeRecord, String> {
+    let field = |i: usize| fields.get(i).ok_or_else(|| format!("missing field {i}"));
+    let text = |i: usize| {
+        field(i)?
+            .as_str()
+            .map(String::from)
+            .ok_or_else(|| format!("field {i} is not a string"))
+    };
+    let line_of = |v: &Value, what: &str| {
+        v.as_u64()
+            .and_then(|n| u32::try_from(n).ok())
+            .filter(|n| *n >= 1)
+            .ok_or_else(|| format!("{what} is not a line number"))
+    };
+    let offset = |i: usize| {
+        field(i)?
+            .as_u64()
+            .ok_or_else(|| format!("field {i} is not a byte offset"))
+    };
+    let expect = |n: usize| {
+        if fields.len() == n {
+            Ok(())
+        } else {
+            Err(format!("expected {n} fields, found {}", fields.len()))
+        }
+    };
+    let record = match kind {
+        ChangeKind::Line => {
+            expect(4)?;
+            let (line, line_end) = match field(1)? {
+                Value::Array(pair) => match pair.as_slice() {
+                    [start, end] => {
+                        let line = line_of(start, "range start")?;
+                        let line_end = line_of(end, "range end")?;
+                        if line_end < line {
+                            return Err("range end is before its start".to_string());
+                        }
+                        (line, line_end)
+                    }
+                    _ => return Err("field 1 is not a line or a range".to_string()),
+                },
+                single => {
+                    let line = line_of(single, "field 1")?;
+                    (line, line)
+                }
+            };
+            ChangeRecord {
+                kind,
+                line,
+                line_end: Some(line_end),
+                reference: None,
+                span_start: None,
+                span_end: None,
+                reason: Some(text(2)?),
+                author: text(3)?,
+            }
+        }
+        ChangeKind::Value | ChangeKind::Attr => {
+            expect(4)?;
+            ChangeRecord {
+                kind,
+                line: 0,
+                line_end: None,
+                reference: Some(text(1)?),
+                span_start: None,
+                span_end: None,
+                reason: Some(text(2)?),
+                author: text(3)?,
+            }
+        }
+        ChangeKind::Title => {
+            expect(3)?;
+            ChangeRecord {
+                kind,
+                line: line_of(field(1)?, "field 1")?,
+                line_end: None,
+                reference: None,
+                span_start: None,
+                span_end: None,
+                reason: None,
+                author: text(2)?,
+            }
+        }
+        ChangeKind::Text => {
+            expect(7)?;
+            let (span_start, span_end) = (offset(3)?, offset(4)?);
+            if span_end < span_start {
+                return Err("span end is before its start".to_string());
+            }
+            ChangeRecord {
+                kind,
+                line: line_of(field(1)?, "field 1")?,
+                line_end: None,
+                reference: Some(text(2)?),
+                span_start: Some(span_start),
+                span_end: Some(span_end),
+                reason: Some(text(5)?),
+                author: text(6)?,
+            }
+        }
+    };
+    Ok(record)
+}
+
+/// Encode `records` as the `changes.json` text: one record per line in
+/// the order the records are given.
+pub fn format_changes(records: &[ChangeRecord]) -> String {
+    let mut out = String::from("[");
+    for (i, record) in records.iter().enumerate() {
+        out.push_str("\n  ");
+        out.push_str(&change_value(record).to_string());
+        if i + 1 < records.len() {
+            out.push(',');
+        } else {
+            out.push('\n');
+        }
+    }
+    out.push_str("]\n");
+    out
+}
+
+/// One record as the list holds it, opened by its kind's tag.
+fn change_value(r: &ChangeRecord) -> Value {
+    let tag = r.kind.as_str();
+    match r.kind {
+        ChangeKind::Line => {
+            let end = r.line_end.unwrap_or(r.line);
+            let lines = if end == r.line {
+                json!(r.line)
+            } else {
+                json!([r.line, end])
+            };
+            json!([tag, lines, r.reason, r.author])
+        }
+        ChangeKind::Value | ChangeKind::Attr => json!([tag, r.reference, r.reason, r.author]),
+        ChangeKind::Title => json!([tag, r.line, r.author]),
+        ChangeKind::Text => json!([
+            tag,
+            r.line,
+            r.reference,
+            r.span_start,
+            r.span_end,
+            r.reason,
+            r.author
+        ]),
+    }
 }
 
 /// A [`ContentSink`] that captures each `create` call into a git blob
@@ -708,6 +1120,7 @@ pub(crate) mod tests {
     use crate::DatasetStore;
     use crate::git::{git_in, run};
     use crate::test_support::open_store;
+    use gage_core::uuid::new_uuid;
     use gage_session::SessionAttrs;
 
     fn attrs_with_origin(origin: &str) -> SessionAttrsRecord {
@@ -1348,5 +1761,385 @@ pub(crate) mod tests {
                 other => panic!("case {i} {files:?}: expected InvalidPath, got {other:?}"),
             }
         }
+    }
+
+    /// A session directory named by an id, holding `attrs.json`,
+    /// `changes.json`, and `files.d/` under `session/`.
+    pub(crate) fn write_session_dir(
+        root: &Path,
+        id: &str,
+        attrs: &SessionAttrsRecord,
+        changes: &str,
+        files: &[(&str, &str)],
+    ) -> PathBuf {
+        let dir = root.join(id);
+        let layout = SessionDirLayout::new(&dir);
+        fs::create_dir_all(layout.files_dir()).unwrap();
+        let value = serde_json::to_value(attrs).unwrap();
+        let mut bytes = serde_json::to_vec(&value).unwrap();
+        bytes.push(b'\n');
+        fs::write(layout.attrs_file(), bytes).unwrap();
+        fs::write(layout.changes_file(), changes).unwrap();
+        for (path, text) in files {
+            fs::write(layout.files_dir().join(path), text).unwrap();
+        }
+        dir
+    }
+
+    /// `create_from_dir` commits the directory's tree as it stands,
+    /// with `changes.json` as a root blob beside the session's usual
+    /// entries, under the id the directory is named by; the records
+    /// read back through `changes`, a session added from a native
+    /// source has none, and a second create of the same id is
+    /// `ObjectExists`.
+    #[test]
+    fn create_from_dir_commits_the_session_tree_under_the_directory_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let sessions = SessionStore::from(&store);
+        let native = sessions
+            .add(
+                &FakeDriver,
+                &mut fake("s1", &[("session.jsonl", "a\nb\nc\n")]),
+            )
+            .unwrap();
+        let id = new_uuid();
+        let origin = format!("session:{}@{}", native.id, native.commit_sha);
+        let changes = "[\n  [\"line\",2,\"scope\",\"user:test\"]\n]\n";
+        let dir = write_session_dir(
+            tmp.path(),
+            &id,
+            &attrs_with_origin(&origin),
+            changes,
+            &[("session.jsonl", "a\nc\n")],
+        );
+        let staged_attrs = fs::read_to_string(SessionDirLayout::new(&dir).attrs_file()).unwrap();
+
+        let commit = sessions.create_from_dir(&dir).unwrap();
+
+        let ref_path = object_ref(&id);
+        let listing = run(git_in(store.path(), ["ls-tree", "--name-only", &ref_path])).unwrap();
+        assert_eq!(
+            listing.lines().collect::<Vec<_>>(),
+            vec![
+                "attrs.json",
+                "changes.json",
+                "created",
+                "files.d",
+                "id",
+                "modified",
+                "type"
+            ]
+        );
+        let cat = |path: &str| {
+            run(git_in(
+                store.path(),
+                ["cat-file", "-p", &format!("{ref_path}:{path}")],
+            ))
+            .unwrap()
+        };
+        assert_eq!(cat("type"), "gage::session 1\n");
+        assert_eq!(cat("attrs.json"), staged_attrs);
+        assert_eq!(cat("changes.json"), changes);
+        assert_eq!(cat("files.d/session.jsonl"), "a\nc\n");
+
+        let created = sessions.at_commit(&commit).unwrap();
+        assert_eq!(created.id, id);
+        assert_eq!(created.attrs.origin, origin);
+        assert_eq!(sessions.iter().unwrap().count(), 2);
+
+        let records = sessions.changes(&commit).unwrap();
+        assert_eq!(records, SessionDirLayout::new(&dir).read_changes().unwrap());
+        assert_eq!(records[0].kind, ChangeKind::Line);
+        assert_eq!((records[0].line, records[0].line_end), (2, Some(2)));
+        assert!(sessions.changes(&native.commit_sha).unwrap().is_empty());
+
+        let again = sessions.create_from_dir(&dir).unwrap_err();
+        assert!(matches!(again, StoreError::ObjectExists(ref existing) if *existing == id));
+    }
+
+    /// The directory name is the id, so a directory named otherwise is
+    /// a caller error.
+    #[test]
+    #[should_panic(expected = "named by its id")]
+    fn create_from_dir_requires_an_id_named_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let dir = write_session_dir(
+            tmp.path(),
+            "not-an-id",
+            &attrs_with_origin("fake:x"),
+            "[]\n",
+            &[],
+        );
+        SessionStore::from(&store).create_from_dir(&dir).unwrap();
+    }
+
+    /// A malformed `changes.json` or a missing `files.d` is refused
+    /// before anything is written.
+    #[test]
+    fn create_from_dir_checks_the_records_and_the_content_subtree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let sessions = SessionStore::from(&store);
+        let id = new_uuid();
+        let dir = write_session_dir(tmp.path(), &id, &attrs_with_origin("fake:x"), "{}\n", &[]);
+        let bad = sessions.create_from_dir(&dir).unwrap_err();
+        assert!(
+            matches!(bad, StoreError::Parse(ref m) if m.contains("expected a list")),
+            "{bad}"
+        );
+        fs::write(SessionDirLayout::new(&dir).changes_file(), "[]\n").unwrap();
+        fs::remove_dir(SessionDirLayout::new(&dir).files_dir()).unwrap();
+        let missing = sessions.create_from_dir(&dir).unwrap_err();
+        assert!(
+            matches!(missing, StoreError::Parse(ref m) if m.contains("no ") && m.contains("files.d")),
+            "{missing}"
+        );
+        assert_eq!(sessions.iter().unwrap().count(), 0);
+    }
+
+    /// An external session reads its attrs as they are now and the
+    /// mtime of `attrs.json`, which a rewrite moves.
+    #[test]
+    fn external_session_reads_attrs_and_their_mtime() {
+        let tmp = tempfile::tempdir().unwrap();
+        let id = new_uuid();
+        let dir = write_session_dir(tmp.path(), &id, &attrs_with_origin("fake:x"), "[]\n", &[]);
+        let external = ExternalSession {
+            id: id.clone(),
+            dir: dir.clone(),
+        };
+        let before = external.read().unwrap();
+        assert_eq!(before.id, id);
+        assert_eq!(before.dir, dir);
+        assert_eq!(before.attrs.origin, "fake:x");
+
+        let later = SystemTime::now() + std::time::Duration::from_secs(90);
+        let mut attrs = attrs_with_origin("fake:y");
+        attrs.summary.title = Some("Retitled".into());
+        let mut bytes = serde_json::to_vec(&attrs).unwrap();
+        bytes.push(b'\n');
+        fs::write(external.layout().attrs_file(), bytes).unwrap();
+        fs::File::options()
+            .write(true)
+            .open(external.layout().attrs_file())
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+
+        let after = external.read().unwrap();
+        assert_eq!(after.attrs.origin, "fake:y");
+        assert_eq!(after.attrs.summary.title.as_deref(), Some("Retitled"));
+        assert!(after.attrs_modified_ms > before.attrs_modified_ms);
+        assert_eq!(
+            after.attrs_modified_ms,
+            later.duration_since(UNIX_EPOCH).unwrap().as_millis() as i64
+        );
+
+        let missing = ExternalSession {
+            id: "gone".into(),
+            dir: tmp.path().join("gone"),
+        }
+        .read()
+        .unwrap_err();
+        assert!(matches!(missing, StoreError::ReadContent(_)), "{missing}");
+    }
+
+    /// The record parser reads every kind with its fields in the
+    /// positions the design gives them, in file order, a record with an
+    /// unknown tag is passed over, and a malformed record is named by
+    /// its position.
+    #[test]
+    fn parse_changes_reads_every_record_kind() {
+        let text = concat!(
+            "[\n",
+            r#"  ["line", [1, 4], "scope", "session:abc"],"#,
+            "\n",
+            r#"  ["line", 7, "scope", "user:t"],"#,
+            "\n",
+            r#"  ["value", "$.cwd", "system", "filter:system"],"#,
+            "\n",
+            r#"  ["text", 5, "/message/content", 4, 14, "pii", "filter:pii"],"#,
+            "\n",
+            r#"  ["attr", "project", "system", "filter:system"],"#,
+            "\n",
+            r#"  ["title", 9, "user:t"],"#,
+            "\n",
+            r#"  ["later", 1]"#,
+            "\n]\n",
+        );
+        let records = parse_changes(text.as_bytes()).unwrap();
+        let record = |kind,
+                      line,
+                      line_end,
+                      reference: Option<&str>,
+                      span,
+                      reason: Option<&str>,
+                      author: &str| {
+            let (span_start, span_end) = match span {
+                Some((start, end)) => (Some(start), Some(end)),
+                None => (None, None),
+            };
+            ChangeRecord {
+                kind,
+                line,
+                line_end,
+                reference: reference.map(String::from),
+                span_start,
+                span_end,
+                reason: reason.map(String::from),
+                author: author.into(),
+            }
+        };
+        assert_eq!(
+            records,
+            [
+                record(
+                    ChangeKind::Line,
+                    1,
+                    Some(4),
+                    None,
+                    None,
+                    Some("scope"),
+                    "session:abc"
+                ),
+                record(
+                    ChangeKind::Line,
+                    7,
+                    Some(7),
+                    None,
+                    None,
+                    Some("scope"),
+                    "user:t"
+                ),
+                record(
+                    ChangeKind::Value,
+                    0,
+                    None,
+                    Some("$.cwd"),
+                    None,
+                    Some("system"),
+                    "filter:system"
+                ),
+                record(
+                    ChangeKind::Text,
+                    5,
+                    None,
+                    Some("/message/content"),
+                    Some((4, 14)),
+                    Some("pii"),
+                    "filter:pii"
+                ),
+                record(
+                    ChangeKind::Attr,
+                    0,
+                    None,
+                    Some("project"),
+                    None,
+                    Some("system"),
+                    "filter:system"
+                ),
+                record(ChangeKind::Title, 9, None, None, None, None, "user:t"),
+            ]
+        );
+        assert!(parse_changes(b"[]\n").unwrap().is_empty());
+        assert!(
+            parse_changes(format_changes(&[]).as_bytes())
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            parse_changes(format_changes(&records).as_bytes()).unwrap(),
+            records
+        );
+
+        let bad =
+            parse_changes(br#"[["line", 1, "scope", "a"], ["text", 2, "/p", "x"]]"#).unwrap_err();
+        assert!(
+            matches!(bad, StoreError::Parse(ref m) if m.contains("record 1") && m.contains("expected 7 fields")),
+            "{bad}"
+        );
+        let reversed = parse_changes(br#"[["line", [4, 1], "scope", "a"]]"#).unwrap_err();
+        assert!(
+            matches!(reversed, StoreError::Parse(ref m) if m.contains("before its start")),
+            "{reversed}"
+        );
+        let zero = parse_changes(br#"[["title", 0, "a"]]"#).unwrap_err();
+        assert!(
+            matches!(zero, StoreError::Parse(ref m) if m.contains("not a line number")),
+            "{zero}"
+        );
+        let untagged = parse_changes(br#"[[1, "scope", "a"]]"#).unwrap_err();
+        assert!(
+            matches!(untagged, StoreError::Parse(ref m) if m.contains("record 0") && m.contains("not a kind tag")),
+            "{untagged}"
+        );
+        let object = parse_changes(b"{}\n").unwrap_err();
+        assert!(
+            matches!(object, StoreError::Parse(ref m) if m.contains("expected a list")),
+            "{object}"
+        );
+    }
+
+    /// The writer puts one record per line in the order given, each
+    /// opened by its tag, and a single dropped line is a bare number
+    /// where a run is a pair.
+    #[test]
+    fn format_changes_writes_one_record_per_line() {
+        let records = [
+            ChangeRecord {
+                kind: ChangeKind::Line,
+                line: 2,
+                line_end: Some(2),
+                reference: None,
+                span_start: None,
+                span_end: None,
+                reason: Some("scope".into()),
+                author: "user:t".into(),
+            },
+            ChangeRecord {
+                kind: ChangeKind::Line,
+                line: 4,
+                line_end: Some(6),
+                reference: None,
+                span_start: None,
+                span_end: None,
+                reason: Some("scope".into()),
+                author: "user:t".into(),
+            },
+            ChangeRecord {
+                kind: ChangeKind::Text,
+                line: 1,
+                line_end: None,
+                reference: Some("/message/content".into()),
+                span_start: Some(6),
+                span_end: Some(16),
+                reason: Some("pii".into()),
+                author: "filter:pii".into(),
+            },
+            ChangeRecord {
+                kind: ChangeKind::Title,
+                line: 7,
+                line_end: None,
+                reference: None,
+                span_start: None,
+                span_end: None,
+                reason: None,
+                author: "user:t".into(),
+            },
+        ];
+        assert_eq!(
+            format_changes(&records),
+            concat!(
+                "[\n",
+                "  [\"line\",2,\"scope\",\"user:t\"],\n",
+                "  [\"line\",[4,6],\"scope\",\"user:t\"],\n",
+                "  [\"text\",1,\"/message/content\",6,16,\"pii\",\"filter:pii\"],\n",
+                "  [\"title\",7,\"user:t\"]\n",
+                "]\n",
+            )
+        );
+        assert_eq!(format_changes(&[]), "[]\n");
     }
 }

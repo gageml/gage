@@ -23,7 +23,9 @@ use gage_registry::driver::DriverRegistry;
 use gage_session::Driver;
 use gage_session::is_system;
 use gage_store::url::{self, LineSelection};
-use gage_store::{ChangeKind, NoteEdit, NoteFull, NoteInput, NoteStore, NoteValue, Store};
+use gage_store::{
+    ChangeKind, ExternalSession, NoteEdit, NoteFull, NoteInput, NoteStore, NoteValue, Store,
+};
 use ratatui::crossterm::terminal;
 use serde_json::Value;
 
@@ -108,13 +110,13 @@ impl Backend {
         }
     }
 
-    /// Over the pending publish working trees under `publish_root`.
-    /// The picker lists them and nothing else, and no note is read or
-    /// written.
-    pub async fn pending(store: Arc<Mutex<Store>>, publish_root: impl Into<PathBuf>) -> Backend {
+    /// Over `sessions`, the pending publishes as the session
+    /// directories they are. The picker lists them and nothing else,
+    /// and no note is read or written.
+    pub async fn pending(store: Arc<Mutex<Store>>, sessions: Vec<ExternalSession>) -> Backend {
         Backend {
             ctx: ContextBuilder::new(Some(Arc::clone(&store)))
-                .publish(publish_root)
+                .external(sessions)
                 .build()
                 .await,
             kind: Kind::Stored {
@@ -738,8 +740,11 @@ fn sql_str(s: &str) -> String {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use std::io::Read;
+
+    use gage_core::uuid::new_uuid;
     use gage_session::SourceOptions;
-    use gage_store::{PublishStore, SessionStore};
+    use gage_store::{SessionAttrsRecord, SessionDirLayout, SessionStore};
     use tempfile::TempDir;
 
     use super::*;
@@ -1009,23 +1014,43 @@ pub(crate) mod tests {
         assert_eq!(recent[0].project, "-w-proj");
     }
 
-    /// The pending backend lists the publish working trees and not the
-    /// stored sessions, loads a pending session with its redactions,
+    /// The pending backend lists the session directories it is given
+    /// and not the stored sessions, loads one with its redactions,
     /// marks it pending, and takes no notes.
     #[tokio::test(flavor = "multi_thread")]
-    async fn pending_backend_loads_publish_working_trees_without_notes() {
+    async fn pending_backend_loads_session_directories_without_notes() {
         let f = fixture();
-        let publish_root = f.cache_root.join("publish");
-        let original = SessionStore::from(&f.store).get(&f.session_id).unwrap();
-        let publish = PublishStore::with_root(&f.store, &publish_root);
-        let pending = publish.init(&original).unwrap();
+        let sessions = SessionStore::from(&f.store);
+        let original = sessions.get(&f.session_id).unwrap();
+        // A derived copy of the original as a session directory
+        let mut text = String::new();
+        sessions
+            .content(&original.commit_sha)
+            .open("session.jsonl")
+            .unwrap()
+            .read_to_string(&mut text)
+            .unwrap();
+        let id = new_uuid();
+        let dir = f.cache_root.join("publish").join(&id);
+        let layout = SessionDirLayout::new(&dir);
+        std::fs::create_dir_all(layout.files_dir()).unwrap();
+        let attrs = SessionAttrsRecord {
+            origin: format!("session:{}@{}", original.id, original.commit_sha),
+            ..original.attrs
+        };
+        std::fs::write(layout.attrs_file(), serde_json::to_vec(&attrs).unwrap()).unwrap();
         std::fs::write(
-            publish.layout(&pending.id).changes_file(),
+            layout.changes_file(),
             r#"[["text", 1, "/message/content", 6, 11, "pii", "filter:pii"]]"#,
         )
         .unwrap();
+        std::fs::write(layout.files_dir().join("session.jsonl"), text).unwrap();
+        let pending = ExternalSession {
+            id: id.clone(),
+            dir,
+        };
 
-        let backend = Backend::pending(Arc::new(Mutex::new(f.store)), &publish_root).await;
+        let backend = Backend::pending(Arc::new(Mutex::new(f.store)), vec![pending.clone()]).await;
         assert!(!backend.supports_notes());
         assert!(!backend.is_native());
 

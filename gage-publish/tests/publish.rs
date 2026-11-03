@@ -118,15 +118,24 @@ fn fixture_with(session: &str) -> Fixture {
 }
 
 fn staged_lines(root: &std::path::Path, id: &str) -> Vec<String> {
-    fs::read_to_string(root.join(id).join("files.d").join("session.jsonl"))
+    fs::read_to_string(staged_file(root, id))
         .unwrap()
         .lines()
         .map(String::from)
         .collect()
 }
 
+/// The staged `session.jsonl` of the pending publish `id`.
+fn staged_file(root: &std::path::Path, id: &str) -> std::path::PathBuf {
+    root.join(id)
+        .join("session")
+        .join("files.d")
+        .join("session.jsonl")
+}
+
 fn staged_attrs(root: &std::path::Path, id: &str) -> Value {
-    serde_json::from_str(&fs::read_to_string(root.join(id).join("attrs.json")).unwrap()).unwrap()
+    let path = root.join(id).join("session").join("attrs.json");
+    serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap()
 }
 
 fn staged_summary(root: &std::path::Path, id: &str) -> Value {
@@ -134,7 +143,8 @@ fn staged_summary(root: &std::path::Path, id: &str) -> Value {
 }
 
 fn changes(root: &std::path::Path, id: &str) -> Vec<ChangeRecord> {
-    parse_changes(&fs::read(root.join(id).join("changes.json")).unwrap()).unwrap()
+    let path = root.join(id).join("session").join("changes.json");
+    parse_changes(&fs::read(path).unwrap()).unwrap()
 }
 
 /// Stage `filters` over the fixture's original with no segment.
@@ -147,7 +157,7 @@ fn stage(publisher: &Publisher<'_>, original: &SessionRecord, filters: &[FilterS
 
 fn write_definition(publisher: &Publisher<'_>, id: &str, definition: &PublishDefinition) {
     fs::write(
-        publisher.store().definition_file(id),
+        publisher.staging().definition_file(id),
         definition.to_jsonc_text(None),
     )
     .unwrap();
@@ -270,7 +280,7 @@ fn init_writes_the_annotated_file_with_the_title_and_init_args() {
         .init(&f.original, &[], &[], "session:test", &init)
         .unwrap()
         .id;
-    let path = publisher.store().definition_file(&id);
+    let path = publisher.staging().definition_file(&id);
     assert!(path.extension().is_some_and(|e| e == "jsonc"), "{path:?}");
     let text = fs::read_to_string(&path).unwrap();
     assert!(text.starts_with("// A pending publish."), "{text}");
@@ -450,7 +460,7 @@ fn custom_requires_a_prompt_and_any_filter_takes_one() {
         )
         .unwrap_err();
     assert!(err.to_string().contains("requires a prompt"), "{err}");
-    assert!(publisher.store().list().unwrap().is_empty());
+    assert!(publisher.staging().list().unwrap().is_empty());
 
     let custom = FilterSpec::new("custom", Some("Remove every duck.".into())).unwrap();
     let pii = FilterSpec::new("pii", Some("Watch for street addresses.".into())).unwrap();
@@ -465,7 +475,7 @@ fn custom_requires_a_prompt_and_any_filter_takes_one() {
         definition.filters[1].prompt.as_deref(),
         Some("Watch for street addresses.")
     );
-    let text = fs::read_to_string(publisher.store().definition_file(&id)).unwrap();
+    let text = fs::read_to_string(publisher.staging().definition_file(&id)).unwrap();
     assert!(
         text.contains(r#"    ["custom", "Remove every duck."],"#),
         "{text}"
@@ -485,7 +495,7 @@ fn custom_requires_a_prompt_and_any_filter_takes_one() {
     write_definition(&publisher, &id, &definition);
     let err = publisher.refresh(&id, "user:test").unwrap_err();
     assert!(err.to_string().contains("piii"), "{err}");
-    let text = fs::read_to_string(publisher.store().definition_file(&id)).unwrap();
+    let text = fs::read_to_string(publisher.staging().definition_file(&id)).unwrap();
     assert!(
         text.contains("\"piii\""),
         "an invalid file is left as written"
@@ -649,7 +659,7 @@ fn init_rejects_a_duplicate_filter() {
         )
         .unwrap_err();
     assert!(matches!(dup, PublishError::Input(_)), "{dup}");
-    assert!(publisher.store().list().unwrap().is_empty());
+    assert!(publisher.staging().list().unwrap().is_empty());
 }
 
 /// A filter added to the file runs on refresh and keeps everything
@@ -858,7 +868,7 @@ fn a_title_in_the_definition_adds_an_entry_after_the_last_line() {
     );
 
     // A title written by hand without an author takes the refresh's
-    let path = publisher.store().definition_file(&id);
+    let path = publisher.staging().definition_file(&id);
     fs::write(
         &path,
         format!(
@@ -884,11 +894,7 @@ fn a_title_in_the_definition_adds_an_entry_after_the_last_line() {
     assert_eq!(staged_summary(&f.publish_root, &id)["title"], "Geese");
 
     // The title entry is checked as written: an altered one is refused
-    let staged = f
-        .publish_root
-        .join(&id)
-        .join("files.d")
-        .join("session.jsonl");
+    let staged = staged_file(&f.publish_root, &id);
     let text = fs::read_to_string(&staged).unwrap();
     fs::write(&staged, text.replace("Geese", "Swans")).unwrap();
     let err = publisher.apply(&id, false).unwrap_err();
@@ -971,7 +977,7 @@ fn refresh_reapplies_a_hand_edited_file() {
     let f = fixture();
     let publisher = Publisher::with_root(&f.store, &f.publish_root);
     let id = stage(&publisher, &f.original, &[]);
-    let path = publisher.store().definition_file(&id);
+    let path = publisher.staging().definition_file(&id);
     let before = staged_summary(&f.publish_root, &id);
     assert_eq!(before["line_count"], 5, "{before}");
     assert_eq!(before["output_tokens"], 10, "{before}");
@@ -1202,8 +1208,8 @@ fn apply_commits_the_derived_session_and_clears_the_staging() {
     assert!(!text.contains("fucking"), "{text}");
 
     assert!(!f.publish_root.join(&init.id).exists());
-    assert!(!publisher.store().definition_file(&init.id).exists());
-    assert!(publisher.store().list().unwrap().is_empty());
+    assert!(!publisher.staging().definition_file(&init.id).exists());
+    assert!(publisher.staging().list().unwrap().is_empty());
 }
 
 /// `apply` refuses a staged session edited by hand: added text, a
@@ -1215,11 +1221,7 @@ fn apply_refuses_a_hand_edited_staged_session() {
     let publisher = Publisher::with_root(&f.store, &f.publish_root);
     let filters = [FilterSpec::new("custom", Some("Remove nothing".into())).unwrap()];
     let id = stage(&publisher, &f.original, &filters);
-    let path = f
-        .publish_root
-        .join(&id)
-        .join("files.d")
-        .join("session.jsonl");
+    let path = staged_file(&f.publish_root, &id);
     let staged = fs::read_to_string(&path).unwrap();
 
     let refused = |edited: String, expect: &str| {
@@ -1329,7 +1331,7 @@ fn init_adds_segments_by_description() {
             ("The reply", String::new(), "session:s"),
         ]
     );
-    let text = fs::read_to_string(publisher.store().definition_file(&id)).unwrap();
+    let text = fs::read_to_string(publisher.staging().definition_file(&id)).unwrap();
     assert!(
         text.contains(r#"    [null, "The question", "session:s"],"#),
         "{text}"

@@ -28,13 +28,12 @@ use gage_core::style::IdHighlighter;
 use gage_core::uuid::short_uuid;
 use gage_publish::{
     Audience, Filter, FilterSpec, InitArgs as InitRecord, NAMED_FILTERS, Problem, PublishError,
-    Publisher, TextEntry, Use, candidate,
+    Publisher, Staging, TextEntry, Use, candidate,
 };
 use gage_session::{Driver, NativeSession, SkillMode, SkillSession, SourceOptions};
 use gage_store::url::parse_session_origin;
 use gage_store::{
-    PendingPublish, PublishStore, SESSION_TYPE, SessionRecord, SessionStore, Store, StoreError,
-    TagStore,
+    ExternalSessionRecord, SESSION_TYPE, SessionRecord, SessionStore, Store, StoreError, TagStore,
 };
 use tabled::{
     Table,
@@ -796,7 +795,7 @@ async fn preview_selection(
 fn list() -> Result<(), CliError> {
     let fail = |e: String| CliError::message(format!("gage publish list: {e}"));
     let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
-    let pending = PublishStore::from(&store)
+    let pending = Staging::from(&store)
         .list()
         .map_err(|e| fail(e.to_string()))?;
     if pending.is_empty() {
@@ -832,7 +831,7 @@ fn list() -> Result<(), CliError> {
 /// publishes alone, as the publish commands resolve it, and an origin
 /// among the store's short-prefix set of sessions.
 fn list_highlighters(
-    pending: &[PendingPublish],
+    pending: &[ExternalSessionRecord],
     stored: Vec<String>,
 ) -> (IdHighlighter, IdHighlighter) {
     let ids = IdHighlighter::new(pending.iter().map(|p| p.id.clone()).collect());
@@ -844,12 +843,12 @@ fn list_highlighters(
 /// `attrs.json`, the redaction count `redactions` gives for the id,
 /// and the age of the working tree.
 fn pending_rows(
-    mut pending: Vec<PendingPublish>,
+    mut pending: Vec<ExternalSessionRecord>,
     ids: &IdHighlighter,
     origins: &IdHighlighter,
     redactions: impl Fn(&str) -> Result<String, PublishError>,
 ) -> Result<Vec<Vec<String>>, PublishError> {
-    pending.sort_by_key(|p| Reverse(p.modified_ms));
+    pending.sort_by_key(|p| Reverse(p.attrs_modified_ms));
     pending
         .iter()
         .map(|p| {
@@ -858,7 +857,7 @@ fn pending_rows(
                 origin_cell(&p.attrs.origin, origins),
                 p.attrs.summary.title.clone().unwrap_or_default(),
                 redactions(&p.id)?,
-                format_elapsed_ms(p.modified_ms),
+                format_elapsed_ms(p.attrs_modified_ms),
             ])
         })
         .collect()
@@ -1212,10 +1211,10 @@ fn show(args: ShowArgs) -> Result<(), CliError> {
     let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
     let publisher = Publisher::new(&store);
     let pending = publisher
-        .store()
+        .staging()
         .get(&args.session)
         .map_err(|e| fail(e.to_string()))?;
-    let path = publisher.store().definition_file(&pending.id);
+    let path = publisher.staging().definition_file(&pending.id);
     let text = fs::read_to_string(&path).map_err(|e| fail(format!("{}: {e}", path.display())))?;
     print!("{text}");
     Ok(())
@@ -1241,10 +1240,10 @@ fn edit(args: EditArgs) -> Result<(), CliError> {
     let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
     let publisher = Publisher::new(&store);
     let pending = publisher
-        .store()
+        .staging()
         .get(&args.session)
         .map_err(|e| fail(e.to_string()))?;
-    let path = publisher.store().definition_file(&pending.id);
+    let path = publisher.staging().definition_file(&pending.id);
     if args.check {
         return match publisher.definition(&pending.id) {
             Ok(_) => Ok(()),
@@ -1400,7 +1399,7 @@ fn refresh(args: RefreshArgs) -> Result<(), CliError> {
     let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
     let publisher = Publisher::new(&store);
     let pending = publisher
-        .store()
+        .staging()
         .get(&args.session)
         .map_err(|e| fail(e.to_string()))?;
     refresh_dialog(
@@ -1423,13 +1422,13 @@ fn refresh(args: RefreshArgs) -> Result<(), CliError> {
 fn refresh_dialog(
     heading: &str,
     publisher: &Publisher<'_>,
-    pending: &PendingPublish,
+    pending: &ExternalSessionRecord,
     author: &str,
     new_title: Option<&str>,
     redactions: &[TextEntry],
     confirm: bool,
 ) -> Result<(), CliError> {
-    let path = publisher.store().definition_file(&pending.id);
+    let path = publisher.staging().definition_file(&pending.id);
     let mut problems = Vec::new();
     let result = dialog::run(heading, || {
         dialog::step_value("Session", short_uuid(&pending.id))?;
@@ -1495,11 +1494,11 @@ fn candidate(args: CandidateArgs) -> Result<(), CliError> {
     let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
     let publisher = Publisher::new(&store);
     let pending = publisher
-        .store()
+        .staging()
         .get(&args.session)
         .map_err(|e| fail(e.to_string()))?;
     if args.instructions {
-        let path = publisher.store().definition_file(&pending.id);
+        let path = publisher.staging().definition_file(&pending.id);
         let definition = publisher
             .definition(&pending.id)
             .map_err(|e| fail(definition_failure(&path, &e)))?;
@@ -1556,8 +1555,8 @@ fn definition_failure(path: &Path, e: &PublishError) -> String {
 fn abort(args: AbortArgs) -> Result<(), CliError> {
     let fail = |e: String| CliError::message(format!("gage publish abort: {e}"));
     let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
-    let publish = PublishStore::from(&store);
-    let mut pending: Vec<PendingPublish> = Vec::new();
+    let publish = Staging::from(&store);
+    let mut pending: Vec<ExternalSessionRecord> = Vec::new();
     for session in &args.session {
         let found = publish.get(session).map_err(|e| fail(e.to_string()))?;
         if !pending.iter().any(|p| p.id == found.id) {
@@ -1592,10 +1591,10 @@ fn apply(args: ApplyArgs) -> Result<(), CliError> {
     let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
     let publisher = Publisher::new(&store);
     let pending = publisher
-        .store()
+        .staging()
         .get(&args.session)
         .map_err(|e| fail(e.to_string()))?;
-    let path = publisher.store().definition_file(&pending.id);
+    let path = publisher.staging().definition_file(&pending.id);
     let definition = publisher
         .definition(&pending.id)
         .map_err(|e| fail(definition_failure(&path, &e)))?;
@@ -2237,8 +2236,13 @@ mod tests {
         assert!(!args.force_tag);
         assert!(Cli::try_parse_from(["gage", "publish", "apply", "abc", "--force-tag"]).is_err());
     }
-    fn pending(id: &str, origin: &str, title: Option<&str>, modified_ms: i64) -> PendingPublish {
-        PendingPublish {
+    fn pending(
+        id: &str,
+        origin: &str,
+        title: Option<&str>,
+        modified_ms: i64,
+    ) -> ExternalSessionRecord {
+        ExternalSessionRecord {
             id: id.to_string(),
             attrs: SessionAttrsRecord {
                 driver: "claude 1".to_string(),
@@ -2254,8 +2258,8 @@ mod tests {
                     ..SummaryAttrs::default()
                 },
             },
-            root: PathBuf::from("/tmp/publish").join(id),
-            modified_ms,
+            dir: PathBuf::from("/tmp/publish").join(id),
+            attrs_modified_ms: modified_ms,
         }
     }
     /// Rows come newest first and carry the short id, the origin, the

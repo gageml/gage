@@ -1,16 +1,17 @@
-//! A publish-scoped context serves a pending publish working tree in
-//! the `session`, `entry`, `message`, `tool_use`, and `changes`
-//! tables, and nothing else; a rebuilt working tree is re-read by the
-//! same context.
+//! An external-scoped context serves a session directory in the
+//! `session`, `entry`, `message`, `tool_use`, and `changes` tables,
+//! and nothing else; a rewritten directory is re-read by the same
+//! context.
 
 use std::sync::{Arc, Mutex};
 
 use datafusion::arrow::array::{Array, StringArray};
 use datafusion::prelude::SessionContext;
+use gage_core::uuid::new_uuid;
 use gage_query::ContextBuilder;
 use gage_registry::driver::DriverRegistry;
 use gage_session::SourceOptions;
-use gage_store::{PublishStore, SessionStore, Store};
+use gage_store::{ExternalSession, SessionAttrsRecord, SessionDirLayout, SessionStore, Store};
 
 const SESSION: &str = concat!(
     r#"{"type":"user","uuid":"u1","timestamp":"2025-01-01T00:00:00Z","cwd":"/w/proj","message":{"role":"user","content":"hello there"}}"#,
@@ -38,9 +39,8 @@ async fn strings(ctx: &SessionContext, sql: &str) -> Vec<String> {
 }
 
 #[tokio::test]
-async fn publish_scope_serves_pending_publishes_in_the_session_tables() {
+async fn external_scope_serves_session_directories_in_the_session_tables() {
     let home = tempfile::tempdir().unwrap();
-    let publish_root = home.path().join("publish");
 
     let claude_root = tempfile::tempdir().unwrap();
     let native_id = "11111111-2222-3333-4444-555555555555";
@@ -65,20 +65,34 @@ async fn publish_scope_serves_pending_publishes_in_the_session_tables() {
     let original = SessionStore::from(&store)
         .at_commit(&outcome.commit_sha)
         .unwrap();
-    let publish = PublishStore::with_root(&store, &publish_root);
-    let pending = publish.init(&original).unwrap();
-    let layout = publish.layout(&pending.id);
+    // A derived copy of the original as a session directory
+    let derived = new_uuid();
+    let dir = home.path().join("external").join(&derived);
+    let layout = SessionDirLayout::new(&dir);
+    std::fs::create_dir_all(layout.files_dir()).unwrap();
+    let attrs = SessionAttrsRecord {
+        origin: format!("session:{}@{}", original.id, original.commit_sha),
+        ..original.attrs.clone()
+    };
+    let mut attrs_bytes = serde_json::to_vec(&serde_json::to_value(&attrs).unwrap()).unwrap();
+    attrs_bytes.push(b'\n');
+    std::fs::write(layout.attrs_file(), attrs_bytes).unwrap();
+    std::fs::write(layout.changes_file(), "[]\n").unwrap();
+    std::fs::write(layout.files_dir().join("session.jsonl"), SESSION).unwrap();
 
     let store = Arc::new(Mutex::new(store));
     let ctx = ContextBuilder::new(Some(Arc::clone(&store)))
-        .publish(&publish_root)
+        .external(vec![ExternalSession {
+            id: derived.clone(),
+            dir: dir.clone(),
+        }])
         .build()
         .await;
-    let id = &pending.id;
+    let id = &derived;
 
-    // The scope holds the pending publish and not its stored original
+    // The scope holds the external session and not its stored original
     let sess = strings(&ctx, "SELECT id FROM session").await;
-    assert_eq!(sess, vec![id.clone()], "pending session row");
+    assert_eq!(sess, vec![id.clone()], "external session row");
     let tables = strings(&ctx, "SHOW TABLES").await;
     assert!(!tables.is_empty());
     for absent in ["note", "issue", "dataset", "scan"] {
@@ -89,7 +103,7 @@ async fn publish_scope_serves_pending_publishes_in_the_session_tables() {
             ),
         )
         .await;
-        assert!(names.is_empty(), "{absent} is not a publish scope table");
+        assert!(names.is_empty(), "{absent} is not an external scope table");
     }
 
     // The store-wide context does not hold it
@@ -119,10 +133,11 @@ async fn publish_scope_serves_pending_publishes_in_the_session_tables() {
     .await;
     assert_eq!(tools, ["Bash"], "tool_use");
 
-    // A rebuild rewrites the staged content and `changes.json` in
-    // place. The row cache keys a pending session by its working tree's
-    // modified time, so the same context serves the new content on the
-    // next query, which is what the session view's reload relies on.
+    // A rewrite replaces the content and `changes.json` in place and
+    // rewrites `attrs.json`. The row cache keys an external session by
+    // the `attrs.json` mtime, so the same context serves the new
+    // content on the next query, which is what the session view's
+    // reload relies on.
     let empty = strings(
         &ctx,
         &format!("SELECT kind FROM changes WHERE session_id = '{id}'"),
@@ -130,7 +145,7 @@ async fn publish_scope_serves_pending_publishes_in_the_session_tables() {
     .await;
     assert!(
         empty.is_empty(),
-        "a fresh publish has no records: {empty:?}"
+        "a fresh directory has no records: {empty:?}"
     );
 
     let staged = layout.files_dir().join("session.jsonl");
@@ -146,7 +161,7 @@ async fn publish_scope_serves_pending_publishes_in_the_session_tables() {
     let later = std::time::SystemTime::now() + std::time::Duration::from_secs(90);
     std::fs::File::options()
         .write(true)
-        .open(layout.changes_file())
+        .open(layout.attrs_file())
         .unwrap()
         .set_modified(later)
         .unwrap();
@@ -155,7 +170,7 @@ async fn publish_scope_serves_pending_publishes_in_the_session_tables() {
         &format!("SELECT text FROM message WHERE session_id = '{id}' AND line = 1"),
     )
     .await;
-    assert_eq!(reread, ["hello [REDACTED]"], "rebuilt content is re-read");
+    assert_eq!(reread, ["hello [REDACTED]"], "rewritten content is re-read");
 
     let records = strings(
         &ctx,
@@ -167,6 +182,6 @@ async fn publish_scope_serves_pending_publishes_in_the_session_tables() {
     assert_eq!(
         records,
         ["text /message/content pii"],
-        "rebuilt records are re-read"
+        "rewritten records are re-read"
     );
 }

@@ -10,7 +10,7 @@ use gage_session::{
     edit_strings,
 };
 use gage_store::{
-    ChangeKind, ChangeRecord, DirContentSink, PublishDirLayout, SummaryAttrs, format_changes,
+    ChangeKind, ChangeRecord, DirContentSink, SessionDirLayout, SummaryAttrs, format_changes,
 };
 use regex::{Regex, RegexBuilder};
 use serde_json::{Value, json};
@@ -240,7 +240,7 @@ pub fn build(
     definition: &PublishDefinition,
     session: &SessionText,
     stored: &mut dyn StoredSession,
-    layout: &PublishDirLayout,
+    layout: &SessionDirLayout,
     title_entry: Option<&str>,
 ) -> Result<Built, PublishError> {
     let Expanded {
@@ -928,7 +928,7 @@ fn apply_spans(text: &str, spans: &[Span]) -> (String, Vec<(usize, usize)>) {
 /// included, describes the published content. `project` is the
 /// original's unless a redaction leaves it out.
 pub fn update_attrs(
-    layout: &PublishDirLayout,
+    layout: &SessionDirLayout,
     staged: &mut dyn StoredSession,
     project: Option<&str>,
 ) -> Result<(), PublishError> {

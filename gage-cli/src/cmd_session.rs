@@ -16,13 +16,13 @@ use datafusion::arrow::array::{
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::prelude::SessionContext;
 use gage_core::uuid::short_uuid;
+use gage_publish::Staging;
 use gage_query::ContextBuilder;
 use gage_registry::driver::DriverRegistry;
 use gage_session::{Driver, NativeLookupError, SessionLiveError, Source, SourceOptions};
 use gage_store::url::LineSelection;
 use gage_store::{
-    DatasetStore, PublishStore, SESSION_TYPE, SessionRecord, SessionStore, Store, StoreError,
-    TagStore, publish_root,
+    DatasetStore, SESSION_TYPE, SessionRecord, SessionStore, Store, StoreError, TagStore,
 };
 use gage_tui::session::{Backend, picker_page_size};
 use gage_tui::{ViewOptions, session_view};
@@ -1714,11 +1714,13 @@ pub async fn view_pending(session: Option<&str>, view: &ViewOptionArgs) -> Resul
     let (prefix, line, options) = view_target(command, "gage publish query", session, view)?;
     let result = async {
         let store = Store::open(&gage_store::store_path())?;
+        let staging = Staging::from(&store);
         let id = match prefix {
-            Some(prefix) => Some(PublishStore::from(&store).get(prefix)?.id),
+            Some(prefix) => Some(staging.get(prefix)?.id),
             None => None,
         };
-        let backend = Backend::pending(Arc::new(Mutex::new(store)), publish_root()).await;
+        let sessions = staging.external()?;
+        let backend = Backend::pending(Arc::new(Mutex::new(store)), sessions).await;
         session_view::run(backend, id.as_deref(), line, options).await
     }
     .await;

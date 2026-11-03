@@ -1,4 +1,4 @@
-//! The publish definition, `publish/<id>.publish.jsonc`: what the
+//! The publish definition, `publish/<id>/publish.jsonc`: what the
 //! staged session is derived from. The original session, the
 //! arguments `init` was given, the title the published session takes,
 //! the filters with their prompts, the segments, every text redaction

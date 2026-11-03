@@ -14,7 +14,6 @@
 use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::fmt::{self, Formatter};
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -47,7 +46,8 @@ use gage_session::{SummaryAttrs, system};
 
 use super::batch::readable;
 use crate::{
-    Order, PendingPublish, PublishStore, SESSION_TYPE, SelectedTip, SessionStore, Store, StoreError,
+    ExternalSession, ExternalSessionRecord, Order, SESSION_TYPE, SelectedTip, SessionStore, Store,
+    StoreError,
 };
 
 /// Columns read from the object's `attrs.json` rather than the index.
@@ -117,9 +117,8 @@ fn stored_session_schema() -> SchemaRef {
 /// versions, the rows are those versions in the order given, which is
 /// how a dataset or scan scope lists its members. A fixed version
 /// carries its markers, so a row costs no read until an attrs column
-/// is projected. Over pending publishes, the rows are the working
-/// trees under a publish root, read from the file system on each
-/// scan.
+/// is projected. Over external sessions, the rows are the session
+/// directories given, each read from the file system on each scan.
 #[derive(Debug, Clone)]
 pub struct StoredSessionTable {
     store: Arc<Mutex<Store>>,
@@ -134,8 +133,8 @@ enum Rows {
     Live,
     /// Exactly these versions, in this order
     Versions(Vec<SelectedTip>),
-    /// The pending publish working trees under this publish root
-    Pending(PathBuf),
+    /// Exactly these session directories, newest modified first
+    External(Vec<ExternalSession>),
 }
 
 impl StoredSessionTable {
@@ -157,15 +156,15 @@ impl StoredSessionTable {
         }
     }
 
-    /// The table over the pending publish working trees under
-    /// `publish_root`, newest modified first. A pending session has
-    /// no commit: its `locator` is its staging directory and its
-    /// `created` is its `modified`.
-    pub fn pending(store: Arc<Mutex<Store>>, publish_root: impl Into<PathBuf>) -> Self {
+    /// The table over `sessions`, session directories read on each
+    /// scan, newest modified first. An external session has no
+    /// commit: its `locator` is its directory, and its `modified` and
+    /// `created` are the mtime of its `attrs.json`.
+    pub fn external(store: Arc<Mutex<Store>>, sessions: Vec<ExternalSession>) -> Self {
         Self {
             store,
             schema: stored_session_schema(),
-            rows: Rows::Pending(publish_root.into()),
+            rows: Rows::External(sessions),
         }
     }
 }
@@ -333,9 +332,10 @@ impl StoredSessionExec {
         let sessions = SessionStore::from(&*store);
 
         // The rows to filter: every live session newest modified first,
-        // the given versions in the given order, or the pending
-        // publishes newest modified first. None reads an object.
-        let (all, mut pending): (Vec<SelectedTip>, Vec<PendingPublish>) = match &self.rows {
+        // the given versions in the given order, or the external
+        // sessions newest modified first. None reads an object.
+        let (all, mut externals): (Vec<SelectedTip>, Vec<ExternalSessionRecord>) = match &self.rows
+        {
             Rows::Live => (
                 sessions
                     .query()
@@ -345,19 +345,21 @@ impl StoredSessionExec {
                 Vec::new(),
             ),
             Rows::Versions(versions) => (versions.clone(), Vec::new()),
-            Rows::Pending(root) => {
-                let mut pending = PublishStore::with_root(&store, root)
-                    .list()
+            Rows::External(sessions) => {
+                let mut records = sessions
+                    .iter()
+                    .map(ExternalSession::read)
+                    .collect::<Result<Vec<_>, _>>()
                     .map_err(external)?;
-                pending.sort_by_key(|p| Reverse(p.modified_ms));
-                (Vec::new(), pending)
+                records.sort_by_key(|r| Reverse(r.attrs_modified_ms));
+                (Vec::new(), records)
             }
         };
         // id_prefix is unique within the set a prefix resolves against:
         // the short-prefix set of sessions plus the fixed rows, or the
-        // pending publishes alone
+        // external sessions alone
         let peers = match &self.rows {
-            Rows::Pending(_) => pending.iter().map(|p| p.id.clone()).collect(),
+            Rows::External(_) => externals.iter().map(|r| r.id.clone()).collect(),
             Rows::Live | Rows::Versions(_) => {
                 let mut peers = store
                     .short_prefix_ids(Some(SESSION_TYPE))
@@ -377,19 +379,19 @@ impl StoredSessionExec {
             .into_iter()
             .filter(|t| since.is_none_or(|ms| t.modified_ms.is_some_and(|m| m >= ms)))
             .collect();
-        pending.retain(|p| since.is_none_or(|ms| p.modified_ms >= ms));
+        externals.retain(|r| since.is_none_or(|ms| r.attrs_modified_ms >= ms));
         let id_filter = IdFilter::new(&self.filters, "id")?;
         if let Some(f) = &id_filter {
             tips = f.retain(tips, |t| t.id.as_str())?;
-            pending = f.retain(pending, |p| p.id.as_str())?;
+            externals = f.retain(externals, |r| r.id.as_str())?;
         }
         if let Some(n) = self.limit {
             tips.truncate(n);
-            pending.truncate(n);
+            externals.truncate(n);
         }
 
         let needs_attrs = self.projection_needs_attrs();
-        let len = tips.len() + pending.len();
+        let len = tips.len() + externals.len();
         let mut ids = StringBuilder::with_capacity(len, len * 26);
         let mut id_displays = StringBuilder::with_capacity(len, len * 8);
         let mut id_prefixes = StringBuilder::with_capacity(len, len * 4);
@@ -448,27 +450,27 @@ impl StoredSessionExec {
             projects.append_option(attrs.project.as_deref());
         }
 
-        // A pending publish has no commit: its id prefix is unique
-        // among the pending publishes, its locator is its staging
-        // directory, and its created is its modified
-        for p in &pending {
-            ids.append_value(&p.id);
-            id_displays.append_value(short_uuid(&p.id));
+        // An external session has no commit: its id prefix is unique
+        // among the external sessions, its locator is its directory,
+        // and its created is its modified
+        for r in &externals {
+            ids.append_value(&r.id);
+            id_displays.append_value(short_uuid(&r.id));
             let n = prefix_len
-                .get(&p.id)
+                .get(&r.id)
                 .copied()
-                .expect("prefix set covers every pending publish");
-            id_prefixes.append_value(p.id.chars().take(n).collect::<String>());
-            locators.append_value(p.root.display().to_string());
-            modifieds.append_value(p.modified_ms);
-            createds.append_value(p.modified_ms);
-            session_types.append_value(&p.attrs.session_type);
-            drivers.append_value(&p.attrs.driver);
-            content_formats.append_value(&p.attrs.content_format);
-            sizes.append_value(p.attrs.size as i64);
-            origins.append_value(&p.attrs.origin);
-            summaries.append_value(summary_json(&p.attrs.summary)?);
-            projects.append_option(p.attrs.project.as_deref());
+                .expect("prefix set covers every external session");
+            id_prefixes.append_value(r.id.chars().take(n).collect::<String>());
+            locators.append_value(r.dir.display().to_string());
+            modifieds.append_value(r.attrs_modified_ms);
+            createds.append_value(r.attrs_modified_ms);
+            session_types.append_value(&r.attrs.session_type);
+            drivers.append_value(&r.attrs.driver);
+            content_formats.append_value(&r.attrs.content_format);
+            sizes.append_value(r.attrs.size as i64);
+            origins.append_value(&r.attrs.origin);
+            summaries.append_value(summary_json(&r.attrs.summary)?);
+            projects.append_option(r.attrs.project.as_deref());
         }
 
         let batch = RecordBatch::try_new(
@@ -618,10 +620,12 @@ mod tests {
     use datafusion::arrow::array::{Array, StringArray};
     use datafusion::prelude::SessionContext;
 
+    use gage_core::uuid::new_uuid;
+
     use super::{StoredSessionTable, unique_prefix_lens};
-    use crate::session::tests::{FakeDriver, fake};
+    use crate::session::tests::{FakeDriver, fake, write_session_dir};
     use crate::test_support::open_store;
-    use crate::{PublishStore, SessionStore};
+    use crate::{ExternalSession, SessionAttrsRecord, SessionDirLayout, SessionStore};
 
     /// The store-bound `session` table projects one row per live
     /// session, reading `native_id` and `project` from each object's
@@ -733,15 +737,14 @@ mod tests {
         out
     }
 
-    /// The pending table lists the publish working trees under its
-    /// root, newest modified first, with an id prefix unique among the
-    /// pending publishes alone, as a publish command resolves it; it
-    /// lists no stored session, and the store-wide table lists no
-    /// pending publish. Both respect an id filter.
+    /// The external table lists the session directories it was given,
+    /// newest modified first, with an id prefix unique among them
+    /// alone, as a publish command resolves it; it lists no stored
+    /// session, and the store-wide table lists no external session.
+    /// Both respect an id filter.
     #[tokio::test]
-    async fn pending_table_lists_publish_working_trees_only() {
+    async fn external_table_lists_the_given_session_directories_only() {
         let tmp = tempfile::tempdir().unwrap();
-        let publish_root = tmp.path().join("publish");
         let (store, _fsck) = open_store(tmp.path());
         let mut session = fake("orig", &[("session.jsonl", "hello\n")]);
         let outcome = SessionStore::from(&store)
@@ -750,17 +753,31 @@ mod tests {
         let original = SessionStore::from(&store)
             .at_commit(&outcome.commit_sha)
             .unwrap();
-        let publish = PublishStore::with_root(&store, &publish_root);
-        let first = publish.init(&original).unwrap();
-        let second = publish.init(&original).unwrap();
+        let attrs = SessionAttrsRecord {
+            origin: format!("session:{}@{}", original.id, original.commit_sha),
+            ..original.attrs.clone()
+        };
+        let external_root = tmp.path().join("external");
+        let (first, second) = (new_uuid(), new_uuid());
+        let first_dir = write_session_dir(&external_root, &first, &attrs, "[]\n", &[]);
+        let second_dir = write_session_dir(&external_root, &second, &attrs, "[]\n", &[]);
         let later = std::time::SystemTime::now() + std::time::Duration::from_secs(90);
         std::fs::File::options()
             .write(true)
-            .open(publish.layout(&second.id).attrs_file())
+            .open(SessionDirLayout::new(&second_dir).attrs_file())
             .unwrap()
             .set_modified(later)
             .unwrap();
-        let first_root = publish.layout(&first.id).root().display().to_string();
+        let externals = vec![
+            ExternalSession {
+                id: first.clone(),
+                dir: first_dir.clone(),
+            },
+            ExternalSession {
+                id: second.clone(),
+                dir: second_dir,
+            },
+        ];
 
         let store = Arc::new(Mutex::new(store));
         let ctx = SessionContext::new();
@@ -770,35 +787,39 @@ mod tests {
         )
         .unwrap();
         ctx.register_table(
-            "pending",
-            Arc::new(StoredSessionTable::pending(store, &publish_root)),
+            "external",
+            Arc::new(StoredSessionTable::external(store, externals)),
         )
         .unwrap();
 
         let stored = ids(&ctx, "SELECT id FROM session").await;
         assert_eq!(stored, vec![original.id.clone()]);
 
-        let pending = ids(&ctx, "SELECT id FROM pending").await;
-        assert_eq!(pending, vec![second.id.clone(), first.id.clone()]);
+        let listed = ids(&ctx, "SELECT id FROM external").await;
+        assert_eq!(listed, vec![second.clone(), first.clone()]);
 
         let one = ids(
             &ctx,
-            &format!("SELECT id FROM pending WHERE id = '{}'", first.id),
+            &format!("SELECT id FROM external WHERE id = '{first}'"),
         )
         .await;
-        assert_eq!(one, vec![first.id.clone()]);
+        assert_eq!(one, vec![first.clone()]);
 
-        let prefixes = ids(&ctx, "SELECT id_prefix FROM pending ORDER BY modified DESC").await;
-        let among_pending = unique_prefix_lens(vec![first.id.clone(), second.id.clone()]);
-        let expect = |id: &str| id.chars().take(among_pending[id]).collect::<String>();
-        assert_eq!(prefixes, [expect(&second.id), expect(&first.id)]);
+        let prefixes = ids(
+            &ctx,
+            "SELECT id_prefix FROM external ORDER BY modified DESC",
+        )
+        .await;
+        let among_externals = unique_prefix_lens(vec![first.clone(), second.clone()]);
+        let expect = |id: &str| id.chars().take(among_externals[id]).collect::<String>();
+        assert_eq!(prefixes, [expect(&second), expect(&first)]);
         assert_ne!(prefixes[0], prefixes[1]);
 
         let locator = ids(
             &ctx,
-            &format!("SELECT locator FROM pending WHERE id = '{}'", first.id),
+            &format!("SELECT locator FROM external WHERE id = '{first}'"),
         )
         .await;
-        assert_eq!(locator, vec![first_root]);
+        assert_eq!(locator, vec![first_dir.display().to_string()]);
     }
 }

@@ -63,11 +63,11 @@ use gage_registry::driver::DriverRegistry;
 use gage_registry::scanner::ScannerRegistry;
 use gage_session::{ContentSchema, content_schema_batch, content_schema_schema};
 use gage_store::{
-    LinkKind, NoteDocRow, Store, StoredNoteTable, StoredSessionTable, attachment_file_table,
-    attachment_table, dataset_table, issue_event_table, issue_report_fn, issue_table, link_table,
-    note_doc_rows, note_doc_schema, object_key_table, related_issue_fn, scan_log_table,
-    scan_scope_tables, scan_table, scan_task_agent_table, scan_task_table, scan_watermark_table,
-    tag_table,
+    ExternalSession, LinkKind, NoteDocRow, Store, StoredNoteTable, StoredSessionTable,
+    attachment_file_table, attachment_table, dataset_table, issue_event_table, issue_report_fn,
+    issue_table, link_table, note_doc_rows, note_doc_schema, object_key_table, related_issue_fn,
+    scan_log_table, scan_scope_tables, scan_table, scan_task_agent_table, scan_task_table,
+    scan_watermark_table, tag_table,
 };
 
 use crate::age::age_udf;
@@ -92,11 +92,12 @@ use crate::text::{
 /// present; without it, they are absent and only the native discovery
 /// functions are available. A store-backed context has store scope,
 /// every live object, unless a [`ScanScope`] narrows it to one scan
-/// or [`publish`](Self::publish) narrows it to the pending publishes.
+/// or [`external`](Self::external) narrows it to given session
+/// directories.
 pub struct ContextBuilder {
     store: Option<Arc<Mutex<Store>>>,
     scope: Option<ScanScope>,
-    publish_root: Option<PathBuf>,
+    external: Option<Vec<ExternalSession>>,
     skip_system_cols: bool,
     show_agents: bool,
     cache_root: Option<PathBuf>,
@@ -107,7 +108,7 @@ impl ContextBuilder {
         Self {
             store,
             scope: None,
-            publish_root: None,
+            external: None,
             skip_system_cols: false,
             show_agents: false,
             cache_root: None,
@@ -132,12 +133,12 @@ impl ContextBuilder {
         self
     }
 
-    /// Scope the context to the pending publishes under
-    /// `publish_root`: the session tables serve the publish working
-    /// trees and nothing else, and no other store table is present.
-    /// Takes precedence over a scan scope.
-    pub fn publish(mut self, publish_root: impl Into<PathBuf>) -> Self {
-        self.publish_root = Some(publish_root.into());
+    /// Scope the context to `sessions`, session directories outside
+    /// the store: the session tables serve them and nothing else, and
+    /// no other store table is present. Each directory is read on
+    /// each query. Takes precedence over a scan scope.
+    pub fn external(mut self, sessions: Vec<ExternalSession>) -> Self {
+        self.external = Some(sessions);
         self
     }
 
@@ -163,7 +164,7 @@ impl ContextBuilder {
     /// base tables lose their system columns, while the views keep
     /// reading the link tables they were planned over. A scan-scoped
     /// context registers the scan's tables, with the relations as
-    /// tables rather than views. A publish-scoped context registers
+    /// tables rather than views. An external-scoped context registers
     /// the session tables alone.
     pub async fn build(self) -> SessionContext {
         let ctx = new_context(
@@ -175,8 +176,8 @@ impl ContextBuilder {
             register_blame_functions(&ctx, None, self.show_agents, self.cache_root);
             return ctx;
         };
-        if let Some(root) = self.publish_root {
-            return build_publish_scope(ctx, store, root, self.skip_system_cols);
+        if let Some(sessions) = self.external {
+            return build_external_scope(ctx, store, sessions, self.skip_system_cols);
         }
         if let Some(scope) = self.scope {
             return build_scan_scope(ctx, store, scope, self.skip_system_cols);
@@ -274,25 +275,22 @@ impl ContextBuilder {
     }
 }
 
-/// Register the publish scope's tables: `session` over the pending
-/// publish working trees under `publish_root`, and `entry`,
-/// `message`, `tool_use`, and `changes` over the same set. Notes,
-/// issues, and the other store tables are absent, since a pending
-/// publish is not a store object and nothing targets it.
-fn build_publish_scope(
+/// Register the external scope's tables: `session` over the given
+/// session directories, and `entry`, `message`, `tool_use`, and
+/// `changes` over the same set. Notes, issues, and the other store
+/// tables are absent, since an external session is not a store object
+/// and nothing targets it.
+fn build_external_scope(
     ctx: SessionContext,
     store: Arc<Mutex<Store>>,
-    publish_root: PathBuf,
+    external: Vec<ExternalSession>,
     skip_system_cols: bool,
 ) -> SessionContext {
-    let sessions = Arc::new(SessionSet::pending(
-        Arc::clone(&store),
-        publish_root.clone(),
-    ));
+    let sessions = Arc::new(SessionSet::external(Arc::clone(&store), external.clone()));
     let tables: [(&str, Arc<dyn TableProvider>); 5] = [
         (
             "session",
-            Arc::new(StoredSessionTable::pending(store, publish_root)),
+            Arc::new(StoredSessionTable::external(store, external)),
         ),
         (
             "entry",
@@ -324,7 +322,7 @@ fn build_publish_scope(
             table
         };
         ctx.register_table(name, table)
-            .expect("register publish tables on a fresh context");
+            .expect("register external tables on a fresh context");
     }
     ctx
 }
@@ -600,6 +598,8 @@ fn content_schema_table() -> Arc<dyn TableProvider> {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Read;
+    use std::path::{Path, PathBuf};
     use std::slice;
     use std::sync::{Arc, Mutex};
 
@@ -612,11 +612,35 @@ mod tests {
     use gage_session::SourceOptions;
     use gage_store::{
         DatasetStore, IssueInput, IssueStatus, IssueStore, NoteInput, NoteStore, NoteValue,
-        PublishStore, ScanStore, SessionSpec, SessionStore, StatusReason, Store, TagStore,
+        ScanStore, SessionAttrsRecord, SessionDirLayout, SessionSpec, SessionStore, StatusReason,
+        Store, TagStore,
     };
     use tempfile::TempDir;
 
     use super::{ContextBuilder, ScanScope};
+
+    /// A session directory named by `id` under `root`: `attrs.json`,
+    /// `changes.json`, and `files.d/` under `session/`.
+    fn write_session_dir(
+        root: &Path,
+        id: &str,
+        attrs: &SessionAttrsRecord,
+        changes: &str,
+        files: &[(&str, &str)],
+    ) -> PathBuf {
+        let dir = root.join(id);
+        let layout = SessionDirLayout::new(&dir);
+        std::fs::create_dir_all(layout.files_dir()).unwrap();
+        let value = serde_json::to_value(attrs).unwrap();
+        let mut bytes = serde_json::to_vec(&value).unwrap();
+        bytes.push(b'\n');
+        std::fs::write(layout.attrs_file(), bytes).unwrap();
+        std::fs::write(layout.changes_file(), changes).unwrap();
+        for (path, text) in files {
+            std::fs::write(layout.files_dir().join(path), text).unwrap();
+        }
+        dir
+    }
 
     /// A fresh store and the guard keeping its directory alive
     fn open_store() -> (TempDir, Arc<Mutex<Store>>) {
@@ -1243,19 +1267,27 @@ mod tests {
             let original = SessionStore::from(&*store)
                 .at_commit(&outcome.commit_sha)
                 .unwrap();
-            let publish = PublishStore::with_root(&store, tmp.path().join("publish"));
-            let init = publish.init(&original).unwrap();
-            let layout = publish.layout(&init.id);
-            // Line 2 is dropped and the greeting on line 1 is redacted
-            let staged = layout.files_dir().join("session.jsonl");
-            let lines: Vec<String> = std::fs::read_to_string(&staged)
+            // The derived session drops line 2 and redacts the
+            // greeting on line 1
+            let mut text = String::new();
+            SessionStore::from(&*store)
+                .content(&outcome.commit_sha)
+                .open("session.jsonl")
                 .unwrap()
+                .read_to_string(&mut text)
+                .unwrap();
+            let lines: Vec<String> = text
                 .lines()
                 .map(|l| l.replace("hello there", "hello [REDACTED]"))
                 .collect();
-            std::fs::write(&staged, format!("{}\n{}\n", lines[0], lines[2])).unwrap();
-            std::fs::write(
-                layout.changes_file(),
+            let derived_id = new_uuid();
+            let dir = write_session_dir(
+                tmp.path(),
+                &derived_id,
+                &SessionAttrsRecord {
+                    origin: format!("session:{}@{}", original.id, original.commit_sha),
+                    ..original.attrs
+                },
                 concat!(
                     "[\n",
                     r#"  ["line", 2, "scope", "user:t"],"#,
@@ -1265,11 +1297,10 @@ mod tests {
                     r#"  ["title", 3, "user:t"]"#,
                     "\n]\n",
                 ),
-            )
-            .unwrap();
-            std::fs::write(publish.definition_file(&init.id), b"{}\n").unwrap();
-            publish.apply(&init.id).unwrap();
-            (outcome.id, init.id)
+                &[("session.jsonl", &format!("{}\n{}\n", lines[0], lines[2]))],
+            );
+            SessionStore::from(&*store).create_from_dir(&dir).unwrap();
+            (outcome.id, derived_id)
         };
 
         let ctx = ContextBuilder::new(Some(store))
