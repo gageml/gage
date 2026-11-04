@@ -123,5 +123,5 @@ pub use session::{
     session_object_id,
 };
 pub use sqlite_index::INDEX_SCHEMA_VERSION;
-pub use store::{OBJECTS_FILE, Store, index_path};
+pub use store::{OBJECTS_FILE, Store, index_path, locate};
 pub use tag::{TagAdded, TagRecord, TagRef, TagStore, TagTarget};

@@ -713,6 +713,47 @@ mod tests {
         ));
     }
 
+    /// A push into a working tree repository lands under `refs/gage/`
+    /// with no hooks on the receiving side, and a guest open of that
+    /// repository reads the object.
+    #[test]
+    fn a_push_into_a_working_tree_is_read_by_a_guest_open() {
+        use crate::note::{NoteInput, NoteStore, NoteValue};
+        let dir = tempfile::tempdir().unwrap();
+        let (source, _fsck) = open_store(&dir.path().join("source"));
+        let project = dir.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        run(git_in(
+            &project,
+            ["init", "--quiet", "--initial-branch=main"],
+        ))
+        .unwrap();
+        let id = NoteStore::from(&source)
+            .create(NoteInput {
+                name: "n",
+                value: NoteValue::Text("v".into()),
+                author: "user:test",
+                target: None,
+                metadata: None,
+                work_id: None,
+            })
+            .unwrap();
+        let ref_name = format!("{OBJECT_REFS}{id}");
+        let remotes = RemoteStore::from(&source);
+        let url = Repository::from_url(project.to_str().unwrap()).unwrap();
+        let set = PushSet {
+            send: vec![ref_name.clone()],
+            ..PushSet::default()
+        };
+        let digest = remotes.approval_digest(&set.names()).unwrap();
+        assert!(remotes.push(&url, &set, &digest).unwrap().success());
+
+        let guest = Store::open_with_cache_root(&project, &dir.path().join("cache")).unwrap();
+        assert!(!guest.is_owned());
+        assert_eq!(guest.path(), project.join(".git"));
+        assert_eq!(NoteStore::from(&guest).get(&id).unwrap().name, "n");
+    }
+
     #[test]
     fn push_sends_approved_refs_and_ls_remote_reads_them_back() {
         use crate::note::{NoteInput, NoteStore, NoteValue};

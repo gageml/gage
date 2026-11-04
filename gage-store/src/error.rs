@@ -13,8 +13,9 @@ use crate::index::IdMatch;
 pub enum StoreError {
     /// No repository at the path
     NotFound(PathBuf),
-    /// The repository carries no `gage.version`
-    VersionMissing(PathBuf),
+    /// The repository has a working tree or refs outside `refs/gage/`
+    /// and cannot become a Gage store
+    ForeignRepository(PathBuf),
     /// The store's `gage.version` is not the one this build supports
     VersionMismatch { found: u32, supported: u32 },
     /// The repository uses an object format the writer does not produce
@@ -116,8 +117,12 @@ impl fmt::Display for StoreError {
             StoreError::NotFound(path) => {
                 write!(f, "no Gage store at {} (run `gage init`)", path.display())
             }
-            StoreError::VersionMissing(path) => {
-                write!(f, "store at {} has no gage.version", path.display())
+            StoreError::ForeignRepository(path) => {
+                write!(
+                    f,
+                    "repository at {} has a working tree or refs outside refs/gage/ and cannot become a Gage store; a Gage store is a bare repository Gage creates",
+                    path.display()
+                )
             }
             StoreError::VersionMismatch { found, supported } if found > supported => {
                 write!(
@@ -258,7 +263,7 @@ impl std::error::Error for StoreError {
             StoreError::ReadContent(e) => Some(e),
             StoreError::RepositoryPath { source, .. } => Some(source),
             StoreError::NotFound(_)
-            | StoreError::VersionMissing(_)
+            | StoreError::ForeignRepository(_)
             | StoreError::VersionMismatch { .. }
             | StoreError::UnsupportedObjectFormat(_)
             | StoreError::Git { .. }

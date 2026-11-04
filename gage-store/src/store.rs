@@ -17,7 +17,7 @@ use gage_core::cache::{ensure_corpus_dir, store_corpus_dir, store_source_url};
 use gage_core::config::default_cache_root;
 
 use crate::StoreError;
-use crate::admin::{STORE_VERSION, exists, migrate, refresh_hooks};
+use crate::admin::{STORE_VERSION, exists, migrate, ref_generations, refresh_hooks};
 use crate::git::{CatFile, CatFileCell, git_cmd, git_in, run};
 use crate::index::ObjectIndex;
 use crate::sqlite_index::SqliteIndex;
@@ -25,6 +25,24 @@ use crate::sqlite_index::SqliteIndex;
 /// The object index file inside a store's corpus directory under the
 /// cache root
 pub const OBJECTS_FILE: &str = "objects.db";
+
+/// The git directory a store path names: the path itself for a bare
+/// repository, or the repository behind `path/.git` for a working
+/// tree, with a gitfile followed to a worktree's or submodule's
+/// directory. A path that is neither is returned as given; nothing
+/// above it is searched.
+pub fn locate(path: &Path) -> PathBuf {
+    if path.join("HEAD").is_file() || !path.join(".git").exists() {
+        return path.to_path_buf();
+    }
+    match run(git_in(path, ["rev-parse", "--absolute-git-dir"])) {
+        Ok(dir) => PathBuf::from(dir.trim_end()),
+        Err(e) => {
+            tracing::debug!(path = %path.display(), "git dir not resolved: {e}");
+            path.to_path_buf()
+        }
+    }
+}
 
 /// The object index file of the store at `store` under `cache_root`.
 pub fn index_path(cache_root: &Path, store: &Path) -> PathBuf {
@@ -53,6 +71,11 @@ pub struct Store {
     /// The cache root the object index is kept under
     cache_root: PathBuf,
     version: u32,
+    /// Whether the repository carries Gage's `gage.version` stamp. A
+    /// stamped repository is one Gage created and configures; an
+    /// unstamped one is a guest, a repository of someone else's that
+    /// Gage reads and writes under `refs/gage/` only.
+    owned: bool,
     pub(crate) index: Box<dyn ObjectIndex>,
     /// The long-lived `cat-file` process every read goes through.
     pub(crate) cat_file: CatFileCell,
@@ -91,20 +114,24 @@ impl fmt::Debug for Store {
         f.debug_struct("Store")
             .field("path", &self.path)
             .field("version", &self.version)
+            .field("owned", &self.owned)
             .finish_non_exhaustive()
     }
 }
 
 impl Store {
-    /// Open the store at `path`. Fails with [`StoreError::NotFound`]
-    /// when no repository is there, [`StoreError::VersionMissing`] when
-    /// the repository carries no `gage.version`, and
+    /// Open the store at `path`, located as [`locate`] does. Fails with
+    /// [`StoreError::NotFound`] when no repository is there and
     /// [`StoreError::VersionMismatch`] when the version is newer than
-    /// this build's, or older with no migration step from it. An older
-    /// version with steps is migrated first. Hooks behind this build's
-    /// are rewritten. Opens the object index in the store's corpus
-    /// directory under the default cache root and reconciles it with
-    /// the repository's refs.
+    /// this build's, or older with no migration step from it. A
+    /// repository stamped with `gage.version` is owned: an older
+    /// version with steps is migrated first, and hooks behind this
+    /// build's are rewritten. An unstamped repository is a guest: its
+    /// version is the generation of the `refs/gage/` namespace it
+    /// holds, this build's when the namespace is empty, and nothing
+    /// outside that namespace is written. Opens the object index in
+    /// the store's corpus directory under the default cache root and
+    /// reconciles it with the repository's refs.
     pub fn open(path: &Path) -> Result<Store, StoreError> {
         Store::open_with_cache_root(path, &default_cache_root())
     }
@@ -112,6 +139,7 @@ impl Store {
     /// As [`Store::open`], with the object index kept under
     /// `cache_root`.
     pub fn open_with_cache_root(path: &Path, cache_root: &Path) -> Result<Store, StoreError> {
+        let path = &locate(path);
         if !exists(path) {
             return Err(StoreError::NotFound(path.to_path_buf()));
         }
@@ -120,11 +148,16 @@ impl Store {
         {
             return Err(StoreError::UnsupportedObjectFormat(format));
         }
-        let found = read_version(path)?;
-        let version = if found < STORE_VERSION {
-            migrate(path, found)?
-        } else {
-            found
+        let (version, owned) = match read_config_u32(path, "gage.version")? {
+            Some(found) => {
+                let version = if found < STORE_VERSION {
+                    migrate(path, found)?
+                } else {
+                    found
+                };
+                (version, true)
+            }
+            None => (guest_version(path)?, false),
         };
         if version != STORE_VERSION {
             return Err(StoreError::VersionMismatch {
@@ -132,7 +165,9 @@ impl Store {
                 supported: STORE_VERSION,
             });
         }
-        refresh_hooks(path)?;
+        if owned {
+            refresh_hooks(path)?;
+        }
         let corpus_dir = store_corpus_dir(cache_root, path);
         ensure_corpus_dir(&corpus_dir, &store_source_url(path))
             .map_err(|e| StoreError::Index(format!("create {}: {e}", corpus_dir.display())))?;
@@ -140,6 +175,7 @@ impl Store {
             path: path.to_path_buf(),
             cache_root: cache_root.to_path_buf(),
             version,
+            owned,
             index: Box::new(SqliteIndex::open(&index_path(cache_root, path))?),
             cat_file: RefCell::new(CatFile::spawn(path)?),
             wrote: Cell::new(false),
@@ -189,10 +225,33 @@ impl Store {
         index_path(&self.cache_root, &self.path)
     }
 
-    /// The store's `gage.version`.
+    /// The store's `gage.version`, or the generation of a guest's
+    /// `refs/gage/` namespace.
     pub fn version(&self) -> u32 {
         self.version
     }
+
+    /// Whether the repository is one Gage created and configures. A
+    /// guest store is read and written under `refs/gage/` only, with
+    /// no config, hooks, or migration.
+    pub fn is_owned(&self) -> bool {
+        self.owned
+    }
+}
+
+/// The generation of an unstamped repository: the one its `refs/gage/`
+/// namespace holds, or this build's when it holds none. A namespace
+/// at another generation is reported as that generation, which the
+/// caller refuses, since a guest is never migrated.
+fn guest_version(path: &Path) -> Result<u32, StoreError> {
+    let generations = ref_generations(path)?;
+    if generations.contains(&STORE_VERSION) || generations.is_empty() {
+        return Ok(STORE_VERSION);
+    }
+    Ok(*generations
+        .iter()
+        .next()
+        .expect("a non-empty set has a first element"))
 }
 
 /// `extensions.objectFormat`, or `None` when unset (SHA-1). The writer
@@ -211,11 +270,6 @@ fn read_object_format(path: &Path) -> Result<Option<String>, StoreError> {
         Err(StoreError::Git { status, .. }) if status.code() == Some(1) => Ok(None),
         Err(e) => Err(e),
     }
-}
-
-fn read_version(path: &Path) -> Result<u32, StoreError> {
-    read_config_u32(path, "gage.version")?
-        .ok_or_else(|| StoreError::VersionMissing(path.to_path_buf()))
 }
 
 /// The integer at `key` in the store's config, or `None` when the key
@@ -337,14 +391,135 @@ mod tests {
     }
 
     #[test]
-    fn open_refuses_missing_version() {
+    fn open_of_an_unstamped_store_is_a_guest_at_this_generation() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("store.git");
         init_for_test(&path);
         run(git_in(&path, ["config", "--unset", "gage.version"])).unwrap();
+        let store = open(&path).unwrap();
+        assert!(!store.is_owned());
+        assert_eq!(store.version(), STORE_VERSION);
+    }
+
+    /// A working tree repository with a commit on a branch, as a
+    /// project repository is.
+    fn working_tree(dir: &Path) -> PathBuf {
+        let wt = dir.join("project");
+        fs::create_dir_all(&wt).unwrap();
+        run(git_in(&wt, ["init", "--quiet", "--initial-branch=main"])).unwrap();
+        run(git_in(
+            &wt,
+            [
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "--quiet",
+                "--allow-empty",
+                "-m",
+                "x",
+            ],
+        ))
+        .unwrap();
+        wt
+    }
+
+    fn local_config(path: &Path) -> String {
+        run(git_in(path, ["config", "--list", "--local"])).unwrap()
+    }
+
+    fn ref_names(path: &Path) -> Vec<String> {
+        run(git_in(path, ["for-each-ref", "--format=%(refname)"]))
+            .unwrap()
+            .lines()
+            .map(String::from)
+            .collect()
+    }
+
+    #[test]
+    fn locate_maps_a_path_to_its_git_directory_without_searching_upward() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bare = tmp.path().join("store.git");
+        init_for_test(&bare);
+        assert_eq!(locate(&bare), bare);
+
+        let wt = working_tree(tmp.path());
+        assert_eq!(locate(&wt), wt.join(".git"));
+
+        let checkout = tmp.path().join("checkout");
+        run(git_in(
+            &wt,
+            ["worktree", "add", "--quiet", checkout.to_str().unwrap()],
+        ))
+        .unwrap();
+        assert_eq!(
+            locate(&checkout),
+            wt.join(".git").join("worktrees").join("checkout")
+        );
+
+        let inside = wt.join("src");
+        fs::create_dir_all(&inside).unwrap();
+        assert_eq!(locate(&inside), inside);
+        let missing = tmp.path().join("nope");
+        assert_eq!(locate(&missing), missing);
+    }
+
+    /// A guest open installs nothing: no stamp, no hooks, no config.
+    /// Its writes land under `refs/gage/` and nowhere else.
+    #[test]
+    fn a_guest_is_read_and_written_under_its_namespace_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wt = working_tree(tmp.path());
+        let git_dir = wt.join(".git");
+        let config_before = local_config(&git_dir);
+        let refs_before = ref_names(&git_dir);
+
+        let store = Store::open_with_cache_root(&wt, &tmp.path().join("cache")).unwrap();
+        assert!(!store.is_owned());
+        assert_eq!(store.path(), git_dir);
+        assert_eq!(store.version(), STORE_VERSION);
+        crate::NoteStore::from(&store)
+            .create(crate::NoteInput {
+                name: "n",
+                value: crate::NoteValue::Text("v".into()),
+                author: "user:test",
+                target: None,
+                metadata: None,
+                work_id: None,
+            })
+            .unwrap();
+        drop(store);
+
+        assert_eq!(local_config(&git_dir), config_before);
+        assert!(!git_dir.join(UPDATE_HOOK_PATH).exists());
+        assert!(!git_dir.join(crate::admin::PRE_PUSH_HOOK_PATH).exists());
+        let refs_after = ref_names(&git_dir);
+        let added: Vec<&String> = refs_after
+            .iter()
+            .filter(|r| !refs_before.contains(r))
+            .collect();
+        assert_eq!(added.len(), 1, "{added:?}");
+        assert!(added[0].starts_with(crate::refs::ROOT), "{}", added[0]);
+
+        let reopened = Store::open_with_cache_root(&wt, &tmp.path().join("cache")).unwrap();
+        assert_eq!(crate::NoteStore::from(&reopened).iter().unwrap().count(), 1);
+    }
+
+    #[test]
+    fn a_guest_at_another_generation_is_refused_without_migration() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wt = working_tree(tmp.path());
+        let git_dir = wt.join(".git");
+        let head = run(git_in(&git_dir, ["rev-parse", "HEAD"])).unwrap();
+        run(git_in(
+            &git_dir,
+            ["update-ref", "refs/gage/0/object/x", head.trim()],
+        ))
+        .unwrap();
         assert!(matches!(
-            open(&path).unwrap_err(),
-            StoreError::VersionMissing(_)
+            open(&wt).unwrap_err(),
+            StoreError::VersionMismatch { found: 0, .. }
         ));
     }
 

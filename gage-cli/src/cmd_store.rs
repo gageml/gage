@@ -305,6 +305,10 @@ fn status_rows(status: &StoreStatus) -> Vec<Vec<String>> {
     let mut rows: Vec<Vec<String>> = vec![
         vec!["path".to_string(), shorten_home(&status.path)],
         vec![
+            "ownership".to_string(),
+            if status.owned { "owned" } else { "guest" }.to_string(),
+        ],
+        vec![
             "objects".to_string(),
             (status.loose_objects + status.packed_objects).to_string(),
         ],

@@ -13,7 +13,7 @@ use gage_core::config::{default_cache_root, gage_home};
 
 use crate::git::{git_cmd, git_in, run};
 use crate::remote::{Remote, RemoteStore};
-use crate::store::{read_config_u32, remove_index_file};
+use crate::store::{locate, read_config_u32, remove_index_file};
 use crate::{Store, StoreError};
 
 /// The ref generation stamped into `gage.version` at init, the
@@ -61,11 +61,15 @@ pub(crate) const PRE_PUSH_HOOK: &str = include_str!("hooks/pre-push");
 pub(crate) const PRE_PUSH_HOOK_PATH: &str = "hooks/pre-push";
 
 /// Path to the default store: `$GAGE_STORE` when set, else
-/// `<gage_home>/store.git`. The variable moves the store alone; the
-/// cache, config, and everything else under the home stay where
+/// `<gage_home>/store.git`, located as [`locate`] does so a working
+/// tree names its repository. The variable moves the store alone;
+/// the cache, config, and everything else under the home stay where
 /// `GAGE_HOME` puts them.
 pub fn store_path() -> PathBuf {
-    store_path_from(env::var_os("GAGE_STORE").as_deref(), &gage_home())
+    locate(&store_path_from(
+        env::var_os("GAGE_STORE").as_deref(),
+        &gage_home(),
+    ))
 }
 
 /// The store path for a `GAGE_STORE` value and a home.
@@ -93,7 +97,10 @@ pub enum InitOutcome {
 /// in its corpus directory under the default cache root belongs to a
 /// store that was removed or replaced, and is deleted. A
 /// reinitialized store keeps its index, and must be at this build's
-/// version: see [`check_generation`].
+/// version: see [`check_generation`]. A repository that is not a Gage
+/// store, one with a working tree or refs outside `refs/gage/`, is
+/// refused with [`StoreError::ForeignRepository`]: Gage never takes
+/// over a repository it did not create.
 /// Leading directories are created as needed. The empty template keeps
 /// sample hooks and `description` out of the store and ignores any
 /// `init.templateDir` in the user's Git config; the store's own
@@ -106,8 +113,10 @@ pub fn init(path: &Path) -> Result<InitOutcome, StoreError> {
 
 /// As [`init`], with the object index looked for under `cache_root`.
 pub fn init_with_cache_root(path: &Path, cache_root: &Path) -> Result<InitOutcome, StoreError> {
+    let path = &locate(path);
     let existing = exists(path);
     if existing {
+        check_foreign(path)?;
         check_generation(path)?;
     }
     let mut cmd = git_cmd();
@@ -161,8 +170,22 @@ fn check_generation(path: &Path) -> Result<(), StoreError> {
     Ok(())
 }
 
+/// A repository with a working tree or a ref outside `refs/gage/` is
+/// someone else's and is refused.
+fn check_foreign(path: &Path) -> Result<(), StoreError> {
+    let bare = run(git_in(path, ["config", "--get", "core.bare"]))?;
+    if bare.trim() != "true" {
+        return Err(StoreError::ForeignRepository(path.to_path_buf()));
+    }
+    let refs = run(git_in(path, ["for-each-ref", "--format=%(refname)"]))?;
+    if refs.lines().any(|name| !name.starts_with("refs/gage/")) {
+        return Err(StoreError::ForeignRepository(path.to_path_buf()));
+    }
+    Ok(())
+}
+
 /// The generations named by the refs under `refs/gage/`.
-fn ref_generations(path: &Path) -> Result<BTreeSet<u32>, StoreError> {
+pub(crate) fn ref_generations(path: &Path) -> Result<BTreeSet<u32>, StoreError> {
     let out = run(git_in(
         path,
         ["for-each-ref", "--format=%(refname)", "refs/gage/"],
@@ -265,6 +288,9 @@ fn write_hook(path: &Path, rel: &str, content: &str) -> Result<(), StoreError> {
 #[derive(Debug, PartialEq, Eq)]
 pub struct StoreStatus {
     pub path: PathBuf,
+    /// Whether Gage created and configures the repository; see
+    /// [`Store::is_owned`]
+    pub owned: bool,
     pub loose_objects: u64,
     pub packed_objects: u64,
     pub packs: u64,
@@ -299,6 +325,7 @@ impl Store {
         let remotes = RemoteStore::from(self).list()?;
         Ok(StoreStatus {
             path: path.to_path_buf(),
+            owned: self.is_owned(),
             loose_objects: counts.count,
             packed_objects: counts.in_pack,
             packs: counts.packs,
@@ -823,13 +850,14 @@ mod tests {
     fn status_of_fresh_store() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("store.git");
-        init(&path).unwrap();
+        init_for_test(&path);
 
         let status = open(&path).unwrap().status().unwrap();
         assert_eq!(
             status,
             StoreStatus {
                 path,
+                owned: true,
                 loose_objects: 0,
                 packed_objects: 0,
                 packs: 0,
@@ -959,17 +987,70 @@ refs/heads/main\n";
             ],
         ))
         .unwrap();
-        assert!(matches!(
-            open(&restored).unwrap_err(),
-            StoreError::VersionMissing(_)
-        ));
+        assert!(!open(&restored).unwrap().is_owned());
 
         assert_eq!(
             init_with_cache_root(&restored, &cache_root_for(&restored)).unwrap(),
             InitOutcome::Reinitialized
         );
         let store = open(&restored).unwrap();
+        assert!(store.is_owned());
         assert_eq!(NoteStore::from(&store).get(&a).unwrap().name, "a");
+    }
+
+    /// Init never takes over a repository Gage did not create: one
+    /// with a working tree, or a bare one with a branch.
+    #[test]
+    fn init_refuses_a_foreign_repository() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wt = tmp.path().join("project");
+        std::fs::create_dir_all(&wt).unwrap();
+        run(git_in(&wt, ["init", "--quiet"])).unwrap();
+        let config_before = run(git_in(&wt, ["config", "--list", "--local"])).unwrap();
+        assert!(matches!(
+            init_with_cache_root(&wt, &cache_root_for(&wt)).unwrap_err(),
+            StoreError::ForeignRepository(p) if p == wt.join(".git")
+        ));
+        assert_eq!(
+            run(git_in(&wt, ["config", "--list", "--local"])).unwrap(),
+            config_before
+        );
+
+        let bare = tmp.path().join("other.git");
+        let mut cmd = git_cmd();
+        cmd.args(["init", "--bare", "--quiet"]).arg(&bare);
+        run(cmd).unwrap();
+        let tree = run(git_in(
+            &bare,
+            ["hash-object", "-t", "tree", "--stdin", "-w"],
+        ));
+        let tree = match tree {
+            Ok(sha) => sha,
+            Err(e) => panic!("{e}"),
+        };
+        let commit = run(git_in(
+            &bare,
+            [
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit-tree",
+                tree.trim(),
+                "-m",
+                "x",
+            ],
+        ))
+        .unwrap();
+        run(git_in(
+            &bare,
+            ["update-ref", "refs/heads/main", commit.trim()],
+        ))
+        .unwrap();
+        assert!(matches!(
+            init_with_cache_root(&bare, &cache_root_for(&bare)).unwrap_err(),
+            StoreError::ForeignRepository(_)
+        ));
     }
 
     /// Init is not a migration: a repository at another generation,
