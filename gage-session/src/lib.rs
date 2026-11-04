@@ -38,7 +38,9 @@ pub use content_schema::{
 pub use json_edit::{EditError, delete_values, edit_strings};
 pub use status::{AuthInfo, DriverStatus, Field, HarnessInfo, InstallInfo};
 pub use system_col::{SYSTEM_META_KEY, is_system, system};
-pub use text_block::{DescriptorError, FilterValues, TextDescriptor, TextValue, ValueHit};
+pub use text_block::{
+    DescriptorError, SpanHit, TextDescriptor, TextValue, TypedSet, TypedValues, ValueHit,
+};
 pub use tool_use::{ToolUse, ToolUseBatch, tool_use_batch, tool_use_schema};
 
 /// What a driver opens and how it reads it. `new` names the source as

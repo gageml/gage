@@ -7,6 +7,7 @@ edition.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
+aho-corasick = { workspace = true }
 chrono = { workspace = true }
 datafusion = { workspace = true }
 futures = { workspace = true }
@@ -24,6 +25,7 @@ percent-encoding = { workspace = true }
 rune = { git = "https://github.com/gar1t/rune.git", branch = "gage" }
 rune-modules = { git = "https://github.com/gar1t/rune.git", branch = "gage", features = ["time", "rand", "thread_rng"] }
 tokio = { workspace = true, features = ["rt", "sync", "macros"] }
+toml = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

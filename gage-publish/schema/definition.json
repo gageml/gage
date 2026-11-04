@@ -10,8 +10,7 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "audience": {"type": "string"},
-        "use": {"type": "string"},
+        "groups": {"type": "array", "items": {"type": "string"}},
         "notes": {"type": "string"}
       }
     },
@@ -28,7 +27,7 @@
           {"type": "string"},
           {
             "type": "array",
-            "prefixItems": [{"type": "string"}, {"type": "string"}],
+            "prefixItems": [{"type": "string"}, {"type": "object"}],
             "items": false,
             "minItems": 2
           }

@@ -1729,7 +1729,7 @@ fn redaction_lines(records: &[&Redaction]) -> Vec<Line<'static>> {
 fn redaction_location(r: &Redaction) -> String {
     let reference = r.reference.clone().unwrap_or_default();
     match r.kind {
-        ChangeKind::Line => line_range(r.line, r.line_end.unwrap_or(r.line)),
+        ChangeKind::Entry => line_range(r.line, r.line_end.unwrap_or(r.line)),
         ChangeKind::Text => match (r.span_start, r.span_end) {
             (Some(start), Some(end)) => format!("{reference} {start}-{end}"),
             _ => reference,
@@ -2230,7 +2230,7 @@ mod tests {
                 author: "filter:pii".into(),
             },
             Redaction {
-                kind: ChangeKind::Line,
+                kind: ChangeKind::Entry,
                 line: 2,
                 line_end: Some(3),
                 reference: None,

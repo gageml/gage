@@ -1,18 +1,19 @@
 //! The publish definition, `publish/<id>/publish.jsonc`: what the
 //! staged session is derived from. The original session, the
 //! arguments `init` was given, the title the published session takes,
-//! the filters with their prompts, the segments, every text redaction
-//! with its author, and the literals a filter may not record again. It may hold the redacted literals,
-//! because it is instructions and is never committed. The file is
-//! edited by hand, so it is JSON with comments and trailing commas,
-//! written with the annotations an editor needs and read back without
-//! them.
+//! the filters with their params, the segments, every text redaction
+//! with its author, and the literals a filter may not record again.
+//! It may hold the redacted literals, because it is instructions and
+//! is never committed. The file is edited by hand, so it is JSON with
+//! comments and trailing commas, written with the annotations an
+//! editor needs and read back without them.
 
 use std::collections::HashSet;
 use std::fmt;
-use std::str::FromStr;
 use std::sync::LazyLock;
 
+use gage_registry::filter::Filter;
+use gage_runtime::Reason;
 use gage_store::url::LineSelection;
 use jsonc_parser::ast;
 use jsonc_parser::common::Ranged;
@@ -21,126 +22,36 @@ use jsonschema::Validator;
 use jsonschema::error::ValidationErrorKind;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use crate::PublishError;
-use crate::filter::Filter;
 
-/// The filters with a built-in definition, in listing order.
-pub const NAMED_FILTERS: &[&str] = &[
-    "custom",
-    "harness-context",
-    "harness-record",
-    "language",
-    "pii",
-    "secret",
-    "system",
-];
-
-/// Whether the filter `name` has no instructions of its own and takes
-/// its prompt as the whole instruction.
-pub fn requires_prompt(name: &str) -> bool {
-    name == "custom"
-}
-
-/// A reason code a redaction may carry.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct Reason {
-    pub code: String,
-    /// One line on what the code covers, for a listing
-    pub description: String,
-}
-
-impl Reason {
-    /// The reason with `code`, when there is one.
-    pub fn find(code: &str) -> Option<&'static Reason> {
-        REASONS.iter().find(|r| r.code == code)
-    }
-}
-
-/// The reason codes, in listing order. A filter's prose cites codes
-/// from this list; the list is not defined by the filters.
-pub static REASONS: LazyLock<Vec<Reason>> = LazyLock::new(|| {
-    serde_json::from_str(include_str!("../filters/reasons.json"))
-        .expect("filters/reasons.json is fixed and valid")
-});
-
-/// One filter of a publish: a named filter, with the prompt that adds
-/// to its instructions or, for a filter that requires one, is its
-/// instructions.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FilterSpec {
-    pub name: String,
-    pub prompt: Option<String>,
-}
-
-impl FilterSpec {
-    /// The filter `name` under `prompt`. A name outside
-    /// [`NAMED_FILTERS`] is an error, and so is a filter that requires
-    /// a prompt without one.
-    pub fn new(name: &str, prompt: Option<String>) -> Result<Self, PublishError> {
-        if !NAMED_FILTERS.contains(&name) {
-            return Err(PublishError::Input(format!(
-                "unknown filter {name:?}; filters are {}",
-                NAMED_FILTERS.join(", ")
-            )));
-        }
-        if requires_prompt(name) && prompt.is_none() {
-            return Err(PublishError::Input(format!(
-                "filter {name} requires a prompt"
-            )));
-        }
-        Ok(Self {
-            name: name.to_string(),
-            prompt,
-        })
-    }
-
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-}
-
-impl FromStr for FilterSpec {
-    type Err = PublishError;
-
-    /// A bare filter name, with no prompt.
-    fn from_str(text: &str) -> Result<Self, Self::Err> {
-        Self::new(text, None)
-    }
-}
-
-impl fmt::Display for FilterSpec {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.name)
-    }
-}
-
-/// A filter as the definition records it: a name, with the prompt
-/// that adds to its instructions or is its instructions. A filter
-/// without a prompt is written as a bare string, and one with a
-/// prompt as `[name, prompt]`.
+/// A filter as the definition records it: a registry name, with the
+/// params the filter ran under. A filter without params is written as
+/// a bare string, and one with params as `[name, {..}]`. The params
+/// are the resolved values of the init, so a later rebuild runs the
+/// filter the same way whatever the config says by then.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(from = "FilterRepr", into = "FilterRepr")]
 pub struct FilterEntry {
     pub name: String,
-    pub prompt: Option<String>,
+    pub params: Option<Map<String, Value>>,
 }
 
 #[derive(Serialize, Deserialize)]
 #[serde(untagged)]
 enum FilterRepr {
     Name(String),
-    WithPrompt(String, String),
+    WithParams(String, Map<String, Value>),
 }
 
 impl From<FilterRepr> for FilterEntry {
     fn from(repr: FilterRepr) -> Self {
         match repr {
-            FilterRepr::Name(name) => FilterEntry { name, prompt: None },
-            FilterRepr::WithPrompt(name, prompt) => FilterEntry {
+            FilterRepr::Name(name) => FilterEntry { name, params: None },
+            FilterRepr::WithParams(name, params) => FilterEntry {
                 name,
-                prompt: Some(prompt),
+                params: Some(params),
             },
         }
     }
@@ -148,25 +59,20 @@ impl From<FilterRepr> for FilterEntry {
 
 impl From<FilterEntry> for FilterRepr {
     fn from(entry: FilterEntry) -> Self {
-        match entry.prompt {
+        match entry.params {
             None => FilterRepr::Name(entry.name),
-            Some(prompt) => FilterRepr::WithPrompt(entry.name, prompt),
+            Some(params) => FilterRepr::WithParams(entry.name, params),
         }
     }
 }
 
 impl FilterEntry {
-    pub fn new(spec: &FilterSpec) -> Self {
+    /// The entry for a resolved filter: its name and its params, when
+    /// it declares any.
+    pub fn from_filter(filter: &Filter<'_>) -> Self {
         FilterEntry {
-            name: spec.name.clone(),
-            prompt: spec.prompt.clone(),
-        }
-    }
-
-    pub fn spec(&self) -> FilterSpec {
-        FilterSpec {
-            name: self.name.clone(),
-            prompt: self.prompt.clone(),
+            name: filter.def.name.clone(),
+            params: filter.params.as_ref().and_then(Value::as_object).cloned(),
         }
     }
 
@@ -322,10 +228,9 @@ impl From<Allow> for AllowRepr {
 /// read it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InitArgs {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub audience: Option<String>,
-    #[serde(default, rename = "use", skip_serializing_if = "Option::is_none")]
-    pub uses: Option<String>,
+    /// The filter groups that selected the filters
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
 }
@@ -383,12 +288,12 @@ pub struct PublishDefinition {
 }
 
 impl PublishDefinition {
-    pub fn new(session: &str, filters: &[FilterSpec]) -> Self {
+    pub fn new(session: &str, filters: &[FilterEntry]) -> Self {
         Self {
             session: session.to_string(),
             init: InitArgs::default(),
             title: None,
-            filters: filters.iter().map(FilterEntry::new).collect(),
+            filters: filters.to_vec(),
             segments: Vec::new(),
             allow: Vec::new(),
             redact: Vec::new(),
@@ -538,29 +443,6 @@ impl PublishDefinition {
             .any(|a| a.literal.eq_ignore_ascii_case(literal))
     }
 
-    /// The redaction instructions of every filter as markdown: per
-    /// filter a level-three heading with its name in code font, then
-    /// its instructions with the prompt given for it in place of the
-    /// placeholder. Sections are separated by a blank line. A filter
-    /// with no instructions of its own, one that redacts whole entries
-    /// at the driver, contributes no section.
-    pub fn instructions_markdown(&self) -> Result<String, PublishError> {
-        let mut out = String::new();
-        for entry in &self.filters {
-            let filter = Filter::named(&entry.name)
-                .ok_or_else(|| PublishError::Input(format!("unknown filter {:?}", entry.name)))?;
-            let instructions = filter.instructions_with_prompt(entry.prompt.as_deref());
-            if instructions.is_empty() {
-                continue;
-            }
-            if !out.is_empty() {
-                out.push('\n');
-            }
-            out.push_str(&format!("### `{}`\n\n{instructions}\n", filter.name));
-        }
-        Ok(out)
-    }
-
     /// Check a definition built in code or filled in after a read: the
     /// rules the reader applies, and every redaction and the title
     /// have an author. A row is named by its 1-based position.
@@ -631,7 +513,7 @@ impl PublishDefinition {
             None => "null".to_string(),
         };
         out.push_str(&format!("  \"title\": {title_row},\n\n"));
-        out.push_str(&filters_comment());
+        out.push_str(FILTERS_COMMENT);
         rows(&mut out, "filters", &self.filters);
         out.push('\n');
         out.push_str(SEGMENTS_COMMENT);
@@ -684,7 +566,7 @@ static SCHEMA: LazyLock<Validator> = LazyLock::new(|| {
 
 /// The shape of a row of each section, for a problem at the row.
 const ROW_SHAPES: [(&str, &str); 4] = [
-    ("filters", "a filters row is a name or [name, prompt]"),
+    ("filters", "a filters row is a name or [name, params]"),
     ("segments", "a segments row is [lines, description, author]"),
     ("allow", "an allow row is [text, author]"),
     (
@@ -835,12 +717,10 @@ impl<'a> Doc<'a> {
     }
 }
 
-/// Why `f` is not a filter the list may hold: an unknown name, a
-/// missing prompt, or a name already in `seen`.
+/// Why `f` is not a filter the list may hold: a name already in
+/// `seen`. Whether the name is a filter the registry knows is found
+/// when the filters run.
 fn filter_problem(f: &FilterEntry, seen: &mut HashSet<String>) -> Option<String> {
-    if let Err(e) = FilterSpec::new(&f.name, f.prompt.clone()) {
-        return Some(e.to_string());
-    }
     if !seen.insert(f.name.clone()) {
         return Some(format!("filter {} is listed more than once", f.name));
     }
@@ -918,29 +798,20 @@ const TITLE_COMMENT: &str = "  // [text, author]: the title the published sessio
   // refresh that reads it.
 ";
 
-/// The `filters` annotation, with the named-filter list from
-/// [`NAMED_FILTERS`].
-fn filters_comment() -> String {
-    comment(&format!(
-        "A name, or [name, prompt]. Each name once. Names: {}. custom \
-         requires a prompt; a prompt on any other filter adds to its \
-         instructions.",
-        NAMED_FILTERS.join(", ")
-    ))
-}
+const FILTERS_COMMENT: &str =
+    "  // A filter name, or [name, params]. Each name once. Params are the
+  // filter's values as init resolved them; gage publish init
+  // --list-filters names the filters.
+";
 
-/// The `redact` annotation, with the reason-code list from [`REASONS`].
+/// The `redact` annotation, with the reason codes of the runtime.
 fn redact_comment() -> String {
-    let reasons = REASONS
-        .iter()
-        .map(|r| r.code.as_str())
-        .collect::<Vec<_>>()
-        .join(", ");
     comment(&format!(
         "[text, reason, author, mark]. Text is matched without case \
-         everywhere it appears. Reasons: {reasons}. mark false removes \
+         everywhere it appears. Reasons: {}. mark false removes \
          the text with no marker. A row without an author, [text, \
-         reason, mark], takes the author of the refresh that reads it."
+         reason, mark], takes the author of the refresh that reads it.",
+        Reason::codes()
     ))
 }
 
@@ -976,67 +847,37 @@ const ALLOW_COMMENT: &str = "  // [text, author]: text a filter found that stays
 
 /// `reason` is a known code.
 fn check_reason(reason: &str) -> Result<(), PublishError> {
-    if Reason::find(reason).is_some() {
-        return Ok(());
-    }
-    Err(PublishError::Input(format!(
-        "unknown reason {reason:?}; reasons are {}",
-        REASONS
-            .iter()
-            .map(|r| r.code.as_str())
-            .collect::<Vec<_>>()
-            .join(", ")
-    )))
+    reason
+        .parse::<Reason>()
+        .map(|_| ())
+        .map_err(PublishError::Input)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// A bare name parses, a name outside the list and a custom filter
-    /// without a prompt are errors, and any filter takes a prompt.
-    #[test]
-    fn filter_spec_takes_a_known_name_and_an_optional_prompt() {
-        assert_eq!(
-            "pii".parse::<FilterSpec>().unwrap(),
-            FilterSpec {
-                name: "pii".into(),
-                prompt: None
-            }
-        );
-        let bad = "piii".parse::<FilterSpec>().unwrap_err();
-        assert!(bad.to_string().contains("piii"), "{bad}");
-        let custom = "custom".parse::<FilterSpec>().unwrap_err();
-        assert!(custom.to_string().contains("requires a prompt"), "{custom}");
-        let with = FilterSpec::new("system", Some("Watch for hosts.".into())).unwrap();
-        assert_eq!(with.to_string(), "system");
-        assert!(requires_prompt("custom") && !requires_prompt("system"));
-    }
-
-    /// The reason file lists each code once with a description.
-    #[test]
-    fn every_reason_is_listed_once_with_a_description() {
-        let mut codes = HashSet::new();
-        for r in REASONS.iter() {
-            assert!(!r.description.is_empty(), "{}", r.code);
-            assert!(codes.insert(r.code.as_str()), "{}", r.code);
+    fn filter(name: &str) -> FilterEntry {
+        FilterEntry {
+            name: name.into(),
+            params: None,
         }
-        assert!(Reason::find("scope").is_some());
-        assert!(Reason::find("opaque").is_none());
-        assert!(Reason::find("nope").is_none());
     }
 
-    /// The redact annotation names every reason code and the filters
-    /// annotation every named filter, so neither drifts from its source.
+    fn filter_with(name: &str, params: Value) -> FilterEntry {
+        FilterEntry {
+            name: name.into(),
+            params: params.as_object().cloned(),
+        }
+    }
+
+    /// The redact annotation names every reason code, so it does not
+    /// drift from the runtime's list.
     #[test]
-    fn the_annotations_name_every_code_and_filter() {
+    fn the_redact_annotation_names_every_code() {
         let redact = redact_comment();
-        for r in REASONS.iter() {
-            assert!(redact.contains(r.code.as_str()), "redact omits {}", r.code);
-        }
-        let filters = filters_comment();
-        for name in NAMED_FILTERS {
-            assert!(filters.contains(name), "filters omits {name}");
+        for r in Reason::ALL {
+            assert!(redact.contains(r.code()), "redact omits {}", r.code());
         }
     }
 
@@ -1049,19 +890,18 @@ mod tests {
         let mut d = PublishDefinition::new(
             "abc",
             &[
-                "pii".parse().unwrap(),
-                FilterSpec::new("custom", Some("Ducks only".into())).unwrap(),
+                filter("pii"),
+                filter_with("language", json!({ "strict": true })),
             ],
         );
         d.init = InitArgs {
-            audience: Some("public".into()),
-            uses: None,
+            groups: vec!["public".into()],
             notes: Some("For the blog".into()),
         };
-        d.filters.push(FilterEntry {
-            name: "system".into(),
-            prompt: Some("Watch for hosts.".into()),
-        });
+        d.filters.push(filter_with(
+            "system",
+            json!({ "prompt": "Watch for hosts." }),
+        ));
         d.title = Some(TitleEntry {
             text: "Fixing the duck".into(),
             author: "user:g".into(),
@@ -1083,7 +923,7 @@ mod tests {
             "  \"session\": \"abc\", // title: Fix the duck\n",
             "\n",
             "  // Recorded by init. Not read by publish.\n",
-            "  \"init\": {\"audience\":\"public\",\"notes\":\"For the blog\"},\n",
+            "  \"init\": {\"groups\":[\"public\"],\"notes\":\"For the blog\"},\n",
             "\n",
             "  // [text, author]: the title the published session takes, set by an\n",
             "  // entry added after its last line. null keeps the title the content\n",
@@ -1092,12 +932,12 @@ mod tests {
             "  \"title\": [\"Fixing the duck\", \"user:g\"],\n",
             "\n",
         ));
-        expected.push_str(&filters_comment());
+        expected.push_str(FILTERS_COMMENT);
         expected.push_str(concat!(
             "  \"filters\": [\n",
             "    \"pii\",\n",
-            "    [\"custom\", \"Ducks only\"],\n",
-            "    [\"system\", \"Watch for hosts.\"],\n",
+            "    [\"language\", {\"strict\":true}],\n",
+            "    [\"system\", {\"prompt\":\"Watch for hosts.\"}],\n",
             "  ],\n",
             "\n",
             "  // [lines, description, author]. Lines are 1-based inclusive ranges\n",
@@ -1127,11 +967,9 @@ mod tests {
         assert_eq!(text, expected);
         let back = PublishDefinition::from_jsonc(&text).unwrap();
         assert_eq!(back, d);
-        assert_eq!(
-            back.filters[1].spec(),
-            FilterSpec::new("custom", Some("Ducks only".into())).unwrap()
-        );
-        assert_eq!(back.named_filters(), ["pii", "custom", "system"]);
+        assert_eq!(back.filters[1].params.as_ref().unwrap()["strict"], true);
+        assert_eq!(back.filters[1].author(), "filter:language");
+        assert_eq!(back.named_filters(), ["pii", "language", "system"]);
         assert!(back.is_allowed("HUNTER2"));
         assert!(!back.is_allowed("hunter"));
         let empty = PublishDefinition::new("abc", &[]).to_jsonc_text(None);
@@ -1188,7 +1026,7 @@ mod tests {
     #[test]
     fn validate_requires_an_author() {
         let d = PublishDefinition::from_jsonc(r#"{"session": "abc", "filters": ["pii"]}"#).unwrap();
-        assert_eq!(d, PublishDefinition::new("abc", &["pii".parse().unwrap()]));
+        assert_eq!(d, PublishDefinition::new("abc", &[filter("pii")]));
         d.validate().unwrap();
 
         let mut d = PublishDefinition::from_jsonc(
@@ -1233,10 +1071,9 @@ mod tests {
     /// problems come first and alone: an unknown key at the key, a row
     /// of the wrong shape at the row with the shape named, a title of
     /// the wrong shape, and a wrong element at the element. A file the schema accepts then reports
-    /// what the rules find: a session other than the original, an
-    /// unknown filter, a filter without its prompt, a filter listed
-    /// twice, bad segment lines, an unknown reason, and a redaction
-    /// whose author slot does not fit its length.
+    /// what the rules find: a session other than the original, a
+    /// filter listed twice, bad segment lines, an unknown reason, and
+    /// a redaction whose author slot does not fit its length.
     #[test]
     fn reader_reports_each_problem_at_its_position() {
         let problems = |text: &str, session: &str| -> Vec<(usize, usize, String)> {
@@ -1265,7 +1102,7 @@ mod tests {
         let found = problems(shape, "abc");
         let expect = [
             (4, 3, "unknown key \"filter\""),
-            (5, 22, "a filters row is a name or [name, prompt]"),
+            (5, 22, "a filters row is a name or [name, params]"),
             (7, 5, "a segments row is [lines, description, author]"),
             (9, 3, "title is [text, author], [text], or null"),
             (11, 6, "shorter than 1 character"),
@@ -1280,7 +1117,7 @@ mod tests {
         let rules = concat!(
             "{\n",
             "  \"session\": \"abc\",\n",
-            "  \"filters\": [\"nope\", \"custom\", \"pii\", \"pii\"],\n",
+            "  \"filters\": [\"nope\", [\"custom\", {}], \"pii\", \"pii\"],\n",
             "  \"segments\": [[\"9-2\", \"d\", \"u\"]],\n",
             "  \"redact\": [\n",
             "    [\"x\", \"nope\", \"u\", true],\n",
@@ -1291,9 +1128,7 @@ mod tests {
         let found = problems(rules, "xyz");
         let expect = [
             (2, 3, "session \"abc\" is not the original xyz"),
-            (3, 15, "unknown filter \"nope\""),
-            (3, 23, "filter custom requires a prompt"),
-            (3, 40, "filter pii is listed more than once"),
+            (3, 46, "filter pii is listed more than once"),
             (4, 16, "9-2"),
             (6, 5, "unknown reason \"nope\""),
             (
@@ -1349,45 +1184,5 @@ mod tests {
         assert!(parse_lines("0-3").is_err());
         assert!(parse_lines("").is_err());
         assert!(parse_lines("99999999999").is_err());
-    }
-
-    /// The instructions are one markdown section per filter: a heading
-    /// with the name, then the prose with the prompt at its placeholder.
-    #[test]
-    fn instructions_are_markdown_sections_with_the_prompt_in_place() {
-        let filters = [
-            FilterSpec::new("language", None).unwrap(),
-            FilterSpec::new("custom", Some("Remove the project codename".into())).unwrap(),
-        ];
-        let definition = PublishDefinition::new("abc", &filters);
-        let markdown = definition.instructions_markdown().unwrap();
-        let language = Filter::named("language").unwrap();
-        let custom = Filter::named("custom").unwrap();
-        assert_eq!(
-            markdown,
-            format!(
-                "### `language`\n\n{}\n\n### `custom`\n\n{}\n",
-                language.instructions.trim_end(),
-                custom.instructions_with_prompt(Some("Remove the project codename"))
-            )
-        );
-        assert!(
-            markdown.ends_with("\n\nRemove the project codename\n"),
-            "{markdown}"
-        );
-    }
-
-    /// A driver-only filter, one with no instructions of its own,
-    /// contributes no section; the filters around it still do.
-    #[test]
-    fn instructions_omit_a_driver_only_filter() {
-        let filters = [
-            FilterSpec::new("harness-record", None).unwrap(),
-            FilterSpec::new("pii", None).unwrap(),
-        ];
-        let definition = PublishDefinition::new("abc", &filters);
-        let markdown = definition.instructions_markdown().unwrap();
-        assert!(!markdown.contains("harness-record"), "{markdown}");
-        assert!(markdown.contains("### `pii`"), "{markdown}");
     }
 }

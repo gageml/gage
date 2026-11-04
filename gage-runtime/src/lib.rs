@@ -1,7 +1,10 @@
-//! The scanner runtime: the Rune context every scanner compiles
-//! against, the native modules installed in it, the per-task state
-//! those modules read, and the rule for which files are a scanner's
-//! source ([`source`]). Task orchestration lives in `gage-scan`.
+//! The Rune runtime: the context every scanner and publish filter
+//! compiles against, the native modules installed in it, the per-task
+//! state those modules read, and the rule for which files are a
+//! scanner's source ([`source`]). Task orchestration lives in
+//! `gage-scan` for scanners and `gage-publish` for filters. One
+//! context serves both; a function of the other kind of task fails at
+//! runtime, the way `scan()` fails outside a scan task.
 //!
 //! The scanner-facing surface is built on `gage-store`,
 //! `gage-session`, and `gage-query`: a session is a store object
@@ -24,7 +27,9 @@ mod key;
 mod log;
 mod macros;
 mod note;
+mod patterns;
 mod progress;
+pub mod publish;
 mod query;
 pub mod row;
 mod scan;
@@ -47,6 +52,8 @@ pub use attachment::{Attachment, AttachmentFile, Attachments};
 pub use fail::Fail;
 pub use ignore::is_ignore;
 pub use log::LOG_TARGET;
+pub use patterns::{Pattern, Patterns, RuleError};
+pub use publish::{Contribution, PUBLISH_CTX, PublishContext, Reason};
 pub use scan::{
     Native, SCAN_CTX, Scan, ScanContext, ScanDataset, ScanDatasetRef, Session, Sessions,
     render_vm_error,
@@ -173,10 +180,12 @@ impl OutputSink {
 /// `gage::carry_forward_notes_named`,
 /// `gage::Mark`, `gage::watermark`, `gage::Template`, `gage::Progress`,
 /// `gage::call_agent` and the values it returns, `gage::AgentRunner`,
-/// `gage::Fail`, `gage::Ignore`, `session.compress(..)`, and the
+/// `gage::Fail`, `gage::Ignore`, `session.compress(..)`, the
 /// `stats` and `json` modules and the include macros from
-/// `gage-runtime`. Every file-reading facility installed here is
-/// enumerated by [`source::source_files`].
+/// `gage-runtime`, and for publish filters `gage::publish` and the
+/// values it returns, `gage::Patterns`, and the `gage::filter`
+/// selectors and `Reason`. Every file-reading facility installed here
+/// is enumerated by [`source::source_files`].
 pub fn context() -> Result<Context, ContextError> {
     let mut context = rune_modules::with_config(false)?;
     context.install(io::module()?)?;
@@ -204,6 +213,10 @@ pub fn context() -> Result<Context, ContextError> {
     context.install(stats::module()?)?;
     context.install(json::module()?)?;
     context.install(macros::module()?)?;
+    context.install(publish::module()?)?;
+    context.install(publish::types_module()?)?;
+    context.install(publish::filter_module()?)?;
+    context.install(patterns::types_module()?)?;
     Ok(context)
 }
 

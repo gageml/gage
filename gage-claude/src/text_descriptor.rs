@@ -1,15 +1,14 @@
 //! The Claude driver's text descriptor: which fields of a transcript
 //! line are identifiers, timestamps, digests, signatures, or
-//! enumerations rather than text, which fields a named filter treats
-//! as sensitive by type, which entries the harness wrote for its own
-//! bookkeeping, and which literals are too generic to redact. The
-//! publish redaction engine reads it.
-//! `schema/claude-jsonl-1/text_descriptor.json` holds the pattern
-//! lists beside the content schemas of the same format.
+//! enumerations rather than text, which fields each typed set holds,
+//! which entries the harness wrote for its own bookkeeping, and which
+//! literals are too generic to redact. The publish redaction engine
+//! reads it. `schema/claude-jsonl-1/text_descriptor.json` holds the
+//! safe and allow pattern lists beside the content schemas of the
+//! same format; the typed sets are declared here against
+//! [`TypedSet`].
 
-use std::collections::BTreeMap;
-
-use gage_session::TextDescriptor;
+use gage_session::{TextDescriptor, TypedSet};
 use serde::Deserialize;
 
 const DESCRIPTOR: &str = include_str!("../schema/claude-jsonl-1/text_descriptor.json");
@@ -19,22 +18,88 @@ struct Lists {
     safe: Vec<String>,
     #[serde(default)]
     allow: Vec<String>,
-    #[serde(default)]
-    filters: BTreeMap<String, FilterLists>,
 }
 
-#[derive(Deserialize)]
-struct FilterLists {
-    #[serde(default)]
-    literal: Vec<String>,
-    #[serde(default)]
-    value: Vec<String>,
-    #[serde(default)]
-    entries: Vec<String>,
-    /// Named tag sets whose tags the filter removes as spans wherever
-    /// they appear in a text value.
-    #[serde(default)]
-    remove_tags: Vec<String>,
+/// The paths of one typed set in the transcript shape: fields whose
+/// string is the sensitive literal, fields whose whole value is left
+/// out, selectors over the entry, and named tag sets whose tags the
+/// set removes as spans wherever they appear in a text value.
+struct TypedLists {
+    literal: &'static [&'static str],
+    value: &'static [&'static str],
+    entries: &'static [&'static str],
+    remove_tags: &'static [&'static str],
+}
+
+const NO_PATHS: &[&str] = &[];
+
+fn typed_lists(set: TypedSet) -> TypedLists {
+    match set {
+        TypedSet::HarnessContext => TypedLists {
+            literal: NO_PATHS,
+            value: NO_PATHS,
+            entries: &[
+                "$[?$.type == 'api-request-shape' || $.type == 'api-request-blob' || $.type == 'attachment']",
+                "$[?$.type == 'user' && $.isMeta == true]",
+            ],
+            remove_tags: NO_PATHS,
+        },
+        TypedSet::HarnessRecord => TypedLists {
+            literal: NO_PATHS,
+            value: &[
+                "$.version",
+                "$.entrypoint",
+                "$.userType",
+                "$.slug",
+                "$.permissionMode",
+                "$.effort",
+                "$.requestedModel",
+                "$.thinkingDurationMs",
+                "$.requestId",
+                "$.apiBlockIndex",
+                "$.message.usage",
+            ],
+            entries: &[
+                "$[?$.type != 'user' && $.type != 'assistant' && $.type != 'system' && $.type != 'custom-title' && $.type != 'agent-name' && $.type != 'api-request-shape' && $.type != 'api-request-blob' && $.type != 'attachment']",
+                "$[?$.type == 'system' && $.subtype != 'api_error' && $.subtype != 'away_summary' && $.subtype != 'compact_boundary' && $.subtype != 'informational' && $.subtype != 'local_command' && $.subtype != 'model_refusal_no_fallback' && $.subtype != 'model_refusal_fallback']",
+            ],
+            remove_tags: &["ide_tags"],
+        },
+        TypedSet::Pii => TypedLists {
+            literal: &["$..user_identity"],
+            value: &["$.attachment.context.userEmail"],
+            entries: NO_PATHS,
+            remove_tags: NO_PATHS,
+        },
+        TypedSet::System => TypedLists {
+            literal: &[
+                "$.cwd",
+                "$..home_dir",
+                "$.attachment.snapshot.scratchpadDirectory",
+                "$.attachment.snapshot.osVersion",
+            ],
+            value: &[
+                "$.cwd",
+                "$..live_cwd",
+                "$..home_dir",
+                "$..git_state.cwd",
+                "$..git_state.root",
+                "$..trusted_directories.primary.path",
+                "$..trusted_directories.primary.resolved[*]",
+                "$..rule_roots.*",
+                "$..visibility..host",
+                "$..visibility..remote",
+                "$..push_remote",
+                "$.attachment.snapshot.workingDirectory",
+                "$.attachment.snapshot.scratchpadDirectory",
+                "$.attachment.snapshot.additionalWorkingDirectories[*]",
+                "$.attachment.snapshot.osVersion",
+                "$.snapshot.trackedFileBackups.*.realParentDir",
+            ],
+            entries: NO_PATHS,
+            remove_tags: NO_PATHS,
+        },
+    }
 }
 
 pub(crate) fn text_descriptor() -> TextDescriptor {
@@ -47,21 +112,17 @@ pub(crate) fn text_descriptor() -> TextDescriptor {
         .expect("descriptor patterns should be JSONPath")
         .with_allow(&strs(&lists.allow))
         .expect("descriptor allow patterns should be regexes");
-    for (name, paths) in &lists.filters {
+    for set in TypedSet::ALL {
+        let paths = typed_lists(set);
         let removes: Vec<String> = paths
             .remove_tags
             .iter()
             .flat_map(|set| tag_set(set).iter().map(|tag| tag_span_regex(tag)))
             .collect();
+        let removes: Vec<&str> = removes.iter().map(String::as_str).collect();
         descriptor = descriptor
-            .with_filter(
-                name,
-                &strs(&paths.literal),
-                &strs(&paths.value),
-                &strs(&paths.entries),
-                &strs(&removes),
-            )
-            .expect("descriptor filter patterns should be JSONPath");
+            .with_typed(set, paths.literal, paths.value, paths.entries, &removes)
+            .expect("descriptor typed patterns should be JSONPath");
     }
     descriptor
 }
@@ -91,9 +152,9 @@ mod tests {
 
     use super::*;
     use crate::entry::{SYSTEM_MESSAGE_SUBTYPES, message_subtype};
-    use gage_session::{FilterValues, TextValue};
+    use gage_session::{TextValue, TypedValues};
 
-    fn pointers(found: &FilterValues) -> Vec<String> {
+    fn pointers(found: &TypedValues) -> Vec<String> {
         found.values.iter().map(|h| h.pointer.clone()).collect()
     }
 
@@ -301,7 +362,7 @@ mod tests {
         for line in sample_and_shapes() {
             let entry: serde_json::Value = serde_json::from_str(line).unwrap();
             let dropped = descriptor
-                .filter_values("harness-context", line)
+                .typed_values(TypedSet::HarnessContext, line)
                 .unwrap()
                 .dropped;
             assert_eq!(dropped, is_context(&entry), "{line}");
@@ -318,7 +379,7 @@ mod tests {
         for line in sample_and_shapes() {
             let entry: serde_json::Value = serde_json::from_str(line).unwrap();
             let dropped = descriptor
-                .filter_values("harness-record", line)
+                .typed_values(TypedSet::HarnessRecord, line)
                 .unwrap()
                 .dropped;
             let expected = !is_conversation(&entry) && !is_context(&entry);
@@ -327,7 +388,7 @@ mod tests {
         for (subtype, _) in SYSTEM_MESSAGE_SUBTYPES {
             let line = format!(r#"{{"type":"system","subtype":"{subtype}","content":"x"}}"#);
             let dropped = descriptor
-                .filter_values("harness-record", &line)
+                .typed_values(TypedSet::HarnessRecord, &line)
                 .unwrap()
                 .dropped;
             assert!(!dropped, "{line}");
@@ -340,7 +401,9 @@ mod tests {
     fn harness_record_removes_ide_tag_spans_in_a_user_message() {
         let descriptor = text_descriptor();
         let line = r#"{"type":"user","message":{"content":"<ide_opened_file>opened /x</ide_opened_file> the prompt"}}"#;
-        let found = descriptor.filter_values("harness-record", line).unwrap();
+        let found = descriptor
+            .typed_values(TypedSet::HarnessRecord, line)
+            .unwrap();
         assert!(!found.dropped, "{found:?}");
         let hit = found.spans.first().expect("one ide-tag span");
         let text = "<ide_opened_file>opened /x</ide_opened_file> the prompt";
@@ -353,10 +416,12 @@ mod tests {
     #[test]
     fn pii_filter_paths_select_the_username_and_the_email_field() {
         let line = r#"{"type":"api-request","params":{"safeguards":[{"classifier_context":{"user_identity":"garrett","home_dir":"/home/garrett"}}]}}"#;
-        let found = text_descriptor().filter_values("pii", line).unwrap();
+        let found = text_descriptor().typed_values(TypedSet::Pii, line).unwrap();
         assert_eq!(found.literals, ["garrett"]);
         let attachment = r#"{"type":"attachment","attachment":{"context":{"userEmail":"The user's email address is g@x.y"}}}"#;
-        let found = text_descriptor().filter_values("pii", attachment).unwrap();
+        let found = text_descriptor()
+            .typed_values(TypedSet::Pii, attachment)
+            .unwrap();
         assert_eq!(pointers(&found), ["/attachment/context/userEmail"]);
         assert_eq!(found.values[0].path, "$.attachment.context.userEmail");
     }
@@ -370,7 +435,7 @@ mod tests {
     fn system_filter_paths_select_paths_hosts_and_the_os_version() {
         let descriptor = text_descriptor();
         let user = r#"{"type":"user","cwd":"/home/garrett/proj","gitBranch":"main","message":{"role":"user","content":"hi"}}"#;
-        let found = descriptor.filter_values("system", user).unwrap();
+        let found = descriptor.typed_values(TypedSet::System, user).unwrap();
         assert_eq!(pointers(&found), ["/cwd"]);
         assert_eq!(found.values[0].path, "$.cwd");
         assert_eq!(found.literals, ["/home/garrett/proj"]);
@@ -378,12 +443,12 @@ mod tests {
         // too generic to redact as text
         for cwd in ["/", "/tmp", "/home/"] {
             let line = format!(r#"{{"type":"user","cwd":"{cwd}"}}"#);
-            let found = descriptor.filter_values("system", &line).unwrap();
+            let found = descriptor.typed_values(TypedSet::System, &line).unwrap();
             assert_eq!(pointers(&found), ["/cwd"], "{cwd}");
             assert!(found.literals.is_empty(), "{cwd}: {found:?}");
         }
         let request = r#"{"type":"api-request","params":{"safeguards":[{"classifier_context":{"user_identity":"garrett","home_dir":"/home/garrett","live_cwd":"/home/garrett/proj","rule_roots":{"userSettings":"/home/garrett/.claude"},"trusted_directories":{"primary":{"path":"/home/garrett/proj","resolved":["/home/garrett/proj"]}},"git_state":{"cwd":"/home/garrett/proj","root":"/home/garrett/proj","branch":"main","visibility":{"push_remote":"origin","origin":{"remote":"git@git.example:a/b.git","host":"git.example","visibility":"private"},"remotes":[{"name":"origin","remote":"git@git.example:a/b.git","host":"git.example","visibility":"private"}]}},"prior_turn_context":[{"context":{"live_cwd":"/home/garrett/proj"}}]}}]}}"#;
-        let found = descriptor.filter_values("system", request).unwrap();
+        let found = descriptor.typed_values(TypedSet::System, request).unwrap();
         let context = "/params/safeguards/0/classifier_context";
         let expected: Vec<String> = [
             "/live_cwd",
@@ -418,7 +483,7 @@ mod tests {
         );
 
         let snapshot = r#"{"type":"attachment","attachment":{"type":"environment_snapshot","snapshot":{"workingDirectory":"/home/garrett/proj","scratchpadDirectory":"/tmp/s","additionalWorkingDirectories":["/home/garrett/other"],"platform":"linux","osVersion":"Linux 6.17.0-1032-oem","shell":"bash"}}}"#;
-        let found = descriptor.filter_values("system", snapshot).unwrap();
+        let found = descriptor.typed_values(TypedSet::System, snapshot).unwrap();
         assert_eq!(
             pointers(&found),
             [
@@ -430,7 +495,7 @@ mod tests {
         );
         assert_eq!(found.literals, ["/tmp/s", "Linux 6.17.0-1032-oem"]);
         let backups = r#"{"type":"file-history-snapshot","snapshot":{"trackedFileBackups":{"src/a.rs":{"realParentDir":"/home/garrett/proj/src","backupFileName":"abc@v1"}}}}"#;
-        let found = descriptor.filter_values("system", backups).unwrap();
+        let found = descriptor.typed_values(TypedSet::System, backups).unwrap();
         assert_eq!(
             pointers(&found),
             ["/snapshot/trackedFileBackups/src~1a.rs/realParentDir"]

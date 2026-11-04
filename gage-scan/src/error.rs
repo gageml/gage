@@ -1,23 +1,8 @@
-// Render an `Err` value a task returned to a human string. A task that
-// returns an unexpected `Err` is a programming error, so we want
-// debug-level detail. Must not Debug-format the raw Rune value: that
-// dispatches the DEBUG_FMT protocol via the interface environment, which
-// is not set here (we run after the VM has finished), turning every task
-// error into an opaque "Missing interface environment". Downcast to the
-// typed Error and use its Rust `Debug` instead — that is plain Rust
-// formatting, not the Rune protocol, so it is safe post-VM.
-pub fn render_task_error(err: rune::runtime::Value) -> String {
-    if let Ok(e) = err.borrow_ref::<gage_runtime::error::Error>() {
-        format!("{:?}", *e)
-    } else if let Ok(s) = err.borrow_string_ref() {
-        s.to_string()
-    } else {
-        format!(
-            "task returned a non-error value of type `{}`",
-            err.type_info()
-        )
-    }
-}
+//! Rendering of the `Err` value a task returned. The renderer lives
+//! in `gage-runtime` beside the typed `Error`; the publish engine
+//! renders a filter task's error the same way.
+
+pub use gage_runtime::error::render_task_error;
 
 #[cfg(test)]
 mod tests {

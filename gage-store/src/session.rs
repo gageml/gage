@@ -684,8 +684,9 @@ pub struct ChangeRecord {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChangeKind {
-    /// One or more lines were left out of the derived session.
-    Line,
+    /// One or more entries were left out of the derived session.
+    /// Stored as `"line"`.
+    Entry,
     /// Every value a JSONPath selects was left out of its entry.
     Value,
     /// A byte span of one text value was removed or replaced by the
@@ -701,7 +702,7 @@ impl ChangeKind {
     /// The tag that opens a record of this kind.
     pub fn as_str(self) -> &'static str {
         match self {
-            ChangeKind::Line => "line",
+            ChangeKind::Entry => "line",
             ChangeKind::Value => "value",
             ChangeKind::Text => "text",
             ChangeKind::Attr => "attr",
@@ -713,7 +714,7 @@ impl ChangeKind {
     /// not know.
     fn from_tag(tag: &str) -> Option<ChangeKind> {
         match tag {
-            "line" => Some(ChangeKind::Line),
+            "line" => Some(ChangeKind::Entry),
             "value" => Some(ChangeKind::Value),
             "text" => Some(ChangeKind::Text),
             "attr" => Some(ChangeKind::Attr),
@@ -785,7 +786,7 @@ fn parse_change(kind: ChangeKind, fields: &[Value]) -> Result<ChangeRecord, Stri
         }
     };
     let record = match kind {
-        ChangeKind::Line => {
+        ChangeKind::Entry => {
             expect(4)?;
             let (line, line_end) = match field(1)? {
                 Value::Array(pair) => match pair.as_slice() {
@@ -883,7 +884,7 @@ pub fn format_changes(records: &[ChangeRecord]) -> String {
 fn change_value(r: &ChangeRecord) -> Value {
     let tag = r.kind.as_str();
     match r.kind {
-        ChangeKind::Line => {
+        ChangeKind::Entry => {
             let end = r.line_end.unwrap_or(r.line);
             let lines = if end == r.line {
                 json!(r.line)
@@ -1850,7 +1851,7 @@ pub(crate) mod tests {
 
         let records = sessions.changes(&commit).unwrap();
         assert_eq!(records, SessionDirLayout::new(&dir).read_changes().unwrap());
-        assert_eq!(records[0].kind, ChangeKind::Line);
+        assert_eq!(records[0].kind, ChangeKind::Entry);
         assert_eq!((records[0].line, records[0].line_end), (2, Some(2)));
         assert!(sessions.changes(&native.commit_sha).unwrap().is_empty());
 
@@ -1996,7 +1997,7 @@ pub(crate) mod tests {
             records,
             [
                 record(
-                    ChangeKind::Line,
+                    ChangeKind::Entry,
                     1,
                     Some(4),
                     None,
@@ -2005,7 +2006,7 @@ pub(crate) mod tests {
                     "session:abc"
                 ),
                 record(
-                    ChangeKind::Line,
+                    ChangeKind::Entry,
                     7,
                     Some(7),
                     None,
@@ -2089,7 +2090,7 @@ pub(crate) mod tests {
     fn format_changes_writes_one_record_per_line() {
         let records = [
             ChangeRecord {
-                kind: ChangeKind::Line,
+                kind: ChangeKind::Entry,
                 line: 2,
                 line_end: Some(2),
                 reference: None,
@@ -2099,7 +2100,7 @@ pub(crate) mod tests {
                 author: "user:t".into(),
             },
             ChangeRecord {
-                kind: ChangeKind::Line,
+                kind: ChangeKind::Entry,
                 line: 4,
                 line_end: Some(6),
                 reference: None,

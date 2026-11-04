@@ -44,7 +44,7 @@ impl Redaction {
     /// The original lines a `Line` record dropped, inclusive.
     fn dropped_lines(&self) -> Option<(u32, u32)> {
         match self.kind {
-            ChangeKind::Line => Some((self.line, self.line_end.unwrap_or(self.line))),
+            ChangeKind::Entry => Some((self.line, self.line_end.unwrap_or(self.line))),
             ChangeKind::Value | ChangeKind::Text | ChangeKind::Attr | ChangeKind::Title => None,
         }
     }
@@ -131,7 +131,7 @@ impl Document {
             .filter(|r| match r.kind {
                 ChangeKind::Text => r.line == line,
                 ChangeKind::Title => r.line == entry.line,
-                ChangeKind::Line | ChangeKind::Value | ChangeKind::Attr => false,
+                ChangeKind::Entry | ChangeKind::Value | ChangeKind::Attr => false,
             })
             .collect()
     }
@@ -343,7 +343,7 @@ mod tests {
             kind,
             line,
             line_end,
-            reference: (kind != ChangeKind::Line).then(|| "/message/content".to_string()),
+            reference: (kind != ChangeKind::Entry).then(|| "/message/content".to_string()),
             span_start: (kind == ChangeKind::Text).then_some(0),
             span_end: (kind == ChangeKind::Text).then_some(10),
             reason: (kind != ChangeKind::Title).then(|| "pii".to_string()),
@@ -377,11 +377,11 @@ mod tests {
             notes: Vec::new(),
             redactions: vec![
                 redaction(ChangeKind::Text, 1, None),
-                redaction(ChangeKind::Line, 2, Some(3)),
-                redaction(ChangeKind::Line, 3, Some(3)),
+                redaction(ChangeKind::Entry, 2, Some(3)),
+                redaction(ChangeKind::Entry, 3, Some(3)),
                 redaction(ChangeKind::Text, 5, None),
-                redaction(ChangeKind::Line, 6, None),
-                redaction(ChangeKind::Line, 9, Some(10)),
+                redaction(ChangeKind::Entry, 6, None),
+                redaction(ChangeKind::Entry, 9, Some(10)),
                 redaction(ChangeKind::Value, 0, None),
                 redaction(ChangeKind::Attr, 0, None),
                 redaction(ChangeKind::Title, 5, None),

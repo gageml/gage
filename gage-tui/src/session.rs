@@ -304,7 +304,7 @@ impl Backend {
             let authors = column::<StringArray>(batch, 7);
             for i in 0..batch.num_rows() {
                 let kind = match kinds.value(i) {
-                    "line" => ChangeKind::Line,
+                    "line" => ChangeKind::Entry,
                     "value" => ChangeKind::Value,
                     "text" => ChangeKind::Text,
                     "attr" => ChangeKind::Attr,

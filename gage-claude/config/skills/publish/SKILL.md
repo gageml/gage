@@ -51,12 +51,23 @@ If the user has not provided sessions, ask them what they want to publish. If
 they don't know the IDs, use `mcp__plugin_gage_gage__Query` and in particular
 the `message_text` TVF to find the sessions.
 
-### Audience and use
+### Filter groups
 
-There are two categories of target audience for a session:
+Filters remove content from a published session. Each filter lists the groups
+it belongs to, and `gage publish init --group <GROUP>` runs every filter in a
+group. Groups describe the audience or the use of a published session:
 
 - `public` - Anyone in the world
 - `trusted` - Only designated users
+- `reading` - A narrative for reading; harness bookkeeping is left out
+
+`gage publish init --list-filters` lists every filter with its groups and
+description. `--filter <NAME>` adds one filter to those the groups select. A
+filter's params are overridden in place, as
+`--filter 'pii#{ prompt: "Watch for street addresses." }'`.
+
+There is no default group. Ask the user which groups or filters apply when
+they have not said.
 
 ## Publish interface
 

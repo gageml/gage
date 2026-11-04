@@ -14,17 +14,59 @@ use serde_json::Value;
 use serde_json_path::JsonPath;
 
 /// What a driver knows about the strings of one content format: the
-/// fields whose type is not text, per named filter the fields whose
-/// type says their value is sensitive, and the literals a filter's
-/// paths select that are too generic to redact. The paths are lists
-/// of JSONPath (RFC 9535) patterns; a pattern selects a node and
-/// covers every string under it. The allow list is regexes over the
-/// literal.
+/// fields whose type is not text, per typed set the fields whose type
+/// says their value belongs to it, and the literals a set's paths
+/// select that are too generic to redact. The paths are lists of
+/// JSONPath (RFC 9535) patterns; a pattern selects a node and covers
+/// every string under it. The allow list is regexes over the literal.
 #[derive(Debug, Clone)]
 pub struct TextDescriptor {
     safe: PathSet,
-    filters: Vec<FilterPaths>,
+    typed: Vec<TypedPaths>,
     allow: Vec<Regex>,
+}
+
+/// A named set of typed-sensitive paths a driver knows: the fields
+/// whose type, not whose content, says what they hold. A publish
+/// filter removes or redacts a set by name; the driver owns which
+/// paths of its content format belong to each.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum TypedSet {
+    /// What the harness wrote into the model's context: the request
+    /// shape and blobs, attachments, and injected user entries
+    HarnessContext,
+    /// The harness's own bookkeeping: run records, descriptive fields,
+    /// and the tags it rides inside a user turn
+    HarnessRecord,
+    /// Fields that identify the person: a username, an email field
+    Pii,
+    /// Fields that describe the machine: paths, hosts, OS versions
+    System,
+}
+
+impl TypedSet {
+    pub const ALL: [TypedSet; 4] = [
+        TypedSet::HarnessContext,
+        TypedSet::HarnessRecord,
+        TypedSet::Pii,
+        TypedSet::System,
+    ];
+
+    /// The set's name in diagnostics and listings.
+    pub fn name(self) -> &'static str {
+        match self {
+            TypedSet::HarnessContext => "harness-context",
+            TypedSet::HarnessRecord => "harness-record",
+            TypedSet::Pii => "pii",
+            TypedSet::System => "system",
+        }
+    }
+}
+
+impl fmt::Display for TypedSet {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
+    }
 }
 
 /// A set of path patterns matched against a string's JSON Pointer by
@@ -185,38 +227,38 @@ fn normalize(pointer: &str) -> String {
         .join("/")
 }
 
-/// The typed-sensitive paths of one named filter.
+/// The typed-sensitive paths of one set.
 #[derive(Debug, Clone)]
-struct FilterPaths {
-    name: String,
+struct TypedPaths {
+    set: TypedSet,
     /// Fields whose value is itself the sensitive literal
     literal: Vec<JsonPath>,
     /// Fields whose whole value is left out, each with its pattern text
     value: Vec<(String, JsonPath)>,
     /// Selectors over the entry; one that selects anything marks the
-    /// whole entry as the filter's to leave out. A selector tests the
+    /// whole entry as the set's to leave out. A selector tests the
     /// entry's own fields through the root, as in
     /// `$[?$.type == 'progress']`.
     entries: Vec<JsonPath>,
-    /// Regexes whose every match in a text value is a span the filter
+    /// Regexes whose every match in a text value is a span the set
     /// removes, for out-of-band content that rides inside a value.
     removes: Vec<Regex>,
 }
 
-/// What a filter's typed-sensitive paths select in one entry.
+/// What a set's typed-sensitive paths select in one entry.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct FilterValues {
-    /// The string values at the filter's `literal` paths
+pub struct TypedValues {
+    /// The string values at the set's `literal` paths
     pub literals: Vec<String>,
-    /// The string values at the filter's `value` paths
+    /// The string values at the set's `value` paths
     pub values: Vec<ValueHit>,
-    /// The spans the filter's `removes` regexes match in text values
+    /// The spans the set's `removes` regexes match in text values
     pub spans: Vec<SpanHit>,
-    /// Whether one of the filter's entry selectors selected the entry
+    /// Whether one of the set's entry selectors selected the entry
     pub dropped: bool,
 }
 
-/// One value a filter's `value` path selects, of any JSON type.
+/// One value a set's `value` path selects, of any JSON type.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValueHit {
     /// The pattern that selected it
@@ -225,7 +267,7 @@ pub struct ValueHit {
     pub pointer: String,
 }
 
-/// One span a filter's `removes` regex matches in a text value, as
+/// One span a set's `removes` regex matches in a text value, as
 /// zero-based byte offsets into that value's text with `end` inclusive.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpanHit {
@@ -264,12 +306,12 @@ impl TextDescriptor {
     pub fn new(safe: &[&str]) -> std::result::Result<Self, DescriptorError> {
         Ok(Self {
             safe: PathSet::compile(safe)?,
-            filters: Vec::new(),
+            typed: Vec::new(),
             allow: Vec::new(),
         })
     }
 
-    /// Add the regexes a literal a filter's `literal` path selects is
+    /// Add the regexes a literal a set's `literal` path selects is
     /// checked against: a literal one of them matches is not reported.
     /// Matching is case-insensitive, as redaction is.
     pub fn with_allow(mut self, allow: &[&str]) -> std::result::Result<Self, DescriptorError> {
@@ -286,19 +328,18 @@ impl TextDescriptor {
         Ok(self)
     }
 
-    /// Add the typed-sensitive paths of the named filter `name`.
-    /// `removes` are regexes whose matches in a text value are spans the
-    /// filter removes.
-    pub fn with_filter(
+    /// Add the typed-sensitive paths of `set`. `removes` are regexes
+    /// whose matches in a text value are spans the set removes.
+    pub fn with_typed(
         mut self,
-        name: &str,
+        set: TypedSet,
         literal: &[&str],
         value: &[&str],
         entries: &[&str],
         removes: &[&str],
     ) -> std::result::Result<Self, DescriptorError> {
-        self.filters.push(FilterPaths {
-            name: name.to_string(),
+        self.typed.push(TypedPaths {
+            set,
             literal: compile(literal)?,
             value: value
                 .iter()
@@ -318,21 +359,21 @@ impl TextDescriptor {
         Ok(self)
     }
 
-    /// The names of the filters with typed-sensitive paths.
-    pub fn filter_names(&self) -> impl Iterator<Item = &str> {
-        self.filters.iter().map(|f| f.name.as_str())
+    /// The sets with typed-sensitive paths.
+    pub fn typed_sets(&self) -> impl Iterator<Item = TypedSet> + '_ {
+        self.typed.iter().map(|t| t.set)
     }
 
-    /// What the filter `name`'s typed-sensitive paths select in one
-    /// entry. Empty for a filter without paths. A literal on the allow
-    /// list is left out.
-    pub fn filter_values(
+    /// What `set`'s typed-sensitive paths select in one entry. Empty
+    /// for a set without paths. A literal on the allow list is left
+    /// out.
+    pub fn typed_values(
         &self,
-        name: &str,
+        set: TypedSet,
         json: &str,
-    ) -> std::result::Result<FilterValues, serde_json::Error> {
-        let Some(paths) = self.filters.iter().find(|f| f.name == name) else {
-            return Ok(FilterValues::default());
+    ) -> std::result::Result<TypedValues, serde_json::Error> {
+        let Some(paths) = self.typed.iter().find(|t| t.set == set) else {
+            return Ok(TypedValues::default());
         };
         let entry: Value = serde_json::from_str(json)?;
         let literals = paths
@@ -379,7 +420,7 @@ impl TextDescriptor {
                 })
                 .collect()
         };
-        Ok(FilterValues {
+        Ok(TypedValues {
             literals,
             values,
             spans,
@@ -577,21 +618,27 @@ mod tests {
         assert_eq!(pointers, ["/a~1b", "/c~0d", "/note"]);
     }
 
-    /// A literal on the allow list is not reported, whatever filter
+    /// A literal on the allow list is not reported, whatever set
     /// selects it; the allow list does not touch whole values.
     #[test]
     fn allowed_literals_are_not_reported() {
         let descriptor = descriptor()
             .with_allow(&["^.{0,2}$", "^/(tmp|home)/?$"])
             .unwrap()
-            .with_filter("system", &["$.cwd", "$..home_dir"], &["$.cwd"], &[], &[])
+            .with_typed(
+                TypedSet::System,
+                &["$.cwd", "$..home_dir"],
+                &["$.cwd"],
+                &[],
+                &[],
+            )
             .unwrap();
         let line = r#"{"cwd":"/","params":{"home_dir":"/HOME/"}}"#;
-        let found = descriptor.filter_values("system", line).unwrap();
+        let found = descriptor.typed_values(TypedSet::System, line).unwrap();
         assert!(found.literals.is_empty(), "{found:?}");
         assert_eq!(found.values.len(), 1);
         let line = r#"{"cwd":"/home/garrett","params":{"home_dir":"/tmp/x"}}"#;
-        let found = descriptor.filter_values("system", line).unwrap();
+        let found = descriptor.typed_values(TypedSet::System, line).unwrap();
         assert_eq!(found.literals, ["/home/garrett", "/tmp/x"]);
         let err = TextDescriptor::new(&[])
             .unwrap()
@@ -601,14 +648,26 @@ mod tests {
     }
 
     #[test]
-    fn filter_values_select_literals_and_whole_values() {
+    fn typed_values_select_literals_and_whole_values() {
         let descriptor = descriptor()
-            .with_filter("pii", &["$..user_identity"], &["$.context.email"], &[], &[])
+            .with_typed(
+                TypedSet::Pii,
+                &["$..user_identity"],
+                &["$.context.email"],
+                &[],
+                &[],
+            )
             .unwrap()
-            .with_filter("metadata", &[], &["$.n", "$.params.n"], &[], &[])
+            .with_typed(
+                TypedSet::HarnessRecord,
+                &[],
+                &["$.n", "$.params.n"],
+                &[],
+                &[],
+            )
             .unwrap();
         let line = r#"{"context":{"email":"The user is a@b.c"},"params":{"classifier":{"user_identity":"garrett"},"n":3},"n":{"user_identity":5}}"#;
-        let found = descriptor.filter_values("pii", line).unwrap();
+        let found = descriptor.typed_values(TypedSet::Pii, line).unwrap();
         assert_eq!(found.literals, ["garrett"]);
         assert_eq!(
             found.values,
@@ -618,16 +677,18 @@ mod tests {
             }]
         );
         // A value path selects a value of any type: an object and a number
-        let metadata = descriptor.filter_values("metadata", line).unwrap();
-        let pointers: Vec<&str> = metadata.values.iter().map(|v| v.pointer.as_str()).collect();
+        let record = descriptor
+            .typed_values(TypedSet::HarnessRecord, line)
+            .unwrap();
+        let pointers: Vec<&str> = record.values.iter().map(|v| v.pointer.as_str()).collect();
         assert_eq!(pointers, ["/n", "/params/n"]);
         assert_eq!(
-            descriptor.filter_values("secret", line).unwrap(),
-            FilterValues::default()
+            descriptor.typed_values(TypedSet::System, line).unwrap(),
+            TypedValues::default()
         );
         assert_eq!(
-            descriptor.filter_names().collect::<Vec<_>>(),
-            ["pii", "metadata"]
+            descriptor.typed_sets().collect::<Vec<_>>(),
+            [TypedSet::Pii, TypedSet::HarnessRecord]
         );
     }
 
@@ -636,10 +697,18 @@ mod tests {
     #[test]
     fn removes_regexes_report_span_hits_in_text_values() {
         let descriptor = descriptor()
-            .with_filter("harness", &[], &[], &[], &["(?s)<tag>.*?</tag>"])
+            .with_typed(
+                TypedSet::HarnessRecord,
+                &[],
+                &[],
+                &[],
+                &["(?s)<tag>.*?</tag>"],
+            )
             .unwrap();
         let line = r#"{"message":{"content":"<tag>drop me</tag> keep"}}"#;
-        let found = descriptor.filter_values("harness", line).unwrap();
+        let found = descriptor
+            .typed_values(TypedSet::HarnessRecord, line)
+            .unwrap();
         let hit = found.spans.first().expect("one span");
         assert_eq!(found.spans.len(), 1);
         assert_eq!(hit.pointer, "/message/content");
@@ -652,8 +721,8 @@ mod tests {
     #[test]
     fn entry_selectors_mark_the_entry_through_the_root() {
         let descriptor = descriptor()
-            .with_filter(
-                "harness",
+            .with_typed(
+                TypedSet::HarnessRecord,
                 &[],
                 &[],
                 &[
@@ -663,7 +732,12 @@ mod tests {
                 &[],
             )
             .unwrap();
-        let dropped = |line: &str| descriptor.filter_values("harness", line).unwrap().dropped;
+        let dropped = |line: &str| {
+            descriptor
+                .typed_values(TypedSet::HarnessRecord, line)
+                .unwrap()
+                .dropped
+        };
         assert!(dropped(r#"{"type":"progress","data":{}}"#));
         assert!(dropped(r#"{"type":"system","subtype":"turn_duration"}"#));
         assert!(dropped(r#"{"type":"system","content":"no subtype"}"#));
@@ -671,7 +745,7 @@ mod tests {
         assert!(!dropped(r#"{"type":"user","message":{"content":"hi"}}"#));
         assert!(
             !descriptor
-                .filter_values("pii", r#"{"type":"progress"}"#)
+                .typed_values(TypedSet::Pii, r#"{"type":"progress"}"#)
                 .unwrap()
                 .dropped
         );

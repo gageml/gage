@@ -1,0 +1,12 @@
+use gage::publish;
+
+pub const FILTER = #{
+    name: "language",
+    description: "Remove profanity and other language unfit for a shared record",
+    groups: ["public", "trusted"],
+    tasks: #{ language: #{} },
+};
+
+pub async fn language() {
+    publish().agent_redact(include_str!("redact-prompt.md"));
+}

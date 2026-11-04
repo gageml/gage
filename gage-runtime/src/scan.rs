@@ -11,7 +11,8 @@
 //!
 //! `params()` returns the scanner's resolved params as an object: the
 //! declared defaults with the scan's per-scanner overrides applied, or
-//! an empty object for a scanner that declares none.
+//! an empty object for a scanner that declares none. Under a publish
+//! filter task it returns the filter's params the same way.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -305,8 +306,13 @@ fn scan() -> Result<Scan, VmError> {
 }
 
 fn params() -> Result<Value, VmError> {
-    let ctx = current()?;
-    Ok(match &ctx.params {
+    let params = match SCAN_CTX.try_with(|ctx| ctx.params.clone()) {
+        Ok(params) => params,
+        Err(_outside_scan) => crate::publish::current_params().ok_or_else(|| {
+            VmError::panic("params() is available only inside a scan task or a filter task")
+        })?,
+    };
+    Ok(match &params {
         Some(params) => json_to_value(params),
         None => rune::to_value(Object::new()).unwrap(),
     })

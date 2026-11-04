@@ -153,6 +153,9 @@ pub struct Config {
     pub scanners: ScannerConfig,
 
     #[serde(default)]
+    pub filters: FilterConfig,
+
+    #[serde(default)]
     pub issues: IssuesConfig,
 
     #[serde(default)]
@@ -249,6 +252,31 @@ impl ScannerConfig {
     }
 }
 
+/// Publish filter settings.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct FilterConfig {
+    /// Per-filter settings, one `[filters.<name>]` table each.
+    #[serde(default, flatten)]
+    pub entries: BTreeMap<String, FilterEntry>,
+}
+
+/// Settings for one publish filter.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct FilterEntry {
+    /// Values for the filter's declared params, set under
+    /// `[filters.<name>.params]`. A value here replaces the default
+    /// the filter declares; a `--filter` override replaces both.
+    #[serde(default, skip_serializing_if = "json::Map::is_empty")]
+    pub params: json::Map<String, json::Value>,
+}
+
+impl FilterConfig {
+    /// The params the config sets for the named filter.
+    pub fn params(&self, name: &str) -> Option<&json::Map<String, json::Value>> {
+        self.entries.get(name).map(|e| &e.params)
+    }
+}
+
 impl Config {
     /// Load the user config from the default path. Returns defaults if
     /// the file does not exist.
@@ -327,6 +355,25 @@ budget = 3
         );
         assert_eq!(params["budget"], json::json!(3));
         assert!(config.scanners.params("general").is_none());
+    }
+
+    #[test]
+    fn filter_params_are_read_from_a_per_filter_table_and_survive_a_save() {
+        let config: Config = toml::from_str(
+            r#"
+[filters.pii.params]
+prompt = "Treat project codenames as names."
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.filters.params("pii").unwrap()["prompt"],
+            json::json!("Treat project codenames as names.")
+        );
+        assert!(config.filters.params("secret").is_none());
+        let text = toml::to_string_pretty(&config).unwrap();
+        let loaded: Config = toml::from_str(&text).unwrap();
+        assert_eq!(loaded.filters.params("pii"), config.filters.params("pii"));
     }
 
     #[test]

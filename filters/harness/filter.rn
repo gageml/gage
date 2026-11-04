@@ -1,0 +1,19 @@
+use gage::{filter::{Entry, Reason, Span, Value}, publish};
+
+pub const FILTER = #{
+    name: "harness",
+    description: "Remove harness specific content",
+    groups: ["reading"],
+    tasks: #{ context: #{}, records: #{} },
+};
+
+pub async fn context() {
+    publish().remove_entries(Entry::harness_context(), Reason::Scope);
+}
+
+pub async fn records() {
+    publish()
+        .remove_entries(Entry::harness_record(), Reason::Scope)
+        .remove_values(Value::harness_record(), Reason::Scope)
+        .remove_spans(Span::harness_record(), Reason::Scope);
+}

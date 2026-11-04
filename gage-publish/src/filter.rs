@@ -1,1079 +1,409 @@
-//! The named filters. Each is defined by a file under `filters/`: the
-//! front matter gives the description, selection, patterns, and
-//! attributes, and the body is the instruction prose the agent follows.
-//! `Filter::load` reads one file; the files are embedded and loaded in
-//! listing order. The `secret` filter sets `gitleaks = true` and takes
-//! the gitleaks rule set as its patterns, vendored as
-//! `filters/gitleaks.toml` under the MIT license beside it. A filter's
-//! typed-sensitive paths are content-format knowledge and come from the
-//! driver's text descriptor, not from here.
+//! Running the filters of a publish. Each filter the definition names
+//! is a Rune filter from the registry: it is compiled against the
+//! runtime context and each of its tasks is run under a publish
+//! context, where `publish()` hands the task its own contribution.
+//! The contributions of a filter's tasks are merged into one
+//! [`FilterOutput`] per filter, and the derivation applies them. A
+//! filter runs at every rebuild, so what it contributes is derived
+//! from its source and the params the definition records, never
+//! stored.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::fmt;
-use std::str::FromStr;
-use std::sync::LazyLock;
-
-use aho_corasick::{AhoCorasick, AhoCorasickBuilder};
-use gage_core::front_matter;
-use regex::Regex;
-use serde::Deserialize;
+use gage_registry::filter::{Filter, FilterDef, FilterRegistry, FilterTaskDef};
+use gage_runtime::error::render_task_error;
+use gage_runtime::{
+    Contribution, Fail, Level, OUTPUT_SINK, Output, OutputSink, PUBLISH_CTX, PublishContext,
+    TaskOutput, is_ignore, render_vm_error,
+};
+use rune::runtime::{RuntimeContext, Unit, Value};
+use rune::sync::Arc as RuneArc;
+use rune::{Diagnostics, Source, Sources, Vm};
+use tokio::sync::mpsc;
 
 use crate::PublishError;
+use crate::definition::FilterEntry;
 
-/// A named filter.
-pub struct Filter {
-    pub name: &'static str,
-    /// The reason code its redactions carry. The front matter sets it,
-    /// defaulting to the filter name.
-    pub reason: String,
-    /// One line on what the filter removes, for a listing
-    pub description: String,
-    /// The instruction prose for the agent, the body after the front
-    /// matter. A filter that requires a prompt has prose on how the
-    /// prompt is read
-    pub instructions: &'static str,
-    /// The audiences the filter is selected for. The values are
-    /// independent: a listed value selects the filter, and no value
-    /// implies another.
-    pub audience: Vec<Audience>,
-    /// The uses the filter is selected for, under the same rule.
-    pub uses: Vec<Use>,
-    /// The attributes of `attrs.json` the filter leaves out of the
-    /// published session
-    pub attrs: Vec<String>,
-    patterns: Vec<Pattern>,
-    /// The keyword prefilter: a pattern with keywords runs only on text
-    /// containing one of them.
-    keywords: Option<Keywords>,
-}
-
-/// Who will read the published session. The values are independent
-/// labels; a filter lists each one it is selected for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Audience {
-    /// Private use only; no filter lists it
-    #[serde(rename = "self")]
-    Private,
-    /// An audience the publisher knows and trusts
-    Trusted,
-    /// Anyone
-    Public,
-}
-
-impl Audience {
-    /// The values as the CLI and the front matter spell them, in
-    /// listing order.
-    pub const NAMES: &[&str] = &["self", "trusted", "public"];
-
-    pub fn name(self) -> &'static str {
-        match self {
-            Audience::Private => "self",
-            Audience::Trusted => "trusted",
-            Audience::Public => "public",
-        }
-    }
-}
-
-impl FromStr for Audience {
-    type Err = PublishError;
-
-    fn from_str(text: &str) -> Result<Self, Self::Err> {
-        match text {
-            "self" => Ok(Audience::Private),
-            "trusted" => Ok(Audience::Trusted),
-            "public" => Ok(Audience::Public),
-            other => Err(PublishError::Input(format!(
-                "unknown audience {other:?}; audiences are {}",
-                Audience::NAMES.join(", ")
-            ))),
-        }
-    }
-}
-
-impl fmt::Display for Audience {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.name())
-    }
-}
-
-/// What the published session is for. The values are independent
-/// labels; a filter lists each one it is selected for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Use {
-    /// Reading for narrative content
-    Reading,
-    /// A record of work; every entry stays, and no filter lists it
-    Provenance,
-    /// Another use; no filter lists it
-    Other,
-}
-
-impl Use {
-    /// The values as the CLI and the front matter spell them, in
-    /// listing order.
-    pub const NAMES: &[&str] = &["reading", "provenance", "other"];
-
-    pub fn name(self) -> &'static str {
-        match self {
-            Use::Reading => "reading",
-            Use::Provenance => "provenance",
-            Use::Other => "other",
-        }
-    }
-}
-
-impl FromStr for Use {
-    type Err = PublishError;
-
-    fn from_str(text: &str) -> Result<Self, Self::Err> {
-        match text {
-            "reading" => Ok(Use::Reading),
-            "provenance" => Ok(Use::Provenance),
-            "other" => Ok(Use::Other),
-            other => Err(PublishError::Input(format!(
-                "unknown use {other:?}; uses are {}",
-                Use::NAMES.join(", ")
-            ))),
-        }
-    }
-}
-
-impl fmt::Display for Use {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.name())
-    }
-}
-
-/// The front matter of a filter file: everything the publish side
-/// knows about the filter but its instruction body. `description` is
-/// required; the rest default to absent. `reason` defaults to the
-/// filter name. `gitleaks` loads the vendored rule set as the filter's
-/// patterns, for the `secret` filter.
-#[derive(Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct FrontMatter {
-    description: String,
-    #[serde(default)]
-    reason: Option<String>,
-    #[serde(default)]
-    audience: Vec<Audience>,
-    #[serde(default, rename = "use")]
-    uses: Vec<Use>,
-    #[serde(default)]
-    attrs: Vec<String>,
-    #[serde(default)]
-    gitleaks: bool,
-    #[serde(default)]
-    pattern: Vec<PatternSpec>,
-}
-
-/// A pattern as the front matter declares it: a name and a regex.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PatternSpec {
-    name: String,
-    regex: String,
-}
-
-/// A compiled matcher for a known shape of sensitive text. The secret
-/// is the configured capture group, else the first non-empty capture
-/// group, else the whole match; a secret at or below the entropy floor
-/// or accepted by an allowlist is not reported.
-pub struct Pattern {
+/// What one filter of the definition contributed: the merged
+/// contributions of its tasks, in task order.
+#[derive(Debug, Clone)]
+pub struct FilterOutput {
     pub name: String,
-    regex: Regex,
-    secret_group: Option<usize>,
-    entropy: Option<f64>,
-    allowlists: Vec<Allowlist>,
-    keywords: Vec<String>,
+    pub contribution: Contribution,
 }
 
-impl Pattern {
-    fn new(name: &str, regex: &str) -> Self {
-        Self {
-            name: name.to_string(),
-            regex: Regex::new(regex).expect("filter patterns are fixed and valid"),
-            secret_group: None,
-            entropy: None,
-            allowlists: Vec::new(),
-            keywords: Vec::new(),
-        }
-    }
-
-    /// The sensitive literals this pattern finds in `text`.
-    pub fn find<'t>(&self, text: &'t str) -> Vec<&'t str> {
-        let mut found = Vec::new();
-        for captures in self.regex.captures_iter(text) {
-            let whole = captures.get(0).expect("group 0 is the match");
-            let secret = match self.secret_group {
-                Some(group) => captures.get(group).map(|m| m.as_str()),
-                None => captures
-                    .iter()
-                    .skip(1)
-                    .flatten()
-                    .map(|m| m.as_str())
-                    .find(|s| !s.is_empty())
-                    .or_else(|| Some(whole.as_str().trim_matches('\n'))),
-            };
-            let Some(secret) = secret else {
-                continue;
-            };
-            if secret.is_empty() {
-                continue;
-            }
-            if let Some(floor) = self.entropy
-                && shannon_entropy(secret) <= floor
-            {
-                continue;
-            }
-            let line = line_around(text, whole.start(), whole.end());
-            if self
-                .allowlists
-                .iter()
-                .any(|a| a.accepts(secret, whole.as_str(), line))
-            {
-                continue;
-            }
-            found.push(secret);
-        }
-        found
+impl FilterOutput {
+    /// The author the filter's redactions carry, `filter:<name>`.
+    pub fn author(&self) -> String {
+        format!("filter:{}", self.name)
     }
 }
 
-/// The Shannon entropy of `text` in bits per character.
-fn shannon_entropy(text: &str) -> f64 {
-    let mut counts: BTreeMap<char, usize> = BTreeMap::new();
-    let mut total = 0usize;
-    for c in text.chars() {
-        *counts.entry(c).or_insert(0) += 1;
-        total += 1;
-    }
-    if total == 0 {
-        return 0.0;
-    }
-    let total = total as f64;
-    counts
-        .values()
-        .map(|&n| {
-            let p = n as f64 / total;
-            -p * p.log2()
-        })
-        .sum()
-}
-
-/// The line of `text` containing the span `start..end`.
-fn line_around(text: &str, start: usize, end: usize) -> &str {
-    let from = text[..start].rfind('\n').map_or(0, |i| i + 1);
-    let to = text[end..].find('\n').map_or(text.len(), |i| end + i);
-    &text[from..to]
-}
-
-/// A gitleaks allowlist: a finding it accepts is not a secret. Under
-/// `OR`, any listed regex or stopword hit accepts; under `AND`, every
-/// listed criterion must hit, and a path criterion never hits because
-/// session text has no path.
-struct Allowlist {
-    target: Target,
-    regexes: Vec<Regex>,
-    stopwords: Vec<String>,
-    all_of: bool,
-    has_paths: bool,
-}
-
-/// What an allowlist regex is matched against.
-#[derive(Clone, Copy)]
-enum Target {
-    Secret,
-    Match,
-    Line,
-}
-
-impl Allowlist {
-    fn accepts(&self, secret: &str, matched: &str, line: &str) -> bool {
-        let target = match self.target {
-            Target::Secret => secret,
-            Target::Match => matched,
-            Target::Line => line,
+/// Run every filter of `entries` from `registry`, in list order. A
+/// name the registry does not know, a filter that does not compile,
+/// and a task that fails are errors naming the filter.
+pub(crate) async fn run_filters(
+    registry: &FilterRegistry,
+    entries: &[FilterEntry],
+) -> Result<Vec<FilterOutput>, PublishError> {
+    let mut outputs = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let Some(def) = registry.get_def(&entry.name) else {
+            return Err(PublishError::Input(format!(
+                "unknown filter {:?}; filters are {}",
+                entry.name,
+                registry.names().join(", ")
+            )));
         };
-        let regex_hit = self.regexes.iter().any(|r| r.is_match(target));
-        let lower = secret.to_lowercase();
-        let stopword_hit = self.stopwords.iter().any(|w| lower.contains(w.as_str()));
-        if self.all_of {
-            !self.has_paths
-                && (self.regexes.is_empty() || regex_hit)
-                && (self.stopwords.is_empty() || stopword_hit)
-                && (!self.regexes.is_empty() || !self.stopwords.is_empty())
-        } else {
-            regex_hit || stopword_hit
+        let compiled = compile(def)?;
+        let filter = Filter::with_params(def, entry.params.as_ref());
+        let mut contribution = Contribution::default();
+        for task in def.tasks.values() {
+            merge(&mut contribution, run_task(&compiled, &filter, task).await?);
         }
+        outputs.push(FilterOutput {
+            name: def.name.clone(),
+            contribution,
+        });
     }
+    Ok(outputs)
 }
 
-/// The keyword prefilter over a filter's patterns: one automaton over
-/// every keyword, and the patterns each keyword admits.
-struct Keywords {
-    automaton: AhoCorasick,
-    /// Indexed by automaton pattern id: the patterns that list the keyword
-    admits: Vec<Vec<usize>>,
-    /// The patterns with no keywords, which always run
-    always: Vec<usize>,
-}
-
-impl Keywords {
-    fn new(patterns: &[Pattern]) -> Option<Self> {
-        if patterns.iter().all(|p| p.keywords.is_empty()) {
-            return None;
-        }
-        let mut by_keyword: BTreeMap<String, Vec<usize>> = BTreeMap::new();
-        let mut always = Vec::new();
-        for (i, pattern) in patterns.iter().enumerate() {
-            if pattern.keywords.is_empty() {
-                always.push(i);
-            }
-            for keyword in &pattern.keywords {
-                by_keyword
-                    .entry(keyword.to_lowercase())
-                    .or_default()
-                    .push(i);
-            }
-        }
-        let (keywords, admits): (Vec<String>, Vec<Vec<usize>>) = by_keyword.into_iter().unzip();
-        let automaton = AhoCorasickBuilder::new()
-            .ascii_case_insensitive(true)
-            .build(&keywords)
-            .expect("gitleaks keywords are short literals");
-        Some(Self {
-            automaton,
-            admits,
-            always,
-        })
-    }
-
-    /// The indexes of the patterns that may match `text`.
-    fn candidates(&self, text: &str) -> BTreeSet<usize> {
-        let mut set: BTreeSet<usize> = self.always.iter().copied().collect();
-        for hit in self.automaton.find_overlapping_iter(text) {
-            let admitted = self
-                .admits
-                .get(hit.pattern().as_usize())
-                .expect("automaton pattern ids index admits");
-            set.extend(admitted);
-        }
-        set
-    }
-}
-
-/// The gitleaks configuration file, as far as the filter reads it.
-#[derive(Deserialize)]
-struct GitleaksConfig {
-    #[serde(default)]
-    allowlist: Option<GitleaksAllowlist>,
-    rules: Vec<GitleaksRule>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct GitleaksRule {
-    id: String,
-    regex: Option<String>,
-    secret_group: Option<usize>,
-    entropy: Option<f64>,
-    #[serde(default)]
-    keywords: Vec<String>,
-    path: Option<String>,
-    #[serde(default)]
-    allowlists: Vec<GitleaksAllowlist>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct GitleaksAllowlist {
-    regex_target: Option<String>,
-    #[serde(default)]
-    regexes: Vec<String>,
-    #[serde(default)]
-    stopwords: Vec<String>,
-    #[serde(default)]
-    paths: Vec<String>,
-    condition: Option<String>,
-}
-
-/// A rule in the vendored file that this build cannot use.
-#[derive(Debug)]
-pub struct RuleError {
-    pub rule: String,
-    pub message: String,
-}
-
-impl fmt::Display for RuleError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "gitleaks rule {}: {}", self.rule, self.message)
-    }
-}
-
-/// A gitleaks regex ported from Go's RE2 syntax to the `regex` crate's.
-/// Go takes a brace that opens no repetition and a bracket inside a
-/// class as literals; the crate rejects the first and nests the second.
-/// Go's `\w`, `\d`, `\s`, and `\b` are ASCII; the crate's are Unicode,
-/// and a Unicode class under a wide repetition exceeds the compiled
-/// size limit.
-fn port_go_regex(pattern: &str) -> String {
-    let chars: Vec<char> = pattern.chars().collect();
-    let mut out = String::with_capacity(pattern.len() + 16);
-    let mut rest: &[char] = &chars;
-    let mut in_class = false;
-    while let Some((&c, tail)) = rest.split_first() {
-        if c == '\\'
-            && let Some((&next, after)) = tail.split_first()
-        {
-            let ported = match (in_class, next) {
-                (false, 'w') => Some("(?-u:\\w)"),
-                (false, 'd') => Some("(?-u:\\d)"),
-                (false, 's') => Some("(?-u:\\s)"),
-                (false, 'b') => Some("(?-u:\\b)"),
-                (false, 'B') => Some("(?-u:\\B)"),
-                (true, 'w') => Some("0-9A-Za-z_"),
-                (true, 'd') => Some("0-9"),
-                (true, 's') => Some("\\t\\n\\x0B\\x0C\\r "),
-                _ => None,
-            };
-            match ported {
-                Some(text) => out.push_str(text),
-                None => {
-                    out.push(c);
-                    out.push(next);
-                }
-            }
-            rest = after;
+/// The redaction instructions of every filter as markdown: per filter
+/// with instructions a level-three heading with its name in code
+/// font, then each instruction text, separated by blank lines. A
+/// filter that contributed no instructions has no section.
+pub fn instructions_markdown(outputs: &[FilterOutput]) -> String {
+    let mut out = String::new();
+    for output in outputs {
+        if output.contribution.instructions.is_empty() {
             continue;
         }
-        if in_class {
-            match c {
-                ']' => {
-                    in_class = false;
-                    out.push(c);
-                }
-                '[' if tail.first() == Some(&':') => {
-                    // A POSIX class, copied through its closing ":]"
-                    let close = rest
-                        .windows(2)
-                        .position(|w| w == [':', ']'])
-                        .expect("a POSIX class closes");
-                    let (class, after) = rest.split_at(close + 2);
-                    out.extend(class);
-                    rest = after;
-                    continue;
-                }
-                '[' => out.push_str("\\["),
-                '&' | '-' | '~' if tail.first() == Some(&c) && out.ends_with(c) => {
-                    out.push('\\');
-                    out.push(c);
-                }
-                _ => out.push(c),
-            }
-            rest = tail;
-            continue;
+        if !out.is_empty() {
+            out.push('\n');
         }
-        match c {
-            '[' => {
-                in_class = true;
-                out.push(c);
-                // A leading "^" and then a leading "]" are part of the class
-                let mut tail = tail;
-                if let Some((&'^', after)) = tail.split_first() {
-                    out.push('^');
-                    tail = after;
-                }
-                if let Some((&']', after)) = tail.split_first() {
-                    out.push_str("\\]");
-                    tail = after;
-                }
-                rest = tail;
-                continue;
-            }
-            '{' => match repetition_len(rest) {
-                Some(len) => {
-                    let (repetition, after) = rest.split_at(len);
-                    out.extend(repetition);
-                    rest = after;
-                    continue;
-                }
-                None => out.push_str("\\{"),
-            },
-            '}' => out.push_str("\\}"),
-            _ => out.push(c),
+        out.push_str(&format!("### `{}`\n", output.name));
+        for instructions in &output.contribution.instructions {
+            out.push('\n');
+            out.push_str(instructions.trim_end());
+            out.push('\n');
         }
-        rest = tail;
     }
     out
 }
 
-/// The length of the repetition `{n}`, `{n,}`, or `{n,m}` that opens
-/// `chars`, when one does.
-fn repetition_len(chars: &[char]) -> Option<usize> {
-    let mut i = 1;
-    let digits = |i: &mut usize| {
-        let start = *i;
-        while chars.get(*i).is_some_and(char::is_ascii_digit) {
-            *i += 1;
-        }
-        *i > start
-    };
-    if !digits(&mut i) {
-        return None;
-    }
-    if chars.get(i) == Some(&',') {
-        i += 1;
-        digits(&mut i);
-    }
-    (chars.get(i) == Some(&'}')).then_some(i + 1)
+fn merge(into: &mut Contribution, from: Contribution) {
+    into.entries.extend(from.entries);
+    into.values.extend(from.values);
+    into.literals.extend(from.literals);
+    into.spans.extend(from.spans);
+    into.attrs.extend(from.attrs);
+    into.patterns.extend(from.patterns);
+    into.instructions.extend(from.instructions);
 }
 
-/// The patterns of the vendored gitleaks rule set. A rule without a
-/// regex, or with a path condition, does not apply to session text and
-/// is left out. The global allowlist is appended to every rule's.
-fn gitleaks_patterns(text: &str) -> Result<Vec<Pattern>, RuleError> {
-    let config: GitleaksConfig = toml::from_str(text).map_err(|e| RuleError {
-        rule: "<file>".to_string(),
-        message: e.to_string(),
-    })?;
-    let global = config
-        .allowlist
-        .map(|a| compile_allowlist("<global>", &a))
-        .transpose()?;
-    let mut patterns = Vec::new();
-    for rule in config.rules {
-        let Some(regex) = rule.regex else {
-            continue;
-        };
-        if rule.path.is_some() {
-            continue;
-        }
-        let fail = |message: String| RuleError {
-            rule: rule.id.clone(),
-            message,
-        };
-        let regex = Regex::new(&port_go_regex(&regex)).map_err(|e| fail(e.to_string()))?;
-        if let Some(group) = rule.secret_group
-            && group >= regex.captures_len()
-        {
-            return Err(fail(format!("secretGroup {group} is not a capture group")));
-        }
-        let mut allowlists = rule
-            .allowlists
-            .iter()
-            .map(|a| compile_allowlist(&rule.id, a))
-            .collect::<Result<Vec<_>, _>>()?;
-        if let Some(global) = &global {
-            allowlists.push(Allowlist {
-                target: global.target,
-                regexes: global.regexes.clone(),
-                stopwords: global.stopwords.clone(),
-                all_of: global.all_of,
-                has_paths: global.has_paths,
-            });
-        }
-        patterns.push(Pattern {
-            name: rule.id,
-            regex,
-            secret_group: rule.secret_group,
-            entropy: rule.entropy,
-            allowlists,
-            keywords: rule.keywords,
-        });
-    }
-    Ok(patterns)
+/// A filter compiled and ready to run; a fresh VM is built per task.
+struct Compiled {
+    rt: RuneArc<RuntimeContext>,
+    unit: RuneArc<Unit>,
+    sources: Sources,
 }
 
-fn compile_allowlist(rule: &str, a: &GitleaksAllowlist) -> Result<Allowlist, RuleError> {
-    let fail = |message: String| RuleError {
-        rule: rule.to_string(),
-        message,
-    };
-    let target = match a.regex_target.as_deref() {
-        None | Some("secret") => Target::Secret,
-        Some("match") => Target::Match,
-        Some("line") => Target::Line,
-        Some(other) => return Err(fail(format!("unknown regexTarget {other:?}"))),
-    };
-    let all_of = match a.condition.as_deref() {
-        None | Some("OR") => false,
-        Some("AND") => true,
-        Some(other) => return Err(fail(format!("unknown condition {other:?}"))),
-    };
-    let regexes = a
-        .regexes
-        .iter()
-        .map(|r| Regex::new(&port_go_regex(r)).map_err(|e| fail(format!("allowlist: {e}"))))
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(Allowlist {
-        target,
-        regexes,
-        stopwords: a.stopwords.iter().map(|w| w.to_lowercase()).collect(),
-        all_of,
-        has_paths: !a.paths.is_empty(),
-    })
-}
-
-impl Filter {
-    /// The named filter, when `name` is one.
-    pub fn named(name: &str) -> Option<&'static Filter> {
-        FILTERS.iter().find(|f| f.name == name)
+/// Compile `def` and verify that every declared task names a function
+/// it defines. A declaration with problems does not compile.
+fn compile(def: &FilterDef) -> Result<Compiled, PublishError> {
+    let filter = |m: String| PublishError::Filter(format!("filter {}: {m}", def.name));
+    if !def.problems.is_empty() {
+        return Err(filter(format!(
+            "invalid FILTER declaration\n{}",
+            def.render_problems()
+        )));
     }
-
-    /// Every named filter, in listing order.
-    pub fn all() -> &'static [Filter] {
-        &FILTERS
-    }
-
-    /// The named filters that list `audience` or list `uses`, in
-    /// listing order. A value not given selects nothing.
-    pub fn selected(audience: Option<Audience>, uses: Option<Use>) -> Vec<&'static Filter> {
-        FILTERS
-            .iter()
-            .filter(|f| {
-                audience.is_some_and(|a| f.audience.contains(&a))
-                    || uses.is_some_and(|u| f.uses.contains(&u))
-            })
-            .collect()
-    }
-
-    /// The filter `name` built from its file `source`: the front matter
-    /// gives every field but the instruction body, which is the prose
-    /// after it. A `gitleaks` filter takes the vendored rule set as its
-    /// patterns; any other takes the patterns the front matter lists.
-    fn load(name: &'static str, source: &'static str) -> Self {
-        let (toml_src, body) =
-            front_matter::split(source).unwrap_or_else(|e| panic!("filter {name}: {e}"));
-        let front: FrontMatter = toml_src
-            .map(|t| toml::from_str(t).unwrap_or_else(|e| panic!("filter {name}: {e}")))
-            .unwrap_or_default();
-        let patterns = if front.gitleaks {
-            gitleaks_patterns(GITLEAKS).expect("vendored gitleaks rules compile")
-        } else {
-            front
-                .pattern
-                .iter()
-                .map(|p| Pattern::new(&p.name, &p.regex))
-                .collect()
-        };
-        let keywords = Keywords::new(&patterns);
-        Filter {
-            name,
-            reason: front.reason.unwrap_or_else(|| name.to_string()),
-            description: front.description,
-            instructions: body.trim_start(),
-            audience: front.audience,
-            uses: front.uses,
-            attrs: front.attrs,
-            patterns,
-            keywords,
+    let context = gage_runtime::context().unwrap();
+    let rt = RuneArc::try_new(context.runtime().unwrap()).unwrap();
+    let mut sources = Sources::new();
+    sources
+        .insert(Source::with_path(&def.name, def.source(), &def.path).unwrap())
+        .unwrap();
+    let mut diagnostics = Diagnostics::new();
+    let result = rune::prepare(&mut sources)
+        .with_context(&context)
+        .with_diagnostics(&mut diagnostics)
+        .build();
+    let rendered = if diagnostics.is_empty() {
+        String::new()
+    } else {
+        let mut buf = rune::termcolor::Buffer::no_color();
+        diagnostics.emit(&mut buf, &sources).unwrap();
+        String::from_utf8(buf.into_inner()).unwrap()
+    };
+    let unit = match result {
+        Ok(unit) => {
+            if !rendered.is_empty() {
+                tracing::warn!(filter = %def.name, "{rendered}");
+            }
+            RuneArc::try_new(unit).unwrap()
+        }
+        Err(_) => return Err(filter(format!("failed to compile\n{rendered}"))),
+    };
+    let vm = Vm::new(rt.clone(), unit.clone());
+    for task in def.tasks.values() {
+        if vm.lookup_function([task.call.as_str()]).is_err() {
+            return Err(filter(format!(
+                "declares task {} but defines no function {}",
+                task.name, task.call
+            )));
         }
     }
+    Ok(Compiled { rt, unit, sources })
+}
 
-    /// The instructions with `prompt` in place of every `{{ prompt }}`
-    /// placeholder. Without a placeholder the prompt has no place in
-    /// the instructions and is left out.
-    pub fn instructions_with_prompt(&self, prompt: Option<&str>) -> String {
-        static PLACEHOLDER: LazyLock<Regex> =
-            LazyLock::new(|| Regex::new(r"\{\{\s*prompt\s*\}\}").unwrap());
-        PLACEHOLDER
-            .replace_all(self.instructions, prompt.unwrap_or_default())
-            .trim_end()
-            .to_string()
+/// Run one task under its publish context and output sink, and
+/// return what it contributed. The task's output goes to the log
+/// under the filter and task names.
+async fn run_task(
+    compiled: &Compiled,
+    filter: &Filter<'_>,
+    task: &FilterTaskDef,
+) -> Result<Contribution, PublishError> {
+    let name = &filter.def.name;
+    let ctx = PublishContext::new(name, &task.name, filter.params.clone());
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let sink = OutputSink {
+        scanner: name.clone(),
+        task: task.name.clone(),
+        tx,
+    };
+    let result = PUBLISH_CTX
+        .scope(
+            ctx.clone(),
+            OUTPUT_SINK.scope(sink, execute(compiled, &task.call)),
+        )
+        .await;
+    while let Ok(output) = rx.try_recv() {
+        log_output(output);
     }
+    result.map_err(|e| PublishError::Filter(format!("filter {name} task {}: {e}", task.name)))?;
+    Ok(ctx.take_contribution())
+}
 
-    pub fn patterns(&self) -> &[Pattern] {
-        &self.patterns
-    }
+/// Run `function` on a fresh VM and interpret its return value.
+async fn execute(compiled: &Compiled, function: &str) -> Result<(), String> {
+    let vm = Vm::new(compiled.rt.clone(), compiled.unit.clone());
+    let render = |e| render_vm_error(&e, Some(&compiled.sources));
+    let execution = vm.send_execute([function], ()).map_err(render)?;
+    let value = execution.complete().await.map_err(render)?;
+    task_result(value)
+}
 
-    /// Every `(pattern name, literal)` the filter's patterns find in
-    /// `text`.
-    pub fn matches<'t>(&self, text: &'t str) -> Vec<(&str, &'t str)> {
-        let candidates: Vec<&Pattern> = match &self.keywords {
-            Some(keywords) => keywords
-                .candidates(text)
-                .into_iter()
-                .map(|i| self.patterns.get(i).expect("candidates index patterns"))
-                .collect(),
-            None => self.patterns.iter().collect(),
-        };
-        candidates
-            .into_iter()
-            .flat_map(|p| p.find(text).into_iter().map(move |m| (p.name.as_str(), m)))
-            .collect()
+/// Interpret a task's return value the way a scan task's is: unit,
+/// `Ok`, and `Err(Ignore)` succeeded; `Err(Fail(msg))` fails with
+/// `msg`; any other `Err` is a filter defect and fails with the value.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "takes the VM execution's return value; the runtime holds the only live handle"
+)]
+fn task_result(value: Value) -> Result<(), String> {
+    match rune::from_value::<Result<Value, Value>>(value) {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(err)) if is_ignore(&err) => Ok(()),
+        Ok(Err(err)) => {
+            if let Ok(fail) = err.borrow_ref::<Fail>() {
+                return Err(fail.message().to_string());
+            }
+            Err(format!("task returned Err: {}", render_task_error(err)))
+        }
+        Err(_) => Ok(()),
     }
 }
 
-/// The vendored gitleaks rule file.
-const GITLEAKS: &str = include_str!("../filters/gitleaks.toml");
-
-static FILTERS: LazyLock<Vec<Filter>> = LazyLock::new(|| {
-    vec![
-        Filter::load("custom", include_str!("../filters/custom.md")),
-        Filter::load(
-            "harness-context",
-            include_str!("../filters/harness-context.md"),
-        ),
-        Filter::load(
-            "harness-record",
-            include_str!("../filters/harness-record.md"),
-        ),
-        Filter::load("language", include_str!("../filters/language.md")),
-        Filter::load("pii", include_str!("../filters/pii.md")),
-        Filter::load("secret", include_str!("../filters/secret.md")),
-        Filter::load("system", include_str!("../filters/system.md")),
-    ]
-});
+/// A task's print or log record, under the filter and task names.
+fn log_output(output: TaskOutput) {
+    let TaskOutput {
+        scanner: filter,
+        task,
+        output,
+    } = output;
+    match output {
+        Output::Print(text) | Output::Println(text) => {
+            tracing::info!(%filter, %task, "{text}");
+        }
+        Output::Log { level, message } => match level {
+            Level::Trace => tracing::trace!(%filter, %task, "{message}"),
+            Level::Debug => tracing::debug!(%filter, %task, "{message}"),
+            Level::Info => tracing::info!(%filter, %task, "{message}"),
+            Level::Warn => tracing::warn!(%filter, %task, "{message}"),
+            Level::Error => tracing::error!(%filter, %task, "{message}"),
+        },
+        Output::Progress { .. } | Output::AgentPool(_) => {}
+    }
+}
 
 #[cfg(test)]
 mod tests {
+    use std::path::{Path, PathBuf};
+
+    use gage_runtime::Reason;
+    use gage_session::TypedSet;
+
     use super::*;
 
-    /// Every code a filter's prose quotes as a reason is a listed
-    /// reason, and a filter's own code is one.
-    #[test]
-    fn reason_codes_in_the_prose_are_listed() {
-        use crate::definition::Reason;
-        for filter in FILTERS.iter() {
-            assert!(Reason::find(&filter.reason).is_some(), "{}", filter.name);
-            for quoted in filter
-                .instructions
-                .split("reason \"")
-                .skip(1)
-                .filter_map(|rest| rest.split('"').next())
-            {
-                assert!(Reason::find(quoted).is_some(), "{}: {quoted}", filter.name);
-            }
+    /// The registry over the filters this repository ships.
+    pub(crate) fn builtin_registry() -> FilterRegistry {
+        let builtin = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../filters"));
+        FilterRegistry::load_from_roots(&builtin, vec![builtin.clone()])
+    }
+
+    fn entry(name: &str) -> FilterEntry {
+        FilterEntry {
+            name: name.into(),
+            params: None,
         }
     }
 
-    /// The prompt lands at every placeholder, whatever the spacing
-    /// inside the braces, and nowhere when the prose has none.
-    #[test]
-    fn prompt_replaces_each_placeholder_or_is_left_out() {
-        let custom = Filter::named("custom").unwrap();
-        let with = custom.instructions_with_prompt(Some("Remove every duck"));
-        assert!(with.ends_with("\n\nRemove every duck"), "{with}");
-        assert!(!with.contains("{{"), "{with}");
-        let without = custom.instructions_with_prompt(None);
-        assert_eq!(
-            without,
-            custom
-                .instructions
-                .trim_end()
-                .trim_end_matches("{{ prompt }}")
-                .trim_end()
-        );
-        let filter = Filter {
-            name: "t",
-            reason: "custom".to_string(),
-            description: String::new(),
-            instructions: "A {{prompt}} B {{  prompt  }} C",
-            audience: Vec::new(),
-            uses: Vec::new(),
-            attrs: Vec::new(),
-            patterns: Vec::new(),
-            keywords: None,
-        };
-        assert_eq!(filter.instructions_with_prompt(Some("x")), "A x B x C");
-        let pii = Filter::named("pii").unwrap();
-        let with = pii.instructions_with_prompt(Some("Remove every duck"));
-        assert!(with.ends_with("\n\nRemove every duck"), "{with}");
-        let language = Filter::named("language").unwrap();
-        assert_eq!(
-            language.instructions_with_prompt(Some("ignored")),
-            language.instructions.trim_end()
-        );
-    }
-
-    #[test]
-    fn every_named_filter_has_a_description() {
-        for name in crate::NAMED_FILTERS {
-            let filter = Filter::named(name).unwrap();
-            assert!(!filter.description.is_empty(), "{name}");
-        }
-        assert_eq!(Filter::all().len(), crate::NAMED_FILTERS.len());
-        assert!(Filter::named("ducks").is_none());
-    }
-
-    /// The loaded filters are exactly the `NAMED_FILTERS` names, in the
-    /// same order, and that order is lexicographic. The two lists and
-    /// their shared order are kept in step by this assertion.
-    #[test]
-    fn loaded_filters_match_the_named_filter_list_in_lexicographic_order() {
-        let loaded: Vec<&str> = Filter::all().iter().map(|f| f.name).collect();
-        assert_eq!(loaded.as_slice(), crate::NAMED_FILTERS);
-        let mut sorted = loaded.clone();
-        sorted.sort_unstable();
-        assert_eq!(loaded, sorted);
-    }
-
-    /// Every field but the body comes from the file's front matter: the
-    /// description, the patterns, the attributes, the gitleaks rule set,
-    /// and the reason, which defaults to the name and is `scope` for
-    /// the harness filters.
-    #[test]
-    fn filter_fields_come_from_the_front_matter() {
-        let pii = Filter::named("pii").unwrap();
-        assert_eq!(
-            pii.description,
-            "Removes personally identifiable information"
-        );
-        assert_eq!(pii.reason, "pii");
-        let names: Vec<&str> = pii.patterns.iter().map(|p| p.name.as_str()).collect();
-        assert_eq!(names, ["email", "phone", "ssn", "git-user"]);
-        assert!(pii.attrs.is_empty());
-
-        let system = Filter::named("system").unwrap();
-        assert_eq!(system.attrs, ["project"]);
-
-        let secret = Filter::named("secret").unwrap();
-        assert!(secret.patterns.len() > 200, "{}", secret.patterns.len());
-        assert!(secret.keywords.is_some());
-
-        for name in ["harness-context", "harness-record"] {
-            assert_eq!(Filter::named(name).unwrap().reason, "scope", "{name}");
-        }
-    }
-
-    /// The front matter never reaches the model: a filter with prose
-    /// of its own opens with prose and carries no front matter. A
-    /// driver-only filter renders nothing.
-    #[test]
-    fn instructions_begin_with_prose_and_carry_no_front_matter() {
-        for filter in Filter::all() {
-            let rendered = filter.instructions_with_prompt(None);
-            if rendered.is_empty() {
-                continue;
-            }
-            assert!(!rendered.contains("+++"), "{}: {rendered}", filter.name);
-            assert!(
-                rendered.starts_with(|c: char| c.is_ascii_uppercase()),
-                "{}: {rendered}",
-                filter.name
-            );
-        }
-    }
-
-    /// The audiences and uses each filter lists, as its front matter
-    /// states them. A change here is a change to what an audience or
-    /// a use selects.
-    #[test]
-    fn front_matter_lists_each_filters_audiences_and_uses() {
-        use Audience::{Public, Trusted};
-        use Use::Reading;
-        let listed: Vec<(&str, &[Audience], &[Use])> = Filter::all()
-            .iter()
-            .map(|f| (f.name, f.audience.as_slice(), f.uses.as_slice()))
+    /// Every shipped filter compiles and runs, and each contributes
+    /// what its source declares.
+    #[tokio::test]
+    async fn the_shipped_filters_run_and_contribute_what_they_declare() {
+        let registry = builtin_registry();
+        let entries: Vec<FilterEntry> = ["harness", "language", "pii", "secret", "system"]
+            .into_iter()
+            .map(entry)
             .collect();
+        let outputs = run_filters(&registry, &entries).await.unwrap();
+        let by_name = |name: &str| {
+            &outputs
+                .iter()
+                .find(|o| o.name == name)
+                .unwrap_or_else(|| panic!("no output for {name}"))
+                .contribution
+        };
+        let harness = by_name("harness");
         assert_eq!(
-            listed,
+            harness.entries,
             [
-                ("custom", &[][..], &[][..]),
-                ("harness-context", &[][..], &[Reading][..]),
-                ("harness-record", &[][..], &[Reading][..]),
-                ("language", &[Public, Trusted][..], &[][..]),
-                ("pii", &[Public][..], &[][..]),
-                ("secret", &[Public, Trusted][..], &[][..]),
-                ("system", &[Public][..], &[][..]),
+                (TypedSet::HarnessContext, Reason::Scope),
+                (TypedSet::HarnessRecord, Reason::Scope)
             ]
         );
-    }
-
-    /// A selection is the filters that list either value, in listing
-    /// order. A value not given, and the values no filter lists,
-    /// select nothing, and the values imply nothing about one another.
-    #[test]
-    fn selection_is_containment_in_either_list() {
-        let names = |audience, uses| -> Vec<&str> {
-            Filter::selected(audience, uses)
-                .into_iter()
-                .map(|f| f.name)
-                .collect()
-        };
-        assert!(names(None, None).is_empty());
-        assert!(names(Some(Audience::Private), Some(Use::Provenance)).is_empty());
-        assert!(names(Some(Audience::Private), Some(Use::Other)).is_empty());
+        assert_eq!(harness.spans, [(TypedSet::HarnessRecord, Reason::Scope)]);
+        assert!(harness.instructions.is_empty());
+        let language = by_name("language");
+        assert!(language.instructions[0].starts_with("Identify language"));
+        let pii = by_name("pii");
+        assert_eq!(pii.values, [(TypedSet::Pii, Reason::Pii)]);
+        assert_eq!(pii.literals, [(TypedSet::Pii, Reason::Pii)]);
+        assert_eq!(pii.patterns[0].1, Reason::Pii);
         assert_eq!(
-            names(Some(Audience::Public), Some(Use::Reading)),
-            [
-                "harness-context",
-                "harness-record",
-                "language",
-                "pii",
-                "secret",
-                "system"
-            ]
+            pii.patterns[0].0.matches("mail a@b.co"),
+            [("email", "a@b.co")]
         );
-        assert_eq!(names(Some(Audience::Trusted), None), ["language", "secret"]);
-        assert_eq!(
-            names(None, Some(Use::Reading)),
-            ["harness-context", "harness-record"]
-        );
-    }
-
-    #[test]
-    fn audience_and_use_parse_their_names_and_reject_others() {
-        for name in Audience::NAMES {
-            assert_eq!(name.parse::<Audience>().unwrap().name(), *name);
-        }
-        for name in Use::NAMES {
-            assert_eq!(name.parse::<Use>().unwrap().name(), *name);
-        }
-        let err = "ducks".parse::<Audience>().unwrap_err().to_string();
-        assert!(err.contains("self, trusted, public"), "{err}");
-        let err = "ducks".parse::<Use>().unwrap_err().to_string();
-        assert!(err.contains("reading, provenance, other"), "{err}");
-    }
-
-    #[test]
-    fn every_gitleaks_rule_with_a_regex_compiles() {
-        let patterns = gitleaks_patterns(GITLEAKS).unwrap();
-        assert!(patterns.len() > 200, "{}", patterns.len());
-        assert!(patterns.iter().any(|p| p.name == "anthropic-api-key"));
-        assert!(patterns.iter().any(|p| p.name == "generic-api-key"));
+        let secret = by_name("secret");
+        assert!(secret.patterns[0].0.len() > 200);
+        assert!(secret.instructions[0].starts_with("Remove every credential"));
+        let system = by_name("system");
+        assert_eq!(system.attrs, [("project".to_string(), Reason::System)]);
+        assert_eq!(system.values, [(TypedSet::System, Reason::System)]);
+        assert_eq!(system.literals, [(TypedSet::System, Reason::System)]);
+        let markdown = instructions_markdown(&outputs);
         assert!(
-            !patterns.iter().any(|p| p.name == "pkcs12-file"),
-            "a path-only rule does not apply to session text"
+            markdown.starts_with("### `language`\n\nIdentify language"),
+            "{markdown}"
         );
+        assert!(!markdown.contains("harness"), "{markdown}");
+        assert!(markdown.contains("\n\n### `pii`\n\n"), "{markdown}");
     }
 
-    #[test]
-    fn secret_patterns_find_keys_and_the_value_of_an_assignment() {
-        let key = "sk-ant-api03-PtYgjmUhBel31iEl2hpChYgCfrL1spNxnyVmihA-2O76UMFxFkM-R5Kjp1vRt_1fjORS-6ilI8ihN5KXSc7Tvo-hBKqFYAA";
-        let text = format!(
-            "export ANTHROPIC_API_KEY={key} and AKIAQ7XJ2M5N3P4R6S7T\n\
-             password = \"xK9mP2vL5nQ8wRt3\"\n\
-             password = \"hunter2hunter2\"\n\
-             api_key = \"abcdefghijklmnopqrstuvwxyz\"\n\
-             token = \"${{GITHUB_TOKEN}}\""
-        );
-        let found = Filter::named("secret").unwrap().matches(&text);
-        let literals: Vec<&str> = found.iter().map(|(_, m)| *m).collect();
-        let rules: Vec<&str> = found.iter().map(|(r, _)| *r).collect();
-        assert!(literals.contains(&key), "{found:?}");
-        assert!(rules.contains(&"anthropic-api-key"), "{found:?}");
-        assert!(literals.contains(&"AKIAQ7XJ2M5N3P4R6S7T"), "{found:?}");
-        assert!(literals.contains(&"xK9mP2vL5nQ8wRt3"), "{found:?}");
+    /// A param the definition records reaches the task through
+    /// `params()` and lands in the rendered instructions.
+    #[tokio::test]
+    async fn recorded_params_reach_the_instructions() {
+        let registry = builtin_registry();
+        let mut params = serde_json::Map::new();
+        params.insert("prompt".into(), "Watch for street addresses.".into());
+        let entries = [FilterEntry {
+            name: "pii".into(),
+            params: Some(params),
+        }];
+        let outputs = run_filters(&registry, &entries).await.unwrap();
+        let instructions = &outputs[0].contribution.instructions[0];
         assert!(
-            !literals.contains(&"hunter2hunter2"),
-            "a low-entropy value is not a secret: {found:?}"
+            instructions.ends_with("\n\nWatch for street addresses."),
+            "{instructions}"
         );
+        let plain = run_filters(&registry, &[entry("pii")]).await.unwrap();
         assert!(
-            !literals.contains(&"abcdefghijklmnopqrstuvwxyz"),
-            "a global stopword is not a secret: {found:?}"
-        );
-        assert!(
-            !literals.iter().any(|l| l.contains("GITHUB_TOKEN")),
-            "a variable reference is not a secret: {found:?}"
+            !plain[0].contribution.instructions[0].ends_with("\n"),
+            "an empty prompt leaves no trailing blank"
         );
     }
 
-    #[test]
-    fn the_secret_is_the_configured_group_else_the_first_group_else_the_match() {
-        let whole = Pattern::new("whole", r"key-[a-z]+");
-        assert_eq!(whole.find("use key-abc now"), ["key-abc"]);
-        let first = Pattern::new("first", r"(?:(x)|(y))=([a-z]+)");
-        assert_eq!(first.find("y=abc"), ["y"]);
-        let mut second = Pattern::new("second", r"(?:(x)|(y))=([a-z]+)");
-        second.secret_group = Some(3);
-        assert_eq!(second.find("y=abc"), ["abc"]);
+    fn write_filter(dir: &Path, source: &str) -> FilterRegistry {
+        std::fs::create_dir_all(dir.join("t")).unwrap();
+        std::fs::write(dir.join("t").join("filter.rn"), source).unwrap();
+        FilterRegistry::load_from_roots(dir, vec![dir.to_path_buf()])
     }
 
-    #[test]
-    fn entropy_and_allowlists_gate_a_match() {
-        let mut p = Pattern::new("p", r"secret=(\w+)");
-        p.entropy = Some(3.0);
-        assert_eq!(p.find("secret=aaaaaaaa"), Vec::<&str>::new());
-        assert_eq!(p.find("secret=q7Zp2mK9vL"), ["q7Zp2mK9vL"]);
+    /// An unknown name, a declaration with problems, a task without
+    /// its function, a compile error, and a failing task are each an
+    /// error naming the filter.
+    #[tokio::test]
+    async fn filter_failures_name_the_filter() {
+        let registry = builtin_registry();
+        let err = run_filters(&registry, &[entry("nope")]).await.unwrap_err();
+        assert!(err.to_string().contains("unknown filter \"nope\""), "{err}");
 
-        p.entropy = None;
-        p.allowlists.push(Allowlist {
-            target: Target::Line,
-            regexes: vec![Regex::new("^# ").unwrap()],
-            stopwords: vec!["example".to_string()],
-            all_of: false,
-            has_paths: false,
-        });
-        assert_eq!(p.find("# secret=q7Zp2mK9vL"), Vec::<&str>::new());
-        assert_eq!(p.find("secret=exampleKey"), Vec::<&str>::new());
-        assert_eq!(p.find("secret=q7Zp2mK9vL"), ["q7Zp2mK9vL"]);
-
-        p.allowlists[0].all_of = true;
-        assert_eq!(
-            p.find("# secret=q7Zp2mK9vL"),
-            ["q7Zp2mK9vL"],
-            "AND needs the stopword too"
-        );
-        assert_eq!(p.find("# secret=exampleKey"), Vec::<&str>::new());
-        p.allowlists[0].has_paths = true;
-        assert_eq!(
-            p.find("# secret=exampleKey"),
-            ["exampleKey"],
-            "AND with a path criterion never applies"
-        );
-    }
-
-    #[test]
-    fn shannon_entropy_counts_bits_per_character() {
-        assert_eq!(shannon_entropy(""), 0.0);
-        assert_eq!(shannon_entropy("aaaa"), 0.0);
-        assert!((shannon_entropy("abcd") - 2.0).abs() < 1e-9);
-    }
-
-    #[test]
-    fn keywords_admit_only_the_patterns_that_list_them() {
-        let secret = Filter::named("secret").unwrap();
-        let keywords = secret.keywords.as_ref().unwrap();
-        let none = keywords.candidates("nothing of interest here");
-        assert!(none.is_empty(), "{none:?}");
-        let some = keywords.candidates("my SK-ANT-API03 thing");
-        let names: Vec<&str> = some
-            .iter()
-            .map(|&i| secret.patterns[i].name.as_str())
-            .collect();
-        assert!(names.contains(&"anthropic-api-key"), "{names:?}");
-        assert!(!names.contains(&"aws-access-token"), "{names:?}");
-    }
-
-    #[test]
-    fn port_go_regex_escapes_literal_braces_and_brackets_and_narrows_classes() {
-        assert_eq!(
-            port_go_regex(r"^\$(?:\d+|{\d+})$"),
-            r"^\$(?:(?-u:\d)+|\{(?-u:\d)+\})$"
-        );
-        assert_eq!(port_go_regex(r"a{2,3}b{4}c{5,}"), r"a{2,3}b{4}c{5,}");
-        assert_eq!(port_go_regex(r"[\w.-]{10,150}"), r"[0-9A-Za-z_.-]{10,150}");
-        assert_eq!(port_go_regex(r"[^}]+"), r"[^}]+");
-        assert_eq!(port_go_regex(r"[[:alnum:]]{14}"), r"[[:alnum:]]{14}");
-        assert_eq!(port_go_regex(r"[a[b]"), r"[a\[b]");
-        assert_eq!(port_go_regex(r"\bx\s\Sy"), r"(?-u:\b)x(?-u:\s)\Sy");
-        assert_eq!(port_go_regex(r"[\s\S-]"), r"[\t\n\x0B\x0C\r \S-]");
-        for ported in [
-            port_go_regex(r"^\${(?:[A-Z_]+|[a-z_]+)}$"),
-            port_go_regex(r#"['"]?\$?{{[^}]+}}['"]?"#),
-        ] {
-            Regex::new(&ported).unwrap_or_else(|e| panic!("{ported}: {e}"));
+        let tmp = tempfile::tempdir().unwrap();
+        let cases = [
+            (
+                "pub const FILTER = #{ name: \"t\", tasks: #{ a: 1 } };",
+                "invalid FILTER declaration",
+            ),
+            (
+                "pub const FILTER = #{ name: \"t\", tasks: #{ a: #{} } };",
+                "declares task a but defines no function a",
+            ),
+            (
+                "pub const FILTER = #{ name: \"t\", tasks: #{ a: #{} } };\npub fn a() { nope() }",
+                "failed to compile",
+            ),
+            (
+                "use gage::Fail;\npub const FILTER = #{ name: \"t\", tasks: #{ a: #{} } };\npub fn a() { Err(Fail(\"no ducks\")) }",
+                "filter t task a: no ducks",
+            ),
+            (
+                "pub const FILTER = #{ name: \"t\", tasks: #{ a: #{} } };\npub fn a() { Err(\"boom\") }",
+                "task returned Err: boom",
+            ),
+            (
+                "pub const FILTER = #{ name: \"t\", tasks: #{ a: #{} } };\npub fn a() { gage::publish().pattern_redact(#{ x: \"(\" }, gage::filter::Reason::Pii) }",
+                "pattern x: ",
+            ),
+        ];
+        for (source, message) in cases {
+            let registry = write_filter(tmp.path(), source);
+            let err = run_filters(&registry, &[entry("t")]).await.unwrap_err();
+            let text = err.to_string();
+            assert!(text.contains(message), "{source}\n{text}");
+            assert!(text.starts_with("filter t"), "{text}");
         }
     }
 
-    #[test]
-    fn pii_patterns_find_emails_phones_ssns_and_the_git_user() {
-        let text =
-            "mail alice@example.com or call 555-123-4567; ssn 123-45-6789; ticket 2026-10-23";
-        let found = Filter::named("pii").unwrap().matches(text);
-        let literals: Vec<&str> = found.iter().map(|(_, m)| *m).collect();
-        assert_eq!(
-            literals,
-            ["alice@example.com", "555-123-4567", "123-45-6789"]
+    /// A task that returns unit, `Ok`, or `Err(Ignore)` succeeds, and
+    /// the contributions of two tasks merge in task order.
+    #[tokio::test]
+    async fn task_outcomes_and_merging() {
+        let tmp = tempfile::tempdir().unwrap();
+        let registry = write_filter(
+            tmp.path(),
+            r#"
+use gage::{Ignore, publish, filter::Reason};
+pub const FILTER = #{ name: "t", tasks: #{ a: #{}, b: #{ call: "run_b" }, c: #{} } };
+pub fn a() { publish().agent_redact("A"); }
+pub fn run_b() { publish().agent_redact("B"); Ok(()) }
+pub fn c() { log::info!("nothing to do"); Err(Ignore) }
+"#,
         );
-        // The git user line yields the name alone, without the label or
-        // trailing whitespace; the label mid-line is not the reminder
-        let status = "Main branch: main\n\nGit user: Alice B. Carol  \n\nStatus:\n(clean)\nsee Git user: docs";
-        let found = Filter::named("pii").unwrap().matches(status);
-        assert_eq!(found, [("git-user", "Alice B. Carol")]);
+        let outputs = run_filters(&registry, &[entry("t")]).await.unwrap();
+        assert_eq!(outputs[0].contribution.instructions, ["A", "B"]);
+        assert_eq!(outputs[0].author(), "filter:t");
     }
 }

@@ -1,14 +1,16 @@
 //! The publish engine: the definition a pending publish is derived
-//! from, the named filters, and the derivation of the staged session
-//! from the original.
+//! from, the filters it names, and the derivation of the staged
+//! session from the original.
 //!
 //! [`staging`] stages the directory and knows where the definition
-//! file lives; the engine reads and writes the definition, expands it
-//! to instances over the original's text values, and writes the
-//! staged content and `changes.json` through the session's driver.
-//! The definition is edited by hand, and a refresh rebuilds the staged
+//! file lives; the engine reads and writes the definition, runs the
+//! Rune filters it names for their contributions, expands both to
+//! instances over the original's text values, and writes the staged
+//! content and `changes.json` through the session's driver. The
+//! definition is edited by hand, and a refresh rebuilds the staged
 //! session from the original plus the full definition. The original
-//! is named by the staged `attrs.json`.
+//! is named by the staged `attrs.json`. The filters run at every
+//! rebuild, so every operation that expands the definition is async.
 
 pub mod candidate;
 mod definition;
@@ -24,6 +26,7 @@ use std::io;
 use std::sync::Arc;
 
 use gage_registry::driver::DriverRegistry;
+use gage_registry::filter::FilterRegistry;
 use gage_session::{Driver, DriverError, EditError, StoredSession, TextDescriptor};
 use gage_store::{
     DirContentSource, SessionAttrsRecord, SessionDirLayout, SessionRecord, SessionStore, Store,
@@ -31,11 +34,11 @@ use gage_store::{
 };
 
 pub use definition::{
-    Allow, FilterEntry, FilterSpec, InitArgs, NAMED_FILTERS, Problem, PublishDefinition, REASONS,
-    Reason, Segment, TextEntry, TitleEntry, format_lines, parse_lines, requires_prompt,
+    Allow, FilterEntry, InitArgs, Problem, PublishDefinition, Segment, TextEntry, TitleEntry,
+    format_lines, parse_lines,
 };
 pub use derive::{Built, Candidate, Instance, InstanceKind, Span};
-pub use filter::{Audience, Filter, Pattern, Use};
+pub use filter::{FilterOutput, instructions_markdown};
 pub use staging::{PublishInit, Staging};
 
 /// The marker a redacted span or value is replaced with.
@@ -52,6 +55,9 @@ pub enum PublishError {
     Input(String),
     /// The definition file has these problems, each at its position
     Definition(Vec<Problem>),
+    /// A filter the definition names does not compile or a task of it
+    /// failed; the message names the filter
+    Filter(String),
     /// No driver is registered under the name the original records
     NoDriver(String),
     /// The staged content is not a removal-only derivation of the
@@ -70,7 +76,7 @@ impl fmt::Display for PublishError {
             PublishError::Io(e) => write!(f, "{e}"),
             PublishError::Json(e) => write!(f, "{e}"),
             PublishError::Edit(e) => write!(f, "{e}"),
-            PublishError::Input(m) | PublishError::Refused(m) => {
+            PublishError::Input(m) | PublishError::Refused(m) | PublishError::Filter(m) => {
                 write!(f, "{m}")
             }
             PublishError::Definition(problems) => {
@@ -131,11 +137,13 @@ impl From<EditError> for PublishError {
     }
 }
 
-/// The publish operations over an opened store.
+/// The publish operations over an opened store, with the filter
+/// registry the definitions' filters resolve through.
 pub struct Publisher<'a> {
     store: &'a Store,
     staging: Staging<'a>,
     drivers: DriverRegistry,
+    filters: FilterRegistry,
 }
 
 /// What a refresh produced: the spans the text redactions produced,
@@ -149,21 +157,31 @@ pub struct Refreshed {
 }
 
 impl<'a> Publisher<'a> {
-    pub fn new(store: &'a Store) -> Self {
+    pub fn new(store: &'a Store, filters: FilterRegistry) -> Self {
         Self {
             store,
             staging: Staging::from(store),
             drivers: DriverRegistry::builtin(),
+            filters,
         }
     }
 
     /// Stage the publish under `root` instead of Gage home. For tests.
-    pub fn with_root(store: &'a Store, root: impl Into<std::path::PathBuf>) -> Self {
+    pub fn with_root(
+        store: &'a Store,
+        root: impl Into<std::path::PathBuf>,
+        filters: FilterRegistry,
+    ) -> Self {
         Self {
             store,
             staging: Staging::with_root(store, root),
             drivers: DriverRegistry::builtin(),
+            filters,
         }
+    }
+
+    pub fn filters(&self) -> &FilterRegistry {
+        &self.filters
     }
 
     pub fn staging(&self) -> &Staging<'a> {
@@ -175,11 +193,13 @@ impl<'a> Publisher<'a> {
     /// `init` recorded for the reader: stage the directory, run every
     /// filter, write the definition, and build the staged session. A
     /// segment starts without lines and drops nothing until it has
-    /// them. A filter given twice is an error.
-    pub fn init(
+    /// them. A filter given twice is an error, and so is a filter the
+    /// registry does not know; the filters run before anything is
+    /// staged, so a filter that fails stages nothing.
+    pub async fn init(
         &self,
         original: &SessionRecord,
-        filters: &[FilterSpec],
+        filters: &[FilterEntry],
         segments: &[String],
         author: &str,
         init: &InitArgs,
@@ -190,13 +210,21 @@ impl<'a> Publisher<'a> {
             definition.push_segment(description, &[], author);
         }
         definition.validate()?;
+        let outputs = self.outputs(&definition).await?;
         let init = self.staging.init(original)?;
         let session = self.open_original(&init.id)?;
-        let names = definition.named_filters();
-        derive::run_filters(&mut definition, &session, &names)?;
-        self.build(&init.id, &definition, &session)?;
+        derive::run_filters(&mut definition, &session, &outputs)?;
+        self.build(&init.id, &definition, &session, &outputs)?;
         self.write_definition(&init.id, &definition)?;
         Ok(init)
+    }
+
+    /// What the filters of `definition` contribute, run now.
+    async fn outputs(
+        &self,
+        definition: &PublishDefinition,
+    ) -> Result<Vec<FilterOutput>, PublishError> {
+        filter::run_filters(&self.filters, &definition.filters).await
     }
 
     /// Rebuild the pending publish `id` from its definition as it is on
@@ -206,9 +234,9 @@ impl<'a> Publisher<'a> {
     /// changes. Every named filter runs again, so a filter's row
     /// deleted by hand comes back unless its literal is allowed. The
     /// file is rewritten with what the refresh changed.
-    pub fn refresh(&self, id: &str, author: &str) -> Result<Refreshed, PublishError> {
+    pub async fn refresh(&self, id: &str, author: &str) -> Result<Refreshed, PublishError> {
         let definition = self.definition(id)?;
-        self.rebuild(id, definition, author)
+        self.rebuild(id, definition, author).await
     }
 
     /// Apply edits to the definition of the pending publish `id` and
@@ -218,7 +246,7 @@ impl<'a> Publisher<'a> {
     /// author takes `author`.
     ///
     /// [`refresh`]: Publisher::refresh
-    pub fn edit(
+    pub async fn edit(
         &self,
         id: &str,
         author: &str,
@@ -230,7 +258,7 @@ impl<'a> Publisher<'a> {
             definition.set_title(text, author);
         }
         definition.add_redactions(redactions);
-        self.rebuild(id, definition, author)
+        self.rebuild(id, definition, author).await
     }
 
     /// Fill authors, check, run every named filter, build the staged
@@ -239,7 +267,7 @@ impl<'a> Publisher<'a> {
     ///
     /// [`refresh`]: Publisher::refresh
     /// [`edit`]: Publisher::edit
-    fn rebuild(
+    async fn rebuild(
         &self,
         id: &str,
         mut definition: PublishDefinition,
@@ -247,10 +275,10 @@ impl<'a> Publisher<'a> {
     ) -> Result<Refreshed, PublishError> {
         let authored = definition.fill_authors(author);
         definition.validate()?;
+        let outputs = self.outputs(&definition).await?;
         let session = self.open_original(id)?;
-        let names = definition.named_filters();
-        derive::run_filters(&mut definition, &session, &names)?;
-        let built = self.build(id, &definition, &session)?;
+        derive::run_filters(&mut definition, &session, &outputs)?;
+        let built = self.build(id, &definition, &session, &outputs)?;
         self.write_definition(id, &definition)?;
         let unmatched = definition
             .redact
@@ -269,25 +297,36 @@ impl<'a> Publisher<'a> {
     /// Every text value the pending publish `id` discloses. The text
     /// is the full value; the spans mark the substrings redaction
     /// removes, carried beside it. Reads only.
-    pub fn candidates(&self, id: &str) -> Result<Vec<Candidate>, PublishError> {
+    pub async fn candidates(&self, id: &str) -> Result<Vec<Candidate>, PublishError> {
         let definition = self.definition(id)?;
+        let outputs = self.outputs(&definition).await?;
         let session = self.open_original(id)?;
-        derive::candidates(&definition, &session)
+        derive::candidates(&definition, &session, &outputs)
     }
 
     /// Each distinct text the pending publish `id` discloses, once, in
     /// order of first occurrence: the candidate text as the redaction
     /// agent reads it. Reads only.
-    pub fn candidate_texts(&self, id: &str) -> Result<Vec<String>, PublishError> {
-        Ok(candidate::unique_texts(&self.candidates(id)?))
+    pub async fn candidate_texts(&self, id: &str) -> Result<Vec<String>, PublishError> {
+        Ok(candidate::unique_texts(&self.candidates(id).await?))
+    }
+
+    /// The redaction instructions of the pending publish `id`'s
+    /// filters as markdown, as [`instructions_markdown`] renders them.
+    /// Reads only.
+    pub async fn instructions(&self, id: &str) -> Result<String, PublishError> {
+        let definition = self.definition(id)?;
+        let outputs = self.outputs(&definition).await?;
+        Ok(instructions_markdown(&outputs))
     }
 
     /// The number of spans each text redaction of the pending publish
     /// `id` produces, by its index in `redact`. Reads only.
-    pub fn instances(&self, id: &str) -> Result<BTreeMap<usize, usize>, PublishError> {
+    pub async fn instances(&self, id: &str) -> Result<BTreeMap<usize, usize>, PublishError> {
         let definition = self.definition(id)?;
+        let outputs = self.outputs(&definition).await?;
         let session = self.open_original(id)?;
-        derive::counts(&definition, &session)
+        derive::counts(&definition, &session, &outputs)
     }
 
     /// Check that the staged session of the pending publish `id` is a
@@ -296,15 +335,22 @@ impl<'a> Publisher<'a> {
     /// where a named filter leaves it out, and every staged text value
     /// is its original with substrings removed or replaced by the
     /// marker. Reads only.
-    pub fn check(&self, id: &str) -> Result<(), PublishError> {
+    pub async fn check(&self, id: &str) -> Result<(), PublishError> {
         let definition = self.definition(id)?;
+        let outputs = self.outputs(&definition).await?;
         let original = self.original(id)?;
         let layout = self.staging.layout(id).session();
         let source = derive::SessionText::read(original.stored()?.as_mut(), &original.descriptor)?;
         let staged =
             derive::SessionText::read(original.staged(&layout)?.as_mut(), &original.descriptor)?;
         let title_entry = original.title_entry(&definition)?;
-        derive::check_removal_only(&definition, &source, &staged, title_entry.as_deref())
+        derive::check_removal_only(
+            &definition,
+            &source,
+            &staged,
+            &outputs,
+            title_entry.as_deref(),
+        )
     }
 
     /// Verify that the pending publish `id` can be published: its
@@ -314,11 +360,11 @@ impl<'a> Publisher<'a> {
     /// `force` is set. Reads only.
     ///
     /// [`check`]: Publisher::check
-    pub fn verify(&self, id: &str, force: bool) -> Result<(), PublishError> {
+    pub async fn verify(&self, id: &str, force: bool) -> Result<(), PublishError> {
         let definition = self.definition(id)?;
         definition.validate()?;
-        self.check(id)?;
-        if !force && self.changes(id)? == 0 {
+        self.check(id).await?;
+        if !force && self.changes(id).await? == 0 {
             return Err(PublishError::Unchanged);
         }
         Ok(())
@@ -328,19 +374,20 @@ impl<'a> Publisher<'a> {
     /// original: every dropped line, dropped value, dropped attribute,
     /// and redacted span, and the title when the definition sets one.
     /// Reads only.
-    pub fn changes(&self, id: &str) -> Result<usize, PublishError> {
+    pub async fn changes(&self, id: &str) -> Result<usize, PublishError> {
         let definition = self.definition(id)?;
+        let outputs = self.outputs(&definition).await?;
         let session = self.open_original(id)?;
-        derive::change_count(&definition, &session)
+        derive::change_count(&definition, &session, &outputs)
     }
 
     /// Publish the pending publish `id`: verify it, commit the staged
     /// session as a new session object with the definition's values
     /// attached, and delete the staging directory. Returns the new
     /// object's commit.
-    pub fn apply(&self, id: &str, force: bool) -> Result<String, PublishError> {
+    pub async fn apply(&self, id: &str, force: bool) -> Result<String, PublishError> {
         let definition = self.definition(id)?;
-        self.verify(id, force)?;
+        self.verify(id, force).await?;
         self.staging.apply(id, Some(&definition))
     }
 
@@ -387,6 +434,7 @@ impl<'a> Publisher<'a> {
         id: &str,
         definition: &PublishDefinition,
         session: &derive::SessionText,
+        outputs: &[FilterOutput],
     ) -> Result<Built, PublishError> {
         let layout = self.staging.layout(id).session();
         let original = self.original(id)?;
@@ -394,6 +442,7 @@ impl<'a> Publisher<'a> {
         let built = derive::build(
             definition,
             session,
+            outputs,
             original.stored()?.as_mut(),
             &layout,
             title_entry.as_deref(),

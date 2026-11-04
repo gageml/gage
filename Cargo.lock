@@ -2575,20 +2575,21 @@ dependencies = [
 name = "gage-publish"
 version = "0.2.0"
 dependencies = [
- "aho-corasick",
  "gage-claude",
  "gage-core",
  "gage-registry",
+ "gage-runtime",
  "gage-session",
  "gage-store",
  "jsonc-parser",
  "jsonschema",
  "regex",
+ "rune",
  "serde",
  "serde_json",
- "serde_json_path",
  "tempfile",
- "toml 0.8.23",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -2637,6 +2638,7 @@ dependencies = [
 name = "gage-runtime"
 version = "0.2.0"
 dependencies = [
+ "aho-corasick",
  "chrono",
  "datafusion",
  "futures",
@@ -2654,6 +2656,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "toml 0.8.23",
  "tracing",
 ]
 

@@ -68,6 +68,26 @@ pub enum AgentError {
     General(#[rune(get)] String),
 }
 
+/// Render an `Err` value a task returned to a human string. A task
+/// that returns an unexpected `Err` is a programming error, so the
+/// detail is debug-level. The raw Rune value is not Debug-formatted:
+/// that dispatches the DEBUG_FMT protocol through the interface
+/// environment, which is not set once the VM has finished, and every
+/// task error would read "Missing interface environment". A typed
+/// `Error` is downcast and rendered with its Rust `Debug` instead.
+pub fn render_task_error(err: rune::runtime::Value) -> String {
+    if let Ok(e) = err.borrow_ref::<Error>() {
+        format!("{:?}", *e)
+    } else if let Ok(s) = err.borrow_string_ref() {
+        s.to_string()
+    } else {
+        format!(
+            "task returned a non-error value of type `{}`",
+            err.type_info()
+        )
+    }
+}
+
 impl Error {
     /// `Error::Agent(AgentError::General(msg))`
     pub fn agent(msg: impl Into<String>) -> Self {

@@ -5,11 +5,14 @@
 
 use std::fs;
 
+use std::path::PathBuf;
+
 use gage_publish::{
-    Allow, FilterSpec, InitArgs, PublishDefinition, PublishError, Publisher, Refreshed, TextEntry,
+    Allow, FilterEntry, InitArgs, PublishDefinition, PublishError, Publisher, Refreshed, TextEntry,
     TitleEntry, candidate, format_lines,
 };
 use gage_registry::driver::DriverRegistry;
+use gage_registry::filter::FilterRegistry;
 use gage_session::SourceOptions;
 use gage_store::{ChangeKind, ChangeRecord, SessionRecord, SessionStore, Store, parse_changes};
 use serde_json::Value;
@@ -147,10 +150,29 @@ fn changes(root: &std::path::Path, id: &str) -> Vec<ChangeRecord> {
     parse_changes(&fs::read(path).unwrap()).unwrap()
 }
 
+/// The registry over the filters this repository ships.
+fn registry() -> FilterRegistry {
+    let builtin = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../filters"));
+    FilterRegistry::load_from_roots(&builtin, vec![builtin.clone()])
+}
+
+/// The filter `name` with no params.
+fn filter(name: &str) -> FilterEntry {
+    FilterEntry {
+        name: name.into(),
+        params: None,
+    }
+}
+
 /// Stage `filters` over the fixture's original with no segment.
-fn stage(publisher: &Publisher<'_>, original: &SessionRecord, filters: &[FilterSpec]) -> String {
+async fn stage(
+    publisher: &Publisher<'_>,
+    original: &SessionRecord,
+    filters: &[FilterEntry],
+) -> String {
     publisher
         .init(original, filters, &[], "session:test", &InitArgs::default())
+        .await
         .unwrap()
         .id
 }
@@ -165,7 +187,7 @@ fn write_definition(publisher: &Publisher<'_>, id: &str, definition: &PublishDef
 
 /// Edit the definition of `id` the way a hand edit does: read the
 /// file, change it, write it back, and refresh as `user:test`.
-fn edit(
+async fn edit(
     publisher: &Publisher<'_>,
     id: &str,
     change: impl FnOnce(&mut PublishDefinition),
@@ -173,13 +195,13 @@ fn edit(
     let mut definition = publisher.definition(id).unwrap();
     change(&mut definition);
     write_definition(publisher, id, &definition);
-    publisher.refresh(id, "user:test").unwrap()
+    publisher.refresh(id, "user:test").await.unwrap()
 }
 
 /// The instance count of the redaction whose literal is `literal`.
-fn instances_of(publisher: &Publisher<'_>, id: &str, literal: &str) -> usize {
+async fn instances_of(publisher: &Publisher<'_>, id: &str, literal: &str) -> usize {
     let definition = publisher.definition(id).unwrap();
-    let counts = publisher.instances(id).unwrap();
+    let counts = publisher.instances(id).await.unwrap();
     let index = definition
         .redact
         .iter()
@@ -188,15 +210,12 @@ fn instances_of(publisher: &Publisher<'_>, id: &str, literal: &str) -> usize {
     *counts.get(&index).unwrap()
 }
 
-#[test]
-fn init_runs_the_named_filters_and_records_their_instances() {
+#[tokio::test]
+async fn init_runs_the_named_filters_and_records_their_instances() {
     let f = fixture();
-    let publisher = Publisher::with_root(&f.store, &f.publish_root);
-    let filters = [
-        "pii".parse::<FilterSpec>().unwrap(),
-        "secret".parse::<FilterSpec>().unwrap(),
-    ];
-    let id = stage(&publisher, &f.original, &filters);
+    let publisher = Publisher::with_root(&f.store, &f.publish_root, registry());
+    let filters = [filter("pii"), filter("secret")];
+    let id = stage(&publisher, &f.original, &filters).await;
 
     let definition = publisher.definition(&id).unwrap();
     assert_eq!(definition.session, f.original.id);
@@ -211,7 +230,7 @@ fn init_runs_the_named_filters_and_records_their_instances() {
     assert_eq!(by_author("filter:pii"), 2, "{definition:#?}");
     // secret: one key, found by pattern in two places
     assert_eq!(by_author("filter:secret"), 1, "{definition:#?}");
-    let counts = publisher.instances(&id).unwrap();
+    let counts = publisher.instances(&id).await.unwrap();
     assert_eq!(counts.len(), 3);
     assert!(counts.values().all(|n| *n > 0), "{counts:?}");
 
@@ -267,17 +286,17 @@ fn init_runs_the_named_filters_and_records_their_instances() {
 /// The file `init` writes names the session with its title, records
 /// the init arguments, and reads back; a refresh rewrites it with the
 /// title kept.
-#[test]
-fn init_writes_the_annotated_file_with_the_title_and_init_args() {
+#[tokio::test]
+async fn init_writes_the_annotated_file_with_the_title_and_init_args() {
     let f = fixture();
-    let publisher = Publisher::with_root(&f.store, &f.publish_root);
+    let publisher = Publisher::with_root(&f.store, &f.publish_root, registry());
     let init = InitArgs {
-        audience: Some("public".into()),
-        uses: Some("reading".into()),
+        groups: vec!["public".into(), "reading".into()],
         notes: Some("For the blog".into()),
     };
     let id = publisher
         .init(&f.original, &[], &[], "session:test", &init)
+        .await
         .unwrap()
         .id;
     let path = publisher.staging().definition_file(&id);
@@ -289,14 +308,14 @@ fn init_writes_the_annotated_file_with_the_title_and_init_args() {
         "{text}"
     );
     assert!(
-        text.contains(r#""init": {"audience":"public","use":"reading","notes":"For the blog"}"#),
+        text.contains(r#""init": {"groups":["public","reading"],"notes":"For the blog"}"#),
         "{text}"
     );
     let definition = publisher.definition(&id).unwrap();
     assert_eq!(definition.init, init);
     assert!(definition.filters.is_empty() && definition.redact.is_empty());
 
-    publisher.refresh(&id, "user:test").unwrap();
+    publisher.refresh(&id, "user:test").await.unwrap();
     let again = fs::read_to_string(&path).unwrap();
     assert_eq!(
         again, text,
@@ -311,11 +330,11 @@ fn init_writes_the_annotated_file_with_the_title_and_init_args() {
 /// rebuild, fills the author it is given into a row left without one,
 /// keeps the marker when mark is true, and skips an exact duplicate
 /// on a later call.
-#[test]
-fn edit_sets_the_title_and_adds_a_redaction_once() {
+#[tokio::test]
+async fn edit_sets_the_title_and_adds_a_redaction_once() {
     let f = fixture();
-    let publisher = Publisher::with_root(&f.store, &f.publish_root);
-    let id = stage(&publisher, &f.original, &[]);
+    let publisher = Publisher::with_root(&f.store, &f.publish_root, registry());
+    let id = stage(&publisher, &f.original, &[]).await;
 
     let row = TextEntry {
         literal: "garrett".into(),
@@ -330,6 +349,7 @@ fn edit_sets_the_title_and_adds_a_redaction_once() {
             Some("A shared title"),
             std::slice::from_ref(&row),
         )
+        .await
         .unwrap();
     assert_eq!(refreshed.instances, 3);
 
@@ -356,23 +376,25 @@ fn edit_sets_the_title_and_adds_a_redaction_once() {
     };
     publisher
         .edit(&id, "session:s", None, std::slice::from_ref(&filled))
+        .await
         .unwrap();
     assert_eq!(publisher.definition(&id).unwrap().redact.len(), 1);
 }
 
 /// reason or mark takes effect.
-#[test]
-fn refresh_applies_redact_rows_and_reports_an_unmatched_row() {
+#[tokio::test]
+async fn refresh_applies_redact_rows_and_reports_an_unmatched_row() {
     let f = fixture();
-    let publisher = Publisher::with_root(&f.store, &f.publish_root);
-    let id = stage(&publisher, &f.original, &[]);
+    let publisher = Publisher::with_root(&f.store, &f.publish_root, registry());
+    let id = stage(&publisher, &f.original, &[]).await;
     assert_eq!(staged_lines(&f.publish_root, &id).len(), 5);
 
     let refreshed = edit(&publisher, &id, |d| {
         d.push_redact("garrett", "pii", "user:hand", true);
         d.push_redact("fucking", "language", "", false);
         d.push_redact("nothing-like-this", "secret", "user:hand", true);
-    });
+    })
+    .await;
     // "garrett" is in cwd on line 1 and in the username and home_dir on
     // line 5
     assert_eq!(
@@ -386,9 +408,9 @@ fn refresh_applies_redact_rows_and_reports_an_unmatched_row() {
     let definition = publisher.definition(&id).unwrap();
     assert_eq!(definition.redact.len(), 3);
     assert_eq!(definition.redact[1].author, "user:test");
-    assert_eq!(instances_of(&publisher, &id, "garrett"), 3);
-    assert_eq!(instances_of(&publisher, &id, "fucking"), 1);
-    assert_eq!(instances_of(&publisher, &id, "nothing-like-this"), 0);
+    assert_eq!(instances_of(&publisher, &id, "garrett").await, 3);
+    assert_eq!(instances_of(&publisher, &id, "fucking").await, 1);
+    assert_eq!(instances_of(&publisher, &id, "nothing-like-this").await, 0);
 
     let lines = staged_lines(&f.publish_root, &id);
     assert_eq!(lines.len(), 5);
@@ -424,7 +446,8 @@ fn refresh_applies_redact_rows_and_reports_an_unmatched_row() {
         d.redact.truncate(1);
         d.redact[0].reason = "privacy".into();
         d.redact[0].mark = false;
-    });
+    })
+    .await;
     let line = staged_lines(&f.publish_root, &id).remove(0);
     assert!(line.contains("the fucking hell"), "{line}");
     assert!(
@@ -440,83 +463,74 @@ fn refresh_applies_redact_rows_and_reports_an_unmatched_row() {
     );
 }
 
-/// A filter is a name, and `custom` takes its prompt as its whole
-/// instruction: `init` refuses it without one, and so does a refresh.
-#[test]
-fn custom_requires_a_prompt_and_any_filter_takes_one() {
+/// A filter row records the params the filter ran under, and a
+/// filter the registry does not know is refused at init and at
+/// refresh, with the file left as written.
+#[tokio::test]
+async fn params_are_recorded_and_an_unknown_filter_is_refused() {
     let f = fixture();
-    let publisher = Publisher::with_root(&f.store, &f.publish_root);
-    let bare = FilterSpec {
-        name: "custom".into(),
-        prompt: None,
-    };
+    let publisher = Publisher::with_root(&f.store, &f.publish_root, registry());
     let err = publisher
         .init(
             &f.original,
-            &[bare],
+            &[filter("piii")],
             &[],
             "session:test",
             &InitArgs::default(),
         )
+        .await
         .unwrap_err();
-    assert!(err.to_string().contains("requires a prompt"), "{err}");
+    assert!(matches!(err, PublishError::Input(_)), "{err}");
+    assert!(err.to_string().contains("piii"), "{err}");
     assert!(publisher.staging().list().unwrap().is_empty());
 
-    let custom = FilterSpec::new("custom", Some("Remove every duck.".into())).unwrap();
-    let pii = FilterSpec::new("pii", Some("Watch for street addresses.".into())).unwrap();
-    let id = stage(&publisher, &f.original, &[custom, pii]);
+    let pii = FilterEntry {
+        name: "pii".into(),
+        params: serde_json::json!({ "prompt": "Watch for street addresses." })
+            .as_object()
+            .cloned(),
+    };
+    let id = stage(&publisher, &f.original, &[pii, filter("secret")]).await;
     let definition = publisher.definition(&id).unwrap();
-    assert_eq!(definition.filters[0].name, "custom");
+    assert_eq!(definition.filters[0].name, "pii");
     assert_eq!(
-        definition.filters[0].prompt.as_deref(),
-        Some("Remove every duck.")
+        definition.filters[0].params.as_ref().unwrap()["prompt"],
+        "Watch for street addresses."
     );
-    assert_eq!(
-        definition.filters[1].prompt.as_deref(),
-        Some("Watch for street addresses.")
-    );
+    assert_eq!(definition.filters[1], filter("secret"));
     let text = fs::read_to_string(publisher.staging().definition_file(&id)).unwrap();
     assert!(
-        text.contains(r#"    ["custom", "Remove every duck."],"#),
+        text.contains(r#"    ["pii", {"prompt":"Watch for street addresses."}],"#),
         "{text}"
     );
+    assert!(text.contains("    \"secret\",\n"), "{text}");
+    let instructions = publisher.instructions(&id).await.unwrap();
     assert!(
-        text.contains(r#"    ["pii", "Watch for street addresses."],"#),
-        "{text}"
+        instructions.contains("Watch for street addresses."),
+        "{instructions}"
     );
 
     let mut definition = publisher.definition(&id).unwrap();
-    definition.filters[0].prompt = None;
-    write_definition(&publisher, &id, &definition);
-    let err = publisher.refresh(&id, "user:test").unwrap_err();
-    assert!(err.to_string().contains("requires a prompt"), "{err}");
     definition.filters[0].name = "piii".into();
-    definition.filters[0].prompt = Some("x".into());
     write_definition(&publisher, &id, &definition);
-    let err = publisher.refresh(&id, "user:test").unwrap_err();
+    let err = publisher.refresh(&id, "user:test").await.unwrap_err();
     assert!(err.to_string().contains("piii"), "{err}");
     let text = fs::read_to_string(publisher.staging().definition_file(&id)).unwrap();
     assert!(
         text.contains("\"piii\""),
         "an invalid file is left as written"
     );
-    let err = publisher.definition(&id).unwrap_err();
-    assert!(matches!(err, PublishError::Definition(_)), "{err}");
 }
 
-/// The `harness-record` filter leaves out the entries the harness
-/// kept about the run: the API request on line 5 goes, with one line
-/// record under the filter, and the descriptive fields of the entries
-/// that stay go with it.
-#[test]
-fn harness_records_filter_leaves_out_run_records_and_descriptive_fields() {
+/// The `harness` filter leaves out the entries the harness kept about
+/// the run: the API request on line 5 goes, with one line record under
+/// the filter, and the descriptive fields of the entries that stay go
+/// with it.
+#[tokio::test]
+async fn harness_filter_leaves_out_run_records_and_descriptive_fields() {
     let f = fixture();
-    let publisher = Publisher::with_root(&f.store, &f.publish_root);
-    let id = stage(
-        &publisher,
-        &f.original,
-        &["harness-record".parse::<FilterSpec>().unwrap()],
-    );
+    let publisher = Publisher::with_root(&f.store, &f.publish_root, registry());
+    let id = stage(&publisher, &f.original, &[filter("harness")]).await;
     let lines = staged_lines(&f.publish_root, &id);
     assert_eq!(lines.len(), 4, "{lines:#?}");
     assert!(
@@ -526,13 +540,10 @@ fn harness_records_filter_leaves_out_run_records_and_descriptive_fields() {
     let records = changes(&f.publish_root, &id);
     let dropped: Vec<(u32, Option<u32>, Option<&str>, &str)> = records
         .iter()
-        .filter(|r| r.kind == ChangeKind::Line)
+        .filter(|r| r.kind == ChangeKind::Entry)
         .map(|r| (r.line, r.line_end, r.reason.as_deref(), r.author.as_str()))
         .collect();
-    assert_eq!(
-        dropped,
-        [(5, Some(5), Some("scope"), "filter:harness-record")]
-    );
+    assert_eq!(dropped, [(5, Some(5), Some("scope"), "filter:harness")]);
     // The token usage is a descriptive field and goes; the working
     // directory is the system filter's and stays
     assert!(!lines[1].contains("\"usage\""), "{}", lines[1]);
@@ -551,31 +562,28 @@ fn harness_records_filter_leaves_out_run_records_and_descriptive_fields() {
         records
             .iter()
             .filter(|r| r.kind == ChangeKind::Value)
-            .all(|r| r.reason.as_deref() == Some("scope") && r.author == "filter:harness-record")
+            .all(|r| r.reason.as_deref() == Some("scope") && r.author == "filter:harness")
     );
     let summary = staged_summary(&f.publish_root, &id);
     assert_eq!(summary["line_count"], 4, "{summary}");
-    publisher.check(&id).unwrap();
+    publisher.check(&id).await.unwrap();
 
     // A literal only on a dropped line matches nothing
     let refreshed = edit(&publisher, &id, |d| {
         d.push_redact("home_dir", "system", "user:test", true);
-    });
+    })
+    .await;
     assert_eq!(refreshed.unmatched, [(1, "home_dir".to_string())]);
 }
 
-/// The `harness-record` filter removes a leading IDE tag block from a
-/// user turn as an unmarked span, leaving the real prompt, and records
-/// the removal as a `text` change under the filter.
-#[test]
-fn harness_record_removes_an_ide_tag_block_from_a_user_turn() {
+/// The `harness` filter removes a leading IDE tag block from a user
+/// turn as an unmarked span, leaving the real prompt, and records the
+/// removal as a `text` change under the filter.
+#[tokio::test]
+async fn harness_filter_removes_an_ide_tag_block_from_a_user_turn() {
     let f = fixture_with(IDE_SESSION);
-    let publisher = Publisher::with_root(&f.store, &f.publish_root);
-    let id = stage(
-        &publisher,
-        &f.original,
-        &["harness-record".parse::<FilterSpec>().unwrap()],
-    );
+    let publisher = Publisher::with_root(&f.store, &f.publish_root, registry());
+    let id = stage(&publisher, &f.original, &[filter("harness")]).await;
     let lines = staged_lines(&f.publish_root, &id);
     assert!(
         !lines[0].contains("ide_opened_file"),
@@ -596,53 +604,55 @@ fn harness_record_removes_an_ide_tag_block_from_a_user_turn() {
     assert!(
         records.iter().any(|r| r.kind == ChangeKind::Text
             && r.reason.as_deref() == Some("scope")
-            && r.author == "filter:harness-record"),
+            && r.author == "filter:harness"),
         "{records:#?}"
     );
-    publisher.check(&id).unwrap();
+    publisher.check(&id).await.unwrap();
 }
 
-/// The `harness-context` filter leaves out exactly what the harness put
-/// in the model's context: the attachment, the meta user entry, and the
-/// request shape and blob go as one run of lines, while the API request
-/// record stays and the token usage stays.
-#[test]
-fn harness_context_filter_leaves_out_context_entries_and_nothing_else() {
+/// The `harness` filter leaves out what the harness put in the model's
+/// context and the records it kept about the run: the attachment, the
+/// meta user entry, and the request shape and blob go as one run of
+/// lines, the API request record goes as another, and the token usage
+/// of the reply that stays goes as a value.
+#[tokio::test]
+async fn harness_filter_leaves_out_context_and_record_entries() {
     let f = fixture_with(CONTEXT_SESSION);
-    let publisher = Publisher::with_root(&f.store, &f.publish_root);
-    let id = stage(
-        &publisher,
-        &f.original,
-        &["harness-context".parse::<FilterSpec>().unwrap()],
-    );
+    let publisher = Publisher::with_root(&f.store, &f.publish_root, registry());
+    let id = stage(&publisher, &f.original, &[filter("harness")]).await;
     let lines = staged_lines(&f.publish_root, &id);
-    assert_eq!(lines.len(), 3, "{lines:#?}");
+    assert_eq!(lines.len(), 2, "{lines:#?}");
     assert!(lines[0].contains("\"content\":\"Hello\""), "{}", lines[0]);
-    assert!(lines[1].contains("\"usage\""), "{}", lines[1]);
-    assert!(lines[2].contains("\"api-request\""), "{}", lines[2]);
+    assert!(lines[1].contains("\"text\":\"Hi\""), "{}", lines[1]);
+    assert!(!lines[1].contains("\"usage\""), "{}", lines[1]);
     let records = changes(&f.publish_root, &id);
     let dropped: Vec<(u32, Option<u32>, Option<&str>, &str)> = records
         .iter()
-        .filter(|r| r.kind == ChangeKind::Line)
+        .filter(|r| r.kind == ChangeKind::Entry)
         .map(|r| (r.line, r.line_end, r.reason.as_deref(), r.author.as_str()))
         .collect();
     assert_eq!(
         dropped,
-        [(2, Some(5), Some("scope"), "filter:harness-context")]
+        [
+            (2, Some(5), Some("scope"), "filter:harness"),
+            (7, Some(7), Some("scope"), "filter:harness"),
+        ]
     );
     assert!(
-        records.iter().all(|r| r.kind == ChangeKind::Line),
+        records
+            .iter()
+            .all(|r| matches!(r.kind, ChangeKind::Entry | ChangeKind::Value)),
         "{records:#?}"
     );
-    publisher.check(&id).unwrap();
+    publisher.check(&id).await.unwrap();
 }
 
 /// `init` rejects a filter given twice.
-#[test]
-fn init_rejects_a_duplicate_filter() {
+#[tokio::test]
+async fn init_rejects_a_duplicate_filter() {
     let f = fixture();
-    let publisher = Publisher::with_root(&f.store, &f.publish_root);
-    let pii = "pii".parse::<FilterSpec>().unwrap();
+    let publisher = Publisher::with_root(&f.store, &f.publish_root, registry());
+    let pii = filter("pii");
     let dup = publisher
         .init(
             &f.original,
@@ -651,6 +661,7 @@ fn init_rejects_a_duplicate_filter() {
             "session:test",
             &InitArgs::default(),
         )
+        .await
         .unwrap_err();
     assert!(matches!(dup, PublishError::Input(_)), "{dup}");
     assert!(publisher.staging().list().unwrap().is_empty());
@@ -659,24 +670,20 @@ fn init_rejects_a_duplicate_filter() {
 /// A filter added to the file runs on refresh and keeps everything
 /// else; a filter removed from the file takes its redactions with it
 /// and leaves the user's; a filter listed twice is rejected.
-#[test]
-fn refresh_runs_an_added_filter_and_drops_a_removed_filters_rows() {
+#[tokio::test]
+async fn refresh_runs_an_added_filter_and_drops_a_removed_filters_rows() {
     let f = fixture();
-    let publisher = Publisher::with_root(&f.store, &f.publish_root);
-    let id = stage(
-        &publisher,
-        &f.original,
-        &["secret".parse::<FilterSpec>().unwrap()],
-    );
+    let publisher = Publisher::with_root(&f.store, &f.publish_root, registry());
+    let id = stage(&publisher, &f.original, &[filter("secret")]).await;
     edit(&publisher, &id, |d| {
         d.push_redact("fucking", "language", "user:test", true);
-    });
+    })
+    .await;
 
     edit(&publisher, &id, |d| {
-        d.filters.push(gage_publish::FilterEntry::new(
-            &"pii".parse::<FilterSpec>().unwrap(),
-        ));
-    });
+        d.filters.push(filter("pii"));
+    })
+    .await;
     let authors = |d: &PublishDefinition| -> Vec<String> {
         d.redact.iter().map(|t| t.author.clone()).collect()
     };
@@ -690,13 +697,14 @@ fn refresh_runs_an_added_filter_and_drops_a_removed_filters_rows() {
     let mut dup = definition.clone();
     dup.filters.push(dup.filters[0].clone());
     write_definition(&publisher, &id, &dup);
-    let err = publisher.refresh(&id, "user:test").unwrap_err();
+    let err = publisher.refresh(&id, "user:test").await.unwrap_err();
     assert!(err.to_string().contains("more than once"), "{err}");
     write_definition(&publisher, &id, &definition);
 
     edit(&publisher, &id, |d| {
         d.filters.retain(|f| f.name != "secret");
-    });
+    })
+    .await;
     let definition = publisher.definition(&id).unwrap();
     let left = authors(&definition);
     assert!(left.contains(&"user:test".to_string()), "{left:?}");
@@ -724,15 +732,12 @@ fn refresh_runs_an_added_filter_and_drops_a_removed_filters_rows() {
 /// A refresh re-runs every named filter: a filter's row stays where it
 /// is, a filter's row deleted by hand comes back at the end, and the
 /// user's rows keep their place.
-#[test]
-fn refresh_reruns_filters_and_keeps_rows_in_place() {
+#[tokio::test]
+async fn refresh_reruns_filters_and_keeps_rows_in_place() {
     let f = fixture();
-    let publisher = Publisher::with_root(&f.store, &f.publish_root);
-    let filters = [
-        "pii".parse::<FilterSpec>().unwrap(),
-        "secret".parse::<FilterSpec>().unwrap(),
-    ];
-    let id = stage(&publisher, &f.original, &filters);
+    let publisher = Publisher::with_root(&f.store, &f.publish_root, registry());
+    let filters = [filter("pii"), filter("secret")];
+    let id = stage(&publisher, &f.original, &filters).await;
     let before = publisher.definition(&id).unwrap();
     assert_eq!(before.redact.len(), 3);
     let literals = |d: &PublishDefinition| -> Vec<(String, String)> {
@@ -752,7 +757,8 @@ fn refresh_reruns_filters_and_keeps_rows_in_place() {
                 mark: true,
             },
         );
-    });
+    })
+    .await;
     let after = publisher.definition(&id).unwrap();
     let mut expected = literals(&before);
     expected.insert(1, ("fucking".into(), "user:test".into()));
@@ -767,7 +773,8 @@ fn refresh_reruns_filters_and_keeps_rows_in_place() {
         .clone();
     edit(&publisher, &id, |d| {
         d.redact.retain(|t| t.literal != key);
-    });
+    })
+    .await;
     let back = publisher.definition(&id).unwrap();
     assert_eq!(back.redact.len(), 4, "{back:#?}");
     assert_eq!(back.redact[3].literal, key, "the filter's row came back");
@@ -779,11 +786,11 @@ fn refresh_reruns_filters_and_keeps_rows_in_place() {
 /// Every summary field, the title included, is the driver's reading
 /// of the staged content: redacting the first prompt retitles the
 /// publication.
-#[test]
-fn the_staged_summary_is_computed_from_the_staged_content() {
+#[tokio::test]
+async fn the_staged_summary_is_computed_from_the_staged_content() {
     let f = fixture();
-    let publisher = Publisher::with_root(&f.store, &f.publish_root);
-    let id = stage(&publisher, &f.original, &[]);
+    let publisher = Publisher::with_root(&f.store, &f.publish_root, registry());
+    let id = stage(&publisher, &f.original, &[]).await;
 
     let before = staged_summary(&f.publish_root, &id);
     assert!(
@@ -795,7 +802,8 @@ fn the_staged_summary_is_computed_from_the_staged_content() {
 
     edit(&publisher, &id, |d| {
         d.push_redact("Hello", "privacy", "user:test", true);
-    });
+    })
+    .await;
     let after = staged_summary(&f.publish_root, &id);
     assert!(
         after["title"]
@@ -816,20 +824,21 @@ fn the_staged_summary_is_computed_from_the_staged_content() {
 /// A title written by hand without an author takes the refresh's. The
 /// staged session passes the removal-only check with the entry in
 /// place and is refused with it altered.
-#[test]
-fn a_title_in_the_definition_adds_an_entry_after_the_last_line() {
+#[tokio::test]
+async fn a_title_in_the_definition_adds_an_entry_after_the_last_line() {
     let f = fixture();
-    let publisher = Publisher::with_root(&f.store, &f.publish_root);
-    let id = stage(&publisher, &f.original, &["pii".parse().unwrap()]);
+    let publisher = Publisher::with_root(&f.store, &f.publish_root, registry());
+    let id = stage(&publisher, &f.original, &[filter("pii")]).await;
     assert_eq!(staged_lines(&f.publish_root, &id).len(), 5);
-    let before = publisher.changes(&id).unwrap();
+    let before = publisher.changes(&id).await.unwrap();
 
     edit(&publisher, &id, |d| {
         d.title = Some(TitleEntry {
             text: "Ducks \"quoted\"".into(),
             author: "user:test".into(),
         });
-    });
+    })
+    .await;
     let lines = staged_lines(&f.publish_root, &id);
     assert_eq!(lines.len(), 6);
     assert_eq!(
@@ -854,9 +863,9 @@ fn a_title_in_the_definition_adds_an_entry_after_the_last_line() {
     let summary = staged_summary(&f.publish_root, &id);
     assert_eq!(summary["title"], "Ducks \"quoted\"", "{summary}");
     assert_eq!(summary["line_count"], 6, "{summary}");
-    publisher.check(&id).unwrap();
+    publisher.check(&id).await.unwrap();
     assert_eq!(
-        publisher.changes(&id).unwrap(),
+        publisher.changes(&id).await.unwrap(),
         before + 1,
         "the title counts as one change"
     );
@@ -871,7 +880,7 @@ fn a_title_in_the_definition_adds_an_entry_after_the_last_line() {
         ),
     )
     .unwrap();
-    let refreshed = publisher.refresh(&id, "session:hand").unwrap();
+    let refreshed = publisher.refresh(&id, "session:hand").await.unwrap();
     assert_eq!(refreshed.authored, 1);
     let definition = publisher.definition(&id).unwrap();
     assert_eq!(
@@ -891,14 +900,14 @@ fn a_title_in_the_definition_adds_an_entry_after_the_last_line() {
     let staged = staged_file(&f.publish_root, &id);
     let text = fs::read_to_string(&staged).unwrap();
     fs::write(&staged, text.replace("Geese", "Swans")).unwrap();
-    let err = publisher.apply(&id, false).unwrap_err();
+    let err = publisher.apply(&id, false).await.unwrap_err();
     assert!(
         matches!(err, PublishError::Refused(ref m) if m.contains("line 6 is not the title entry")),
         "{err}"
     );
     fs::write(&staged, text).unwrap();
 
-    let commit = publisher.apply(&id, false).unwrap();
+    let commit = publisher.apply(&id, false).await.unwrap();
     let published = SessionStore::from(&f.store).at_commit(&commit).unwrap();
     assert_eq!(published.attrs.summary.title.as_deref(), Some("Geese"));
     let committed = SessionStore::from(&f.store).changes(&commit).unwrap();
@@ -908,18 +917,15 @@ fn a_title_in_the_definition_adds_an_entry_after_the_last_line() {
 /// A user's row deleted by hand is gone; a filter's row deleted by
 /// hand comes back unless its literal is on the allow list, where a
 /// refresh leaves it out.
-#[test]
-fn an_allowed_literal_is_not_recorded_again() {
+#[tokio::test]
+async fn an_allowed_literal_is_not_recorded_again() {
     let f = fixture();
-    let publisher = Publisher::with_root(&f.store, &f.publish_root);
-    let id = stage(
-        &publisher,
-        &f.original,
-        &["secret".parse::<FilterSpec>().unwrap()],
-    );
+    let publisher = Publisher::with_root(&f.store, &f.publish_root, registry());
+    let id = stage(&publisher, &f.original, &[filter("secret")]).await;
     edit(&publisher, &id, |d| {
         d.push_redact("garrett", "pii", "user:test", true);
-    });
+    })
+    .await;
     let cwd = |publish_root: &std::path::Path| {
         let line = staged_lines(publish_root, &id).remove(0);
         line.contains("/home/[REDACTED]/proj")
@@ -928,7 +934,8 @@ fn an_allowed_literal_is_not_recorded_again() {
 
     edit(&publisher, &id, |d| {
         d.redact.retain(|t| t.literal != "garrett");
-    });
+    })
+    .await;
     assert!(!cwd(&f.publish_root), "the username is back");
     let definition = publisher.definition(&id).unwrap();
     assert_eq!(definition.redact.len(), 1, "{definition:#?}");
@@ -937,7 +944,8 @@ fn an_allowed_literal_is_not_recorded_again() {
 
     edit(&publisher, &id, |d| {
         d.redact.clear();
-    });
+    })
+    .await;
     let definition = publisher.definition(&id).unwrap();
     assert_eq!(
         definition.redact.len(),
@@ -952,7 +960,8 @@ fn an_allowed_literal_is_not_recorded_again() {
             literal: key.to_uppercase(),
             author: "user:test".into(),
         });
-    });
+    })
+    .await;
     let definition = publisher.definition(&id).unwrap();
     assert!(
         definition.redact.is_empty(),
@@ -966,11 +975,11 @@ fn an_allowed_literal_is_not_recorded_again() {
 /// every line outside it and the staged summary follows, and an
 /// invalid file is rejected without touching the staged session. A
 /// file naming another session is refused.
-#[test]
-fn refresh_reapplies_a_hand_edited_file() {
+#[tokio::test]
+async fn refresh_reapplies_a_hand_edited_file() {
     let f = fixture();
-    let publisher = Publisher::with_root(&f.store, &f.publish_root);
-    let id = stage(&publisher, &f.original, &[]);
+    let publisher = Publisher::with_root(&f.store, &f.publish_root, registry());
+    let id = stage(&publisher, &f.original, &[]).await;
     let path = publisher.staging().definition_file(&id);
     let before = staged_summary(&f.publish_root, &id);
     assert_eq!(before["line_count"], 5, "{before}");
@@ -987,7 +996,7 @@ fn refresh_reapplies_a_hand_edited_file() {
         file("  \"redact\": [\n    [\"garrett\", \"pii\", true], // no author\n  ],"),
     )
     .unwrap();
-    let refreshed = publisher.refresh(&id, "session:hand").unwrap();
+    let refreshed = publisher.refresh(&id, "session:hand").await.unwrap();
     assert_eq!(refreshed.instances, 3);
     assert_eq!(refreshed.authored, 1);
     assert!(staged_lines(&f.publish_root, &id)[0].contains("/home/[REDACTED]/proj"));
@@ -1010,7 +1019,7 @@ fn refresh_reapplies_a_hand_edited_file() {
         ),
     )
     .unwrap();
-    let refreshed = publisher.refresh(&id, "session:hand").unwrap();
+    let refreshed = publisher.refresh(&id, "session:hand").await.unwrap();
     assert_eq!(
         refreshed.instances, 0,
         "the username is only on dropped lines"
@@ -1023,7 +1032,7 @@ fn refresh_reapplies_a_hand_edited_file() {
     let records = changes(&f.publish_root, &id);
     let dropped: Vec<(u32, Option<u32>, Option<&str>, &str)> = records
         .iter()
-        .filter(|r| r.kind == ChangeKind::Line)
+        .filter(|r| r.kind == ChangeKind::Entry)
         .map(|r| (r.line, r.line_end, r.reason.as_deref(), r.author.as_str()))
         .collect();
     assert_eq!(
@@ -1042,20 +1051,20 @@ fn refresh_reapplies_a_hand_edited_file() {
     );
     // The kept lines hold no prompt, so the content yields no title
     assert_eq!(after["title"], Value::Null, "{after}");
-    publisher.check(&id).unwrap();
+    publisher.check(&id).await.unwrap();
 
     fs::write(
         &path,
         file("  \"redact\": [[\"x\", \"bogus\", \"user:hand\", true]],"),
     )
     .unwrap();
-    let err = publisher.refresh(&id, "session:hand").unwrap_err();
+    let err = publisher.refresh(&id, "session:hand").await.unwrap_err();
     assert!(err.to_string().starts_with("4:14: "), "{err}");
     assert!(err.to_string().contains("bogus"), "{err}");
     assert_eq!(staged_lines(&f.publish_root, &id).len(), 2);
 
     fs::write(&path, file("  \"segments\": [[\"9-2\", \"d\", \"u\"]],")).unwrap();
-    let err = publisher.refresh(&id, "session:hand").unwrap_err();
+    let err = publisher.refresh(&id, "session:hand").await.unwrap_err();
     assert!(err.to_string().starts_with("4:16: "), "{err}");
     assert!(err.to_string().contains("9-2"), "{err}");
 
@@ -1064,36 +1073,37 @@ fn refresh_reapplies_a_hand_edited_file() {
         "{\n  \"session\": \"other\",\n  \"filters\": [\"pii\"],\n}\n",
     )
     .unwrap();
-    let err = publisher.refresh(&id, "session:hand").unwrap_err();
+    let err = publisher.refresh(&id, "session:hand").await.unwrap_err();
     assert!(
         err.to_string().starts_with("2:3: session \"other\""),
         "{err}"
     );
-    let err = publisher.apply(&id, true).unwrap_err();
+    let err = publisher.apply(&id, true).await.unwrap_err();
     assert!(matches!(err, PublishError::Definition(_)), "{err}");
     assert_eq!(staged_lines(&f.publish_root, &id).len(), 2);
 }
 
 /// A segment without lines drops nothing; once it has lines, every
 /// line outside it is dropped; a changed or removed segment rebuilds.
-#[test]
-fn segments_drop_the_lines_outside_them() {
+#[tokio::test]
+async fn segments_drop_the_lines_outside_them() {
     let f = fixture();
-    let publisher = Publisher::with_root(&f.store, &f.publish_root);
-    let id = stage(&publisher, &f.original, &[]);
+    let publisher = Publisher::with_root(&f.store, &f.publish_root, registry());
+    let id = stage(&publisher, &f.original, &[]).await;
 
     edit(&publisher, &id, |d| {
         d.push_segment("The reply", &[], "session:s");
-    });
+    })
+    .await;
     assert_eq!(staged_lines(&f.publish_root, &id).len(), 5);
 
-    edit(&publisher, &id, |d| d.segments[0].lines = vec![(2, 3)]);
+    edit(&publisher, &id, |d| d.segments[0].lines = vec![(2, 3)]).await;
     assert_eq!(staged_lines(&f.publish_root, &id).len(), 2);
     let records = changes(&f.publish_root, &id);
     assert_eq!(
         records
             .iter()
-            .filter(|r| r.kind == ChangeKind::Line)
+            .filter(|r| r.kind == ChangeKind::Entry)
             .count(),
         2,
         "{records:#?}"
@@ -1102,14 +1112,15 @@ fn segments_drop_the_lines_outside_them() {
     edit(&publisher, &id, |d| {
         d.segments[0].description = "The whole exchange".into();
         d.segments[0].lines = vec![(1, 5)];
-    });
+    })
+    .await;
     assert_eq!(staged_lines(&f.publish_root, &id).len(), 5);
     assert_eq!(
         publisher.definition(&id).unwrap().segments[0].description,
         "The whole exchange"
     );
 
-    edit(&publisher, &id, |d| d.segments.clear());
+    edit(&publisher, &id, |d| d.segments.clear()).await;
     assert!(publisher.definition(&id).unwrap().segments.is_empty());
     assert_eq!(staged_lines(&f.publish_root, &id).len(), 5);
 }
@@ -1117,21 +1128,18 @@ fn segments_drop_the_lines_outside_them() {
 /// The candidates are every text value of the kept lines that no
 /// filter leaves out, in document order, each with the spans redacted
 /// in it merged.
-#[test]
-fn candidates_are_the_disclosed_text_values_with_their_spans() {
+#[tokio::test]
+async fn candidates_are_the_disclosed_text_values_with_their_spans() {
     let f = fixture_with(SYSTEM_SESSION);
-    let publisher = Publisher::with_root(&f.store, &f.publish_root);
-    let id = stage(
-        &publisher,
-        &f.original,
-        &["system".parse::<FilterSpec>().unwrap()],
-    );
+    let publisher = Publisher::with_root(&f.store, &f.publish_root, registry());
+    let id = stage(&publisher, &f.original, &[filter("system")]).await;
     edit(&publisher, &id, |d| {
         d.push_redact("/home/garrett", "system", "user:test", true);
         d.push_segment("The lookup", &[(2, 4)], "user:test");
-    });
+    })
+    .await;
 
-    let candidates = publisher.candidates(&id).unwrap();
+    let candidates = publisher.candidates(&id).await.unwrap();
     let keys: Vec<(u32, &str)> = candidates
         .iter()
         .map(|c| (c.line, c.pointer.as_str()))
@@ -1160,14 +1168,11 @@ fn candidates_are_the_disclosed_text_values_with_their_spans() {
 /// `apply` commits the staged session as a new session object with the
 /// redacted content and `origin`, and clears the staging directory and
 /// the definition.
-#[test]
-fn apply_commits_the_derived_session_and_clears_the_staging() {
+#[tokio::test]
+async fn apply_commits_the_derived_session_and_clears_the_staging() {
     let f = fixture();
-    let publisher = Publisher::with_root(&f.store, &f.publish_root);
-    let filters = [
-        "pii".parse::<FilterSpec>().unwrap(),
-        "secret".parse::<FilterSpec>().unwrap(),
-    ];
+    let publisher = Publisher::with_root(&f.store, &f.publish_root, registry());
+    let filters = [filter("pii"), filter("secret")];
     let init = publisher
         .init(
             &f.original,
@@ -1176,12 +1181,14 @@ fn apply_commits_the_derived_session_and_clears_the_staging() {
             "session:test",
             &InitArgs::default(),
         )
+        .await
         .unwrap();
     edit(&publisher, &init.id, |d| {
         d.push_redact("fucking", "language", "user:test", false);
-    });
+    })
+    .await;
 
-    let commit = publisher.apply(&init.id, false).unwrap();
+    let commit = publisher.apply(&init.id, false).await.unwrap();
 
     let sessions = SessionStore::from(&f.store);
     let published = sessions.at_commit(&commit).unwrap();
@@ -1209,51 +1216,53 @@ fn apply_commits_the_derived_session_and_clears_the_staging() {
 /// `apply` refuses a staged session edited by hand: added text, a
 /// removed entry, or a change outside the text values. Nothing is
 /// committed and the staging directory stays.
-#[test]
-fn apply_refuses_a_hand_edited_staged_session() {
+#[tokio::test]
+async fn apply_refuses_a_hand_edited_staged_session() {
     let f = fixture();
-    let publisher = Publisher::with_root(&f.store, &f.publish_root);
-    let filters = [FilterSpec::new("custom", Some("Remove nothing".into())).unwrap()];
-    let id = stage(&publisher, &f.original, &filters);
+    let publisher = Publisher::with_root(&f.store, &f.publish_root, registry());
+    let filters = [filter("language")];
+    let id = stage(&publisher, &f.original, &filters).await;
     let path = staged_file(&f.publish_root, &id);
     let staged = fs::read_to_string(&path).unwrap();
 
-    let refused = |edited: String, expect: &str| {
+    let refused: [(String, &str); 4] = [
+        (staged.replace("Hello, what", "Hello there, what"), "line 1"),
+        (
+            staged.lines().skip(1).map(|l| format!("{l}\n")).collect(),
+            "entries staged",
+        ),
+        (
+            staged.replace("\"uuid\":\"a1\"", "\"uuid\":\"a9\""),
+            "outside its text values",
+        ),
+        (
+            staged.replace("\"cwd\":\"/home/garrett/proj\",", ""),
+            "outside its text values",
+        ),
+    ];
+    for (edited, expect) in refused {
         fs::write(&path, edited).unwrap();
-        let err = publisher.apply(&id, true).unwrap_err();
+        let err = publisher.apply(&id, true).await.unwrap_err();
         assert!(matches!(err, PublishError::Refused(_)), "{err}");
         assert!(err.to_string().contains(expect), "{err}");
         assert_eq!(SessionStore::from(&f.store).iter().unwrap().count(), 1);
         assert!(f.publish_root.join(&id).is_dir());
-    };
-    refused(staged.replace("Hello, what", "Hello there, what"), "line 1");
-    refused(
-        staged.lines().skip(1).map(|l| format!("{l}\n")).collect(),
-        "entries staged",
-    );
-    refused(
-        staged.replace("\"uuid\":\"a1\"", "\"uuid\":\"a9\""),
-        "outside its text values",
-    );
-    refused(
-        staged.replace("\"cwd\":\"/home/garrett/proj\",", ""),
-        "outside its text values",
-    );
+    }
 
     fs::write(&path, &staged).unwrap();
-    publisher.check(&id).unwrap();
+    publisher.check(&id).await.unwrap();
 }
 
 /// The candidate text is each distinct disclosed value once, in order
 /// of first occurrence, divided into splits that `--split-files`
 /// writes one per file.
-#[test]
-fn candidate_texts_are_each_distinct_value_once_in_splits() {
+#[tokio::test]
+async fn candidate_texts_are_each_distinct_value_once_in_splits() {
     let f = fixture();
-    let publisher = Publisher::with_root(&f.store, &f.publish_root);
-    let id = stage(&publisher, &f.original, &[]);
-    let candidates = publisher.candidates(&id).unwrap();
-    let texts = publisher.candidate_texts(&id).unwrap();
+    let publisher = Publisher::with_root(&f.store, &f.publish_root, registry());
+    let id = stage(&publisher, &f.original, &[]).await;
+    let candidates = publisher.candidates(&id).await.unwrap();
+    let texts = publisher.candidate_texts(&id).await.unwrap();
     // "ok" is the tool result's content and the harness's stdout copy
     assert_eq!(candidates.iter().filter(|c| c.text == "ok").count(), 2);
     assert_eq!(texts.iter().filter(|t| *t == "ok").count(), 1);
@@ -1291,10 +1300,10 @@ fn candidate_texts_are_each_distinct_value_once_in_splits() {
 /// `init` adds a segment per description, without lines, attributed
 /// to the author; the staged session is unchanged until a segment has
 /// lines.
-#[test]
-fn init_adds_segments_by_description() {
+#[tokio::test]
+async fn init_adds_segments_by_description() {
     let f = fixture();
-    let publisher = Publisher::with_root(&f.store, &f.publish_root);
+    let publisher = Publisher::with_root(&f.store, &f.publish_root, registry());
     let segments = ["The question".to_string(), "The reply".to_string()];
     let id = publisher
         .init(
@@ -1304,6 +1313,7 @@ fn init_adds_segments_by_description() {
             "session:s",
             &InitArgs::default(),
         )
+        .await
         .unwrap()
         .id;
     let definition = publisher.definition(&id).unwrap();
@@ -1331,20 +1341,20 @@ fn init_adds_segments_by_description() {
         "{text}"
     );
     assert_eq!(staged_lines(&f.publish_root, &id).len(), 5);
-    assert_eq!(publisher.changes(&id).unwrap(), 0);
+    assert_eq!(publisher.changes(&id).await.unwrap(), 0);
 }
 
 /// `apply` refuses a definition that changed nothing, with or without
 /// filters, unless forced, and a forced apply publishes the session as
 /// it is. A definition whose only change is the title is applied.
-#[test]
-fn apply_requires_a_change_unless_forced() {
+#[tokio::test]
+async fn apply_requires_a_change_unless_forced() {
     let f = fixture();
-    let publisher = Publisher::with_root(&f.store, &f.publish_root);
+    let publisher = Publisher::with_root(&f.store, &f.publish_root, registry());
     let sessions = SessionStore::from(&f.store);
 
-    let empty = stage(&publisher, &f.original, &[]);
-    let err = publisher.apply(&empty, false).unwrap_err();
+    let empty = stage(&publisher, &f.original, &[]).await;
+    let err = publisher.apply(&empty, false).await.unwrap_err();
     assert!(matches!(err, PublishError::Unchanged), "{err}");
     assert!(f.publish_root.join(&empty).is_dir());
     assert_eq!(sessions.iter().unwrap().count(), 1);
@@ -1354,22 +1364,23 @@ fn apply_requires_a_change_unless_forced() {
             text: "Retitled".into(),
             author: "user:test".into(),
         });
-    });
-    assert_eq!(publisher.changes(&empty).unwrap(), 1);
-    let commit = publisher.apply(&empty, false).unwrap();
+    })
+    .await;
+    assert_eq!(publisher.changes(&empty).await.unwrap(), 1);
+    let commit = publisher.apply(&empty, false).await.unwrap();
     let retitled = sessions.at_commit(&commit).unwrap();
     assert_eq!(retitled.attrs.summary.title.as_deref(), Some("Retitled"));
     assert_eq!(sessions.iter().unwrap().count(), 2);
 
-    let filters = [FilterSpec::new("custom", Some("Remove nothing".into())).unwrap()];
-    let unchanged = stage(&publisher, &f.original, &filters);
-    assert_eq!(publisher.changes(&unchanged).unwrap(), 0);
-    let err = publisher.apply(&unchanged, false).unwrap_err();
+    let filters = [filter("language")];
+    let unchanged = stage(&publisher, &f.original, &filters).await;
+    assert_eq!(publisher.changes(&unchanged).await.unwrap(), 0);
+    let err = publisher.apply(&unchanged, false).await.unwrap_err();
     assert!(matches!(err, PublishError::Unchanged), "{err}");
     assert!(f.publish_root.join(&unchanged).is_dir());
     assert_eq!(sessions.iter().unwrap().count(), 2);
 
-    let commit = publisher.apply(&unchanged, true).unwrap();
+    let commit = publisher.apply(&unchanged, true).await.unwrap();
     let published = sessions.at_commit(&commit).unwrap();
     assert_eq!(published.id, unchanged);
     let mut text = String::new();
@@ -1383,19 +1394,16 @@ fn apply_requires_a_change_unless_forced() {
     assert!(!f.publish_root.join(&unchanged).exists());
 }
 
-#[test]
-fn system_filter_leaves_out_system_values_and_drops_the_project_attribute() {
+#[tokio::test]
+async fn system_filter_leaves_out_system_values_and_drops_the_project_attribute() {
     let f = fixture_with(SYSTEM_SESSION);
     assert_eq!(
         f.original.attrs.project.as_deref(),
         Some("-home-garrett-proj")
     );
-    let publisher = Publisher::with_root(&f.store, &f.publish_root);
-    let filters = [
-        "system".parse::<FilterSpec>().unwrap(),
-        "pii".parse::<FilterSpec>().unwrap(),
-    ];
-    let id = stage(&publisher, &f.original, &filters);
+    let publisher = Publisher::with_root(&f.store, &f.publish_root, registry());
+    let filters = [filter("system"), filter("pii")];
+    let id = stage(&publisher, &f.original, &filters).await;
 
     // The system filter has no patterns; its literal paths record the
     // working directory and the home directory as its text redactions.
@@ -1514,13 +1522,15 @@ fn system_filter_leaves_out_system_values_and_drops_the_project_attribute() {
     // and is reported as such
     let refreshed = edit(&publisher, &id, |d| {
         d.push_redact("git.corp.example", "system", "user:test", true);
-    });
+    })
+    .await;
     assert_eq!(refreshed.unmatched, [(4, "git.corp.example".to_string())]);
 
     edit(&publisher, &id, |d| {
         d.filters.retain(|f| f.name != "system");
         d.redact.retain(|t| t.literal != "git.corp.example");
-    });
+    })
+    .await;
     let attrs = staged_attrs(&f.publish_root, &id);
     assert_eq!(attrs["project"], "-home-garrett-proj");
     let lines = staged_lines(&f.publish_root, &id);
@@ -1547,8 +1557,8 @@ fn system_filter_leaves_out_system_values_and_drops_the_project_attribute() {
 
 /// The name on the reminder's git user line is a pii pattern literal:
 /// found in the attachment, redacted there and in a quoted copy.
-#[test]
-fn the_git_user_name_is_redacted_from_the_reminder_and_its_quotes() {
+#[tokio::test]
+async fn the_git_user_name_is_redacted_from_the_reminder_and_its_quotes() {
     let session = concat!(
         r#"{"type":"attachment","uuid":"x1","timestamp":"2025-01-01T00:00:00Z","attachment":{"type":"session_context","context":{"gitStatus":"Current branch: main\n\nGit user: Alice Carol\n\nStatus:\n(clean)"}}}"#,
         "\n",
@@ -1558,12 +1568,8 @@ fn the_git_user_name_is_redacted_from_the_reminder_and_its_quotes() {
         "\n",
     );
     let f = fixture_with(session);
-    let publisher = Publisher::with_root(&f.store, &f.publish_root);
-    let id = stage(
-        &publisher,
-        &f.original,
-        &["pii".parse::<FilterSpec>().unwrap()],
-    );
+    let publisher = Publisher::with_root(&f.store, &f.publish_root, registry());
+    let id = stage(&publisher, &f.original, &[filter("pii")]).await;
     let definition = publisher.definition(&id).unwrap();
     let pii: Vec<(&str, &str)> = definition
         .redact
@@ -1584,22 +1590,23 @@ fn the_git_user_name_is_redacted_from_the_reminder_and_its_quotes() {
     );
 }
 
-#[test]
-fn a_literal_inside_a_tool_input_is_a_span() {
+#[tokio::test]
+async fn a_literal_inside_a_tool_input_is_a_span() {
     let f = fixture();
-    let publisher = Publisher::with_root(&f.store, &f.publish_root);
-    let id = stage(&publisher, &f.original, &[]);
+    let publisher = Publisher::with_root(&f.store, &f.publish_root, registry());
+    let id = stage(&publisher, &f.original, &[]).await;
     let key = "sk-ant-api03-PtYgjmUhBel31iEl2hpChYgCfrL1spNxnyVmihA-2O76UMFxFkM-R5Kjp1vRt_1fjORS-6ilI8ihN5KXSc7Tvo-hBKqFYAA";
     let command = "/message/content/0/input/command";
 
     edit(&publisher, &id, |d| {
         d.push_redact(key, "secret", "user:test", true);
         d.push_redact("api03", "secret", "user:test", true);
-    });
+    })
+    .await;
     // The key: a span on line 2 and one in the command on line 3. The
     // substring: a span inside each of them
-    assert_eq!(instances_of(&publisher, &id, key), 2);
-    assert_eq!(instances_of(&publisher, &id, "api03"), 2);
+    assert_eq!(instances_of(&publisher, &id, key).await, 2);
+    assert_eq!(instances_of(&publisher, &id, "api03").await, 2);
 
     let records = changes(&f.publish_root, &id);
     let on_line = |line: u32| -> Vec<&ChangeRecord> {
@@ -1648,8 +1655,9 @@ fn a_literal_inside_a_tool_input_is_a_span() {
     // A literal next to a redacted span is its own marker
     edit(&publisher, &id, |d| {
         d.push_redact("echo", "secret", "user:test", true);
-    });
-    assert_eq!(instances_of(&publisher, &id, "echo"), 1);
+    })
+    .await;
+    assert_eq!(instances_of(&publisher, &id, "echo").await, 1);
     let lines = staged_lines(&f.publish_root, &id);
     assert!(
         lines[2].contains(r#""command":"[REDACTED] [REDACTED]""#),

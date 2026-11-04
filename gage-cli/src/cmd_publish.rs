@@ -14,7 +14,6 @@
 
 use std::cmp::Reverse;
 use std::env;
-use std::fmt;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -23,13 +22,16 @@ use std::sync::Arc;
 
 use clap::{Args, Subcommand};
 use cliclack as cli;
-use gage_core::config::gage_home;
+use console::style;
+use gage_core::config::{Config, FilterConfig, gage_home};
 use gage_core::style::IdHighlighter;
 use gage_core::uuid::short_uuid;
 use gage_publish::{
-    Audience, Filter, FilterSpec, InitArgs as InitRecord, NAMED_FILTERS, Problem, PublishError,
-    Publisher, Staging, TextEntry, Use, candidate,
+    FilterEntry, InitArgs as InitRecord, Problem, PublishError, Publisher, Staging, TextEntry,
+    candidate,
 };
+use gage_registry::filter::{Filter, FilterDef, FilterRegistry, filter_source};
+use gage_registry::scanner::split_scanner_spec;
 use gage_session::{Driver, NativeSession, SkillMode, SkillSession, SourceOptions};
 use gage_store::url::parse_session_origin;
 use gage_store::{
@@ -93,23 +95,14 @@ pub struct PublishRunArgs {
     #[command(flatten)]
     select: SessionFilterArgs,
 
-    /// Audience sessions are published for
+    /// Filter group to apply (repeatable)
     #[arg(
-        short = 'A',
+        short,
         long,
-        value_name = "AUDIENCE",
-        long_help = format!("Audience sessions are published for\n\n{AUDIENCE_HELP}")
+        value_name = "GROUP",
+        long_help = format!("Filter group to apply (repeatable)\n\n{GROUP_HELP}")
     )]
-    audience: Option<String>,
-
-    /// Use sessions are published for
-    #[arg(
-        short = 'U',
-        long,
-        value_name = "USE",
-        long_help = format!("Use sessions are published for\n\n{USE_HELP}")
-    )]
-    r#use: Option<String>,
+    group: Vec<String>,
 
     /// Filter to apply (repeatable)
     #[arg(
@@ -124,10 +117,10 @@ pub struct PublishRunArgs {
     ///
     /// A segment starts without lines and drops nothing until segment
     /// edit gives it lines.
-    #[arg(short = 'g', long, value_name = "TEXT")]
+    #[arg(short = 't', long, value_name = "TEXT")]
     segment: Vec<String>,
 
-    /// Notes about use, audience, segments
+    /// Notes about audience, use, segments
     ///
     /// Read from a file as @PATH.
     #[arg(short = 'N', long, value_name = "TEXT")]
@@ -154,7 +147,7 @@ pub struct PublishRunArgs {
     #[arg(short, long)]
     yes: bool,
 
-    /// Show available named filters and exit
+    /// Show available filters and exit
     #[arg(long, exclusive = true)]
     list_filters: bool,
 
@@ -163,17 +156,10 @@ pub struct PublishRunArgs {
     extra_args: Vec<String>,
 }
 
-/// The paragraph the `--audience` options share.
-const AUDIENCE_HELP: &str = "Selects every filter that lists audience. Values are \"public\" \
-(everyone; requires the most filtering), \"trusted\" (only trusted users; some filtering), \
-and \"self\" (only you can read; no filter lists it). Values are independent: one implies \
-nothing about another, and a value not given selects nothing.";
-
-/// The paragraph the `--use` options share.
-const USE_HELP: &str = "Selects every filter that lists use. Values are \"reading\" (a \
-narrative for reading; entries a reader does not want are left out), \"provenance\" (a \
-record of work; no filter lists it), and \"other\" (another use; no filter lists it). Values \
-are independent: one implies nothing about another, and a value not given selects nothing.";
+/// The paragraph the `--group` options share.
+const GROUP_HELP: &str = "Selects every filter that lists group; see --list-filters for \
+groups each filter lists. Groups are independent: one implies nothing about another, and a \
+group not given selects nothing. A group no filter lists is an error.";
 
 #[derive(Subcommand)]
 pub enum PublishCommand {
@@ -282,23 +268,14 @@ pub struct InitArgs {
     #[command(flatten)]
     select: SessionFilterArgs,
 
-    /// Audience sessions are published for
+    /// Filter group to apply (repeatable)
     #[arg(
-        short = 'A',
+        short,
         long,
-        value_name = "AUDIENCE",
-        long_help = format!("Audience sessions are published for\n\n{AUDIENCE_HELP}")
+        value_name = "GROUP",
+        long_help = format!("Filter group to apply (repeatable)\n\n{GROUP_HELP}")
     )]
-    audience: Option<String>,
-
-    /// Use sessions are published for
-    #[arg(
-        short = 'U',
-        long,
-        value_name = "USE",
-        long_help = format!("Use sessions are published for\n\n{USE_HELP}")
-    )]
-    r#use: Option<String>,
+    group: Vec<String>,
 
     /// Filter to apply (repeatable)
     #[arg(
@@ -313,13 +290,12 @@ pub struct InitArgs {
     ///
     /// A segment starts without lines and drops nothing until
     /// definition gives it lines.
-    #[arg(short = 'g', long, value_name = "TEXT")]
+    #[arg(short = 't', long, value_name = "TEXT")]
     segment: Vec<String>,
 
-    /// Notes about use, audience, segments
+    /// Notes about audience, use, segments
     ///
-    /// Read from a file as @PATH. Recorded in definition with
-    /// audience and use.
+    /// Read from a file as @PATH. Recorded in definition with groups.
     #[arg(short = 'N', long, value_name = "TEXT")]
     notes: Option<String>,
 
@@ -327,17 +303,17 @@ pub struct InitArgs {
     #[arg(short, long)]
     yes: bool,
 
-    /// Show available named filters and exit
+    /// Show available filters and exit
     #[arg(long, exclusive = true)]
     list_filters: bool,
 }
 
 /// The paragraph `--filter` options share on what a filter argument
 /// is.
-const FILTER_HELP: &str = "A filter name; see --list-filters. Filter names are \"custom\", \
-\"harness-context\", \"harness-record\", \"language\", \"pii\", \"secret\", and \
-\"system\". \"custom\" takes a prompt as its whole instruction, so it is added in definition \
-file. A filter given here is added to those --audience and --use select.";
+const FILTER_HELP: &str = "A filter name; see --list-filters. A trailing #{..} overrides filter \
+params, as pii#{ prompt: \"Watch for hosts.\" }. A filter given here is added to those --group \
+selects and replaces a selected filter of the same name. With neither --group nor --filter, a \
+prompt offers every filter with none selected; --yes needs a group or filter.";
 
 #[derive(Args)]
 pub struct ViewArgs {
@@ -518,11 +494,11 @@ pub async fn run(args: PublishArgs) -> Result<(), CliError> {
         }
         PublishCommand::Query(args) => cmd_query::publish(args).await,
         PublishCommand::Show(args) => show(args),
-        PublishCommand::Edit(args) => edit(args),
-        PublishCommand::Refresh(args) => refresh(args),
-        PublishCommand::Candidate(args) => candidate(args),
+        PublishCommand::Edit(args) => edit(args).await,
+        PublishCommand::Refresh(args) => refresh(args).await,
+        PublishCommand::Candidate(args) => candidate(args).await,
         PublishCommand::Abort(args) => abort(args),
-        PublishCommand::Apply(args) => apply(args),
+        PublishCommand::Apply(args) => apply(args).await,
     }
 }
 
@@ -533,17 +509,14 @@ pub async fn run(args: PublishArgs) -> Result<(), CliError> {
 async fn publish_sessions(args: PublishRunArgs) -> Result<(), CliError> {
     let fail = |e: String| CliError::message(format!("gage publish: {e}"));
     if args.list_filters {
-        list_filters();
+        list_filters(&FilterRegistry::load());
         return Ok(());
     }
     check_run_args(&args).map_err(fail)?;
-    let audience = parse_audience("gage publish", args.audience.as_deref())?;
-    let uses = parse_use("gage publish", args.r#use.as_deref())?;
-    // Filters and segments are checked here and handed to the run;
-    // the dialog does not show them
-    for name in &args.filter {
-        parse_filter("gage publish", "--filter", name, None)?;
-    }
+    let registry = FilterRegistry::load();
+    let config = Config::load_user().map_err(|e| fail(format!("reading config: {e}")))?;
+    check_groups("gage publish", &registry, &args.group)?;
+    let specs = resolve_filter_specs("gage publish", &registry, &args.filter)?;
     let segments = args
         .segment
         .iter()
@@ -571,22 +544,7 @@ async fn publish_sessions(args: PublishRunArgs) -> Result<(), CliError> {
             Vec::new()
         };
         let prompt = !args.yes;
-        let audience = match audience {
-            Some(audience) => {
-                dialog::step_value("Audience", audience)?;
-                Some(audience)
-            }
-            None if prompt => Some(prompt_audience()?),
-            None => None,
-        };
-        let uses = match uses {
-            Some(uses) => {
-                dialog::step_value("Use", uses)?;
-                Some(uses)
-            }
-            None if prompt => Some(prompt_use()?),
-            None => None,
-        };
+        let selection = select_filters(&registry, &config.filters, &args.group, &specs, prompt)?;
         let notes = match notes {
             Some(notes) => {
                 dialog::step_value("Notes", value_cell(&notes))?;
@@ -601,9 +559,8 @@ async fn publish_sessions(args: PublishRunArgs) -> Result<(), CliError> {
             dialog::confirm(false, true)?;
         }
         let inputs = InitInputs {
-            audience,
-            uses,
-            filters: &args.filter,
+            groups: &args.group,
+            filters: &selection.specs,
             segments: &segments,
             notes: notes.as_deref(),
         };
@@ -642,10 +599,11 @@ struct PublishSetup {
     model: Option<String>,
 }
 
-/// The publish inputs the dialog settled, as the skill receives them.
+/// The publish inputs the dialog settled, as the skill receives them:
+/// the groups as given, and the `--filter` values as given or the
+/// names chosen in the prompt.
 struct InitInputs<'a> {
-    audience: Option<Audience>,
-    uses: Option<Use>,
+    groups: &'a [String],
     filters: &'a [String],
     segments: &'a [String],
     notes: Option<&'a str>,
@@ -662,14 +620,11 @@ fn skill_args(args: &PublishRunArgs, inputs: &InitInputs<'_>, ids: &[String]) ->
     } else if let Some(source) = &args.source {
         out.extend(["--source".to_string(), source.clone()]);
     }
-    if let Some(audience) = inputs.audience {
-        out.extend(["--audience".to_string(), audience.to_string()]);
+    for group in inputs.groups {
+        out.extend(["--group".to_string(), group.clone()]);
     }
-    if let Some(uses) = inputs.uses {
-        out.extend(["--use".to_string(), uses.to_string()]);
-    }
-    for name in inputs.filters {
-        out.extend(["--filter".to_string(), name.clone()]);
+    for spec in inputs.filters {
+        out.extend(["--filter".to_string(), spec.clone()]);
     }
     for text in inputs.segments {
         out.extend(["--segment".to_string(), text.clone()]);
@@ -693,32 +648,109 @@ fn usage_notice(batch: bool) -> &'static str {
     }
 }
 
-fn prompt_audience() -> Result<Audience, DialogError> {
-    Ok(cli::select("Audience")
-        .item(
-            Audience::Public,
-            "public",
-            "Everyone - requires the most filtering",
-        )
-        .item(
-            Audience::Trusted,
-            "trusted",
-            "Only trusted users - some filtering",
-        )
-        .item(
-            Audience::Private,
-            "self",
-            "Only you can read - filtering not required",
-        )
-        .interact()?)
+/// The filters a publish stages, settled in the dialog. With a group
+/// or a `--filter` value given, the `Groups` and `Filters` steps show
+/// what they select. With neither, a prompt offers every filter with
+/// none selected, and a run that cannot prompt fails.
+fn select_filters<'a>(
+    registry: &'a FilterRegistry,
+    config: &FilterConfig,
+    groups: &[String],
+    specs: &'a [ResolvedSpec<'a>],
+    prompt: bool,
+) -> Result<FilterSelection<'a>, DialogError> {
+    if groups.is_empty() && specs.is_empty() {
+        if !prompt {
+            return Err(DialogError::Failed(
+                "A filter or group is required; see --list-filters".to_string(),
+            ));
+        }
+        let names = prompt_filter_multiselect(registry)?;
+        if names.is_empty() {
+            return Err(DialogError::Failed("No filters selected".to_string()));
+        }
+        let filters = names
+            .iter()
+            .map(|name| {
+                let def = registry
+                    .get_def(name)
+                    .expect("the prompt offers registry names");
+                Filter::from_spec(def, config, None, name)
+                    .map_err(|e| DialogError::Failed(e.to_string()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        return Ok(FilterSelection {
+            filters,
+            specs: names,
+        });
+    }
+    if !groups.is_empty() {
+        dialog::step_list("Groups", groups.iter().cloned())?;
+    }
+    let filters = selected_filters(registry, config, groups, specs).map_err(DialogError::Failed)?;
+    dialog::step_list("Filters", filters.iter().map(|f| f.def.name.clone()))?;
+    Ok(FilterSelection {
+        filters,
+        specs: specs.iter().map(|s| s.spec.to_string()).collect(),
+    })
 }
 
-fn prompt_use() -> Result<Use, DialogError> {
-    Ok(cli::select("Use")
-        .item(Use::Reading, "reading", "Share as a narrative for reading")
-        .item(Use::Provenance, "provenance", "Export as a record of work")
-        .item(Use::Other, "other", "Another use")
-        .interact()?)
+/// What the dialog settled: the filters to stage, and the `--filter`
+/// values that spell them for the skill.
+struct FilterSelection<'a> {
+    filters: Vec<Filter<'a>>,
+    specs: Vec<String>,
+}
+
+/// The filters `groups` select in listing order, each once, then each
+/// of `specs`, replacing a selected filter of the same name or
+/// following the rest.
+fn selected_filters<'a>(
+    registry: &'a FilterRegistry,
+    config: &FilterConfig,
+    groups: &[String],
+    specs: &'a [ResolvedSpec<'a>],
+) -> Result<Vec<Filter<'a>>, String> {
+    let mut filters: Vec<Filter<'a>> = Vec::new();
+    for group in groups {
+        for def in registry.group_members(group) {
+            if filters.iter().any(|f| f.def.name == def.name) {
+                continue;
+            }
+            let filter =
+                Filter::from_spec(def, config, None, &def.name).map_err(|e| e.to_string())?;
+            filters.push(filter);
+        }
+    }
+    for spec in specs {
+        let filter = spec.filter(config)?;
+        match filters.iter_mut().find(|f| f.def.name == filter.def.name) {
+            Some(selected) => *selected = filter,
+            None => filters.push(filter),
+        }
+    }
+    Ok(filters)
+}
+
+/// Multi-select over every filter with none selected. The hint shown
+/// for each item is the first line of the filter's description.
+fn prompt_filter_multiselect(registry: &FilterRegistry) -> Result<Vec<String>, DialogError> {
+    let defs = registry.list();
+    let mut prompt = cli::multiselect("Filters");
+    for (i, def) in defs.iter().enumerate() {
+        let hint = def.description.lines().next().unwrap_or("").to_string();
+        prompt = prompt.item(i, def.name.clone(), hint);
+    }
+    let indices: Vec<usize> = prompt.interact()?;
+    Ok(indices
+        .into_iter()
+        .map(|i| {
+            defs.get(i)
+                .expect("selected index points into defs")
+                .name
+                .clone()
+        })
+        .collect())
 }
 
 /// The notes prompt; `None` when nothing was entered.
@@ -732,8 +764,8 @@ fn prompt_notes() -> Result<Option<String>, DialogError> {
 }
 
 /// The rule clap does not express: `--batch` runs without a session
-/// to ask in, so it needs a session selection and a filter or a
-/// segment. An interactive run takes whatever is given.
+/// to ask in, so it needs a session selection and a group, a filter,
+/// or a segment. An interactive run takes whatever is given.
 fn check_run_args(args: &PublishRunArgs) -> Result<(), String> {
     if !args.batch {
         return Ok(());
@@ -741,8 +773,8 @@ fn check_run_args(args: &PublishRunArgs) -> Result<(), String> {
     if !selects_sessions(args) {
         return Err("--batch requires a session selection".to_string());
     }
-    if args.filter.is_empty() && args.segment.is_empty() {
-        return Err("--batch requires a filter or segment".to_string());
+    if args.group.is_empty() && args.filter.is_empty() && args.segment.is_empty() {
+        return Err("--batch requires a group, filter, or segment".to_string());
     }
     Ok(())
 }
@@ -811,7 +843,7 @@ fn list() -> Result<(), CliError> {
         .iter()
         .map(|s| s.to_string())
         .collect();
-    let publisher = Publisher::new(&store);
+    let publisher = Publisher::new(&store, FilterRegistry::load());
     let rows = pending_rows(pending, &ids, &origins, |id| {
         redaction_count(&publisher, id)
     })
@@ -887,25 +919,22 @@ fn origin_cell(origin: &str, highlighter: &IdHighlighter) -> String {
 }
 
 /// Stage a publish per selected session after confirmation. The
-/// sessions are resolved before the dialog opens, so a bad argument
-/// fails without a prompt, and a native session is added to the store
-/// only after the user confirms.
+/// sessions, groups, and filters are resolved before the dialog opens,
+/// so a bad argument fails without a prompt, and a native session is
+/// added to the store only after the user confirms.
 async fn init(args: InitArgs) -> Result<(), CliError> {
     let fail = |e: String| CliError::message(format!("gage publish init: {e}"));
     if args.list_filters {
-        list_filters();
+        list_filters(&FilterRegistry::load());
         return Ok(());
     }
     check_init_args(&args).map_err(fail)?;
     let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
-    let audience = parse_audience("gage publish init", args.audience.as_deref())?;
-    let uses = parse_use("gage publish init", args.r#use.as_deref())?;
-    let added = args
-        .filter
-        .iter()
-        .map(|name| parse_filter("gage publish init", "--filter", name, None))
-        .collect::<Result<Vec<_>, _>>()?;
-    let filters = selected_filters(audience, uses, added);
+    let publisher = Publisher::new(&store, FilterRegistry::load());
+    let registry = publisher.filters();
+    let config = Config::load_user().map_err(|e| fail(format!("reading config: {e}")))?;
+    check_groups("gage publish init", registry, &args.group)?;
+    let specs = resolve_filter_specs("gage publish init", registry, &args.filter)?;
     let segments = args
         .segment
         .iter()
@@ -925,8 +954,7 @@ async fn init(args: InitArgs) -> Result<(), CliError> {
         })
         .transpose()?;
     let record = InitRecord {
-        audience: audience.map(|a| a.to_string()),
-        uses: uses.map(|u| u.to_string()),
+        groups: args.group.clone(),
         notes,
     };
     let originals = resolve_originals(
@@ -944,18 +972,17 @@ async fn init(args: InitArgs) -> Result<(), CliError> {
     } else {
         "Publish sessions"
     };
-    dialog::run(title, || {
+    dialog::run_async(title, || async {
         originals.preview()?;
-        if let Some(audience) = audience {
-            dialog::step_value("Audience", audience)?;
-        }
-        if let Some(uses) = uses {
-            dialog::step_value("Use", uses)?;
-        }
+        let selection = select_filters(registry, &config.filters, &args.group, &specs, !args.yes)?;
+        let filters: Vec<FilterEntry> = selection
+            .filters
+            .iter()
+            .map(FilterEntry::from_filter)
+            .collect();
         if let Some(notes) = &record.notes {
             dialog::step_value("Notes", value_cell(notes))?;
         }
-        filters_step(&filters)?;
         if !segments.is_empty() {
             dialog::step_list("Segments", segments.iter().map(|s| value_cell(s)))?;
         }
@@ -965,14 +992,14 @@ async fn init(args: InitArgs) -> Result<(), CliError> {
                 return Err(DialogError::Canceled);
             }
         }
-        let publisher = Publisher::new(&store);
         let total = originals.len();
         let mut staged: Vec<String> = Vec::new();
         for original in originals.into_stored(&store) {
-            let stage = || -> Result<String, String> {
+            let stage = async {
                 let record_of = original?;
                 let outcome = publisher
                     .init(&record_of, &filters, &segments, &author, &record)
+                    .await
                     .map_err(|e| e.to_string())?;
                 cli::log::info(format!(
                     "Staged publish {} of session {}",
@@ -980,10 +1007,12 @@ async fn init(args: InitArgs) -> Result<(), CliError> {
                     short_uuid(&record_of.id)
                 ))
                 .map_err(|e| e.to_string())?;
-                report_filter_redactions(&publisher, &outcome.id).map_err(|e| e.to_string())?;
-                Ok(outcome.id)
+                report_filter_redactions(&publisher, &outcome.id)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Ok::<String, String>(outcome.id)
             };
-            match stage() {
+            match stage.await {
                 Ok(id) => staged.push(id),
                 Err(e) if staged.is_empty() => return Err(DialogError::Failed(e)),
                 Err(e) => {
@@ -998,6 +1027,7 @@ async fn init(args: InitArgs) -> Result<(), CliError> {
         }
         .into())
     })
+    .await
 }
 
 /// The rule clap does not express: a session or a selection option is
@@ -1028,14 +1058,15 @@ fn edit_author(explicit: Option<&str>) -> String {
     }
 }
 
-/// Print the named filters as a table, the way `gage scan
-/// --list-scanners` prints scanners.
-fn list_filters() {
-    let header: Vec<String> = ["Filter", "Audience", "Use", "Description"]
+/// Print the filters as a table, the way `gage scan --list-scanners`
+/// prints scanners, then the files that failed to parse and the
+/// declarations with problems.
+fn list_filters(registry: &FilterRegistry) {
+    let header: Vec<String> = ["Filter", "Source", "Groups", "Description"]
         .iter()
         .map(|s| s.to_string())
         .collect();
-    let rows = filter_rows();
+    let rows = filter_rows(registry);
     let mut table = Table::from_iter(std::iter::once(header).chain(rows));
     table.with(Style::rounded());
     if let Some(width) = style::stdout_width() {
@@ -1051,124 +1082,136 @@ fn list_filters() {
             Columns::one(0).not(Rows::first()),
             style::tty(Color::FG_BRIGHT_YELLOW),
         )
-        .modify(Columns::one(3).not(Rows::first()), style::dim());
+        .modify(Columns::new(1..).not(Rows::first()), style::dim());
     println!("{table}");
+
+    let errors: Vec<_> = registry.parse_errors().collect();
+    if !errors.is_empty() {
+        println!();
+        eprintln!(
+            "{}",
+            style(format!("{} filter file(s) failed to parse:", errors.len()))
+                .red()
+                .bold()
+        );
+        for (path, rendered) in errors {
+            eprintln!();
+            eprintln!("{}", style(path.display()).yellow());
+            eprintln!("{rendered}");
+        }
+    }
+
+    let invalid: Vec<&FilterDef> = registry
+        .list()
+        .into_iter()
+        .filter(|d| !d.problems.is_empty())
+        .collect();
+    if !invalid.is_empty() {
+        println!();
+        eprintln!(
+            "{}",
+            style(format!(
+                "{} filter(s) have an invalid FILTER declaration:",
+                invalid.len()
+            ))
+            .red()
+            .bold()
+        );
+        for def in invalid {
+            eprintln!();
+            eprintln!("{}", style(def.path.display()).yellow());
+            eprintln!("{}", def.render_problems());
+        }
+    }
 }
 
-/// One row per named filter: name, the audiences and uses it lists
-/// (empty when it lists none), and description.
-fn filter_rows() -> Vec<Vec<String>> {
-    fn joined<T: fmt::Display>(values: &[T]) -> String {
-        values
-            .iter()
-            .map(|v| v.to_string())
-            .collect::<Vec<_>>()
-            .join(", ")
-    }
-    Filter::all()
-        .iter()
-        .map(|f| {
+/// One row per filter, by name: name, where its file lives, the
+/// groups it lists (empty when it lists none), and description.
+fn filter_rows(registry: &FilterRegistry) -> Vec<Vec<String>> {
+    registry
+        .list()
+        .into_iter()
+        .map(|d| {
             vec![
-                f.name.to_string(),
-                joined(&f.audience),
-                joined(&f.uses),
-                f.description.to_string(),
+                d.name.clone(),
+                filter_source(&d.path).to_string(),
+                d.groups.join(", "),
+                d.description.clone(),
             ]
         })
         .collect()
 }
 
-/// The audience `text` names, `None` when there is none. A name
-/// outside the list is a usage error in clap's layout.
-fn parse_audience(command: &str, text: Option<&str>) -> Result<Option<Audience>, CliError> {
-    let Some(text) = text else {
-        return Ok(None);
-    };
-    if !Audience::NAMES.contains(&text) {
-        return Err(CliError::invalid_value(
-            command,
-            "--audience",
-            text,
-            Audience::NAMES,
-        ));
-    }
-    Ok(Some(text.parse().expect("a listed audience name parses")))
+/// One `--filter` value resolved against the registry.
+struct ResolvedSpec<'a> {
+    def: &'a FilterDef,
+    /// The `#{...}` params override, when given
+    params: Option<&'a str>,
+    /// The value as the user gave it, for diagnostics
+    spec: &'a str,
 }
 
-/// The use `text` names, `None` when there is none. A name outside
-/// the list is a usage error in clap's layout.
-fn parse_use(command: &str, text: Option<&str>) -> Result<Option<Use>, CliError> {
-    let Some(text) = text else {
-        return Ok(None);
-    };
-    if !Use::NAMES.contains(&text) {
-        return Err(CliError::invalid_value(command, "--use", text, Use::NAMES));
+impl ResolvedSpec<'_> {
+    /// The filter with the config's params and its params override
+    /// applied.
+    fn filter(&self, config: &FilterConfig) -> Result<Filter<'_>, String> {
+        Filter::from_spec(self.def, config, self.params, self.spec).map_err(|e| e.to_string())
     }
-    Ok(Some(text.parse().expect("a listed use name parses")))
 }
 
-/// A filter argument: a filter name, with the prompt read through
-/// `@PATH`. A name outside the named filters is a usage error in
-/// clap's layout, since the argument accepts any text and the names
-/// are checked here; a filter that requires a prompt and has none is
-/// a plain error.
-fn parse_filter(
+/// Resolve every `--filter` value, in order. A value is a filter name
+/// with an optional `#{...}` params override. A name outside the
+/// registry is a usage error in clap's layout, since the argument
+/// accepts any text and the names are the registry's to decide; a
+/// filter named twice is a plain error.
+fn resolve_filter_specs<'a>(
     command: &str,
-    option: &str,
-    name: &str,
-    prompt: Option<&str>,
-) -> Result<FilterSpec, CliError> {
-    if !NAMED_FILTERS.contains(&name) {
-        return Err(CliError::invalid_value(
-            command,
-            option,
-            name,
-            NAMED_FILTERS,
-        ));
+    registry: &'a FilterRegistry,
+    specs: &'a [String],
+) -> Result<Vec<ResolvedSpec<'a>>, CliError> {
+    let mut out: Vec<ResolvedSpec<'a>> = Vec::with_capacity(specs.len());
+    for spec in specs {
+        let (name, params) = split_scanner_spec(spec);
+        let Some(def) = registry.get_def(name) else {
+            return Err(CliError::invalid_value(
+                command,
+                "--filter",
+                name,
+                &registry.names(),
+            ));
+        };
+        if out.iter().any(|r| r.def.name == def.name) {
+            return Err(CliError::message(format!(
+                "{command}: filter {name:?} given more than once"
+            )));
+        }
+        out.push(ResolvedSpec { def, params, spec });
     }
-    let prompt = prompt
-        .map(|p| text_value(command, "--prompt", p))
-        .transpose()
-        .map_err(|e| CliError::message(format!("{command}: {e}")))?;
-    FilterSpec::new(name, prompt.map(|p| p.trim_end().to_string()))
-        .map_err(|e| CliError::message(format!("{command}: {e}")))
+    Ok(out)
 }
 
-/// The filters an init stages: those `audience` or `uses` selects, in
-/// listing order, then each of `added` not already among them.
-fn selected_filters(
-    audience: Option<Audience>,
-    uses: Option<Use>,
-    added: Vec<FilterSpec>,
-) -> Vec<FilterSpec> {
-    let mut filters: Vec<FilterSpec> = Filter::selected(audience, uses)
-        .into_iter()
-        .map(|f| {
-            FilterSpec::new(f.name, None)
-                .expect("custom lists no value, so no selected filter needs a prompt")
-        })
-        .collect();
-    for spec in added {
-        if !filters.iter().any(|f| f.name == spec.name) {
-            filters.push(spec);
+/// Every group in `groups` is one some filter lists. A group outside
+/// them is a usage error in clap's layout, since the argument accepts
+/// any text and the groups are the registry's to decide.
+fn check_groups(
+    command: &str,
+    registry: &FilterRegistry,
+    groups: &[String],
+) -> Result<(), CliError> {
+    let known = registry.groups();
+    for group in groups {
+        if !known.contains(&group.as_str()) {
+            return Err(CliError::invalid_value(command, "--group", group, &known));
         }
     }
-    filters
+    Ok(())
 }
 
-/// The `Filters` step of the dialog: one line per filter, or `None`.
-fn filters_step(filters: &[FilterSpec]) -> io::Result<()> {
-    if filters.is_empty() {
-        return dialog::step_none("Filters");
-    }
-    dialog::step_list("Filters", filters.iter().map(|f| f.to_string()))
-}
-
-/// Report what the named filters found: the text redactions each
-/// recorded and the spans they produce.
-fn report_filter_redactions(publisher: &Publisher<'_>, id: &str) -> Result<(), PublishError> {
+/// Report what the filters found: the text redactions each recorded
+/// and the spans they produce.
+async fn report_filter_redactions(publisher: &Publisher<'_>, id: &str) -> Result<(), PublishError> {
     let definition = publisher.definition(id)?;
-    let counts = publisher.instances(id)?;
+    let counts = publisher.instances(id).await?;
     let by_filter: Vec<(String, usize, usize)> = definition
         .filters
         .iter()
@@ -1210,7 +1253,7 @@ fn report_filter_redactions(publisher: &Publisher<'_>, id: &str) -> Result<(), P
 fn show(args: ShowArgs) -> Result<(), CliError> {
     let fail = |e: String| CliError::message(format!("gage publish show: {e}"));
     let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
-    let publisher = Publisher::new(&store);
+    let publisher = Publisher::new(&store, FilterRegistry::load());
     let pending = publisher
         .staging()
         .get(&args.session)
@@ -1236,10 +1279,10 @@ fn diagnostic(path: &Path, problem: &Problem) -> String {
 /// Open the definition file in the editor and rebuild when the editor
 /// exits. The editor save is the confirmation. A file the editor left
 /// as it was rebuilds nothing.
-fn edit(args: EditArgs) -> Result<(), CliError> {
+async fn edit(args: EditArgs) -> Result<(), CliError> {
     let fail = |e: String| CliError::message(format!("gage publish edit: {e}"));
     let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
-    let publisher = Publisher::new(&store);
+    let publisher = Publisher::new(&store, FilterRegistry::load());
     let pending = publisher
         .staging()
         .get(&args.session)
@@ -1283,7 +1326,8 @@ fn edit(args: EditArgs) -> Result<(), CliError> {
             title.as_deref(),
             &redactions,
             !args.yes,
-        );
+        )
+        .await;
     }
     let read =
         |path: &PathBuf| fs::read(path).map_err(|e| fail(format!("{}: {e}", path.display())));
@@ -1314,6 +1358,7 @@ fn edit(args: EditArgs) -> Result<(), CliError> {
         &[],
         false,
     )
+    .await
 }
 
 /// The redaction rows a `--redact` value carries. The value is `-`
@@ -1395,10 +1440,10 @@ fn read_redact_input(command: &str, value: &str) -> Result<String, String> {
 }
 
 /// Rebuild a pending publish from its definition after confirmation.
-fn refresh(args: RefreshArgs) -> Result<(), CliError> {
+async fn refresh(args: RefreshArgs) -> Result<(), CliError> {
     let fail = |e: String| CliError::message(format!("gage publish refresh: {e}"));
     let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
-    let publisher = Publisher::new(&store);
+    let publisher = Publisher::new(&store, FilterRegistry::load());
     let pending = publisher
         .staging()
         .get(&args.session)
@@ -1412,6 +1457,7 @@ fn refresh(args: RefreshArgs) -> Result<(), CliError> {
         &[],
         !args.yes,
     )
+    .await
 }
 
 /// The dialog that rebuilds `pending` from its definition: the
@@ -1420,7 +1466,7 @@ fn refresh(args: RefreshArgs) -> Result<(), CliError> {
 /// redaction that matches nothing reported by its position. A
 /// definition with problems ends the dialog, and the problems follow
 /// it one per line as `edit --check` prints them.
-fn refresh_dialog(
+async fn refresh_dialog(
     heading: &str,
     publisher: &Publisher<'_>,
     pending: &ExternalSessionRecord,
@@ -1431,7 +1477,7 @@ fn refresh_dialog(
 ) -> Result<(), CliError> {
     let path = publisher.staging().definition_file(&pending.id);
     let mut problems = Vec::new();
-    let result = dialog::run(heading, || {
+    let result = dialog::run_async(heading, || async {
         dialog::step_value("Session", short_uuid(&pending.id))?;
         let mut definition = publisher.definition(&pending.id).map_err(|e| match e {
             PublishError::Definition(found) => {
@@ -1468,7 +1514,9 @@ fn refresh_dialog(
         }
         let spinner = cli::spinner();
         spinner.start("Refreshing session");
-        let refreshed = publisher.edit(&pending.id, author, new_title, redactions);
+        let refreshed = publisher
+            .edit(&pending.id, author, new_title, redactions)
+            .await;
         spinner.clear();
         let refreshed = refreshed.map_err(|e| DialogError::Failed(e.to_string()))?;
         for (position, literal) in &refreshed.unmatched {
@@ -1480,7 +1528,8 @@ fn refresh_dialog(
             count(refreshed.instances, "instance")
         )
         .into())
-    });
+    })
+    .await;
     for problem in &problems {
         eprintln!("{}", diagnostic(&path, problem));
     }
@@ -1490,28 +1539,27 @@ fn refresh_dialog(
 /// List the text values open to redaction, one per line where the
 /// value fits, else as a header with the text indented below it, or
 /// the redaction instructions of the definition's filters.
-fn candidate(args: CandidateArgs) -> Result<(), CliError> {
+async fn candidate(args: CandidateArgs) -> Result<(), CliError> {
     let fail = |e: String| CliError::message(format!("gage publish candidate: {e}"));
     let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
-    let publisher = Publisher::new(&store);
+    let publisher = Publisher::new(&store, FilterRegistry::load());
     let pending = publisher
         .staging()
         .get(&args.session)
         .map_err(|e| fail(e.to_string()))?;
+    let path = publisher.staging().definition_file(&pending.id);
     if args.instructions {
-        let path = publisher.staging().definition_file(&pending.id);
-        let definition = publisher
-            .definition(&pending.id)
+        let markdown = publisher
+            .instructions(&pending.id)
+            .await
             .map_err(|e| fail(definition_failure(&path, &e)))?;
-        let markdown = definition
-            .instructions_markdown()
-            .map_err(|e| fail(e.to_string()))?;
         print!("{markdown}");
         return Ok(());
     }
     let texts = publisher
         .candidate_texts(&pending.id)
-        .map_err(|e| fail(e.to_string()))?;
+        .await
+        .map_err(|e| fail(definition_failure(&path, &e)))?;
     let splits = candidate::splits(&texts, args.split.unwrap_or(DEFAULT_SPLIT_BYTES));
     if args.split_files || args.split_files_dir.is_some() {
         let dir = args
@@ -1587,10 +1635,10 @@ fn abort(args: AbortArgs) -> Result<(), CliError> {
 /// Publish a pending publish after confirmation. The staged session is
 /// checked and the tag's availability confirmed before the dialog
 /// opens, so a refusal leaves the store untouched and shows no prompt.
-fn apply(args: ApplyArgs) -> Result<(), CliError> {
+async fn apply(args: ApplyArgs) -> Result<(), CliError> {
     let fail = |e: String| CliError::message(format!("gage publish apply: {e}"));
     let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
-    let publisher = Publisher::new(&store);
+    let publisher = Publisher::new(&store, FilterRegistry::load());
     let pending = publisher
         .staging()
         .get(&args.session)
@@ -1601,6 +1649,7 @@ fn apply(args: ApplyArgs) -> Result<(), CliError> {
         .map_err(|e| fail(definition_failure(&path, &e)))?;
     publisher
         .verify(&pending.id, args.force)
+        .await
         .map_err(|e| match e {
             PublishError::Unchanged => fail(format!("{e} (use --force to publish it unchanged)")),
             e => fail(e.to_string()),
@@ -1615,11 +1664,12 @@ fn apply(args: ApplyArgs) -> Result<(), CliError> {
     }
     let instances: usize = publisher
         .instances(&pending.id)
+        .await
         .map_err(|e| fail(e.to_string()))?
         .values()
         .sum();
 
-    dialog::run("Apply publish", || {
+    dialog::run_async("Apply publish", || async {
         dialog::step_value("Session", short_uuid(&pending.id))?;
         dialog::step_value("Origin", &pending.attrs.origin)?;
         dialog::step_value(
@@ -1643,6 +1693,7 @@ fn apply(args: ApplyArgs) -> Result<(), CliError> {
         }
         publisher
             .apply(&pending.id, args.force)
+            .await
             .map_err(|e| DialogError::Failed(e.to_string()))?;
         if let Some(name) = &args.tag {
             let added = tags
@@ -1662,6 +1713,7 @@ fn apply(args: ApplyArgs) -> Result<(), CliError> {
         }
         Ok(format!("Published session {}", short_uuid(&pending.id)).into())
     })
+    .await
 }
 
 /// The sessions a publish starts from, resolved but not yet written.
@@ -1795,39 +1847,80 @@ mod tests {
     use super::*;
     use crate::{Cli, Command};
 
+    /// The registry over the filters this repository ships.
+    fn registry() -> FilterRegistry {
+        let builtin = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../filters"));
+        FilterRegistry::load_from_roots(&builtin, vec![builtin.clone()])
+    }
+
     /// An unknown filter name reports as clap reports a value outside
-    /// a known set, naming the argument as its help does, the valid
-    /// names, and the nearest one; an instruction is not a name.
+    /// a known set, naming the argument as its help does, the names,
+    /// and the nearest one; a filter given twice is a plain error.
     #[test]
     fn unknown_filter_name_is_a_usage_error_in_claps_layout() {
-        let rendered = match parse_filter("gage publish init", "--filter", "secrets", None) {
+        let registry = registry();
+        let specs = ["secrets".to_string()];
+        let rendered = match resolve_filter_specs("gage publish init", &registry, &specs) {
             Err(CliError::Usage(e)) => {
                 assert_eq!(e.exit_code(), 2);
                 e.render().to_string()
             }
             Err(_) => panic!("not a usage error"),
-            Ok(f) => panic!("{f} parsed"),
+            Ok(_) => panic!("secrets resolved"),
         };
         assert!(
             rendered.contains("invalid value 'secrets' for '--filter <FILTER>'"),
             "{rendered}"
         );
         assert!(
-            rendered.contains(
-                "[possible values: custom, harness-context, harness-record, language, pii, secret, system]"
-            ),
+            rendered.contains("[possible values: harness, language, pii, secret, system]"),
             "{rendered}"
         );
         assert!(
             rendered.contains("a similar value exists: 'secret'"),
             "{rendered}"
         );
-        assert!(parse_filter("gage publish init", "--filter", "pii", None).is_ok());
-        let custom = parse_filter("gage publish init", "--filter", "custom", None);
+        let specs = ["secret".to_string(), "secret#{ prompt: \"x\" }".to_string()];
+        let message = match resolve_filter_specs("gage publish init", &registry, &specs) {
+            Err(CliError::Exit {
+                message: Some(m), ..
+            }) => m,
+            Err(_) => panic!("not a plain error"),
+            Ok(_) => panic!("a duplicate resolved"),
+        };
+        assert!(message.contains("given more than once"), "{message}");
+    }
+
+    /// A group no filter lists reports as clap reports a value outside
+    /// a known set, naming the argument as its help does and the
+    /// groups the filters list.
+    #[test]
+    fn unknown_group_is_a_usage_error_in_claps_layout() {
+        let registry = registry();
+        let rendered = match check_groups("gage publish init", &registry, &["everyone".into()]) {
+            Err(CliError::Usage(e)) => {
+                assert_eq!(e.exit_code(), 2);
+                e.render().to_string()
+            }
+            Err(_) => panic!("not a usage error"),
+            Ok(()) => panic!("everyone passed"),
+        };
         assert!(
-            matches!(custom, Err(CliError::Exit { message: Some(ref m), .. }) if m.contains("requires a prompt")),
-            "custom without a prompt is a plain error"
+            rendered.contains("invalid value 'everyone' for '--group <GROUP>'"),
+            "{rendered}"
         );
+        assert!(
+            rendered.contains("[possible values: public, reading, trusted]"),
+            "{rendered}"
+        );
+        assert!(matches!(
+            check_groups(
+                "gage publish init",
+                &registry,
+                &["public".into(), "reading".into()],
+            ),
+            Ok(())
+        ));
     }
 
     /// The publish commands live under `gage publish`, not `gage
@@ -1851,23 +1944,22 @@ mod tests {
         let args = init_args(&[
             "abc",
             "def",
-            "-g",
+            "-t",
             "The question",
             "--segment",
             "The reply",
             "-N",
             "For the blog",
-            "-A",
+            "-g",
             "public",
-            "-U",
+            "--group",
             "reading",
             "-y",
         ]);
         assert_eq!(args.sessions, ["abc", "def"]);
         assert_eq!(args.segment, ["The question", "The reply"]);
         assert_eq!(args.notes.as_deref(), Some("For the blog"));
-        assert_eq!(args.audience.as_deref(), Some("public"));
-        assert_eq!(args.r#use.as_deref(), Some("reading"));
+        assert_eq!(args.group, ["public", "reading"]);
         assert!(args.yes && !args.stored);
         assert_eq!(check_init_args(&args), Ok(()));
         let args = init_args(&["-S", "--days", "7", "-f", "secret"]);
@@ -1878,7 +1970,7 @@ mod tests {
         let args = init_args(&["-s", "claude:/tmp/claude", "--all"]);
         assert_eq!(args.source.as_deref(), Some("claude:/tmp/claude"));
         assert!(args.select.all);
-        let args = init_args(&["-A", "public"]);
+        let args = init_args(&["-g", "public"]);
         assert_eq!(
             check_init_args(&args),
             Err("SESSION or a selection option is required".to_string())
@@ -2044,13 +2136,13 @@ mod tests {
         let args = run_args(&[
             "abc",
             "def",
-            "-A",
+            "-g",
             "public",
-            "-U",
+            "-g",
             "reading",
             "-f",
             "pii",
-            "-g",
+            "-t",
             "The question",
             "-N",
             "For the blog",
@@ -2062,8 +2154,7 @@ mod tests {
             "--verbose",
         ]);
         assert_eq!(args.sessions, ["abc", "def"]);
-        assert_eq!(args.audience.as_deref(), Some("public"));
-        assert_eq!(args.r#use.as_deref(), Some("reading"));
+        assert_eq!(args.group, ["public", "reading"]);
         assert_eq!(args.filter, ["pii"]);
         assert_eq!(args.segment, ["The question"]);
         assert_eq!(args.notes.as_deref(), Some("For the blog"));
@@ -2078,15 +2169,14 @@ mod tests {
         assert!(args.select.all);
         run_args(&["--list-filters"]);
         run_args(&[]);
-        Cli::try_parse_from([
-            "gage", "publish", "init", "-A", "public", "-U", "reading", "abc",
-        ])
-        .unwrap();
+        Cli::try_parse_from(["gage", "publish", "init", "-g", "public", "abc"]).unwrap();
         for argv in [
             vec!["abc", "--days", "7"],
             vec!["--source", "claude:/tmp/claude", "--stored", "abc"],
             vec!["--list-filters", "abc"],
             vec!["-a", "public", "abc"],
+            vec!["-A", "public", "abc"],
+            vec!["-U", "reading", "abc"],
         ] {
             assert!(
                 Cli::try_parse_from([&["gage", "publish"], &argv[..]].concat()).is_err(),
@@ -2106,10 +2196,18 @@ mod tests {
             };
             run_args
         };
-        let args = run_args(&["--source", "claude:/tmp/c", "--days", "7", "-f", "pii"]);
+        let args = run_args(&[
+            "--source",
+            "claude:/tmp/c",
+            "--days",
+            "7",
+            "-g",
+            "public",
+            "-f",
+            "pii#{ prompt: \"Watch for hosts.\" }",
+        ]);
         let inputs = InitInputs {
-            audience: Some(Audience::Public),
-            uses: Some(Use::Reading),
+            groups: &args.group,
             filters: &args.filter,
             segments: &["The question".to_string()],
             notes: Some("For the blog"),
@@ -2120,12 +2218,10 @@ mod tests {
             [
                 "--source",
                 "claude:/tmp/c",
-                "--audience",
+                "--group",
                 "public",
-                "--use",
-                "reading",
                 "--filter",
-                "pii",
+                "pii#{ prompt: \"Watch for hosts.\" }",
                 "--segment",
                 "The question",
                 "--notes",
@@ -2136,8 +2232,7 @@ mod tests {
         );
         let args = run_args(&["-S"]);
         let inputs = InitInputs {
-            audience: None,
-            uses: None,
+            groups: &[],
             filters: &[],
             segments: &[],
             notes: None,
@@ -2152,10 +2247,10 @@ mod tests {
         assert!(usage_notice(false).starts_with("You are about to start an interactive session"));
         assert!(usage_notice(true).starts_with("You are about to publish sessions"));
     }
-    /// `--batch` needs a session selection and a filter or a segment;
-    /// an interactive run needs neither.
+    /// `--batch` needs a session selection and a group, a filter, or
+    /// a segment; an interactive run needs neither.
     #[test]
-    fn batch_needs_a_selection_and_a_filter_or_segment() {
+    fn batch_needs_a_selection_and_a_group_filter_or_segment() {
         let check = |argv: &[&str]| {
             let cli = Cli::try_parse_from([&["gage", "publish"], argv].concat()).unwrap();
             let Command::Publish(PublishArgs { run_args, .. }) = cli.command else {
@@ -2164,7 +2259,8 @@ mod tests {
             check_run_args(&run_args)
         };
         assert_eq!(check(&["-b", "abc", "-f", "pii"]), Ok(()));
-        assert_eq!(check(&["-b", "--days", "7", "-g", "The question"]), Ok(()));
+        assert_eq!(check(&["-b", "abc", "-g", "public"]), Ok(()));
+        assert_eq!(check(&["-b", "--days", "7", "-t", "The question"]), Ok(()));
         assert_eq!(check(&[]), Ok(()));
         assert_eq!(check(&["abc"]), Ok(()));
         assert_eq!(check(&["-f", "pii"]), Ok(()));
@@ -2174,11 +2270,11 @@ mod tests {
         );
         assert_eq!(
             check(&["-b", "abc"]),
-            Err("--batch requires a filter or segment".to_string())
+            Err("--batch requires a group, filter, or segment".to_string())
         );
         assert_eq!(
             check(&["-b", "--days", "7"]),
-            Err("--batch requires a filter or segment".to_string())
+            Err("--batch requires a group, filter, or segment".to_string())
         );
     }
     #[test]
@@ -2348,74 +2444,67 @@ mod tests {
             "claude:/home/u/.claude/abc"
         );
     }
+    /// The listing has one row per filter by name, with its source,
+    /// the groups it lists, and a description.
     #[test]
-    fn filter_rows_list_every_named_filter_with_its_values_and_a_description() {
-        let rows = filter_rows();
-        let mut names: Vec<&str> = rows.iter().map(|r| r[0].as_str()).collect();
-        names.sort_unstable();
-        let mut expected = NAMED_FILTERS.to_vec();
-        expected.sort_unstable();
-        assert_eq!(names, expected);
+    fn filter_rows_list_every_filter_with_its_source_groups_and_description() {
+        let registry = registry();
+        let rows = filter_rows(&registry);
+        let names: Vec<&str> = rows.iter().map(|r| r[0].as_str()).collect();
+        assert_eq!(names, registry.names());
         assert!(rows.iter().all(|r| r.len() == 4 && !r[3].is_empty()));
         let row = |name: &str| rows.iter().find(|r| r[0] == name).unwrap();
-        assert_eq!(row("secret")[1], "public, trusted");
-        assert_eq!(row("secret")[2], "");
-        assert_eq!(row("harness-context")[1], "");
-        assert_eq!(row("harness-context")[2], "reading");
-        assert_eq!(row("custom")[1], "");
-        assert_eq!(row("custom")[2], "");
+        // The repository's filters directory is outside Gage home, so
+        // the source is a project's
+        assert_eq!(row("secret")[1], "project");
+        assert_eq!(row("secret")[2], "public, trusted");
+        assert_eq!(row("harness")[2], "reading");
+        assert_eq!(row("pii")[2], "public");
     }
-    /// An init stages what the audience and use select, then the
-    /// filters given, each once. The defaults select nothing.
+
+    /// An init stages what the groups select in listing order, then
+    /// the filters given, each once; a filter given by `--filter`
+    /// replaces the group's copy and carries its params.
     #[test]
     fn init_filters_are_the_selection_then_the_added_ones_once() {
-        let spec = |name: &str| FilterSpec::new(name, None).unwrap();
-        let names = |audience: Option<&str>, uses: Option<&str>, added| -> Vec<String> {
-            let (Ok(audience), Ok(uses)) = (
-                parse_audience("gage publish init", audience),
-                parse_use("gage publish init", uses),
-            ) else {
-                panic!("{audience:?} {uses:?} parse");
+        let registry = registry();
+        let config = FilterConfig::default();
+        let names = |groups: &[&str], specs: &[String]| -> Vec<String> {
+            let groups: Vec<String> = groups.iter().map(|g| g.to_string()).collect();
+            let Ok(specs) = resolve_filter_specs("gage publish init", &registry, specs) else {
+                panic!("{specs:?} resolve");
             };
-            selected_filters(audience, uses, added)
+            selected_filters(&registry, &config, &groups, &specs)
+                .unwrap()
                 .into_iter()
-                .map(|f| f.name)
+                .map(|f| f.def.name.clone())
                 .collect()
         };
-        assert_eq!(names(None, None, vec![spec("pii")]), ["pii"]);
+        assert_eq!(names(&[], &["pii".to_string()]), ["pii"]);
         assert_eq!(
             names(
-                Some("trusted"),
-                Some("reading"),
-                vec![spec("secret"), spec("pii")]
+                &["trusted", "reading"],
+                &["secret".to_string(), "pii".to_string()]
             ),
-            [
-                "harness-context",
-                "harness-record",
-                "language",
-                "secret",
-                "pii"
-            ]
+            ["language", "secret", "system", "harness", "pii"]
         );
-        let text = match parse_audience("gage publish init", Some("everyone")) {
-            Err(CliError::Usage(e)) => e.render().to_string(),
-            _ => panic!("not a usage error"),
+        assert_eq!(
+            names(&["public", "trusted"], &[]),
+            ["language", "pii", "secret", "system"]
+        );
+        let specs = vec!["secret#{ prompt: \"Watch for hosts.\" }".to_string()];
+        let Ok(specs) = resolve_filter_specs("gage publish init", &registry, &specs) else {
+            panic!("{specs:?} resolve");
         };
-        assert!(
-            text.contains("invalid value 'everyone' for '--audience <AUDIENCE>'"),
-            "{text}"
+        let filters =
+            selected_filters(&registry, &config, &["trusted".to_string()], &specs).unwrap();
+        let secret = filters.iter().find(|f| f.def.name == "secret").unwrap();
+        assert_eq!(
+            secret.params.as_ref().unwrap()["prompt"],
+            "Watch for hosts.",
+            "{secret:?}"
         );
-        assert!(
-            text.contains("[possible values: self, trusted, public]"),
-            "{text}"
-        );
-        let text = match parse_use("gage publish init", Some("read")) {
-            Err(CliError::Usage(e)) => e.render().to_string(),
-            _ => panic!("not a usage error"),
-        };
-        assert!(
-            text.contains("[possible values: reading, provenance, other]"),
-            "{text}"
-        );
+        let entry = FilterEntry::from_filter(secret);
+        assert_eq!(entry.params.unwrap()["prompt"], "Watch for hosts.");
     }
 }

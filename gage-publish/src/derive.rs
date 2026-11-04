@@ -5,9 +5,10 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 
+use gage_runtime::Reason;
 use gage_session::{
-    Derivation, EntryJson, FilterValues, StoredSession, TextDescriptor, TextValue, delete_values,
-    edit_strings,
+    Derivation, EntryJson, StoredSession, TextDescriptor, TextValue, TypedSet, TypedValues,
+    delete_values, edit_strings,
 };
 use gage_store::{
     ChangeKind, ChangeRecord, DirContentSink, SessionDirLayout, SummaryAttrs, format_changes,
@@ -16,7 +17,7 @@ use regex::{Regex, RegexBuilder};
 use serde_json::{Value, json};
 
 use crate::definition::{PublishDefinition, Segment, TextEntry};
-use crate::filter::Filter;
+use crate::filter::FilterOutput;
 use crate::{MARKER, PublishError};
 
 /// One entry of the original with its text values.
@@ -72,7 +73,8 @@ impl SessionText {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Instance {
     /// The index in `redact` of the text redaction that produced a
-    /// span; none for a dropped line, a left-out value, or an attribute
+    /// span; none for a dropped entry, a left-out value, or an
+    /// attribute
     pub entry: Option<usize>,
     pub reason: String,
     pub author: String,
@@ -81,8 +83,8 @@ pub struct Instance {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InstanceKind {
-    /// The lines `line` through `line_end` are left out
-    Line { line: u32, line_end: u32 },
+    /// The entries on lines `line` through `line_end` are left out
+    Entry { line: u32, line_end: u32 },
     Span {
         line: u32,
         pointer: String,
@@ -119,9 +121,13 @@ impl Instance {
                 }
             };
         match &self.kind {
-            InstanceKind::Line { line, line_end } => {
-                Some(record(ChangeKind::Line, *line, Some(*line_end), None, None))
-            }
+            InstanceKind::Entry { line, line_end } => Some(record(
+                ChangeKind::Entry,
+                *line,
+                Some(*line_end),
+                None,
+                None,
+            )),
             InstanceKind::Span { line, pointer, .. } => {
                 let span =
                     published.expect("a span instance is on a kept line, which line_edits visits");
@@ -144,7 +150,7 @@ impl Instance {
     /// none.
     fn line(&self) -> u32 {
         match &self.kind {
-            InstanceKind::Line { line, .. }
+            InstanceKind::Entry { line, .. }
             | InstanceKind::Span { line, .. }
             | InstanceKind::Value { line, .. } => *line,
             InstanceKind::Attr { .. } => 0,
@@ -157,7 +163,7 @@ impl Instance {
     fn order(&self) -> (u32, &str, usize) {
         match &self.kind {
             InstanceKind::Attr { name } => (0, name, 0),
-            InstanceKind::Line { line, .. } => (*line, "", 0),
+            InstanceKind::Entry { line, .. } => (*line, "", 0),
             InstanceKind::Value { line, pointer } => (*line, pointer, 0),
             InstanceKind::Span {
                 line,
@@ -176,69 +182,69 @@ pub struct Built {
     pub counts: BTreeMap<usize, usize>,
 }
 
-/// Run the named filters `names`, the filters on the list, over the
-/// original and record what their patterns and typed literal paths
-/// find as the filter's text redactions. A row the filter recorded
-/// before stays in place when the filter finds its literal again and
-/// goes when it does not; a literal found anew is appended. A literal
-/// on the allow list is not recorded. A row authored by a filter not
-/// on the list goes.
+/// Record what the filters' patterns and typed literal sets find in
+/// the original as the filters' text redactions. A row the filter
+/// recorded before stays in place when the filter finds its literal
+/// again and goes when it does not; a literal found anew is appended.
+/// A literal on the allow list is not recorded. A row authored by a
+/// filter not on the list goes.
 pub fn run_filters(
     definition: &mut PublishDefinition,
     session: &SessionText,
-    names: &[String],
+    outputs: &[FilterOutput],
 ) -> Result<(), PublishError> {
     definition
         .redact
         .retain(|t| match t.author.strip_prefix("filter:") {
-            Some(name) => names.iter().any(|n| n == name),
+            Some(name) => outputs.iter().any(|o| o.name == name),
             None => true,
         });
-    for name in names {
-        let author = format!("filter:{name}");
-        let Some(filter) = Filter::named(name) else {
-            definition.redact.retain(|t| t.author != author);
-            continue;
-        };
-        let mut literals: BTreeSet<String> = BTreeSet::new();
+    for output in outputs {
+        let author = output.author();
+        let c = &output.contribution;
+        // The first reason a literal is found under is the one it takes
+        let mut literals: BTreeMap<String, Reason> = BTreeMap::new();
         for entry in &session.entries {
-            for value in &entry.values {
-                for (_, literal) in filter.matches(&value.text) {
-                    literals.insert(literal.to_string());
+            for (patterns, reason) in &c.patterns {
+                for value in &entry.values {
+                    for (_, literal) in patterns.matches(&value.text) {
+                        literals.entry(literal.to_string()).or_insert(*reason);
+                    }
                 }
             }
-            let found = session
-                .descriptor
-                .filter_values(name, &entry.json)
-                .map_err(|e| PublishError::Input(format!("line {}: {e}", entry.line)))?;
-            literals.extend(found.literals);
+            for (set, reason) in &c.literals {
+                let found = session
+                    .descriptor
+                    .typed_values(*set, &entry.json)
+                    .map_err(|e| PublishError::Input(format!("line {}: {e}", entry.line)))?;
+                for literal in found.literals {
+                    literals.entry(literal).or_insert(*reason);
+                }
+            }
         }
-        literals.retain(|literal| !definition.is_allowed(literal));
+        literals.retain(|literal, _| !definition.is_allowed(literal));
         definition.redact.retain(|t| {
-            t.author != author || literals.iter().any(|l| l.eq_ignore_ascii_case(&t.literal))
+            t.author != author || literals.keys().any(|l| l.eq_ignore_ascii_case(&t.literal))
         });
-        for literal in literals {
+        for (literal, reason) in literals {
             let present = definition
                 .redact
                 .iter()
                 .any(|t| t.author == author && t.literal.eq_ignore_ascii_case(&literal));
             if !present {
-                definition.push_redact(&literal, &filter.reason, &author, true);
+                definition.push_redact(&literal, reason.code(), &author, true);
             }
         }
     }
     Ok(())
 }
 
-/// Expand `definition` over `session`, write the staged content
-/// through `stored` and `changes.json` into `layout`, and count the
-/// spans of each text redaction. `title_entry` is the entry the driver
-/// adds after the last line to set the title the definition names,
-/// recorded as a title change at the line it lands on. The staged
-/// `attrs.json` is the caller's to update.
+/// Expand the definition over the original and write the staged
+/// content and `changes.json`.
 pub fn build(
     definition: &PublishDefinition,
     session: &SessionText,
+    outputs: &[FilterOutput],
     stored: &mut dyn StoredSession,
     layout: &SessionDirLayout,
     title_entry: Option<&str>,
@@ -246,7 +252,7 @@ pub fn build(
     let Expanded {
         mut instances,
         rules,
-    } = expand(definition, session)?;
+    } = expand(definition, session, outputs)?;
     instances.sort_by(|a, b| a.order().cmp(&b.order()));
     let dropped = dropped_of(&instances);
     let counts = counts_of(definition, &instances);
@@ -321,8 +327,9 @@ pub struct Candidate {
 pub fn candidates(
     definition: &PublishDefinition,
     session: &SessionText,
+    outputs: &[FilterOutput],
 ) -> Result<Vec<Candidate>, PublishError> {
-    let Expanded { instances, .. } = expand(definition, session)?;
+    let Expanded { instances, .. } = expand(definition, session, outputs)?;
     let dropped = dropped_of(&instances);
     let deleted: HashSet<(u32, &str)> = instances
         .iter()
@@ -433,8 +440,9 @@ fn resolve_spans(ranges: Vec<Span>) -> Vec<Span> {
 pub fn counts(
     definition: &PublishDefinition,
     session: &SessionText,
+    outputs: &[FilterOutput],
 ) -> Result<BTreeMap<usize, usize>, PublishError> {
-    let Expanded { instances, .. } = expand(definition, session)?;
+    let Expanded { instances, .. } = expand(definition, session, outputs)?;
     Ok(counts_of(definition, &instances))
 }
 
@@ -443,16 +451,17 @@ pub fn counts(
 pub fn change_count(
     definition: &PublishDefinition,
     session: &SessionText,
+    outputs: &[FilterOutput],
 ) -> Result<usize, PublishError> {
-    let Expanded { instances, .. } = expand(definition, session)?;
+    let Expanded { instances, .. } = expand(definition, session, outputs)?;
     Ok(instances.len() + usize::from(definition.title.is_some()))
 }
 
-/// Every line a `Line` instance drops.
+/// Every line an `Entry` instance drops.
 fn dropped_of(instances: &[Instance]) -> BTreeSet<u32> {
     let mut dropped = BTreeSet::new();
     for i in instances {
-        if let InstanceKind::Line { line, line_end } = &i.kind {
+        if let InstanceKind::Entry { line, line_end } = &i.kind {
             dropped.extend(*line..=*line_end);
         }
     }
@@ -474,20 +483,21 @@ fn counts_of(definition: &PublishDefinition, instances: &[Instance]) -> BTreeMap
 /// Check that `staged` is a removal-only derivation of `original`
 /// under `definition`: the staged entries are the original's undropped
 /// entries in order, each with the same JSON apart from the values
-/// the named filters leave out and its text values, and each text
-/// value is the original's with substrings removed or replaced by the
-/// marker. `title_entry`, when given, is the one entry allowed after
-/// them, as the driver writes it. An error names the original line
-/// and, for a value, its pointer.
+/// the filters leave out and its text values, and each text value is
+/// the original's with substrings removed or replaced by the marker.
+/// `title_entry`, when given, is the one entry allowed after them, as
+/// the driver writes it. An error names the original line and, for a
+/// value, its pointer.
 pub fn check_removal_only(
     definition: &PublishDefinition,
     original: &SessionText,
     staged: &SessionText,
+    outputs: &[FilterOutput],
     title_entry: Option<&str>,
 ) -> Result<(), PublishError> {
     let refuse =
         |m: String| PublishError::Refused(format!("staged session is not removal-only: {m}"));
-    let Expanded { instances, .. } = expand(definition, original)?;
+    let Expanded { instances, .. } = expand(definition, original, outputs)?;
     let dropped = dropped_of(&instances);
     let kept: Vec<&EntryText> = original
         .entries
@@ -585,62 +595,77 @@ fn blank_values(json: &str, pointers: &[&str]) -> Result<Value, PublishError> {
 }
 
 /// What the definition does to the session: the instances, and the
-/// value rules of the named filters, one per path that selected a
-/// value.
+/// value rules of the filters, one per path that selected a value.
 struct Expanded {
     instances: Vec<Instance>,
     rules: Vec<ChangeRecord>,
 }
 
 /// Expand `definition` over `session` in order of precedence: the
-/// entries the named filters leave out, then the lines outside every
-/// segment, then the attributes and values the named filters leave
+/// entries the filters leave out, then the lines outside every
+/// segment, then the attributes, values, and spans the filters leave
 /// out, then the spans of the text redactions. A match inside a
-/// dropped line or a left-out value records nothing, and a value is
+/// dropped entry or a left-out value records nothing, and a value is
 /// left out once however many paths select it, so the record holds
-/// only what changed the derived session.
-fn expand(definition: &PublishDefinition, session: &SessionText) -> Result<Expanded, PublishError> {
-    let filters: Vec<&Filter> = definition
-        .named_filters()
-        .iter()
-        .filter_map(|name| Filter::named(name))
-        .collect();
+/// one instance per effect.
+fn expand(
+    definition: &PublishDefinition,
+    session: &SessionText,
+    outputs: &[FilterOutput],
+) -> Result<Expanded, PublishError> {
     let mut instances = Vec::new();
     let mut dropped = BTreeSet::new();
-    // What each filter's typed paths select in each entry, read once
-    let mut found: Vec<Vec<(u32, FilterValues)>> = Vec::with_capacity(filters.len());
-    for filter in &filters {
-        let mut mine = Vec::with_capacity(session.entries.len());
-        let mut lines = BTreeSet::new();
-        for entry in &session.entries {
-            let values = session
-                .descriptor
-                .filter_values(filter.name, &entry.json)
-                .map_err(|e| PublishError::Input(format!("line {}: {e}", entry.line)))?;
-            if values.dropped {
-                lines.insert(entry.line);
+    // What each typed set a filter names selects in each entry, read
+    // once per filter and set
+    let mut found: Vec<BTreeMap<TypedSet, Vec<(u32, TypedValues)>>> =
+        Vec::with_capacity(outputs.len());
+    for output in outputs {
+        let c = &output.contribution;
+        let sets: BTreeSet<TypedSet> = c
+            .entries
+            .iter()
+            .chain(&c.values)
+            .chain(&c.spans)
+            .map(|(set, _)| *set)
+            .collect();
+        let mut hits: BTreeMap<TypedSet, Vec<(u32, TypedValues)>> = BTreeMap::new();
+        for set in sets {
+            let mut mine = Vec::with_capacity(session.entries.len());
+            for entry in &session.entries {
+                let values = session
+                    .descriptor
+                    .typed_values(set, &entry.json)
+                    .map_err(|e| PublishError::Input(format!("line {}: {e}", entry.line)))?;
+                mine.push((entry.line, values));
             }
-            mine.push((entry.line, values));
+            hits.insert(set, mine);
         }
-        for (line, line_end) in runs(lines.iter().copied()) {
-            instances.push(Instance {
-                entry: None,
-                reason: filter.reason.clone(),
-                author: format!("filter:{}", filter.name),
-                kind: InstanceKind::Line { line, line_end },
-            });
+        for (set, reason) in &c.entries {
+            let lines: BTreeSet<u32> = hits_of(&hits, set)
+                .iter()
+                .filter(|(_, values)| values.dropped)
+                .map(|(line, _)| *line)
+                .collect();
+            for (line, line_end) in runs(lines.iter().copied()) {
+                instances.push(Instance {
+                    entry: None,
+                    reason: reason.code().to_string(),
+                    author: output.author(),
+                    kind: InstanceKind::Entry { line, line_end },
+                });
+            }
+            dropped.extend(lines);
         }
-        dropped.extend(lines);
-        found.push(mine);
+        found.push(hits);
     }
     for (line, line_end, author) in segment_gaps(&definition.segments, session.last_line()) {
         let outside = (line..=line_end).filter(|l| !dropped.contains(l));
         for (line, line_end) in runs(outside) {
             instances.push(Instance {
                 entry: None,
-                reason: "scope".to_string(),
+                reason: Reason::Scope.code().to_string(),
                 author: author.clone(),
-                kind: InstanceKind::Line { line, line_end },
+                kind: InstanceKind::Entry { line, line_end },
             });
         }
     }
@@ -648,53 +673,72 @@ fn expand(definition: &PublishDefinition, session: &SessionText) -> Result<Expan
 
     let mut deleted: HashSet<(u32, String)> = HashSet::new();
     let mut rules = Vec::new();
-    for (filter, mine) in filters.iter().zip(found) {
-        let author = format!("filter:{}", filter.name);
-        let instance = |kind| Instance {
+    for (output, hits) in outputs.iter().zip(&found) {
+        let c = &output.contribution;
+        let author = output.author();
+        let instance = |reason: Reason, kind| Instance {
             entry: None,
-            reason: filter.reason.clone(),
+            reason: reason.code().to_string(),
             author: author.clone(),
             kind,
         };
-        for attr in &filter.attrs {
+        for (attr, reason) in &c.attrs {
             if session.has_attr(attr) {
-                instances.push(instance(InstanceKind::Attr {
-                    name: attr.to_string(),
-                }));
+                instances.push(instance(
+                    *reason,
+                    InstanceKind::Attr {
+                        name: attr.to_string(),
+                    },
+                ));
             }
         }
-        let mut paths: BTreeSet<String> = BTreeSet::new();
-        for (line, values) in mine {
-            if dropped.contains(&line) {
-                continue;
-            }
-            for hit in values.values {
-                paths.insert(hit.path);
-                if deleted.insert((line, hit.pointer.clone())) {
-                    instances.push(instance(InstanceKind::Value {
-                        line,
-                        pointer: hit.pointer,
-                    }));
+        let mut paths: BTreeSet<(String, Reason)> = BTreeSet::new();
+        for (set, reason) in &c.values {
+            for (line, values) in hits_of(hits, set) {
+                if dropped.contains(line) {
+                    continue;
+                }
+                for hit in &values.values {
+                    paths.insert((hit.path.clone(), *reason));
+                    if deleted.insert((*line, hit.pointer.clone())) {
+                        instances.push(instance(
+                            *reason,
+                            InstanceKind::Value {
+                                line: *line,
+                                pointer: hit.pointer.clone(),
+                            },
+                        ));
+                    }
                 }
             }
-            for span in values.spans {
-                instances.push(instance(InstanceKind::Span {
-                    line,
-                    pointer: span.pointer,
-                    start: span.start,
-                    end: span.end,
-                    mark: false,
-                }));
+        }
+        for (set, reason) in &c.spans {
+            for (line, values) in hits_of(hits, set) {
+                if dropped.contains(line) {
+                    continue;
+                }
+                for span in &values.spans {
+                    instances.push(instance(
+                        *reason,
+                        InstanceKind::Span {
+                            line: *line,
+                            pointer: span.pointer.clone(),
+                            start: span.start,
+                            end: span.end,
+                            mark: false,
+                        },
+                    ));
+                }
             }
         }
-        rules.extend(paths.into_iter().map(|path| ChangeRecord {
+        rules.extend(paths.into_iter().map(|(path, reason)| ChangeRecord {
             kind: ChangeKind::Value,
             line: 0,
             line_end: None,
             reference: Some(path),
             span_start: None,
             span_end: None,
-            reason: Some(filter.reason.clone()),
+            reason: Some(reason.code().to_string()),
             author: author.clone(),
         }));
     }
@@ -723,6 +767,16 @@ fn expand(definition: &PublishDefinition, session: &SessionText) -> Result<Expan
         }
     }
     Ok(Expanded { instances, rules })
+}
+
+/// What `set` selected in each entry, read when the contribution was
+/// expanded.
+fn hits_of<'a>(
+    hits: &'a BTreeMap<TypedSet, Vec<(u32, TypedValues)>>,
+    set: &TypedSet,
+) -> &'a [(u32, TypedValues)] {
+    hits.get(set)
+        .expect("every set a contribution names was read before its instances")
 }
 
 /// The runs of consecutive lines in `lines`, which come in order.
@@ -854,7 +908,7 @@ fn line_edits(
             InstanceKind::Span { pointer, start, .. } => {
                 members.entry(pointer).or_default().push((index, *start));
             }
-            InstanceKind::Line { .. } | InstanceKind::Attr { .. } => {}
+            InstanceKind::Entry { .. } | InstanceKind::Attr { .. } => {}
         }
     }
     let mut replaced = Vec::new();
@@ -990,7 +1044,7 @@ mod tests {
             .is_none()
         );
         let records = [
-            instance(InstanceKind::Line {
+            instance(InstanceKind::Entry {
                 line: 1,
                 line_end: 4,
             })
@@ -1013,7 +1067,7 @@ mod tests {
         ];
         let parsed = parse_changes(format_changes(&records).as_bytes()).unwrap();
         assert_eq!(parsed.len(), 3);
-        assert_eq!(parsed[0].kind, ChangeKind::Line);
+        assert_eq!(parsed[0].kind, ChangeKind::Entry);
         assert_eq!((parsed[0].line, parsed[0].line_end), (1, Some(4)));
         assert_eq!(parsed[1].kind, ChangeKind::Attr);
         assert_eq!(parsed[1].reference.as_deref(), Some("project"));

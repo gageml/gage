@@ -11,9 +11,11 @@ use rune::alloc::prelude::TryClone;
 use rune::ast::{self, Spanned};
 use rune::parse;
 use rune::runtime::{Object, Value};
-use rust_embed::Embed;
+use rust_embed::{Embed, RustEmbed};
 use serde::Serialize;
 use serde_json as json;
+
+use crate::DefSource;
 
 #[derive(Embed)]
 #[folder = "../scanners/"]
@@ -23,41 +25,17 @@ pub fn scanners_dir() -> PathBuf {
     gage_core::config::gage_home().join("lib/scanners")
 }
 
-/// Classification of where a scanner's source file lives.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ScannerSource {
-    Builtin,
-    User,
-    Project,
-}
-
-impl ScannerSource {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            ScannerSource::Builtin => "builtin",
-            ScannerSource::User => "user",
-            ScannerSource::Project => "project",
-        }
-    }
-}
-
-impl fmt::Display for ScannerSource {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
 /// Classify a scanner file by its filesystem location. Paths under
 /// the extracted builtin bundle are `Builtin`; paths under the user
 /// custom-scanner root are `User`; everything else (any project
 /// `.gage/scanners` root, or an ad-hoc `-f` file) is `Project`.
-pub fn scanner_source(path: &Path) -> ScannerSource {
+pub fn scanner_source(path: &Path) -> DefSource {
     if path.starts_with(scanners_dir()) {
-        ScannerSource::Builtin
+        DefSource::Builtin
     } else if path.starts_with(user_scanners_dir()) {
-        ScannerSource::User
+        DefSource::User
     } else {
-        ScannerSource::Project
+        DefSource::Project
     }
 }
 
@@ -82,6 +60,12 @@ pub fn scanner_home_paths() -> Vec<PathBuf> {
 /// first. Stops at `$HOME` so the walk cannot escape into the user's
 /// gage home.
 pub fn discover_project_scanner_dirs(start: &Path) -> Vec<PathBuf> {
+    discover_project_dirs(start, "scanners")
+}
+
+/// Each `<dir>/.gage/<leaf>` that exists walking up from `start`,
+/// innermost first. The walk stops at `$HOME`.
+pub(crate) fn discover_project_dirs(start: &Path, leaf: &str) -> Vec<PathBuf> {
     let home = std::env::var("HOME").ok().map(PathBuf::from);
     let mut out = Vec::new();
     let mut cur = Some(start);
@@ -91,7 +75,7 @@ pub fn discover_project_scanner_dirs(start: &Path) -> Vec<PathBuf> {
         {
             break;
         }
-        let candidate = dir.join(".gage").join("scanners");
+        let candidate = dir.join(".gage").join(leaf);
         if candidate.is_dir() {
             out.push(candidate);
         }
@@ -116,15 +100,26 @@ pub fn user_scanners_dir() -> PathBuf {
 pub fn extract_scanners() -> std::io::Result<()> {
     let dir = scanners_dir();
     assert!(dir.ends_with("lib/scanners"));
-    let lib = dir.parent().expect("scanners_dir ends with lib/scanners");
+    extract_embedded::<Scanners>(&dir)
+}
+
+/// Extract the embedded bundle `E` to `dir`, `<lib>/<name>`. The lock
+/// and digest marker sit beside it as `<lib>/<name>.lock` and
+/// `<lib>/<name>.digest`.
+pub(crate) fn extract_embedded<E: RustEmbed>(dir: &Path) -> std::io::Result<()> {
+    let lib = dir.parent().expect("bundle dir is under lib");
+    let name = dir
+        .file_name()
+        .expect("bundle dir has a name")
+        .to_string_lossy();
     std::fs::create_dir_all(lib)?;
 
-    let lock_file = std::fs::File::create(lib.join("scanners.lock"))?;
+    let lock_file = std::fs::File::create(lib.join(format!("{name}.lock")))?;
     fs4::FileExt::lock(&lock_file)?;
     // The OS releases the lock when `lock_file` drops.
 
-    let digest = embedded_digest();
-    let marker = lib.join("scanners.digest");
+    let digest = embedded_digest::<E>();
+    let marker = lib.join(format!("{name}.digest"));
     if dir.is_dir() && std::fs::read_to_string(&marker).is_ok_and(|prev| prev == digest) {
         return Ok(());
     }
@@ -133,9 +128,9 @@ pub fn extract_scanners() -> std::io::Result<()> {
         std::io::ErrorKind::NotFound => Ok(()),
         _ => Err(e),
     })?;
-    gage_core::fs::remove_checked_dir_all(&dir)?;
-    for path in Scanners::iter() {
-        let file = Scanners::get(&path).expect("embedded key exists");
+    gage_core::fs::remove_checked_dir_all(dir)?;
+    for path in E::iter() {
+        let file = E::get(&path).expect("embedded key exists");
         let target = dir.join(path.as_ref());
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent)?;
@@ -147,13 +142,13 @@ pub fn extract_scanners() -> std::io::Result<()> {
 }
 
 /// Deterministic digest over the embedded bundle's keys and contents.
-fn embedded_digest() -> String {
+fn embedded_digest<E: RustEmbed>() -> String {
     use std::hash::{DefaultHasher, Hash, Hasher};
-    let mut keys: Vec<_> = Scanners::iter().collect();
+    let mut keys: Vec<_> = E::iter().collect();
     keys.sort();
     let mut h = DefaultHasher::new();
     for key in keys {
-        let file = Scanners::get(&key).expect("embedded key exists");
+        let file = E::get(&key).expect("embedded key exists");
         key.hash(&mut h);
         file.data.hash(&mut h);
     }
@@ -257,7 +252,7 @@ pub struct ScannerDef {
 
 impl ScannerDef {
     pub fn params_def(&self) -> Object {
-        match self.scanner_field("params") {
+        match const_field(&self.ast, &self.source, "SCANNER", "params") {
             Some(ast::Expr::Object(obj)) => parse_params_def(&self.source, obj),
             _ => Object::new(),
         }
@@ -272,26 +267,6 @@ impl ScannerDef {
             .unwrap_or_else(|| PathBuf::from("/"))
     }
 
-    fn scanner_field(&self, name: &str) -> Option<&ast::Expr> {
-        for (item, _) in &self.ast.items {
-            let ast::Item::Const(item_const) = item else {
-                continue;
-            };
-            if self.ident(item_const.name.span()) != "SCANNER" {
-                continue;
-            }
-            let ast::Expr::Object(obj) = &item_const.expr else {
-                continue;
-            };
-            for (field, _) in &obj.assignments {
-                if field_key(&self.source, &field.key).as_deref() == Some(name) {
-                    return field.assign.as_ref().map(|(_, expr)| expr);
-                }
-            }
-        }
-        None
-    }
-
     pub fn source(&self) -> &str {
         &self.source
     }
@@ -299,37 +274,73 @@ impl ScannerDef {
     /// The problems as one codespan report, each labelled at its
     /// source span, for the compile error that stops the scanner.
     pub fn render_problems(&self) -> String {
-        use codespan_reporting::diagnostic::{Diagnostic, Label};
-        use codespan_reporting::term;
-        use rune::{Source, Sources};
-
-        let mut sources = Sources::new();
-        let source_id = sources
-            .insert(Source::with_path(&self.embed_key, &self.source, &self.path).unwrap())
-            .unwrap();
-        let mut buf = rune::termcolor::Buffer::no_color();
-        for problem in &self.problems {
-            let diagnostic = Diagnostic::error()
-                .with_message(&problem.message)
-                .with_labels(vec![Label::primary(source_id, problem.start..problem.end)]);
-            term::emit_to_write_style(&mut buf, &term::Config::default(), &sources, &diagnostic)
-                .unwrap();
-        }
-        String::from_utf8(buf.into_inner()).unwrap()
-    }
-
-    fn ident(&self, span: rune::ast::Span) -> &str {
-        &self.source[span.start.0 as usize..span.end.0 as usize]
+        render_problems(&self.embed_key, &self.source, &self.path, &self.problems)
     }
 }
 
-/// Why a file is not a scanner at all. Defects within a scanner's
-/// declaration are [`Problem`]s on the def instead.
+/// The field `field` of the object the constant `const_name` of
+/// `file` is assigned, when there is one.
+pub(crate) fn const_field<'a>(
+    file: &'a ast::File,
+    source: &str,
+    const_name: &str,
+    field: &str,
+) -> Option<&'a ast::Expr> {
+    for (item, _) in &file.items {
+        let ast::Item::Const(item_const) = item else {
+            continue;
+        };
+        let span = item_const.name.span();
+        if &source[span.start.0 as usize..span.end.0 as usize] != const_name {
+            continue;
+        }
+        let ast::Expr::Object(obj) = &item_const.expr else {
+            continue;
+        };
+        for (assignment, _) in &obj.assignments {
+            if field_key(source, &assignment.key).as_deref() == Some(field) {
+                return assignment.assign.as_ref().map(|(_, expr)| expr);
+            }
+        }
+    }
+    None
+}
+
+/// `problems` as one codespan report over `source`, each labelled at
+/// its span.
+pub(crate) fn render_problems(
+    embed_key: &str,
+    source: &str,
+    path: &Path,
+    problems: &[Problem],
+) -> String {
+    use codespan_reporting::diagnostic::{Diagnostic, Label};
+    use codespan_reporting::term;
+    use rune::{Source, Sources};
+
+    let mut sources = Sources::new();
+    let source_id = sources
+        .insert(Source::with_path(embed_key, source, path).unwrap())
+        .unwrap();
+    let mut buf = rune::termcolor::Buffer::no_color();
+    for problem in problems {
+        let diagnostic = Diagnostic::error()
+            .with_message(&problem.message)
+            .with_labels(vec![Label::primary(source_id, problem.start..problem.end)]);
+        term::emit_to_write_style(&mut buf, &term::Config::default(), &sources, &diagnostic)
+            .unwrap();
+    }
+    String::from_utf8(buf.into_inner()).unwrap()
+}
+
+/// Why a file is not a scanner or a filter at all. Defects within a
+/// declaration are [`Problem`]s on the def instead. The constant name
+/// is `SCANNER` or `FILTER`.
 #[derive(Debug)]
 pub enum ParseError {
     Syntax(rune::compile::Error),
-    MissingScanner,
-    MissingName,
+    MissingConst(&'static str),
+    MissingName(&'static str),
 }
 
 impl ParseError {
@@ -381,8 +392,8 @@ impl fmt::Display for ParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ParseError::Syntax(e) => write!(f, "{e}"),
-            ParseError::MissingScanner => write!(f, "missing SCANNER constant"),
-            ParseError::MissingName => write!(f, "SCANNER missing 'name' field"),
+            ParseError::MissingConst(name) => write!(f, "missing {name} constant"),
+            ParseError::MissingName(name) => write!(f, "{name} missing 'name' field"),
         }
     }
 }
@@ -420,7 +431,8 @@ impl fmt::Display for ScannerSpecError {
     }
 }
 
-/// Split a scanner spec `foo` or `foo#{...}` into `(name, Some(override_src))`.
+/// Split a scanner or filter spec `foo` or `foo#{...}` into
+/// `(name, Some(override_src))`.
 pub fn split_scanner_spec(spec: &str) -> (&str, Option<&str>) {
     match spec.find("#{") {
         Some(pos) => (&spec[..pos], Some(&spec[pos..])),
@@ -474,7 +486,7 @@ impl<'a> Scanner<'a> {
 /// Replace declared params with the values of one layer. A key the
 /// scanner does not declare is ignored with a warning naming the
 /// layer.
-fn apply_params(
+pub(crate) fn apply_params(
     params: &mut Option<json::Value>,
     layer: json::Map<String, json::Value>,
     scanner: &str,
@@ -509,7 +521,7 @@ fn apply_params(
     }
 }
 
-fn parse_object_repr(source: &str) -> Result<json::Map<String, json::Value>, String> {
+pub(crate) fn parse_object_repr(source: &str) -> Result<json::Map<String, json::Value>, String> {
     let expr = parse::parse_all::<ast::Expr>(source, SourceId::empty(), false)
         .map_err(|e| format!("syntax error: {e}"))?;
     let ast::Expr::Object(obj) = &expr else {
@@ -535,7 +547,7 @@ fn parse_object_repr(source: &str) -> Result<json::Map<String, json::Value>, Str
     Ok(map)
 }
 
-fn resolve_params(params_def: &Object) -> Option<json::Value> {
+pub(crate) fn resolve_params(params_def: &Object) -> Option<json::Value> {
     if params_def.is_empty() {
         return None;
     }
@@ -632,7 +644,7 @@ impl ScannerRegistry {
                         defs.push(def);
                         by_name.entry(name).or_default().push(idx);
                     }
-                    Err(ParseError::MissingScanner) => {}
+                    Err(ParseError::MissingConst(_)) => {}
                     Err(ref e) => {
                         errors.push((path.clone(), e.render(&key, &code)));
                     }
@@ -930,7 +942,7 @@ fn parse_scanner(source: &str, embed_key: &str, path: &Path) -> Result<ScannerDe
     }
 
     if scanner_name.is_none() {
-        return Err(ParseError::MissingScanner);
+        return Err(ParseError::MissingConst("SCANNER"));
     }
 
     let tasks = match tasks_obj {
@@ -941,7 +953,7 @@ fn parse_scanner(source: &str, embed_key: &str, path: &Path) -> Result<ScannerDe
     problems.sort_by_key(|p| p.start);
 
     Ok(ScannerDef {
-        name: scanner_name.ok_or(ParseError::MissingName)?,
+        name: scanner_name.ok_or(ParseError::MissingName("SCANNER"))?,
         description: description.unwrap_or_default(),
         version,
         hidden,
@@ -959,44 +971,59 @@ fn parse_scanner(source: &str, embed_key: &str, path: &Path) -> Result<ScannerDe
 /// Parse a scanner from a filesystem path, returning an owned
 /// `ScannerDef`. Used for scanners loaded ad hoc via `-f / --file`
 /// which do not enter the registry.
-pub fn parse_scanner_file(path: &Path) -> Result<ScannerDef, ParseScannerFileError> {
+pub fn parse_scanner_file(path: &Path) -> Result<ScannerDef, ParseDefFileError> {
+    let (abs, embed_key, code) = read_def_file("scanner", path)?;
+    parse_scanner(&code, &embed_key, &abs)
+        .map_err(|e| ParseDefFileError::Parse(e.render(&embed_key, &code)))
+}
+
+/// Read the `.rn` file at `path` for an ad hoc definition: its
+/// canonical path, that path as the embed key, and its text. `what`
+/// names the kind of file in the extension error.
+pub(crate) fn read_def_file(
+    what: &'static str,
+    path: &Path,
+) -> Result<(PathBuf, String, String), ParseDefFileError> {
     if path.extension().is_none_or(|ext| ext != "rn") {
-        return Err(ParseScannerFileError::Extension(path.display().to_string()));
+        return Err(ParseDefFileError::Extension(
+            what,
+            path.display().to_string(),
+        ));
     }
     let abs = path
         .canonicalize()
-        .map_err(|e| ParseScannerFileError::Io(path.display().to_string(), e))?;
+        .map_err(|e| ParseDefFileError::Io(path.display().to_string(), e))?;
     let embed_key = abs.to_string_lossy().to_string();
-    let code = std::fs::read_to_string(&abs)
-        .map_err(|e| ParseScannerFileError::Io(embed_key.clone(), e))?;
-    parse_scanner(&code, &embed_key, &abs)
-        .map_err(|e| ParseScannerFileError::Parse(e.render(&embed_key, &code)))
+    let code =
+        std::fs::read_to_string(&abs).map_err(|e| ParseDefFileError::Io(embed_key.clone(), e))?;
+    Ok((abs, embed_key, code))
 }
 
 #[derive(Debug)]
-pub enum ParseScannerFileError {
-    Extension(String),
+pub enum ParseDefFileError {
+    /// The file is not `.rn`; the first field names the kind of file
+    Extension(&'static str, String),
     Io(String, std::io::Error),
     Parse(String),
 }
 
-impl fmt::Display for ParseScannerFileError {
+impl fmt::Display for ParseDefFileError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ParseScannerFileError::Extension(path) => {
-                write!(f, "scanner file must have .rn extension: {path}")
+            ParseDefFileError::Extension(what, path) => {
+                write!(f, "{what} file must have .rn extension: {path}")
             }
-            ParseScannerFileError::Io(path, err) => write!(f, "{path}: {err}"),
-            ParseScannerFileError::Parse(rendered) => f.write_str(rendered),
+            ParseDefFileError::Io(path, err) => write!(f, "{path}: {err}"),
+            ParseDefFileError::Parse(rendered) => f.write_str(rendered),
         }
     }
 }
 
-impl std::error::Error for ParseScannerFileError {}
+impl std::error::Error for ParseDefFileError {}
 
 /// A key as a function name: `-` becomes `_`, since a key may be a
 /// quoted string but a function name is an identifier.
-fn function_name(key: &str) -> String {
+pub(crate) fn function_name(key: &str) -> String {
     key.replace('-', "_")
 }
 
@@ -1332,7 +1359,7 @@ fn resolve_note_doc(
 }
 
 /// A problem at an expression's span.
-fn problem(expr: &ast::Expr, message: impl Into<String>) -> Problem {
+pub(crate) fn problem(expr: &ast::Expr, message: impl Into<String>) -> Problem {
     let span = expr.span();
     Problem {
         start: span.start.0 as usize,
@@ -1365,7 +1392,7 @@ fn include_base_dir(embed_key: &str) -> PathBuf {
     scanners_dir().join(rel)
 }
 
-fn parse_params_def(source: &str, obj: &ast::ExprObject) -> Object {
+pub(crate) fn parse_params_def(source: &str, obj: &ast::ExprObject) -> Object {
     let mut params_def = Object::new();
 
     for (field, _) in &obj.assignments {
@@ -1453,7 +1480,7 @@ fn expr_to_value(source: &str, expr: &ast::Expr) -> Option<Value> {
     }
 }
 
-fn field_key(source: &str, key: &ast::ObjectKey) -> Option<String> {
+pub(crate) fn field_key(source: &str, key: &ast::ObjectKey) -> Option<String> {
     match key {
         ast::ObjectKey::Path(path) => {
             let span = path.span();
@@ -1480,7 +1507,7 @@ fn expr_bool(source: &str, expr: &ast::Expr) -> bool {
     false
 }
 
-fn expr_str(source: &str, expr: &ast::Expr) -> Option<String> {
+pub(crate) fn expr_str(source: &str, expr: &ast::Expr) -> Option<String> {
     let span = expr.span();
     let raw = &source[span.start.0 as usize..span.end.0 as usize];
     let stripped = strip_quotes(raw);
@@ -1492,7 +1519,7 @@ fn expr_str(source: &str, expr: &ast::Expr) -> Option<String> {
 
 /// String elements of a vec literal; non-vec expressions and
 /// non-string elements yield nothing.
-fn expr_str_vec(source: &str, expr: &ast::Expr) -> Vec<String> {
+pub(crate) fn expr_str_vec(source: &str, expr: &ast::Expr) -> Vec<String> {
     let ast::Expr::Vec(vec_expr) = expr else {
         return Vec::new();
     };
@@ -1511,7 +1538,7 @@ fn strip_quotes(s: &str) -> String {
     }
 }
 
-fn walk_rn_files(dir: &Path) -> Vec<PathBuf> {
+pub(crate) fn walk_rn_files(dir: &Path) -> Vec<PathBuf> {
     let mut result = Vec::new();
     walk_rn_files_rec(dir, &mut result);
     result.sort();
