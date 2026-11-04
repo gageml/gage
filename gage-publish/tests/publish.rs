@@ -531,7 +531,7 @@ fn harness_records_filter_leaves_out_run_records_and_descriptive_fields() {
         .collect();
     assert_eq!(
         dropped,
-        [(5, Some(5), Some("harness-record"), "filter:harness-record")]
+        [(5, Some(5), Some("scope"), "filter:harness-record")]
     );
     // The token usage is a descriptive field and goes; the working
     // directory is the system filter's and stays
@@ -551,8 +551,7 @@ fn harness_records_filter_leaves_out_run_records_and_descriptive_fields() {
         records
             .iter()
             .filter(|r| r.kind == ChangeKind::Value)
-            .all(|r| r.reason.as_deref() == Some("harness-record")
-                && r.author == "filter:harness-record")
+            .all(|r| r.reason.as_deref() == Some("scope") && r.author == "filter:harness-record")
     );
     let summary = staged_summary(&f.publish_root, &id);
     assert_eq!(summary["line_count"], 4, "{summary}");
@@ -596,7 +595,7 @@ fn harness_record_removes_an_ide_tag_block_from_a_user_turn() {
     let records = changes(&f.publish_root, &id);
     assert!(
         records.iter().any(|r| r.kind == ChangeKind::Text
-            && r.reason.as_deref() == Some("harness-record")
+            && r.reason.as_deref() == Some("scope")
             && r.author == "filter:harness-record"),
         "{records:#?}"
     );
@@ -629,12 +628,7 @@ fn harness_context_filter_leaves_out_context_entries_and_nothing_else() {
         .collect();
     assert_eq!(
         dropped,
-        [(
-            2,
-            Some(5),
-            Some("harness-context"),
-            "filter:harness-context"
-        )]
+        [(2, Some(5), Some("scope"), "filter:harness-context")]
     );
     assert!(
         records.iter().all(|r| r.kind == ChangeKind::Line),

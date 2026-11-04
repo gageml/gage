@@ -8,14 +8,6 @@
     "description": "Content the publish's own instructions remove"
   },
   {
-    "code": "harness-context",
-    "description": "Content the harness placed in the model's context (system prompt, tool definitions, injected instructions)"
-  },
-  {
-    "code": "harness-record",
-    "description": "Records the harness kept about the run (request logs, snapshots, state, usage)"
-  },
-  {
     "code": "language",
     "description": "Profanity and other language unfit for a public record"
   },

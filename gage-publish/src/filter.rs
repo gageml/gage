@@ -813,7 +813,8 @@ mod tests {
 
     /// Every field but the body comes from the file's front matter: the
     /// description, the patterns, the attributes, the gitleaks rule set,
-    /// and the reason, which defaults to the name.
+    /// and the reason, which defaults to the name and is `scope` for
+    /// the harness filters.
     #[test]
     fn filter_fields_come_from_the_front_matter() {
         let pii = Filter::named("pii").unwrap();
@@ -832,6 +833,10 @@ mod tests {
         let secret = Filter::named("secret").unwrap();
         assert!(secret.patterns.len() > 200, "{}", secret.patterns.len());
         assert!(secret.keywords.is_some());
+
+        for name in ["harness-context", "harness-record"] {
+            assert_eq!(Filter::named(name).unwrap().reason, "scope", "{name}");
+        }
     }
 
     /// The front matter never reaches the model: a filter with prose
