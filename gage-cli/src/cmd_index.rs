@@ -5,10 +5,12 @@ use std::sync::{Arc, Mutex};
 use anyhow::Context;
 use clap::Args;
 use cliclack as cli;
+use gage_core::cache::{DRIVER_DIR, QUERY_DIR, STORE_DIR, read_corpus};
 use gage_core::config::default_cache_root;
 use gage_index::LockMode;
 use gage_query::text::{StoreTextIndex, StoreTextOutcome, StoreTextStatus};
 use gage_session::MaintenanceStatus;
+use gage_store::OBJECTS_FILE;
 use gage_store::Store;
 use tabled::{
     Table,
@@ -45,16 +47,18 @@ pub struct IndexArgs {
     /// List every index under cache directory
     ///
     /// List every index under cache directory. Each row names a
-    /// corpus as --remove takes it, the index kind, the source it was
-    /// built from, and whether that source is still present
+    /// corpus as --remove takes it, the indexes it holds, the source
+    /// it was built from, whether that source is still present, and
+    /// its size. An entry from an earlier cache layout is listed as
+    /// legacy
     #[arg(long, conflicts_with_all = ["source", "stored", "rebuild", "status", "remove"])]
     list: bool,
 
     /// Remove indexes of a corpus
     ///
-    /// Remove indexes of a corpus. CORPUS is a name --list shows; every
-    /// index kind of that corpus is removed, whether or not its source
-    /// is still present
+    /// Remove indexes of a corpus. CORPUS is a corpus path --list
+    /// shows, as store/1a2b3c4d5e6f7a8b; its whole directory is
+    /// removed, whether or not its source is still present
     #[arg(long, value_name = "CORPUS", conflicts_with_all = ["source", "stored", "rebuild", "status"])]
     remove: Option<String>,
 }
@@ -231,54 +235,38 @@ fn print_rows<const N: usize>(rows: [[String; 2]; N]) {
     println!("{table}");
 }
 
-/// The index categories under the cache root and the manifest field
-/// naming each corpus's source
-const CATEGORIES: [&str; 2] = ["summary", "text"];
+/// One listed entry of the cache root: a corpus directory, or an
+/// entry of an earlier layout.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct IndexRow {
+    /// The path under the cache root, as --remove takes it
+    corpus: String,
+    /// The index categories present, or `legacy`
+    indexes: String,
+    source: String,
+    present: String,
+    bytes: u64,
+}
 
-/// Every index under `cache_root`, one row per corpus and category:
-/// the corpus name, the category, the source, and whether the source
-/// is present.
+/// Every index under `cache_root`, one row per corpus and one per
+/// legacy entry.
 fn list_indexes(cache_root: &Path) -> Result<(), CliError> {
-    let mut rows: Vec<[String; 4]> = Vec::new();
-    for category in CATEGORIES {
-        let dir = cache_root.join(category);
-        let entries = match std::fs::read_dir(&dir) {
-            Ok(entries) => entries,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
-            Err(e) => return Err(anyhow::Error::from(e).context("gage index").into()),
-        };
-        for entry in entries {
-            let entry = entry.context("gage index")?;
-            if !entry.path().is_dir() {
-                continue;
-            }
-            let corpus = entry.file_name().to_string_lossy().into_owned();
-            let source = manifest_source(&entry.path().join("manifest.json"));
-            let present = match &source {
-                Some(source) => {
-                    if source_path(source).is_dir() {
-                        "yes"
-                    } else {
-                        "no"
-                    }
-                }
-                None => "unknown",
-            };
-            rows.push([
-                corpus,
-                category.to_string(),
-                source.unwrap_or_else(|| "(no manifest)".to_string()),
-                present.to_string(),
-            ]);
-        }
-    }
+    let rows = index_rows(cache_root)?;
     if rows.is_empty() {
         println!("No indexes found");
         return Ok(());
     }
-    rows.sort();
-    let header = ["Corpus", "Index", "Source", "Present"].map(String::from);
-    let table = Table::from_iter(std::iter::once(header).chain(rows))
+    let header = ["Corpus", "Indexes", "Source", "Present", "Size"].map(String::from);
+    let cells = rows.into_iter().map(|r| {
+        [
+            r.corpus,
+            r.indexes,
+            r.source,
+            r.present,
+            format_size(r.bytes as i64),
+        ]
+    });
+    let table = Table::from_iter(std::iter::once(header).chain(cells))
         .with(Style::rounded())
         .modify(Rows::first(), style::tty(Color::FG_BRIGHT_YELLOW))
         .to_string();
@@ -286,15 +274,121 @@ fn list_indexes(cache_root: &Path) -> Result<(), CliError> {
     Ok(())
 }
 
-/// The `source` field of a manifest, as written: a path for a summary
-/// cache, a URL for a text index.
-fn manifest_source(path: &Path) -> Option<String> {
-    let text = std::fs::read_to_string(path).ok()?;
-    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
-    value.get("source")?.as_str().map(str::to_string)
+/// The rows of `list_indexes`, sorted by corpus path. A corpus
+/// directory is `store/<digest>` or `driver/<name>/<digest>`; any
+/// other entry beside them, other than the query page cache, is from
+/// an earlier layout.
+fn index_rows(cache_root: &Path) -> Result<Vec<IndexRow>, CliError> {
+    let mut rows = Vec::new();
+    for entry in read_dir_or_empty(cache_root)? {
+        let (name, path) = entry;
+        if name == QUERY_DIR {
+            continue;
+        }
+        if name == STORE_DIR {
+            for (digest, dir) in read_dir_or_empty(&path)? {
+                rows.push(corpus_row(format!("{STORE_DIR}/{digest}"), &dir)?);
+            }
+        } else if name == DRIVER_DIR {
+            for (driver, driver_dir) in read_dir_or_empty(&path)? {
+                for (digest, dir) in read_dir_or_empty(&driver_dir)? {
+                    rows.push(corpus_row(format!("{DRIVER_DIR}/{driver}/{digest}"), &dir)?);
+                }
+            }
+        } else {
+            rows.push(IndexRow {
+                corpus: name,
+                indexes: "legacy".to_string(),
+                source: dialog::NONE.to_string(),
+                present: dialog::NONE.to_string(),
+                bytes: tree_size(&path)?,
+            });
+        }
+    }
+    rows.sort();
+    Ok(rows)
 }
 
-/// The directory a manifest source names: the path itself, or the
+/// The entries of `dir` by name, or none when it does not exist.
+fn read_dir_or_empty(dir: &Path) -> Result<Vec<(String, PathBuf)>, CliError> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => {
+            return Err(anyhow::Error::from(e)
+                .context(format!("gage index: reading {}", dir.display()))
+                .into());
+        }
+    };
+    let mut out = Vec::new();
+    for entry in entries {
+        let entry = entry.context("gage index")?;
+        out.push((
+            entry.file_name().to_string_lossy().into_owned(),
+            entry.path(),
+        ));
+    }
+    Ok(out)
+}
+
+/// The row of the corpus directory `dir`, listed as `corpus`.
+fn corpus_row(corpus: String, dir: &Path) -> Result<IndexRow, CliError> {
+    let mut indexes = Vec::new();
+    if dir.join(OBJECTS_FILE).is_file() {
+        indexes.push("objects");
+    }
+    for category in ["summary", "text"] {
+        if dir.join(category).is_dir() {
+            indexes.push(category);
+        }
+    }
+    let source = match read_corpus(dir) {
+        Ok(corpus) => Some(corpus.source),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        Err(e) => {
+            tracing::warn!(dir = %dir.display(), "unreadable corpus record: {e}");
+            None
+        }
+    };
+    let present = match &source {
+        Some(source) => {
+            if source_path(source).is_dir() {
+                "yes"
+            } else {
+                "no"
+            }
+        }
+        None => "unknown",
+    };
+    Ok(IndexRow {
+        corpus,
+        indexes: if indexes.is_empty() {
+            dialog::NONE.to_string()
+        } else {
+            indexes.join(", ")
+        },
+        source: source.unwrap_or_else(|| "(no record)".to_string()),
+        present: present.to_string(),
+        bytes: tree_size(dir)?,
+    })
+}
+
+/// The bytes under `path`: the file's size, or the sum over a
+/// directory tree.
+fn tree_size(path: &Path) -> Result<u64, CliError> {
+    let metadata = std::fs::symlink_metadata(path)
+        .with_context(|| format!("gage index: {}", path.display()))?;
+    if !metadata.is_dir() {
+        return Ok(metadata.len());
+    }
+    let mut total = 0;
+    for (_, child) in read_dir_or_empty(path)? {
+        total += tree_size(&child)?;
+    }
+    Ok(total)
+}
+
+/// The directory a corpus source names: the path itself, or the
 /// body of a `scheme:path` URL.
 fn source_path(source: &str) -> PathBuf {
     match source.split_once(':') {
@@ -307,32 +401,49 @@ fn source_path(source: &str) -> PathBuf {
     }
 }
 
-/// Remove every category's directory of `corpus`.
+/// Remove the corpus directory, or legacy entry, at `corpus` under
+/// the cache root. The argument is a path --list shows: a corpus is
+/// `store/<digest>` or `driver/<name>/<digest>`, and a legacy entry
+/// is a single name beside those directories.
 fn remove_corpus(cache_root: &Path, corpus: &str) -> Result<(), CliError> {
-    if corpus.is_empty() || corpus.contains('/') || corpus.contains("..") {
-        return Err(CliError::message(format!(
-            "gage index: --remove {corpus}: not a corpus name"
-        )));
+    let not_a_corpus = || CliError::message(format!("gage index: --remove {corpus}: not a corpus"));
+    let parts: Vec<&str> = corpus.split('/').collect();
+    if parts
+        .iter()
+        .any(|p| p.is_empty() || *p == "." || *p == "..")
+    {
+        return Err(not_a_corpus());
     }
-    let mut removed = 0;
-    for category in CATEGORIES {
-        let dir = cache_root.join(category).join(corpus);
-        match std::fs::remove_dir_all(&dir) {
-            Ok(()) => removed += 1,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-            Err(e) => {
-                return Err(anyhow::Error::from(e)
-                    .context(format!("gage index: removing {}", dir.display()))
-                    .into());
-            }
+    let shape_ok = match parts.as_slice() {
+        [STORE_DIR, _] => true,
+        [DRIVER_DIR, _, _] => true,
+        [name] => *name != STORE_DIR && *name != DRIVER_DIR && *name != QUERY_DIR,
+        _ => false,
+    };
+    if !shape_ok {
+        return Err(not_a_corpus());
+    }
+    let path = cache_root.join(corpus);
+    let metadata = match std::fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return Err(CliError::message(format!(
+                "gage index: no index found for corpus {corpus}"
+            )));
         }
-    }
-    if removed == 0 {
-        return Err(CliError::message(format!(
-            "gage index: no index found for corpus {corpus}"
-        )));
-    }
-    println!("Removed {removed} index directories of {corpus}");
+        Err(e) => {
+            return Err(anyhow::Error::from(e)
+                .context(format!("gage index: {}", path.display()))
+                .into());
+        }
+    };
+    let removed = if metadata.is_dir() {
+        std::fs::remove_dir_all(&path)
+    } else {
+        std::fs::remove_file(&path)
+    };
+    removed.with_context(|| format!("gage index: removing {}", path.display()))?;
+    println!("Removed {corpus}");
     Ok(())
 }
 
@@ -356,21 +467,76 @@ mod tests {
         );
     }
 
-    #[test]
-    fn remove_corpus_deletes_every_category_and_rejects_paths() {
+    /// A cache root with one store corpus whose source is `source`,
+    /// one driver corpus, the query page cache, and one legacy entry.
+    fn cache_root(source: &Path) -> tempfile::TempDir {
         let root = tempfile::tempdir().unwrap();
-        for category in CATEGORIES {
-            std::fs::create_dir_all(root.path().join(category).join("-c")).unwrap();
-        }
-        match remove_corpus(root.path(), "-c") {
+        let store = root.path().join("store").join("1111111111111111");
+        std::fs::create_dir_all(store.join("text")).unwrap();
+        std::fs::write(store.join(OBJECTS_FILE), b"12345").unwrap();
+        gage_core::cache::ensure_corpus_dir(&store, &format!("gage:{}", source.display())).unwrap();
+        let driver = root
+            .path()
+            .join("driver")
+            .join("claude")
+            .join("2222222222222222");
+        std::fs::create_dir_all(driver.join("summary")).unwrap();
+        gage_core::cache::ensure_corpus_dir(&driver, "claude:/no/such/dir").unwrap();
+        std::fs::create_dir_all(root.path().join("query")).unwrap();
+        std::fs::write(root.path().join("object-index.sqlite"), b"old").unwrap();
+        root
+    }
+
+    #[test]
+    fn rows_list_each_corpus_with_its_indexes_and_legacy_entries() {
+        let source = tempfile::tempdir().unwrap();
+        let root = cache_root(source.path());
+        let rows = match index_rows(root.path()) {
+            Ok(rows) => rows,
+            Err(CliError::Other(e)) => panic!("{e:#}"),
+            Err(CliError::Exit { message, .. }) => panic!("{message:?}"),
+            Err(CliError::Usage(e)) => panic!("{e}"),
+        };
+        let summary: Vec<(&str, &str, &str)> = rows
+            .iter()
+            .map(|r| (r.corpus.as_str(), r.indexes.as_str(), r.present.as_str()))
+            .collect();
+        assert_eq!(
+            summary,
+            vec![
+                ("driver/claude/2222222222222222", "summary", "no"),
+                ("object-index.sqlite", "legacy", dialog::NONE),
+                ("store/1111111111111111", "objects, text", "yes"),
+            ]
+        );
+        assert_eq!(rows[1].bytes, 3);
+        assert!(rows[2].source.starts_with("gage:"), "{}", rows[2].source);
+    }
+
+    #[test]
+    fn remove_corpus_takes_a_listed_path_and_rejects_others() {
+        let source = tempfile::tempdir().unwrap();
+        let root = cache_root(source.path());
+        let ok = |corpus: &str| match remove_corpus(root.path(), corpus) {
             Ok(()) => {}
             Err(CliError::Other(e)) => panic!("{e:#}"),
             Err(CliError::Exit { message, .. }) => panic!("{message:?}"),
             Err(CliError::Usage(e)) => panic!("{e}"),
-        }
-        assert!(!root.path().join("summary").join("-c").exists());
-        assert!(!root.path().join("text").join("-c").exists());
-        assert!(remove_corpus(root.path(), "-c").is_err());
+        };
+        ok("store/1111111111111111");
+        assert!(!root.path().join("store/1111111111111111").exists());
+        ok("driver/claude/2222222222222222");
+        assert!(!root.path().join("driver/claude/2222222222222222").exists());
+        ok("object-index.sqlite");
+        assert!(!root.path().join("object-index.sqlite").exists());
+
+        assert!(remove_corpus(root.path(), "store/1111111111111111").is_err());
+        assert!(remove_corpus(root.path(), "store").is_err());
+        assert!(remove_corpus(root.path(), "driver/claude").is_err());
+        assert!(remove_corpus(root.path(), "query").is_err());
         assert!(remove_corpus(root.path(), "../x").is_err());
+        assert!(remove_corpus(root.path(), "store/../query").is_err());
+        assert!(remove_corpus(root.path(), "").is_err());
+        assert!(root.path().join("query").is_dir());
     }
 }

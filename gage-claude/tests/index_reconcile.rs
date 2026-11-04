@@ -24,6 +24,13 @@ fn copy_fixtures(dst: &Path) {
     }
 }
 
+/// The corpus directory of the source whose projects directory is
+/// `root`: the driver names the source by the projects directory's
+/// parent.
+fn corpus_dir(cache_root: &Path, root: &Path) -> PathBuf {
+    gage_core::cache::driver_corpus_dir(cache_root, "claude", root.parent().unwrap())
+}
+
 fn store_with_tempdirs() -> (IndexStore, tempfile::TempDir, tempfile::TempDir) {
     let root = tempfile::tempdir().unwrap();
     let cache = tempfile::tempdir().unwrap();
@@ -126,8 +133,8 @@ fn rebuild_resets_artifacts() {
     assert_eq!(outcome.indexed, 4);
     assert!(rich_summary(&store, root.path()).is_some());
     assert_eq!(
-        store.text_dir().parent().unwrap(),
-        cache.path().join("text")
+        store.text_dir(),
+        corpus_dir(cache.path(), root.path()).join("text")
     );
     assert_eq!(
         store
@@ -150,15 +157,23 @@ fn status_on_empty_cache_has_no_reconcile() {
     assert!(status.last_reconcile_ms.is_none());
 }
 
-/// The cache of a corpus is `summary/<slug>` under the cache root, a
-/// flat directory of one file per session beside the manifest, which
-/// names the projects directory it caches.
+/// The corpus directory of a Claude source is `driver/claude/<digest>`
+/// under the cache root, opened by `corpus.json` naming the source.
+/// The summary cache is its `summary/`, a flat directory of one file
+/// per session beside the manifest, which names the projects
+/// directory it caches.
 #[test]
-fn summary_dir_is_the_slug_under_the_summary_category() {
+fn summary_dir_is_inside_the_corpus_directory() {
     let (store, root, cache) = store_with_tempdirs();
     store.reconcile(LockMode::Wait).unwrap();
+    let corpus = corpus_dir(cache.path(), root.path());
+    assert!(corpus.starts_with(cache.path().join("driver").join("claude")));
+    assert_eq!(
+        gage_core::cache::read_corpus(&corpus).unwrap().source,
+        format!("claude:{}", root.path().parent().unwrap().display())
+    );
     let dir = store.summary_dir();
-    assert_eq!(dir.parent().unwrap(), cache.path().join("summary"));
+    assert_eq!(dir, corpus.join("summary"));
     assert!(dir.join(RICH_SESSION).is_file());
     let manifest: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(dir.join("manifest.json")).unwrap()).unwrap();

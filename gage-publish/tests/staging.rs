@@ -38,7 +38,7 @@ fn fixture() -> Fixture {
 
     let store_path = home.path().join("store.git");
     gage_store::init(&store_path).unwrap();
-    let store = Store::open(&store_path).unwrap();
+    let store = Store::open_with_cache_root(&store_path, &home.path().join("cache")).unwrap();
     let spec = format!("claude:{}", claude.path().display());
     let registry = DriverRegistry::builtin();
     let driver = registry.driver_for(&spec).unwrap();

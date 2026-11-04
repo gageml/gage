@@ -1,13 +1,12 @@
 //! Derived data layer for Claude session files.
 //!
 //! Two artifacts shadow the session corpus, maintained by one
-//! reconcile pass: a per-session summary cache at
-//! `<cache root>/summary/<slug>` and a full-text index over message
-//! text at `<cache root>/text/<slug>`, where the slug is the canonical
-//! projects path with every non-alphanumeric character replaced by
-//! `-`. Every source is keyed the same way; the default Claude
-//! location is not special. Both are ephemeral: deleting either is a
-//! complete reset of it.
+//! reconcile pass: a per-session summary cache at `summary/` and a
+//! full-text index over message text at `text/`, both inside the
+//! corpus directory `<cache root>/driver/claude/<digest>` that
+//! `gage_core::cache` lays out. Every source is keyed the same way;
+//! the default Claude location is not special. Both are ephemeral:
+//! deleting either is a complete reset of it.
 //!
 //! Layering: [`crate::session`] and [`crate::entry`] (source reading)
 //! feed this module (derived artifacts); the DataFusion table

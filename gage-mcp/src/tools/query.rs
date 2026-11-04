@@ -752,7 +752,7 @@ mod tests {
         let path = dir.path().join("store.git");
         gage_store::init(&path).unwrap();
         let store = Arc::new(std::sync::Mutex::new(
-            gage_store::Store::open(&path).unwrap(),
+            gage_store::Store::open_with_cache_root(&path, &dir.path().join("cache")).unwrap(),
         ));
         let configured = Arc::new(context());
         let config = QueryConfig {

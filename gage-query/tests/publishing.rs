@@ -50,7 +50,7 @@ async fn external_scope_serves_session_directories_in_the_session_tables() {
 
     let store_path = home.path().join("store.git");
     gage_store::init(&store_path).unwrap();
-    let store = Store::open(&store_path).unwrap();
+    let store = Store::open_with_cache_root(&store_path, &home.path().join("cache")).unwrap();
 
     let spec = format!("claude:{}", claude_root.path().display());
     let registry = DriverRegistry::builtin();

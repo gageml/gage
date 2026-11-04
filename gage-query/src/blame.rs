@@ -1637,7 +1637,9 @@ filename f.rs
         let tmp = tempfile::tempdir().unwrap();
         let store_path = tmp.path().join("store.git");
         gage_store::init(&store_path).unwrap();
-        let store = Arc::new(Mutex::new(Store::open(&store_path).unwrap()));
+        let store = Arc::new(Mutex::new(
+            Store::open_with_cache_root(&store_path, &tmp.path().join("cache")).unwrap(),
+        ));
         let registry = DriverRegistry::builtin();
         let driver = registry.driver_for(&spec).unwrap();
         let source = driver

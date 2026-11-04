@@ -1503,11 +1503,14 @@ mod tests {
         let status = source.maintenance_status().unwrap();
         let state_dir = status.state_dir.unwrap();
         assert!(
-            state_dir.starts_with(cache_root.join("summary")),
+            state_dir.starts_with(cache_root.join("driver").join("claude")),
             "{}",
             state_dir.display()
         );
+        assert!(state_dir.ends_with("summary"), "{}", state_dir.display());
         assert!(state_dir.join("manifest.json").is_file());
+        let corpus = gage_core::cache::read_corpus(state_dir.parent().unwrap()).unwrap();
+        assert_eq!(corpus.source, source_for(root));
     }
 
     #[test]

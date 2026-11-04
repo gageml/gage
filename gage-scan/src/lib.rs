@@ -486,11 +486,11 @@ pub async fn scan(
         id.clone(),
         dataset,
         store.path(),
+        config.cache_root.clone(),
         scan_dir.layout(),
         Arc::clone(&config.driver),
     )?;
     scan_ctx.invalidate = config.invalidate;
-    scan_ctx.cache_root = config.cache_root.clone();
     scan_ctx.agent_pool = Arc::new(Semaphore::new(config.agent_jobs.max(1)));
     trace::install_panic_hook();
     let scope = LogScope {
@@ -1308,7 +1308,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("store.git");
         gage_store::init(&path).unwrap();
-        let store = Store::open(&path).unwrap();
+        let store = Store::open_with_cache_root(&path, &tmp.path().join("cache")).unwrap();
         (tmp, store)
     }
 
@@ -3903,11 +3903,10 @@ mod tests {
         );
 
         // The scan and its relations are queryable through the tables
-        let ctx = gage_query::ContextBuilder::new(Some(Arc::new(Mutex::new(
-            Store::open(store.path()).unwrap(),
-        ))))
-        .build()
-        .await;
+        let ctx =
+            gage_query::ContextBuilder::new(Some(Arc::new(Mutex::new(store.reopen().unwrap()))))
+                .build()
+                .await;
         let count = |sql: String| {
             let ctx = ctx.clone();
             async move {
@@ -4119,11 +4118,10 @@ mod tests {
         );
 
         // The scan's issues and their evidence are queryable
-        let ctx = gage_query::ContextBuilder::new(Some(Arc::new(Mutex::new(
-            Store::open(store.path()).unwrap(),
-        ))))
-        .build()
-        .await;
+        let ctx =
+            gage_query::ContextBuilder::new(Some(Arc::new(Mutex::new(store.reopen().unwrap()))))
+                .build()
+                .await;
         let count = |sql: String| {
             let ctx = ctx.clone();
             async move {
@@ -4162,12 +4160,11 @@ mod tests {
 
         // The stored scan's scope serves the same tables over that scan
         // alone: the prior issue is outside it
-        let scoped = gage_query::ContextBuilder::new(Some(Arc::new(Mutex::new(
-            Store::open(store.path()).unwrap(),
-        ))))
-        .scope(gage_query::ScanScope::stored(outcome.id.clone()))
-        .build()
-        .await;
+        let scoped =
+            gage_query::ContextBuilder::new(Some(Arc::new(Mutex::new(store.reopen().unwrap()))))
+                .scope(gage_query::ScanScope::stored(outcome.id.clone()))
+                .build()
+                .await;
         let count = |sql: &'static str| {
             let ctx = scoped.clone();
             async move {
@@ -5434,11 +5431,10 @@ mod tests {
             Some(format!("session:{session_id}#1-3").as_str())
         );
 
-        let ctx = gage_query::ContextBuilder::new(Some(Arc::new(Mutex::new(
-            Store::open(store.path()).unwrap(),
-        ))))
-        .build()
-        .await;
+        let ctx =
+            gage_query::ContextBuilder::new(Some(Arc::new(Mutex::new(store.reopen().unwrap()))))
+                .build()
+                .await;
         let batches = ctx
             .sql("SELECT scan_id, version, mark FROM scan_watermark")
             .await
@@ -5744,11 +5740,10 @@ mod tests {
             "only the note written at the current digest is carried"
         );
 
-        let ctx = gage_query::ContextBuilder::new(Some(Arc::new(Mutex::new(
-            Store::open(store.path()).unwrap(),
-        ))))
-        .build()
-        .await;
+        let ctx =
+            gage_query::ContextBuilder::new(Some(Arc::new(Mutex::new(store.reopen().unwrap()))))
+                .build()
+                .await;
         let carried = ctx
             .sql(&format!(
                 "SELECT note_id FROM scan_note WHERE scan_id = '{}' AND carried",

@@ -68,7 +68,8 @@ pub mod url;
 mod writer;
 
 pub use admin::{
-    GcOutcome, HOOK_VERSION, InitOutcome, STORE_VERSION, StoreStatus, init, store_path,
+    GcOutcome, HOOK_VERSION, InitOutcome, STORE_VERSION, StoreStatus, init, init_with_cache_root,
+    store_path,
 };
 pub use attachment::{
     AttachmentAddOutcome, AttachmentAttrs, AttachmentFile, AttachmentOutcome, AttachmentQuery,
@@ -122,5 +123,5 @@ pub use session::{
     session_object_id,
 };
 pub use sqlite_index::INDEX_SCHEMA_VERSION;
-pub use store::{INDEX_FILE, Store};
+pub use store::{OBJECTS_FILE, Store, index_path};
 pub use tag::{TagAdded, TagRecord, TagRef, TagStore, TagTarget};

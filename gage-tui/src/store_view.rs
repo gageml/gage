@@ -1223,7 +1223,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("store.git");
         gage_store::init(&path).unwrap();
-        let store = Store::open(&path).unwrap();
+        let store = Store::open_with_cache_root(&path, &tmp.path().join("cache")).unwrap();
         let notes = NoteStore::from(&store);
         // The tree sorts objects by id, so the greatest id is the
         // deepest row
@@ -1268,7 +1268,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("store.git");
         gage_store::init(&path).unwrap();
-        let store = Store::open(&path).unwrap();
+        let store = Store::open_with_cache_root(&path, &tmp.path().join("cache")).unwrap();
         let note_id = NoteStore::from(&store)
             .create(NoteInput {
                 name: "n",
@@ -1400,7 +1400,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("store.git");
         gage_store::init(&path).unwrap();
-        let store = Store::open(&path).unwrap();
+        let store = Store::open_with_cache_root(&path, &tmp.path().join("cache")).unwrap();
         let notes = NoteStore::from(&store);
         let keep = notes
             .create(NoteInput {
@@ -1555,7 +1555,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("store.git");
         gage_store::init(&path).unwrap();
-        let store = Store::open(&path).unwrap();
+        let store = Store::open_with_cache_root(&path, &tmp.path().join("cache")).unwrap();
         gage_store::SessionStore::from(&store)
             .add(&FakeDriver, &mut FakeSession)
             .unwrap();
@@ -1617,7 +1617,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("store.git");
         gage_store::init(&path).unwrap();
-        let mut state = ViewState::new(Store::open(&path).unwrap());
+        let mut state =
+            ViewState::new(Store::open_with_cache_root(&path, &tmp.path().join("cache")).unwrap());
         assert_eq!(state.focus, Focus::Tree);
         handle_key(&mut state, KeyEvent::from(KeyCode::Tab));
         assert_eq!(state.focus, Focus::Detail);
@@ -1647,7 +1648,7 @@ mod tests {
 
     fn store_with_notes(path: &std::path::Path, names: &[&str]) -> (Store, Vec<String>) {
         gage_store::init(path).unwrap();
-        let store = Store::open(path).unwrap();
+        let store = Store::open_with_cache_root(path, &path.with_file_name("cache")).unwrap();
         let notes = NoteStore::from(&store);
         let ids = names
             .iter()

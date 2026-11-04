@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use crate::git::{git_in, run};
 use crate::object::object_ref;
 use crate::writer::{TreeInput, commit_tree, mktree, write_blob};
-use crate::{Store, init};
+use crate::{Store, StoreError, init_with_cache_root};
 
 /// Runs `git fsck --strict` on the store at `path` when dropped and
 /// panics on failure. Skipped while unwinding so a failing test
@@ -34,14 +34,27 @@ impl Drop for FsckGuard {
 pub(crate) fn open_store(dir: &Path) -> (Store, FsckGuard) {
     let path = dir.join("store.git");
     init_for_test(&path);
-    let store = Store::open(&path).unwrap();
+    let store = open(&path).unwrap();
     (store, FsckGuard { path })
 }
 
-/// `init` with git's automatic gc switched off, so no background git
-/// runs against a temporary directory the test is about to remove.
+/// The cache root a test keeps beside the store at `store`: `cache`
+/// in the store's directory, so nothing a test opens reaches the
+/// default cache root.
+pub(crate) fn cache_root_for(store: &Path) -> PathBuf {
+    store.with_file_name("cache")
+}
+
+/// Open the store at `path` with its index under [`cache_root_for`].
+pub(crate) fn open(path: &Path) -> Result<Store, StoreError> {
+    Store::open_with_cache_root(path, &cache_root_for(path))
+}
+
+/// `init` with the index under [`cache_root_for`] and git's automatic
+/// gc switched off, so no background git runs against a temporary
+/// directory the test is about to remove.
 pub(crate) fn init_for_test(path: &Path) {
-    init(path).unwrap();
+    init_with_cache_root(path, &cache_root_for(path)).unwrap();
     run(git_in(path, ["config", "gc.auto", "0"])).unwrap();
 }
 
@@ -86,5 +99,5 @@ pub(crate) fn plant_blob(store: &Store, id: &str, name: &str, content: &str) -> 
 pub(crate) fn reopen(store: Store) -> Store {
     let path = store.path().to_path_buf();
     drop(store);
-    Store::open(&path).unwrap()
+    open(&path).unwrap()
 }

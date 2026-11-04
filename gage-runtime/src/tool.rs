@@ -1233,10 +1233,18 @@ mod tests {
 
     fn scan_ctx(tmp: &TempDir) -> ScanContext {
         let store = tmp.path().join("store.git");
-        gage_store::init(&store).unwrap();
+        let cache_root = tmp.path().join("cache");
+        gage_store::init_with_cache_root(&store, &cache_root).unwrap();
         let paths = ScanDirLayout::new(tmp.path());
-        let mut ctx =
-            ScanContext::new("scan-1".into(), None, &store, paths, Arc::new(NoDriver)).unwrap();
+        let mut ctx = ScanContext::new(
+            "scan-1".into(),
+            None,
+            &store,
+            Some(cache_root),
+            paths,
+            Arc::new(NoDriver),
+        )
+        .unwrap();
         ctx.scanner = "demo".into();
         ctx
     }

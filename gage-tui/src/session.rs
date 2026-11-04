@@ -782,7 +782,7 @@ pub(crate) mod tests {
         let store_root = tempfile::tempdir().unwrap();
         let path = store_root.path().join("store.git");
         gage_store::init(&path).unwrap();
-        let store = Store::open(&path).unwrap();
+        let store = Store::open_with_cache_root(&path, &store_root.path().join("cache")).unwrap();
         let cache_root = store_root.path().join("cache");
         let spec = format!("claude:{}", claude_root.path().display());
         let registry = DriverRegistry::builtin();

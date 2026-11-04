@@ -1,5 +1,5 @@
 //! Full-text search over message text: one Tantivy index per corpus
-//! at `<cache root>/text/<slug>`.
+//! at `text/` in the corpus directory.
 //!
 //! The directory holds `manifest.json`, the reconcile lock, and the
 //! Tantivy index under `index/`. The manifest names the format
@@ -164,17 +164,17 @@ struct Fields {
 }
 
 impl TextIndex {
-    /// The directory of corpus `slug` under `cache_root`.
-    pub fn dir_for(cache_root: &Path, slug: &str) -> PathBuf {
-        cache_root.join(CATEGORY_DIR).join(slug)
+    /// The index directory of the corpus at `corpus_dir`.
+    pub fn dir_for(corpus_dir: &Path) -> PathBuf {
+        corpus_dir.join(CATEGORY_DIR)
     }
 
-    /// Open the index of the corpus `slug`, whose sessions are read
-    /// from `source`, creating it when absent. A directory of another
-    /// format, with an unreadable manifest, or whose index fails to
-    /// open is discarded and recreated empty.
-    pub fn open(cache_root: &Path, slug: &str, source: &str) -> Result<Self> {
-        let dir = Self::dir_for(cache_root, slug);
+    /// Open the index of the corpus at `corpus_dir`, whose sessions
+    /// are read from `source`, creating it when absent. A directory of
+    /// another format, with an unreadable manifest, or whose index
+    /// fails to open is discarded and recreated empty.
+    pub fn open(corpus_dir: &Path, source: &str) -> Result<Self> {
+        let dir = Self::dir_for(corpus_dir);
         if dir.is_dir() {
             match Self::open_existing(&dir) {
                 Ok(index) => return Ok(index),
@@ -225,10 +225,10 @@ impl TextIndex {
         })
     }
 
-    /// Remove the directory of corpus `slug`, if present. The next
-    /// `open` starts it empty.
-    pub fn remove(cache_root: &Path, slug: &str) -> io::Result<()> {
-        match std::fs::remove_dir_all(Self::dir_for(cache_root, slug)) {
+    /// Remove the index directory of the corpus at `corpus_dir`, if
+    /// present. The next `open` starts it empty.
+    pub fn remove(corpus_dir: &Path) -> io::Result<()> {
+        match std::fs::remove_dir_all(Self::dir_for(corpus_dir)) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(e),
@@ -548,7 +548,7 @@ mod tests {
 
     fn index_with(docs: &[(&str, i64, &str)]) -> (TextIndex, tempfile::TempDir) {
         let root = tempfile::tempdir().unwrap();
-        let mut index = TextIndex::open(root.path(), "corpus", "claude:/c").unwrap();
+        let mut index = TextIndex::open(&root.path().join("corpus"), "claude:/c").unwrap();
         let mut writer = index.writer().unwrap();
         let mut by_session: BTreeMap<&str, Vec<MessageRow>> = BTreeMap::new();
         for (sid, line, text) in docs {
@@ -637,7 +637,7 @@ mod tests {
     fn the_manifest_survives_a_reopen_and_names_the_source() {
         let (index, root) = index_with(&[("s1", 1, "x")]);
         drop(index);
-        let reopened = TextIndex::open(root.path(), "corpus", "claude:/c").unwrap();
+        let reopened = TextIndex::open(&root.path().join("corpus"), "claude:/c").unwrap();
         assert_eq!(reopened.sessions()["s1"], "fp1");
         assert_eq!(reopened.search("x", 10, 100).unwrap().len(), 1);
         let manifest: serde_json::Value = serde_json::from_str(
@@ -645,7 +645,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(manifest["source"], "claude:/c");
-        assert_eq!(reopened.dir(), root.path().join("text").join("corpus"));
+        assert_eq!(reopened.dir(), root.path().join("corpus").join("text"));
     }
 
     #[test]
@@ -658,7 +658,7 @@ mod tests {
             r#"{"format_version":0,"tokenizer_chain":"other","source":"claude:/c","last_reconcile_ms":1,"sessions":{"s1":"fp1"}}"#,
         )
         .unwrap();
-        let reopened = TextIndex::open(root.path(), "corpus", "claude:/c").unwrap();
+        let reopened = TextIndex::open(&root.path().join("corpus"), "claude:/c").unwrap();
         assert!(reopened.sessions().is_empty());
         assert!(reopened.search("x", 10, 100).unwrap().is_empty());
     }

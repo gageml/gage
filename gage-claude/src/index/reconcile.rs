@@ -1,11 +1,12 @@
 //! The reconcile pass and the `IndexStore` handle that owns the
 //! per-session summary cache.
 //!
-//! The cache of one corpus is the directory `<cache root>/summary/<slug>`,
-//! where the slug encodes the corpus's projects directory. It holds
-//! `manifest.json`, naming the format version, the source, and the
-//! fingerprint of every session indexed; the reconcile lock; and one
-//! summary file per session. The directory is validated when the
+//! The cache of one corpus is the `summary/` directory of its corpus
+//! directory under the cache root, `driver/claude/<digest>` as
+//! `gage_core::cache` lays it out. It holds `manifest.json`, naming
+//! the format version, the source, and the fingerprint of every
+//! session indexed; the reconcile lock; and one summary file per
+//! session. The directory is validated when the
 //! handle's directory is ensured: a manifest of another format version,
 //! or none, discards the directory and starts it empty.
 //!
@@ -25,7 +26,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use arrow::array::{Array, Int64Array, StringArray};
 use arrow::record_batch::RecordBatch;
 use fs4::FileExt;
-use gage_index::{LockMode, MessageRow, TextIndex, corpus_slug};
+use gage_core::cache::{driver_corpus_dir, ensure_corpus_dir};
+use gage_index::{LockMode, MessageRow, TextIndex};
 use gage_session::MessageTextHit;
 use serde::{Deserialize, Serialize};
 
@@ -120,42 +122,39 @@ fn process_lock(summary_dir: &Path) -> Arc<Mutex<()>> {
 /// Handle to the derived artifacts of one session corpus: the summary
 /// cache and the full-text index.
 ///
-/// `root` is the Claude projects directory the corpus is read from;
-/// the summary cache is the directory `summary/<slug>` and the text
-/// index `text/<slug>` under `cache_root` (`~/.gage/cache` in
-/// production). Everything under either is rebuildable; deleting it
-/// is a complete reset.
+/// `root` is the Claude projects directory the corpus is read from.
+/// The corpus directory is `driver/claude/<digest>` under `cache_root`
+/// (`~/.gage/cache` in production); the summary cache is its
+/// `summary/` and the text index its `text/`. Everything under either
+/// is rebuildable; deleting it is a complete reset.
 #[derive(Debug, Clone)]
 pub struct IndexStore {
     root: PathBuf,
-    cache_root: PathBuf,
-    slug: String,
-    /// The source URL the text index records and prefixes session
-    /// URLs with: `claude:<Claude root>`
+    corpus_dir: PathBuf,
+    /// The source URL the corpus record and the text index name, and
+    /// that session URLs are prefixed with: `claude:<Claude root>`
     source_url: String,
     summary_dir: PathBuf,
     show_agents: bool,
 }
 
-/// The category directory under the cache root holding the summary
-/// cache of every corpus
+/// The summary cache directory inside the corpus directory
 const SUMMARY_DIR: &str = "summary";
 
-/// The scheme of a Claude session URL
+/// The scheme of a Claude session URL, and the driver's name
 const URL_SCHEME: &str = "claude";
 
 impl IndexStore {
     pub fn new(root: impl Into<PathBuf>, cache_root: impl Into<PathBuf>) -> Self {
         let root = root.into();
         let cache_root = cache_root.into();
-        let slug = corpus_slug(&root);
         let claude_root = root.parent().unwrap_or(&root);
+        let corpus_dir = driver_corpus_dir(&cache_root, URL_SCHEME, claude_root);
         let source_url = format!("{URL_SCHEME}:{}", claude_root.display());
-        let summary_dir = cache_root.join(SUMMARY_DIR).join(&slug);
+        let summary_dir = corpus_dir.join(SUMMARY_DIR);
         Self {
             root,
-            cache_root,
-            slug,
+            corpus_dir,
             source_url,
             summary_dir,
             show_agents: false,
@@ -193,15 +192,12 @@ impl IndexStore {
 
     /// The directory holding this corpus's full-text index.
     pub fn text_dir(&self) -> PathBuf {
-        TextIndex::dir_for(&self.cache_root, &self.slug)
+        TextIndex::dir_for(&self.corpus_dir)
     }
 
     fn text_index(&self) -> Result<TextIndex> {
-        Ok(TextIndex::open(
-            &self.cache_root,
-            &self.slug,
-            &self.source_url,
-        )?)
+        ensure_corpus_dir(&self.corpus_dir, &self.source_url)?;
+        Ok(TextIndex::open(&self.corpus_dir, &self.source_url)?)
     }
 
     /// The URL of the session `id` in this corpus, as the text index
@@ -248,11 +244,13 @@ impl IndexStore {
         summary_cache::write(&self.summary_dir, id, attrs)
     }
 
-    /// Bring the summary directory to a usable state: created, with a
-    /// manifest of the current format naming this corpus. A directory
-    /// whose manifest is of another format, unreadable, or missing is
-    /// discarded first; its files are of unknown shape.
+    /// Bring the summary directory to a usable state: created inside
+    /// the corpus directory, with a manifest of the current format
+    /// naming this corpus. A directory whose manifest is of another
+    /// format, unreadable, or missing is discarded first; its files
+    /// are of unknown shape.
     pub fn ensure_summary_dir(&self) -> std::io::Result<()> {
+        ensure_corpus_dir(&self.corpus_dir, &self.source_url)?;
         let manifest_path = self.manifest_path();
         if self.summary_dir.is_dir() {
             match read_manifest(&manifest_path) {
@@ -301,7 +299,7 @@ impl IndexStore {
         self.locked(LockMode::Wait, |store| {
             write_manifest(&store.manifest_path(), &Manifest::empty(&store.root))?;
             summary_cache::remove_all(&store.summary_dir)?;
-            TextIndex::remove(&store.cache_root, &store.slug)?;
+            TextIndex::remove(&store.corpus_dir)?;
             store.reconcile_locked(&mut on_event)
         })
     }

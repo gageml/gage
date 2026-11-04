@@ -159,8 +159,9 @@ impl Driver for FakeDriver {
 fn write_generation_1_fixture() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("store.git");
-    gage_store::init(&path).unwrap();
-    let store = Store::open(&path).unwrap();
+    let cache_root = tmp.path().join("cache");
+    gage_store::init_with_cache_root(&path, &cache_root).unwrap();
+    let store = Store::open_with_cache_root(&path, &cache_root).unwrap();
 
     let note_id = NoteStore::from(&store)
         .create(NoteInput {
@@ -298,8 +299,9 @@ fn reads_the_generation_1_fixture() {
             "+refs/gage/*:refs/gage/*",
         ],
     );
-    gage_store::init(&path).unwrap();
-    let store = Store::open(&path).unwrap();
+    let cache_root = tmp.path().join("cache");
+    gage_store::init_with_cache_root(&path, &cache_root).unwrap();
+    let store = Store::open_with_cache_root(&path, &cache_root).unwrap();
     store.fsck().unwrap();
 
     let notes = NoteStore::from(&store);

@@ -1,4 +1,5 @@
 pub mod author;
+pub mod cache;
 pub mod config;
 pub mod datetime;
 pub mod front_matter;

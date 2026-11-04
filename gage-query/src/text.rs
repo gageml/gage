@@ -30,8 +30,9 @@ use datafusion::datasource::{MemTable, TableProvider, TableType};
 use datafusion::error::{DataFusionError, Result};
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::prelude::Expr;
+use gage_core::cache::{STORE_SCHEME, ensure_corpus_dir, store_corpus_dir};
 use gage_core::config::default_cache_root;
-use gage_index::{LockMode, MessageRow, TextIndex, corpus_slug};
+use gage_index::{LockMode, MessageRow, TextIndex};
 use gage_registry::driver::DriverRegistry;
 use gage_session::{MessageTextHit, SourceOptions};
 use gage_store::Store;
@@ -49,7 +50,7 @@ pub const NATIVE_MESSAGE_TEXT_ARGS: &str = "source text, query text [, snippet_l
 pub const MESSAGE_TEXT_ARGS: &str = "query text [, snippet_len integer]";
 
 /// The scheme of a stored session's URL: `gage:<store path>/<id>`
-const STORE_URL_SCHEME: &str = "gage";
+const STORE_URL_SCHEME: &str = STORE_SCHEME;
 
 pub fn message_text_schema() -> SchemaRef {
     MESSAGE_TEXT_SCHEMA.clone()
@@ -292,11 +293,12 @@ fn hits_batch(hits: &[MessageTextHit]) -> Result<RecordBatch> {
 }
 
 /// The store's full-text index: the live sessions at their tips,
-/// kept at `<cache root>/text/<slug of the store path>`.
+/// kept at `text/` in the store's corpus directory under the cache
+/// root.
 pub struct StoreTextIndex {
     sessions: Arc<SessionSet>,
     store_path: PathBuf,
-    cache_root: PathBuf,
+    corpus_dir: PathBuf,
 }
 
 /// What a reconcile of the store's index did
@@ -333,10 +335,12 @@ impl StoreTextIndex {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .path()
             .to_path_buf();
+        let cache_root = cache_root.unwrap_or_else(default_cache_root);
+        let corpus_dir = store_corpus_dir(&cache_root, &store_path);
         Self {
             sessions: Arc::new(SessionSet::all(store)),
             store_path,
-            cache_root: cache_root.unwrap_or_else(default_cache_root),
+            corpus_dir,
         }
     }
 
@@ -348,17 +352,15 @@ impl StoreTextIndex {
         format!("{}/{id}", self.source_url())
     }
 
-    fn slug(&self) -> String {
-        corpus_slug(&self.store_path)
-    }
-
     /// The index directory, whether or not it exists yet.
     pub fn dir(&self) -> PathBuf {
-        TextIndex::dir_for(&self.cache_root, &self.slug())
+        TextIndex::dir_for(&self.corpus_dir)
     }
 
     fn open(&self) -> Result<TextIndex> {
-        TextIndex::open(&self.cache_root, &self.slug(), &self.source_url()).map_err(index_error)
+        ensure_corpus_dir(&self.corpus_dir, &self.source_url())
+            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+        TextIndex::open(&self.corpus_dir, &self.source_url()).map_err(index_error)
     }
 
     /// Bring the index up to date with the store's live tips.
@@ -429,7 +431,7 @@ impl StoreTextIndex {
 
     /// Discard the index and build it again.
     pub fn rebuild(&self, on_progress: &mut dyn FnMut(usize, usize)) -> Result<StoreTextOutcome> {
-        TextIndex::remove(&self.cache_root, &self.slug())?;
+        TextIndex::remove(&self.corpus_dir)?;
         self.reconcile(LockMode::Wait, on_progress)
     }
 

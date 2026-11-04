@@ -33,7 +33,7 @@ use arrow::record_batch::RecordBatch;
 use datafusion::error::DataFusionError;
 use datafusion::prelude::SessionContext;
 use gage_query::ContextBuilder;
-use gage_store::{INDEX_FILE, SessionStore, Store};
+use gage_store::{SessionStore, Store};
 use indicatif::ProgressBar;
 use serde::Serialize;
 
@@ -89,15 +89,15 @@ pub fn run(
     progress.set_message("populate");
     let mut timings = Timings::default();
     let mut counts = Vec::new();
-    {
+    let index_path = {
         let store = Store::open(&store_path).map_err(|e| e.to_string())?;
         populate(&store, params, &mut timings, progress)?;
-    }
+        store.index_path()
+    };
 
     let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
 
     progress.set_message("cold");
-    let index_path = home.join(INDEX_FILE);
     std::fs::remove_file(&index_path)
         .map_err(|e| format!("remove {}: {e}", index_path.display()))?;
     let store = timings

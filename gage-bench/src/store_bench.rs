@@ -50,8 +50,6 @@ pub struct Params {
     pub seed: u64,
 }
 
-const INDEX_FILE: &str = "cache/object-index.sqlite";
-
 /// Everything the populate phase created, for verification and reads.
 struct Population {
     note_ids: Vec<String>,
@@ -79,7 +77,8 @@ pub fn run(
     progress: &ProgressBar,
 ) -> Result<Results, String> {
     let store_path = home.join("store.git");
-    gage_store::init(&store_path).map_err(|e| e.to_string())?;
+    let cache_root = home.join("cache");
+    gage_store::init_with_cache_root(&store_path, &cache_root).map_err(|e| e.to_string())?;
     // A store runs `git gc --auto` when a writing handle closes. Off
     // here: a background collection would run under the timed reads,
     // and it would collide with the `gc` the bench runs and measures
@@ -97,21 +96,33 @@ pub fn run(
     let mut sizes = Vec::new();
     let mut counts = Vec::new();
 
-    let store = Store::open(&store_path).map_err(|e| e.to_string())?;
+    let store = Store::open_with_cache_root(&store_path, &cache_root).map_err(|e| e.to_string())?;
     let population = populate(&store, params, &mut timings, progress)?;
     drop(store);
 
-    measure_sizes(&store_path, home, "before gc", &mut sizes, &mut counts)?;
+    measure_sizes(
+        &store_path,
+        &cache_root,
+        "before gc",
+        &mut sizes,
+        &mut counts,
+    )?;
     progress.set_message("gc");
-    let store = Store::open(&store_path).map_err(|e| e.to_string())?;
+    let store = Store::open_with_cache_root(&store_path, &cache_root).map_err(|e| e.to_string())?;
     timings.time("gc v2", || {
         store.gc(Some("now"), true).map_err(|e| e.to_string())
     })?;
     drop(store);
-    measure_sizes(&store_path, home, "after gc", &mut sizes, &mut counts)?;
+    measure_sizes(
+        &store_path,
+        &cache_root,
+        "after gc",
+        &mut sizes,
+        &mut counts,
+    )?;
 
     progress.set_message("verify");
-    let store = Store::open(&store_path).map_err(|e| e.to_string())?;
+    let store = Store::open_with_cache_root(&store_path, &cache_root).map_err(|e| e.to_string())?;
     verify(&store, params, &population)?;
     let fsck = timings
         .time("fsck", || store.fsck())
@@ -119,7 +130,7 @@ pub fn run(
     drop(store);
 
     progress.set_message("reads");
-    let read_metrics = time_reads(&store_path, home, params, &population)?;
+    let read_metrics = time_reads(&store_path, &cache_root, params, &population)?;
 
     let mut metrics = timings.summarize();
     metrics.extend(read_metrics);
@@ -364,15 +375,15 @@ fn populate(
 
 fn measure_sizes(
     store_path: &Path,
-    home: &Path,
+    cache_root: &Path,
     label: &str,
     sizes: &mut Vec<Size>,
     counts: &mut Vec<Count>,
 ) -> Result<(), String> {
-    let store = Store::open(store_path).map_err(|e| e.to_string())?;
+    let store = Store::open_with_cache_root(store_path, cache_root).map_err(|e| e.to_string())?;
     let status = store.status().map_err(|e| e.to_string())?;
     let objects = status.loose_objects + status.packed_objects;
-    let index_bytes = std::fs::metadata(home.join(INDEX_FILE))
+    let index_bytes = std::fs::metadata(store.index_path())
         .map(|m| m.len())
         .unwrap_or(0);
     sizes.push(Size {
@@ -535,24 +546,30 @@ fn verify(store: &Store, params: &Params, population: &Population) -> Result<(),
 }
 fn time_reads(
     store_path: &Path,
-    home: &Path,
+    cache_root: &Path,
     params: &Params,
     population: &Population,
 ) -> Result<Vec<Metric>, String> {
     let mut timings = Timings::default();
-    let index_path: PathBuf = home.join(INDEX_FILE);
 
+    let mut index_path: Option<PathBuf> = None;
     for _ in 0..params.iterations {
-        let store = timings.time("open (warm index)", || Store::open(store_path));
-        drop(store.map_err(|e| e.to_string())?);
+        let store = timings.time("open (warm index)", || {
+            Store::open_with_cache_root(store_path, cache_root)
+        });
+        let store = store.map_err(|e| e.to_string())?;
+        index_path = Some(store.index_path());
     }
+    let index_path = index_path.ok_or("iterations must be at least 1")?;
     // A rebuild walks every object and runs for seconds at default
     // scale, so it is measured once rather than per iteration.
     std::fs::remove_file(&index_path).map_err(|e| e.to_string())?;
-    let store = timings.time("open (rebuild index) v2", || Store::open(store_path));
+    let store = timings.time("open (rebuild index) v2", || {
+        Store::open_with_cache_root(store_path, cache_root)
+    });
     drop(store.map_err(|e| e.to_string())?);
 
-    let store = Store::open(store_path).map_err(|e| e.to_string())?;
+    let store = Store::open_with_cache_root(store_path, cache_root).map_err(|e| e.to_string())?;
     let notes = NoteStore::from(&store);
     let datasets = DatasetStore::from(&store);
     let live: Vec<&String> = population

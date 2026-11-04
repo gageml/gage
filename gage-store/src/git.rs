@@ -713,15 +713,15 @@ pub(crate) type CatFileCell = RefCell<CatFile>;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::init;
+    use crate::test_support::{init_for_test, open};
     use crate::writer::write_blob;
 
     fn store_with_blob() -> (tempfile::TempDir, Store, String) {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("store.git");
-        init(&path).unwrap();
+        init_for_test(&path);
         let sha = write_blob(&path, b"hello").unwrap();
-        let store = Store::open(&path).unwrap();
+        let store = open(&path).unwrap();
         (tmp, store, sha)
     }
 

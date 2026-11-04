@@ -116,9 +116,10 @@ impl ContextBuilder {
     }
 
     /// Keep the derived state of every source the context opens under
-    /// `root` rather than the default cache root. The native table
-    /// functions, `native_blame`, `blame`, and `project_for_path` open
-    /// sources.
+    /// `root`. The native table functions, `native_blame`, `blame`,
+    /// and `project_for_path` open sources. Without this, a context
+    /// over a store uses the store's cache root, and one without a
+    /// store uses the default.
     pub fn cache_root(mut self, root: impl Into<PathBuf>) -> Self {
         self.cache_root = Some(root.into());
         self
@@ -167,13 +168,18 @@ impl ContextBuilder {
     /// tables rather than views. An external-scoped context registers
     /// the session tables alone.
     pub async fn build(self) -> SessionContext {
-        let ctx = new_context(
-            self.skip_system_cols,
-            self.show_agents,
-            self.cache_root.clone(),
-        );
+        let cache_root = self.cache_root.or_else(|| {
+            self.store.as_ref().map(|store| {
+                store
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .cache_root()
+                    .to_path_buf()
+            })
+        });
+        let ctx = new_context(self.skip_system_cols, self.show_agents, cache_root.clone());
         let Some(store) = self.store else {
-            register_blame_functions(&ctx, None, self.show_agents, self.cache_root);
+            register_blame_functions(&ctx, None, self.show_agents, cache_root);
             return ctx;
         };
         if let Some(sessions) = self.external {
@@ -187,7 +193,7 @@ impl ContextBuilder {
             "message_text",
             Arc::new(MessageTextFn::new(Arc::new(StoreTextIndex::new(
                 Arc::clone(&store),
-                self.cache_root.clone(),
+                cache_root.clone(),
             )))),
         );
         let base: Vec<(&str, Arc<dyn TableProvider>)> = vec![
@@ -243,7 +249,7 @@ impl ContextBuilder {
         ctx.register_table("note_doc", registry_note_doc_table())
             .expect("register the note doc table on a fresh context");
         register_issue_functions(&ctx, &store);
-        register_blame_functions(&ctx, Some(&store), self.show_agents, self.cache_root);
+        register_blame_functions(&ctx, Some(&store), self.show_agents, cache_root);
         // Views are planned over the raw providers, so they survive the
         // user-facing context hiding what they read
         for (name, sql) in VIEWS {
@@ -647,8 +653,27 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("store.git");
         gage_store::init(&path).unwrap();
-        let store = Store::open(&path).unwrap();
+        let store = Store::open_with_cache_root(&path, &tmp.path().join("cache")).unwrap();
         (tmp, Arc::new(Mutex::new(store)))
+    }
+
+    /// A context over a store, built with no cache root of its own,
+    /// keeps every index under the store's cache root rather than the
+    /// default one.
+    #[tokio::test]
+    async fn a_store_context_defaults_to_the_stores_cache_root() {
+        let (tmp, store) = open_store();
+        let ctx = ContextBuilder::new(Some(store)).build().await;
+        assert!(
+            strings(&ctx, "SELECT session_id FROM message_text('quokka')")
+                .await
+                .is_empty()
+        );
+        let corpus = gage_core::cache::store_corpus_dir(
+            &tmp.path().join("cache"),
+            &tmp.path().join("store.git"),
+        );
+        assert!(corpus.join("text").is_dir(), "{}", corpus.display());
     }
 
     struct Explained {
@@ -1955,9 +1980,14 @@ mod tests {
             err.to_string().contains("invalid text search query"),
             "{err}"
         );
+        let corpus = gage_core::cache::driver_corpus_dir(
+            &claude_root.path().join("cache"),
+            "claude",
+            claude_root.path(),
+        );
         assert!(
-            claude_root.path().join("cache").join("text").is_dir(),
-            "the index is kept under the context's cache root"
+            corpus.join("text").is_dir(),
+            "the index is kept in the source's corpus directory under the context's cache root"
         );
     }
 
@@ -2022,9 +2052,13 @@ mod tests {
             .await
             .is_empty()
         );
+        let corpus = gage_core::cache::store_corpus_dir(
+            &tmp.path().join("cache"),
+            &tmp.path().join("store.git"),
+        );
         assert!(
-            tmp.path().join("cache").join("text").is_dir(),
-            "the store's index is kept under the context's cache root"
+            corpus.join("text").is_dir(),
+            "the store's index is kept in its corpus directory under the context's cache root"
         );
     }
 

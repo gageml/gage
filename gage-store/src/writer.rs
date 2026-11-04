@@ -238,11 +238,11 @@ fn decode_sha(sha: &str) -> Result<[u8; 20], StoreError> {
 mod tests {
     use super::*;
     use crate::git::{git_in, run};
-    use crate::init;
+    use crate::test_support::init_for_test;
 
     fn repo(dir: &Path) -> std::path::PathBuf {
         let path = dir.join("store.git");
-        init(&path).unwrap();
+        init_for_test(&path);
         path
     }
 

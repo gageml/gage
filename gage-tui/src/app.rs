@@ -1570,15 +1570,15 @@ fn row_to_item(
     ListItem::new(line)
 }
 
-/// The label of a run of dropped lines: how many, `2 lines removed`,
-/// or `1 line removed`. The original line numbers are in the body.
+/// The label of a run of dropped lines: how many, `✂ --- 2 lines ---`,
+/// or `✂ --- 1 line ---`. The original line numbers are in the body.
 fn dropped_header(doc: &Document, index: usize) -> String {
     match doc.dropped().get(index) {
         Some(d) => match d.line_end - d.line + 1 {
-            1 => "1 line removed".to_string(),
-            n => format!("{n} lines removed"),
+            1 => "✂ --- 1 line ---".to_string(),
+            n => format!("✂ --- {n} lines ---"),
         },
-        None => "? lines removed".to_string(),
+        None => "✂ --- ? lines ---".to_string(),
     }
 }
 
@@ -2206,10 +2206,10 @@ mod tests {
     #[test]
     fn dropped_header_counts_the_lines_of_the_run() {
         let mut doc = doc_with_redactions();
-        assert_eq!(dropped_header(&doc, 0), "2 lines removed");
+        assert_eq!(dropped_header(&doc, 0), "✂ --- 2 lines ---");
         doc.redactions[1].line_end = Some(2);
-        assert_eq!(dropped_header(&doc, 0), "1 line removed");
-        assert_eq!(dropped_header(&doc, 1), "? lines removed");
+        assert_eq!(dropped_header(&doc, 0), "✂ --- 1 line ---");
+        assert_eq!(dropped_header(&doc, 1), "✂ --- ? lines ---");
     }
 
     /// A derived session: five kept entries of an original whose
@@ -2302,7 +2302,7 @@ mod tests {
             text.contains("/message/content 6-16  pii  filter:pii"),
             "{text}"
         );
-        assert!(text.contains("2 lines removed"), "{text}");
+        assert!(text.contains("✂ --- 2 lines ---"), "{text}");
 
         // With the native source on, a blank line separates the
         // records from the source header

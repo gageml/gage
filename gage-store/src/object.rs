@@ -1170,7 +1170,7 @@ mod tests {
     use super::*;
     use crate::DatasetStore;
     use crate::note::{NoteEdit, NoteInput, NoteStore, NoteValue};
-    use crate::test_support::{open_store, reopen};
+    use crate::test_support::{open, open_store, reopen};
     use serde_json::json;
 
     fn tree_names(store: &Store, commit: &str) -> Vec<String> {
@@ -1225,7 +1225,7 @@ mod tests {
             let walk = store.walk_parent_chain(&commit).map_err(|e| e.to_string());
             let path = store.path().to_path_buf();
             drop(store);
-            let open = Store::open(&path).map(|_| ()).map_err(|e| e.to_string());
+            let open = open(&path).map(|_| ()).map_err(|e| e.to_string());
             send.send((walk, open)).unwrap();
         });
         let (walk, open) = recv
@@ -1387,7 +1387,7 @@ mod tests {
             NoteStore::from(&store).get(&id).unwrap().value,
             NoteValue::Text("v2".into())
         );
-        let reopened = Store::open(store.path()).unwrap();
+        let reopened = open(store.path()).unwrap();
         assert_eq!(
             NoteStore::from(&reopened).get(&id).unwrap().value,
             NoteValue::Text("v2".into())

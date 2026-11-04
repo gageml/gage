@@ -31,7 +31,6 @@ use crate::git::{git_in, run};
 use crate::key::KeyRefUpdate;
 use crate::object::{LinkFile, Object, object_ref, object_version};
 use crate::sqlite_index::INDEX_SCHEMA_VERSION;
-use crate::store::index_path;
 use crate::{Store, StoreError, attachment, dataset, issue, note, scan, session};
 
 /// Indexed attribute paths for an object type, or empty when the type
@@ -239,7 +238,7 @@ impl Store {
 
     /// The index file's location, schema, row counts, and size.
     pub fn index_status(&self) -> Result<IndexStatus, StoreError> {
-        let path = index_path(self.path());
+        let path = self.index_path();
         let bytes = fs::metadata(&path)
             .map_err(|e| StoreError::Index(format!("stat {}: {e}", path.display())))?
             .len();
@@ -386,7 +385,10 @@ mod tests {
     use crate::object::ObjectTree;
     use crate::session::SessionStore;
     use crate::sqlite_index::{INDEX_SCHEMA_VERSION, INDEXED_ATTRS_SNAPSHOT};
-    use crate::test_support::{FsckGuard, fsck_guard, init_for_test, open_store};
+    use crate::store::index_path;
+    use crate::test_support::{
+        FsckGuard, cache_root_for, fsck_guard, init_for_test, open, open_store,
+    };
     use crate::writer::{TreeInput, mktree, write_blob};
     use gage_session::{
         ContentSink, ContentSource, Driver, DriverError, NativeSession, SessionAttrs, Source,
@@ -433,7 +435,7 @@ mod tests {
     fn write_through_makes_objects_selectable_immediately() {
         let tmp = tempfile::tempdir().unwrap();
         let (path, _fsck) = init_repo(tmp.path());
-        let store = Store::open(&path).unwrap();
+        let store = open(&path).unwrap();
         let a = note(&store, "a");
         let b = note(&store, "b");
         assert_eq!(note_ids(&store), vec![a, b]);
@@ -443,10 +445,10 @@ mod tests {
     fn reopen_reconciles_objects_written_by_another_handle() {
         let tmp = tempfile::tempdir().unwrap();
         let (path, _fsck) = init_repo(tmp.path());
-        let a = note(&Store::open(&path).unwrap(), "a");
+        let a = note(&open(&path).unwrap(), "a");
         // Remove the index so the second open starts from nothing.
-        std::fs::remove_file(tmp.path().join("cache/object-index.sqlite")).unwrap();
-        let store = Store::open(&path).unwrap();
+        std::fs::remove_file(index_path(&cache_root_for(&path), &path)).unwrap();
+        let store = open(&path).unwrap();
         assert_eq!(note_ids(&store), vec![a]);
     }
 
@@ -454,7 +456,7 @@ mod tests {
     fn reconcile_of_a_dropped_ref_prunes_its_commits_at_close() {
         let tmp = tempfile::tempdir().unwrap();
         let (path, _fsck) = init_repo(tmp.path());
-        let a = note(&Store::open(&path).unwrap(), "a");
+        let a = note(&open(&path).unwrap(), "a");
         let sha = run(git_in(&path, ["rev-parse", &object_ref(&a)]))
             .unwrap()
             .trim()
@@ -463,11 +465,11 @@ mod tests {
         // replacement or a pruning fetch would make it
         run(git_in(&path, ["update-ref", "-d", &object_ref(&a)])).unwrap();
         {
-            let store = Store::open(&path).unwrap();
+            let store = open(&path).unwrap();
             assert!(note_ids(&store).is_empty());
             assert!(store.index.has_commit(&sha).unwrap());
         }
-        let store = Store::open(&path).unwrap();
+        let store = open(&path).unwrap();
         assert!(!store.index.has_commit(&sha).unwrap());
     }
 
@@ -475,12 +477,14 @@ mod tests {
     fn rebuild_index_starts_from_an_empty_file_and_reaches_every_ref() {
         let tmp = tempfile::tempdir().unwrap();
         let (path, _fsck) = init_repo(tmp.path());
-        let a = note(&Store::open(&path).unwrap(), "a");
-        let before = std::fs::metadata(index_path(&path)).unwrap().len();
-        let store = Store::rebuild_index(&path).unwrap();
+        let a = note(&open(&path).unwrap(), "a");
+        let before = std::fs::metadata(index_path(&cache_root_for(&path), &path))
+            .unwrap()
+            .len();
+        let store = Store::rebuild_index_with_cache_root(&path, &cache_root_for(&path)).unwrap();
         assert_eq!(note_ids(&store), vec![a]);
         let status = store.index_status().unwrap();
-        assert_eq!(status.path, index_path(&path));
+        assert_eq!(status.path, index_path(&cache_root_for(&path), &path));
         assert_eq!(status.schema_version, INDEX_SCHEMA_VERSION);
         assert_eq!(
             status.counts,
@@ -717,7 +721,7 @@ mod tests {
         assert!(matches!(err, StoreError::Index(_)), "{err}");
         assert_eq!(store.rev_parse(&object_ref(&id)).unwrap().unwrap(), before);
 
-        let reopened = Store::open(store.path()).unwrap();
+        let reopened = open(store.path()).unwrap();
         assert_eq!(
             reopened.rev_parse(&object_ref(&id)).unwrap().unwrap(),
             before
@@ -852,8 +856,8 @@ mod tests {
     fn rebuild_matches_write_through_after_gc() {
         let tmp = tempfile::tempdir().unwrap();
         let (path, _fsck) = init_repo(tmp.path());
-        let index_path = tmp.path().join(crate::store::INDEX_FILE);
-        let store = Store::open(&path).unwrap();
+        let index_path = index_path(&cache_root_for(&path), &path);
+        let store = open(&path).unwrap();
         let notes = NoteStore::from(&store);
         let tip = |id: &str| store.rev_parse(&object_ref(id)).unwrap().unwrap();
 
@@ -957,7 +961,7 @@ mod tests {
                 std::fs::remove_file(&file).unwrap();
             }
         }
-        let rebuilt_store = Store::open(&path).unwrap();
+        let rebuilt_store = open(&path).unwrap();
         let rebuilt = dump_index(&index_path);
         drop(rebuilt_store);
         assert_eq!(after_gc, rebuilt);
@@ -967,8 +971,8 @@ mod tests {
     fn delete_prunes_the_index_at_close() {
         let tmp = tempfile::tempdir().unwrap();
         let (path, _fsck) = init_repo(tmp.path());
-        let index_path = tmp.path().join(crate::store::INDEX_FILE);
-        let store = Store::open(&path).unwrap();
+        let index_path = index_path(&cache_root_for(&path), &path);
+        let store = open(&path).unwrap();
         let keep = note(&store, "keep");
         let gone = note(&store, "gone");
         let gone_first = store.rev_parse(&object_ref(&gone)).unwrap().unwrap();
@@ -987,14 +991,14 @@ mod tests {
     fn reconcile_catches_ref_moved_outside_the_store() {
         let tmp = tempfile::tempdir().unwrap();
         let (path, _fsck) = init_repo(tmp.path());
-        let store = Store::open(&path).unwrap();
+        let store = open(&path).unwrap();
         let id = note(&store, "a");
         let first = store.rev_parse(&object_ref(&id)).unwrap().unwrap();
 
         // Edit through a second handle, whose index is a separate
         // connection to the same file, then move the ref back with git
         // so the first handle's index is stale in both directions.
-        let other = Store::open(&path).unwrap();
+        let other = open(&path).unwrap();
         NoteStore::from(&other)
             .edit(
                 &id,
@@ -1006,7 +1010,7 @@ mod tests {
             .unwrap();
         run(git_in(&path, ["update-ref", &object_ref(&id), &first])).unwrap();
 
-        let reopened = Store::open(&path).unwrap();
+        let reopened = open(&path).unwrap();
         let shas: Vec<String> = reopened
             .select(&ObjectQuery::new(note::OBJECT_TYPE))
             .unwrap()
@@ -1020,12 +1024,12 @@ mod tests {
     fn reconcile_drops_refs_deleted_outside_the_store() {
         let tmp = tempfile::tempdir().unwrap();
         let (path, _fsck) = init_repo(tmp.path());
-        let store = Store::open(&path).unwrap();
+        let store = open(&path).unwrap();
         let a = note(&store, "a");
         let b = note(&store, "b");
         run(git_in(&path, ["update-ref", "-d", &object_ref(&a)])).unwrap();
 
-        let reopened = Store::open(&path).unwrap();
+        let reopened = open(&path).unwrap();
         assert_eq!(note_ids(&reopened), vec![b]);
         assert!(!reopened.index.tips().unwrap().contains_key(&a));
     }
@@ -1034,7 +1038,7 @@ mod tests {
     fn tombstones_are_not_selected() {
         let tmp = tempfile::tempdir().unwrap();
         let (path, _fsck) = init_repo(tmp.path());
-        let store = Store::open(&path).unwrap();
+        let store = open(&path).unwrap();
         let a = note(&store, "a");
         let b = note(&store, "b");
         NoteStore::from(&store).delete(&a).unwrap();
@@ -1045,7 +1049,7 @@ mod tests {
     fn linked_commits_stay_indexed_after_their_ref_moves() {
         let tmp = tempfile::tempdir().unwrap();
         let (path, _fsck) = init_repo(tmp.path());
-        let store = Store::open(&path).unwrap();
+        let store = open(&path).unwrap();
         let notes = NoteStore::from(&store);
         let root = note(&store, "root");
         let root_first = store.rev_parse(&object_ref(&root)).unwrap().unwrap();
@@ -1069,8 +1073,8 @@ mod tests {
             )
             .unwrap();
 
-        std::fs::remove_file(tmp.path().join("cache/object-index.sqlite")).unwrap();
-        let reopened = Store::open(&path).unwrap();
+        std::fs::remove_file(index_path(&cache_root_for(&path), &path)).unwrap();
+        let reopened = open(&path).unwrap();
         assert!(reopened.index.has_commit(&root_first).unwrap());
     }
 
@@ -1078,9 +1082,9 @@ mod tests {
     fn schema_version_mismatch_rebuilds_the_index() {
         let tmp = tempfile::tempdir().unwrap();
         let (path, _fsck) = init_repo(tmp.path());
-        let a = note(&Store::open(&path).unwrap(), "a");
+        let a = note(&open(&path).unwrap(), "a");
 
-        let index_path = tmp.path().join("cache/object-index.sqlite");
+        let index_path = index_path(&cache_root_for(&path), &path);
         let conn = rusqlite::Connection::open(&index_path).unwrap();
         conn.execute(
             "UPDATE meta SET schema_version = ?1",
@@ -1089,7 +1093,7 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let store = Store::open(&path).unwrap();
+        let store = open(&path).unwrap();
         assert_eq!(note_ids(&store), vec![a]);
         let conn = rusqlite::Connection::open(&index_path).unwrap();
         let version: u32 = conn
@@ -1104,10 +1108,9 @@ mod tests {
     fn listing_join_searches_ref_by_tip_sha() {
         let tmp = tempfile::tempdir().unwrap();
         let (path, _fsck) = init_repo(tmp.path());
-        note(&Store::open(&path).unwrap(), "a");
+        note(&open(&path).unwrap(), "a");
 
-        let conn =
-            rusqlite::Connection::open(tmp.path().join("cache/object-index.sqlite")).unwrap();
+        let conn = rusqlite::Connection::open(index_path(&cache_root_for(&path), &path)).unwrap();
         let mut stmt = conn
             .prepare(
                 "EXPLAIN QUERY PLAN SELECT o.id FROM ref r JOIN object o ON o.sha = r.tip_sha \
@@ -1133,7 +1136,7 @@ mod tests {
     fn datasets_and_notes_select_independently() {
         let tmp = tempfile::tempdir().unwrap();
         let (path, _fsck) = init_repo(tmp.path());
-        let store = Store::open(&path).unwrap();
+        let store = open(&path).unwrap();
         note(&store, "a");
         let d = DatasetStore::from(&store).create().unwrap();
         let ids: Vec<String> = DatasetStore::from(&store)

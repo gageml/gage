@@ -24,6 +24,7 @@ use datafusion::arrow::array::{Array, Int64Array, StringArray, TimestampMillisec
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::error::DataFusionError;
 use datafusion::prelude::SessionContext;
+use gage_core::config::default_cache_root;
 use gage_mcp::{HostError, McpHost};
 use gage_query::{ContextBuilder, ScanScope};
 use gage_session::{Driver, DriverError, Source, SourceOptions};
@@ -103,14 +104,18 @@ pub struct ScanContext {
 
 impl ScanContext {
     /// Open the context over the store at `store_path`: one handle for
-    /// the runtime and one for the query context.
+    /// the runtime and one for the query context, with their index
+    /// and every source's derived state under `cache_root`, or the
+    /// default cache root when it is `None`.
     pub fn new(
         scan_id: String,
         dataset: Option<ScanDatasetRef>,
         store_path: &Path,
+        cache_root: Option<PathBuf>,
         paths: ScanDirLayout,
         driver: Arc<dyn Driver>,
     ) -> Result<Self, StoreError> {
+        let root = cache_root.clone().unwrap_or_else(default_cache_root);
         Ok(ScanContext {
             scan_id,
             dataset,
@@ -119,13 +124,15 @@ impl ScanContext {
             task: String::new(),
             sources: None,
             driver,
-            cache_root: None,
+            cache_root,
             agent_pool: Arc::new(Semaphore::new(Semaphore::MAX_PERMITS)),
-            store: Arc::new(tokio::sync::Mutex::new(Store::open(store_path)?)),
+            store: Arc::new(tokio::sync::Mutex::new(Store::open_with_cache_root(
+                store_path, &root,
+            )?)),
             paths,
             invalidate: false,
             note_writes: BTreeMap::new(),
-            query_store: Arc::new(Mutex::new(Store::open(store_path)?)),
+            query_store: Arc::new(Mutex::new(Store::open_with_cache_root(store_path, &root)?)),
             scan_query: Arc::new(OnceCell::new()),
             store_query: Arc::new(OnceCell::new()),
             mcp_host: Arc::new(OnceCell::new()),

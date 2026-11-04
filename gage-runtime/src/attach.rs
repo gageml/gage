@@ -28,6 +28,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::error::Error;
 use datafusion::prelude::SessionContext;
+use gage_core::config::default_cache_root;
 use gage_query::{ContextBuilder, ScanScope};
 use gage_session::Driver;
 use gage_store::{
@@ -72,24 +73,30 @@ pub struct AttachContext {
 
 impl AttachContext {
     /// Open the context over the store at `store_path`: one handle for
-    /// the writes and one for the query context.
+    /// the writes and one for the query context, with their index and
+    /// every source's derived state under `cache_root`, or the default
+    /// cache root when it is `None`.
     pub fn new(
         dataset: ScanDatasetRef,
         scanner: String,
         scanner_dir: PathBuf,
         store_path: &Path,
+        cache_root: Option<PathBuf>,
         attached: mpsc::UnboundedSender<Attached>,
         driver: Arc<dyn Driver>,
     ) -> Result<Self, gage_store::StoreError> {
+        let root = cache_root.clone().unwrap_or_else(default_cache_root);
         Ok(AttachContext {
             dataset,
             scanner,
             scanner_dir,
-            store: Arc::new(tokio::sync::Mutex::new(Store::open(store_path)?)),
+            store: Arc::new(tokio::sync::Mutex::new(Store::open_with_cache_root(
+                store_path, &root,
+            )?)),
             attached,
             driver,
-            cache_root: None,
-            query_store: Arc::new(Mutex::new(Store::open(store_path)?)),
+            cache_root,
+            query_store: Arc::new(Mutex::new(Store::open_with_cache_root(store_path, &root)?)),
             dataset_query: Arc::new(OnceCell::new()),
         })
     }

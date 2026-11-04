@@ -2427,7 +2427,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("store.git");
         gage_store::init(&path).unwrap();
-        let store = Store::open(&path).unwrap();
+        let store = Store::open_with_cache_root(&path, &tmp.path().join("cache")).unwrap();
         let ids: Vec<String> = (0..3).map(|_| new_uuid()).collect();
         store_scan(
             &store,

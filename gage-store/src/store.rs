@@ -13,27 +13,29 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use gage_core::cache::{ensure_corpus_dir, store_corpus_dir, store_source_url};
+use gage_core::config::default_cache_root;
+
 use crate::StoreError;
 use crate::admin::{STORE_VERSION, exists, migrate, refresh_hooks};
 use crate::git::{CatFile, CatFileCell, git_cmd, git_in, run};
 use crate::index::ObjectIndex;
 use crate::sqlite_index::SqliteIndex;
 
-/// The object index file, relative to the store's parent directory
-pub const INDEX_FILE: &str = "cache/object-index.sqlite";
+/// The object index file inside a store's corpus directory under the
+/// cache root
+pub const OBJECTS_FILE: &str = "objects.db";
 
-/// The object index file for the store at `store`.
-pub(crate) fn index_path(store: &Path) -> PathBuf {
-    store
-        .parent()
-        .map(|p| p.join(INDEX_FILE))
-        .unwrap_or_else(|| PathBuf::from(INDEX_FILE))
+/// The object index file of the store at `store` under `cache_root`.
+pub fn index_path(cache_root: &Path, store: &Path) -> PathBuf {
+    store_corpus_dir(cache_root, store).join(OBJECTS_FILE)
 }
 
-/// Remove the object index file for the store at `store`. An absent
-/// file is the outcome the caller wants, so it is not an error.
-pub(crate) fn remove_index_file(store: &Path) -> Result<(), StoreError> {
-    let index = index_path(store);
+/// Remove the object index file of the store at `store` under
+/// `cache_root`. An absent file is the outcome the caller wants, so
+/// it is not an error.
+pub(crate) fn remove_index_file(cache_root: &Path, store: &Path) -> Result<(), StoreError> {
+    let index = index_path(cache_root, store);
     match fs::remove_file(&index) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
@@ -48,6 +50,8 @@ pub(crate) fn remove_index_file(store: &Path) -> Result<(), StoreError> {
 /// this build supports.
 pub struct Store {
     path: PathBuf,
+    /// The cache root the object index is kept under
+    cache_root: PathBuf,
     version: u32,
     pub(crate) index: Box<dyn ObjectIndex>,
     /// The long-lived `cat-file` process every read goes through.
@@ -98,10 +102,16 @@ impl Store {
     /// [`StoreError::VersionMismatch`] when the version is newer than
     /// this build's, or older with no migration step from it. An older
     /// version with steps is migrated first. Hooks behind this build's
-    /// are rewritten. Opens the object index beside the store
-    /// (`cache/object-index.sqlite` under the store's parent) and
-    /// reconciles it with the repository's refs.
+    /// are rewritten. Opens the object index in the store's corpus
+    /// directory under the default cache root and reconciles it with
+    /// the repository's refs.
     pub fn open(path: &Path) -> Result<Store, StoreError> {
+        Store::open_with_cache_root(path, &default_cache_root())
+    }
+
+    /// As [`Store::open`], with the object index kept under
+    /// `cache_root`.
+    pub fn open_with_cache_root(path: &Path, cache_root: &Path) -> Result<Store, StoreError> {
         if !exists(path) {
             return Err(StoreError::NotFound(path.to_path_buf()));
         }
@@ -123,10 +133,14 @@ impl Store {
             });
         }
         refresh_hooks(path)?;
+        let corpus_dir = store_corpus_dir(cache_root, path);
+        ensure_corpus_dir(&corpus_dir, &store_source_url(path))
+            .map_err(|e| StoreError::Index(format!("create {}: {e}", corpus_dir.display())))?;
         let store = Store {
             path: path.to_path_buf(),
+            cache_root: cache_root.to_path_buf(),
             version,
-            index: Box::new(SqliteIndex::open(&index_path(path))?),
+            index: Box::new(SqliteIndex::open(&index_path(cache_root, path))?),
             cat_file: RefCell::new(CatFile::spawn(path)?),
             wrote: Cell::new(false),
             deleted: Cell::new(false),
@@ -139,14 +153,40 @@ impl Store {
     /// file is removed first, so the open's reconcile is a full walk
     /// of every ref.
     pub fn rebuild_index(path: &Path) -> Result<Store, StoreError> {
-        remove_index_file(path)?;
-        let store = Store::open(path)?;
+        Store::rebuild_index_with_cache_root(path, &default_cache_root())
+    }
+
+    /// As [`Store::rebuild_index`], with the object index kept under
+    /// `cache_root`.
+    pub fn rebuild_index_with_cache_root(
+        path: &Path,
+        cache_root: &Path,
+    ) -> Result<Store, StoreError> {
+        remove_index_file(cache_root, path)?;
+        let store = Store::open_with_cache_root(path, cache_root)?;
         store.rebuild_key_refs()?;
         Ok(store)
     }
 
+    /// A second handle on this store, opened at the same path with
+    /// the same cache root. Its index is a separate connection to the
+    /// same file.
+    pub fn reopen(&self) -> Result<Store, StoreError> {
+        Store::open_with_cache_root(&self.path, &self.cache_root)
+    }
+
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// The cache root the object index is kept under.
+    pub fn cache_root(&self) -> &Path {
+        &self.cache_root
+    }
+
+    /// The object index file.
+    pub fn index_path(&self) -> PathBuf {
+        index_path(&self.cache_root, &self.path)
     }
 
     /// The store's `gage.version`.
@@ -197,14 +237,14 @@ pub(crate) fn read_config_u32(path: &Path, key: &str) -> Result<Option<u32>, Sto
 mod tests {
     use super::*;
     use crate::admin::{HOOK_VERSION, UPDATE_HOOK, UPDATE_HOOK_PATH};
-    use crate::init;
+    use crate::test_support::{init_for_test, open};
 
     #[test]
     fn open_reads_version() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("store.git");
-        init(&path).unwrap();
-        let store = Store::open(&path).unwrap();
+        init_for_test(&path);
+        let store = open(&path).unwrap();
         assert_eq!(store.path(), path);
         assert_eq!(store.version(), STORE_VERSION);
     }
@@ -223,7 +263,7 @@ mod tests {
     fn writes_hand_git_gc_auto_the_decision_at_close() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("store.git");
-        init(&path).unwrap();
+        init_for_test(&path);
         // git runs when the sampled directory holds more than
         // gc.auto/256 rounded up, so two probes clear a threshold of
         // 1; in the foreground so the outcome is observable
@@ -231,7 +271,7 @@ mod tests {
         run(git_in(&path, ["config", "gc.autoDetach", "false"])).unwrap();
         let probes = blobs_under_17(&path, 2);
         {
-            let store = Store::open(&path).unwrap();
+            let store = open(&path).unwrap();
             crate::NoteStore::from(&store)
                 .create(crate::NoteInput {
                     name: "n",
@@ -261,7 +301,7 @@ mod tests {
     fn open_of_missing_store_fails() {
         let tmp = tempfile::tempdir().unwrap();
         assert!(matches!(
-            Store::open(&tmp.path().join("nope.git")).unwrap_err(),
+            open(&tmp.path().join("nope.git")).unwrap_err(),
             StoreError::NotFound(_)
         ));
     }
@@ -270,11 +310,11 @@ mod tests {
     fn open_refuses_newer_version() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("store.git");
-        init(&path).unwrap();
+        init_for_test(&path);
         let newer = (STORE_VERSION + 1).to_string();
         run(git_in(&path, ["config", "gage.version", &newer])).unwrap();
         assert!(matches!(
-            Store::open(&path).unwrap_err(),
+            open(&path).unwrap_err(),
             StoreError::VersionMismatch { found, supported }
                 if found == STORE_VERSION + 1 && supported == STORE_VERSION
         ));
@@ -284,14 +324,14 @@ mod tests {
     fn open_refuses_sha256_object_format() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("store.git");
-        init(&path).unwrap();
+        init_for_test(&path);
         run(git_in(
             &path,
             ["config", "extensions.objectFormat", "sha256"],
         ))
         .unwrap();
         assert!(matches!(
-            Store::open(&path).unwrap_err(),
+            open(&path).unwrap_err(),
             StoreError::UnsupportedObjectFormat(f) if f == "sha256"
         ));
     }
@@ -300,10 +340,10 @@ mod tests {
     fn open_refuses_missing_version() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("store.git");
-        init(&path).unwrap();
+        init_for_test(&path);
         run(git_in(&path, ["config", "--unset", "gage.version"])).unwrap();
         assert!(matches!(
-            Store::open(&path).unwrap_err(),
+            open(&path).unwrap_err(),
             StoreError::VersionMissing(_)
         ));
     }
@@ -312,9 +352,9 @@ mod tests {
     fn open_refuses_an_older_version_with_no_migration_step() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("store.git");
-        init(&path).unwrap();
+        init_for_test(&path);
         run(git_in(&path, ["config", "gage.version", "0"])).unwrap();
-        let err = Store::open(&path).unwrap_err();
+        let err = open(&path).unwrap_err();
         assert!(
             matches!(err, StoreError::VersionMismatch { found: 0, supported } if supported == STORE_VERSION),
             "{err}"
@@ -332,13 +372,13 @@ mod tests {
     fn open_rewrites_hooks_behind_this_build() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("store.git");
-        init(&path).unwrap();
+        init_for_test(&path);
         let hook = path.join(UPDATE_HOOK_PATH);
         let stale = "#!/bin/sh\nexit 0\n";
 
         fs::write(&hook, stale).unwrap();
         run(git_in(&path, ["config", "--unset", "gage.hookVersion"])).unwrap();
-        drop(Store::open(&path).unwrap());
+        drop(open(&path).unwrap());
         assert_eq!(fs::read_to_string(&hook).unwrap(), UPDATE_HOOK);
         assert_eq!(
             run(git_in(&path, ["config", "--get", "gage.hookVersion"]))
@@ -348,7 +388,7 @@ mod tests {
         );
 
         fs::write(&hook, stale).unwrap();
-        drop(Store::open(&path).unwrap());
+        drop(open(&path).unwrap());
         assert_eq!(fs::read_to_string(&hook).unwrap(), stale);
     }
 }

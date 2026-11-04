@@ -137,15 +137,15 @@ async fn run_one(
 ) -> Result<(), AttachError> {
     let (attached_tx, mut attached_rx) = mpsc::unbounded_channel();
     let (output_tx, mut output_rx) = mpsc::unbounded_channel();
-    let mut ctx = AttachContext::new(
+    let ctx = AttachContext::new(
         dataset.clone(),
         scanner.name.clone(),
         scanner.dir().to_path_buf(),
         store_path,
+        cache_root,
         attached_tx,
         driver,
     )?;
-    ctx.cache_root = cache_root;
     let sink = OutputSink {
         scanner: scanner.name.clone(),
         task: task.name.clone(),

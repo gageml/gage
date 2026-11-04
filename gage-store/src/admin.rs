@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use gage_core::config::gage_home;
+use gage_core::config::{default_cache_root, gage_home};
 
 use crate::git::{git_cmd, git_in, run};
 use crate::remote::{Remote, RemoteStore};
@@ -77,9 +77,10 @@ pub enum InitOutcome {
 /// Creates a bare repository at `path`, or reinitializes it if present.
 ///
 /// A newly created store has no objects, so any object index already
-/// under its parent belongs to a store that was removed or replaced,
-/// and is deleted. A reinitialized store keeps its index, and must be
-/// at this build's version: see [`check_generation`].
+/// in its corpus directory under the default cache root belongs to a
+/// store that was removed or replaced, and is deleted. A
+/// reinitialized store keeps its index, and must be at this build's
+/// version: see [`check_generation`].
 /// Leading directories are created as needed. The empty template keeps
 /// sample hooks and `description` out of the store and ignores any
 /// `init.templateDir` in the user's Git config; the store's own
@@ -87,6 +88,11 @@ pub enum InitOutcome {
 /// initial branch is fixed so `HEAD` does not depend on
 /// `init.defaultBranch`.
 pub fn init(path: &Path) -> Result<InitOutcome, StoreError> {
+    init_with_cache_root(path, &default_cache_root())
+}
+
+/// As [`init`], with the object index looked for under `cache_root`.
+pub fn init_with_cache_root(path: &Path, cache_root: &Path) -> Result<InitOutcome, StoreError> {
     let existing = exists(path);
     if existing {
         check_generation(path)?;
@@ -112,7 +118,7 @@ pub fn init(path: &Path) -> Result<InitOutcome, StoreError> {
     if existing {
         return Ok(InitOutcome::Reinitialized);
     }
-    remove_index_file(path)?;
+    remove_index_file(cache_root, path)?;
     Ok(InitOutcome::Created)
 }
 
@@ -417,7 +423,8 @@ mod tests {
     use crate::git::{git_in, run};
     use crate::note::{NoteEdit, NoteInput, NoteStore, NoteValue};
     use crate::object::object_ref;
-    use crate::test_support::{init_for_test, plant_blob, reopen};
+    use crate::store::index_path;
+    use crate::test_support::{cache_root_for, init_for_test, open, plant_blob, reopen};
     use crate::writer::{TreeInput, commit_tree, mktree};
 
     #[test]
@@ -425,7 +432,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let store = tmp.path().join("home").join("store.git");
 
-        assert_eq!(init(&store).unwrap(), InitOutcome::Created);
+        assert_eq!(
+            init_with_cache_root(&store, &cache_root_for(&store)).unwrap(),
+            InitOutcome::Created
+        );
         assert_eq!(
             std::fs::read_to_string(store.join("HEAD")).unwrap().trim(),
             "ref: refs/heads/main"
@@ -457,7 +467,10 @@ mod tests {
             }
         }
 
-        assert_eq!(init(&store).unwrap(), InitOutcome::Reinitialized);
+        assert_eq!(
+            init_with_cache_root(&store, &cache_root_for(&store)).unwrap(),
+            InitOutcome::Reinitialized
+        );
     }
 
     #[test]
@@ -465,15 +478,22 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join("home");
         let store = home.join("store.git");
-        let index = home.join(crate::INDEX_FILE);
+        let cache_root = cache_root_for(&store);
+        let index = index_path(&cache_root, &store);
         std::fs::create_dir_all(index.parent().unwrap()).unwrap();
         std::fs::write(&index, b"stale").unwrap();
 
-        assert_eq!(init(&store).unwrap(), InitOutcome::Created);
+        assert_eq!(
+            init_with_cache_root(&store, &cache_root).unwrap(),
+            InitOutcome::Created
+        );
         assert!(!index.exists());
 
         std::fs::write(&index, b"current").unwrap();
-        assert_eq!(init(&store).unwrap(), InitOutcome::Reinitialized);
+        assert_eq!(
+            init_with_cache_root(&store, &cache_root).unwrap(),
+            InitOutcome::Reinitialized
+        );
         assert!(index.exists());
     }
 
@@ -484,7 +504,7 @@ mod tests {
         let target_path = tmp.path().join("target.git");
         init_for_test(&source_path);
         init_for_test(&target_path);
-        let source = Store::open(&source_path).unwrap();
+        let source = open(&source_path).unwrap();
         let notes = NoteStore::from(&source);
         let tip = |id: &str| source.rev_parse(&object_ref(id)).unwrap().unwrap();
 
@@ -559,7 +579,7 @@ mod tests {
         push(&a_second, "refs/tags/x").unwrap();
         push(&a_first, "refs/tags/x").unwrap();
 
-        let target = Store::open(&target_path).unwrap();
+        let target = open(&target_path).unwrap();
         assert_eq!(target.rev_parse(&a_ref).unwrap().unwrap(), a_tomb_2);
     }
 
@@ -649,7 +669,7 @@ mod tests {
         let target_path = tmp.path().join("target.git");
         init_for_test(&source_path);
         init_for_test(&target_path);
-        let source = Store::open(&source_path).unwrap();
+        let source = open(&source_path).unwrap();
         let notes = NoteStore::from(&source);
         let tip = |id: &str| source.rev_parse(&object_ref(id)).unwrap().unwrap();
 
@@ -688,7 +708,7 @@ mod tests {
         assert_declined(push("", key), "deletion");
         push(&b_first, key).unwrap();
 
-        let target = Store::open(&target_path).unwrap();
+        let target = open(&target_path).unwrap();
         assert_eq!(target.rev_parse(tag).unwrap().unwrap(), a_first);
         assert_eq!(target.rev_parse(key).unwrap().unwrap(), b_first);
     }
@@ -700,7 +720,7 @@ mod tests {
         let target_path = tmp.path().join("target.git");
         init_for_test(&source_path);
         init_for_test(&target_path);
-        let source = Store::open(&source_path).unwrap();
+        let source = open(&source_path).unwrap();
         let notes = NoteStore::from(&source);
         let a = note(&notes, "a");
         let a_ref = object_ref(&a);
@@ -775,7 +795,7 @@ mod tests {
         let path = tmp.path().join("store.git");
         init(&path).unwrap();
 
-        let status = Store::open(&path).unwrap().status().unwrap();
+        let status = open(&path).unwrap().status().unwrap();
         assert_eq!(
             status,
             StoreStatus {
@@ -842,7 +862,7 @@ refs/heads/main\n";
         let target_path = tmp.path().join("target.git");
         init_for_test(&source_path);
         init_for_test(&target_path);
-        let source = Store::open(&source_path).unwrap();
+        let source = open(&source_path).unwrap();
         let a = note(&NoteStore::from(&source), "a");
         plant_blob(&source, &a, "type", "gage::note 0\n");
         let source = reopen(source);
@@ -881,7 +901,7 @@ refs/heads/main\n";
         let live = commit_tree(&source_path, &live_tree, "live", &[]).unwrap();
         push(&live).unwrap();
 
-        let target = Store::open(&target_path).unwrap();
+        let target = open(&target_path).unwrap();
         assert_eq!(target.rev_parse(&a_ref).unwrap().unwrap(), live);
     }
 
@@ -893,7 +913,7 @@ refs/heads/main\n";
         let tmp = tempfile::tempdir().unwrap();
         let origin = tmp.path().join("origin.git");
         init_for_test(&origin);
-        let a = note(&NoteStore::from(&Store::open(&origin).unwrap()), "a");
+        let a = note(&NoteStore::from(&open(&origin).unwrap()), "a");
 
         let restored = tmp.path().join("restored.git");
         let mut cmd = git_cmd();
@@ -910,12 +930,15 @@ refs/heads/main\n";
         ))
         .unwrap();
         assert!(matches!(
-            Store::open(&restored).unwrap_err(),
+            open(&restored).unwrap_err(),
             StoreError::VersionMissing(_)
         ));
 
-        assert_eq!(init(&restored).unwrap(), InitOutcome::Reinitialized);
-        let store = Store::open(&restored).unwrap();
+        assert_eq!(
+            init_with_cache_root(&restored, &cache_root_for(&restored)).unwrap(),
+            InitOutcome::Reinitialized
+        );
+        let store = open(&restored).unwrap();
         assert_eq!(NoteStore::from(&store).get(&a).unwrap().name, "a");
     }
 
