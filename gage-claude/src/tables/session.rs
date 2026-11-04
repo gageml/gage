@@ -42,7 +42,13 @@ use gage_session::system;
 /// other column is filled from the directory walk. A projection that
 /// touches none of these — `SELECT COUNT(*)`, `SELECT id FROM session
 /// WHERE ...` — can skip per-row derivation entirely.
-const SUMMARY_COLS: &[&str] = &["summary", "is_empty", "files_changed", "files_referenced"];
+const SUMMARY_COLS: &[&str] = &[
+    "title",
+    "summary",
+    "is_empty",
+    "files_changed",
+    "files_referenced",
+];
 
 fn session_schema() -> SchemaRef {
     // Column order is shared with the store's `session` table:
@@ -52,6 +58,9 @@ fn session_schema() -> SchemaRef {
     Arc::new(Schema::new(vec![
         // Identity
         Field::new("id", DataType::Utf8, false),
+        // The session's title, as the driver derives it; also carried
+        // in `summary`. Null when the session could not be read.
+        Field::new("title", DataType::Utf8, true),
         // Location
         Field::new("project", DataType::Utf8, true),
         // Timestamps
@@ -354,6 +363,7 @@ impl SessionExec {
         let mut mtimes = TimestampMillisecondBuilder::with_capacity(len);
         let mut sizes = Int64Builder::with_capacity(len);
         let mut content_formats = StringBuilder::with_capacity(len, len * CONTENT_FORMAT.len());
+        let mut titles = StringBuilder::new();
         let mut summaries = StringBuilder::new();
         let mut is_empty = BooleanBuilder::with_capacity(len);
         let mut files_changed = ListBuilder::new(StringBuilder::new());
@@ -407,6 +417,7 @@ impl SessionExec {
                 ),
                 None => summaries.append_null(),
             }
+            titles.append_option(attrs.as_ref().and_then(|a| a.title.as_deref()));
             let attrs = attrs.as_ref().unwrap_or(&default_summary);
             is_empty.append_value(attrs.is_empty);
             append_paths(&mut files_changed, &attrs.files_changed, needs_summary);
@@ -421,6 +432,7 @@ impl SessionExec {
             self.full_schema.clone(),
             vec![
                 Arc::new(ids.finish()),
+                Arc::new(titles.finish()),
                 Arc::new(projects.finish()),
                 Arc::new(mtimes.finish().with_timezone("UTC")),
                 Arc::new(content_formats.finish()),

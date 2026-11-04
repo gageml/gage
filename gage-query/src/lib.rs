@@ -1016,7 +1016,8 @@ mod tests {
 
     /// `native_session` carries the driver's projection as the same
     /// `summary` JSON the stored `session` table carries, so one
-    /// `json_extract` reads either; `is_empty` stays a typed column.
+    /// `json_extract` reads either; `title` and `is_empty` are typed
+    /// columns beside it.
     #[tokio::test]
     async fn native_session_carries_the_summary_json() {
         let claude_root = tempfile::tempdir().unwrap();
@@ -1060,10 +1061,17 @@ mod tests {
             strings(&ctx, &format!("SELECT id FROM {from} WHERE is_empty")).await,
             [empty]
         );
-        let flat = ctx.sql(&format!("SELECT title FROM {from}")).await;
+        assert_eq!(
+            strings(
+                &ctx,
+                &format!("SELECT coalesce(title, '-') FROM {from} ORDER BY id")
+            )
+            .await,
+            ["Fix the parser", "-"]
+        );
         assert!(
-            flat.is_err(),
-            "the flat summary columns are gone from native_session"
+            ctx.sql(&format!("SELECT model FROM {from}")).await.is_err(),
+            "the other flat summary columns are gone from native_session"
         );
     }
 

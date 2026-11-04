@@ -194,7 +194,7 @@ fn run_queries(
     let list_light_rows: u64 = light.iter().map(|b| b.num_rows() as u64).sum();
 
     let full_sql = format!(
-        "SELECT id, session_type, json_extract(summary, '$.title') AS title, \
+        "SELECT id, session_type, title, \
          json_extract(summary, '$.model') AS model, size, \
          CAST(json_extract(summary, '$.message_count') AS BIGINT) AS message_count, modified \
          FROM session ORDER BY modified DESC LIMIT {limit}"

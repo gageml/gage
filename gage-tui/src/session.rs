@@ -444,7 +444,7 @@ impl Backend {
             Kind::Stored { .. } => ("modified", "driver"),
         };
         let sql = format!(
-            "SELECT id, id_display, project, json_extract(summary, '$.title') AS title, \
+            "SELECT id, id_display, project, title, \
              {time_col}, {driver_col} \
              FROM {} ORDER BY {time_col} DESC LIMIT {limit} OFFSET {offset}",
             self.session_rel()

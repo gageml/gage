@@ -1171,6 +1171,7 @@ pub(crate) mod tests {
 
     pub(crate) struct FakeAttrs {
         size: u64,
+        pub(crate) title: Option<String>,
         /// `(input, output, cached)` when the fake reports usage
         pub(crate) tokens: Option<(u64, u64, u64)>,
         pub(crate) cost_usd: Option<f64>,
@@ -1190,7 +1191,7 @@ pub(crate) mod tests {
             Some("proj")
         }
         fn title(&self) -> Option<&str> {
-            None
+            self.title.as_deref()
         }
         fn model(&self) -> Option<&str> {
             None
@@ -1295,6 +1296,7 @@ pub(crate) mod tests {
             files: entries,
             summary: FakeAttrs {
                 size,
+                title: None,
                 tokens: None,
                 cost_usd: None,
             },

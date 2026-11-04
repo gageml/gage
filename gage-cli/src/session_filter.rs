@@ -409,7 +409,7 @@ pub async fn native_session_lines(
     let ctx = ContextBuilder::new(None).build().await;
     let in_list: Vec<String> = ids.iter().map(|id| format!("'{}'", sql_str(id))).collect();
     let sql = format!(
-        "SELECT id, json_extract(summary, '$.title') AS title FROM native_session('{}') WHERE id IN ({})",
+        "SELECT id, title FROM native_session('{}') WHERE id IN ({})",
         sql_str(&spec),
         in_list.join(", ")
     );

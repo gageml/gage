@@ -53,6 +53,7 @@ use crate::{
 /// Columns read from the object's `attrs.json` rather than the index.
 /// A projection touching none of these never opens an object.
 const ATTRS_COLS: &[&str] = &[
+    "title",
     "project",
     "session_type",
     "driver",
@@ -72,6 +73,9 @@ fn stored_session_schema() -> SchemaRef {
     Arc::new(Schema::new(vec![
         // Identity
         Field::new("id", DataType::Utf8, false),
+        // The session's title, as the driver derives it; also carried
+        // in `summary`
+        Field::new("title", DataType::Utf8, true),
         // Location
         // The project the session belongs to, as the driver names it
         Field::new("project", DataType::Utf8, true),
@@ -393,6 +397,7 @@ impl StoredSessionExec {
         let needs_attrs = self.projection_needs_attrs();
         let len = tips.len() + externals.len();
         let mut ids = StringBuilder::with_capacity(len, len * 26);
+        let mut titles = StringBuilder::new();
         let mut id_displays = StringBuilder::with_capacity(len, len * 8);
         let mut id_prefixes = StringBuilder::with_capacity(len, len * 4);
         let mut locators = StringBuilder::with_capacity(len, len * 44);
@@ -431,6 +436,7 @@ impl StoredSessionExec {
             createds.append_value(marker(tip, "created", tip.created_ms)?);
 
             let Some(record) = record else {
+                titles.append_null();
                 session_types.append_value("");
                 drivers.append_value("");
                 content_formats.append_value("");
@@ -441,6 +447,7 @@ impl StoredSessionExec {
                 continue;
             };
             let attrs = &record.attrs;
+            titles.append_option(attrs.summary.title.as_deref());
             session_types.append_value(&attrs.session_type);
             drivers.append_value(&attrs.driver);
             content_formats.append_value(&attrs.content_format);
@@ -464,6 +471,7 @@ impl StoredSessionExec {
             locators.append_value(r.dir.display().to_string());
             modifieds.append_value(r.attrs_modified_ms);
             createds.append_value(r.attrs_modified_ms);
+            titles.append_option(r.attrs.summary.title.as_deref());
             session_types.append_value(&r.attrs.session_type);
             drivers.append_value(&r.attrs.driver);
             content_formats.append_value(&r.attrs.content_format);
@@ -477,6 +485,7 @@ impl StoredSessionExec {
             self.full_schema.clone(),
             vec![
                 Arc::new(ids.finish()),
+                Arc::new(titles.finish()),
                 Arc::new(projects.finish()),
                 Arc::new(modifieds.finish().with_timezone("UTC")),
                 Arc::new(createds.finish().with_timezone("UTC")),
@@ -678,7 +687,8 @@ mod tests {
 
     /// The `summary` column carries the driver's projection as a JSON
     /// object, with the token totals and cost present only where the
-    /// driver reported them.
+    /// driver reported them. `title` is a typed column beside it and
+    /// stays in the JSON.
     #[tokio::test]
     async fn session_table_projects_summary_json() {
         let tmp = tempfile::tempdir().unwrap();
@@ -686,6 +696,7 @@ mod tests {
         {
             let sessions = SessionStore::from(&store);
             let mut with = fake("s1", &[("session.jsonl", "{}\n")]);
+            with.summary.title = Some("Fix the parser".to_string());
             with.summary.tokens = Some((1200, 300, 1000));
             with.summary.cost_usd = Some(0.5);
             sessions.add(&FakeDriver, &mut with).unwrap();
@@ -701,7 +712,7 @@ mod tests {
         )
         .unwrap();
         let batches = ctx
-            .sql("SELECT origin, summary FROM session ORDER BY origin")
+            .sql("SELECT origin, summary, title FROM session ORDER BY origin")
             .await
             .unwrap()
             .collect()
@@ -713,7 +724,15 @@ mod tests {
             .as_any()
             .downcast_ref::<StringArray>()
             .unwrap();
+        let title = batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(title.value(0), "Fix the parser");
+        assert!(title.is_null(1));
         let with: serde_json::Value = serde_json::from_str(summary.value(0)).unwrap();
+        assert_eq!(with["title"], "Fix the parser");
         assert_eq!(with["input_tokens"], 1200);
         assert_eq!(with["output_tokens"], 300);
         assert_eq!(with["cached_tokens"], 1000);

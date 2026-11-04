@@ -494,7 +494,7 @@ async fn query_sessions(
     let order_clause = listing.order_clause();
     let sql = format!(
         "SELECT id, id_display, id_prefix, project, \
-         json_extract(summary, '$.title') AS title, {type_col}, \
+         title, {type_col}, \
          json_extract(summary, '$.model') AS model, size, \
          CAST(json_extract(summary, '$.message_count') AS BIGINT) AS message_count, \
          {time_col}, {driver_col} \
@@ -1526,9 +1526,7 @@ async fn delete_dialog(
         spinner.start("Looking for empty sessions");
         let targets = delete_targets(
             &ctx,
-            &format!(
-                "SELECT id, json_extract(summary, '$.title') AS title FROM {from} WHERE is_empty"
-            ),
+            &format!("SELECT id, title FROM {from} WHERE is_empty"),
         )
         .await
         .map_err(|e| DialogError::Other(e.into()))?;
@@ -1541,9 +1539,7 @@ async fn delete_dialog(
             .map(|id| format!("'{}'", id.replace('\'', "''")))
             .collect::<Vec<_>>()
             .join(", ");
-        let sql = format!(
-            "SELECT id, json_extract(summary, '$.title') AS title FROM {from} WHERE id IN ({in_list})"
-        );
+        let sql = format!("SELECT id, title FROM {from} WHERE id IN ({in_list})");
         delete_targets(&ctx, &sql)
             .await
             .map_err(|e| DialogError::Other(e.into()))?

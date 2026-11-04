@@ -848,7 +848,7 @@ impl StoreHost {
         let mut sessions = Vec::new();
         for batch in &query(
             ctx,
-            "SELECT m.session_id, json_extract(s.summary, '$.title') AS title \
+            "SELECT m.session_id, s.title \
              FROM scan_session m \
              JOIN session s ON s.id = m.session_id ORDER BY m.session_num",
         )
@@ -998,7 +998,7 @@ impl StoreHost {
         for batch in &query(
             ctx,
             "SELECT i.issue_id, i.session_id, s.project, s.driver, \
-                    json_extract(s.summary, '$.title') AS title \
+                    s.title \
              FROM session_issue i JOIN session s ON s.id = i.session_id",
         )
         .await?

@@ -32,9 +32,9 @@ function's result columns are read with DESCRIBE SELECT * FROM <func>(<args>),
 the only way to see the native functions' driver-dependent shape. The tables and
 their less obvious columns:
 
-- session - `summary` is the driver's JSON: title, model, message_count,
-  line_count, is_empty, token totals, and cost_usd when reported; `origin` is
-  the session's source URL
+- session - `title` is the session's title; `summary` is the driver's JSON:
+  title, model, message_count, line_count, is_empty, token totals, and cost_usd
+  when reported; `origin` is the session's source URL
 - entry - one row per transcript line, `raw` its JSON
 - message - conversation text; `type` is user, assistant, or system
 - tool_use - one call with its result; `files_changed` is the paths written,

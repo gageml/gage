@@ -18,7 +18,7 @@ be stored. `native_session(source)`, `native_message(source)`,
 The argument is required: `''` names the default source, `'claude:'` is the
 default Claude Code source, and `'claude:/path'` names a projects directory. The
 native tables use the native UUID: `id` in `native_session`, `session_id` in the
-other three. The table `native_session` returns is `(id, project, mtime,
+other three. The table `native_session` returns is `(id, title, project, mtime,
 content_format, size, summary, is_empty, files_changed, files_referenced)`:
 `mtime` and `size` are the session file's, where the stored table has `created`
 and `modified` and the stored content size; `summary` is the same JSON object
@@ -28,12 +28,13 @@ wrote and named. The other three return their stored tables' columns.
 
 The `summary` JSON on `session` and on `native_session`'s result holds `title`,
 `model`, `message_count`, `line_count`, `is_empty`, the token totals, and
-`cost_usd`. Read a field with `json_extract(summary, '$.title')` and CAST a
-number for arithmetic. The token totals count each API response once:
-`input_tokens` is every prompt token sent, cached or not; `output_tokens` every
-token generated, reasoning included; `cached_tokens` the part of input served
-from cache. `cost_usd` is the harness's reported figure, absent when it reports
-none. Use these before reading usage out of `raw`.
+`cost_usd`. `title` is also a typed column on both. Read a field with
+`json_extract(summary, '$.model')` and CAST a number for arithmetic. The token
+totals count each API response once: `input_tokens` is every prompt token sent,
+cached or not; `output_tokens` every token generated, reasoning included;
+`cached_tokens` the part of input served from cache. `cost_usd` is the
+harness's reported figure, absent when it reports none. Use these before
+reading usage out of `raw`.
 
 ## Full-text search: `message_text` and `native_message_text`
 
