@@ -160,6 +160,7 @@ async fn write_counts(out: &mut String, problems: &mut Vec<String>) -> Result<()
     w(out, format!("{}", style("Data").bold()));
 
     let path = gage_store::store_path();
+    w(out, format!("  Store:    {}", shorten_home(&path)));
     match Store::open(&path) {
         Ok(store) => {
             let ctx = ContextBuilder::new(Some(Arc::new(Mutex::new(store))))

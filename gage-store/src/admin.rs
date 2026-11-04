@@ -4,6 +4,8 @@
 //! not depend on live in [`crate::object`].
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::env;
+use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -58,9 +60,20 @@ pub(crate) const PRE_PUSH_HOOK: &str = include_str!("hooks/pre-push");
 /// Relative path of the pre-push hook inside the store.
 pub(crate) const PRE_PUSH_HOOK_PATH: &str = "hooks/pre-push";
 
-/// Path to the default store: `<gage_home>/store.git`.
+/// Path to the default store: `$GAGE_STORE` when set, else
+/// `<gage_home>/store.git`. The variable moves the store alone; the
+/// cache, config, and everything else under the home stay where
+/// `GAGE_HOME` puts them.
 pub fn store_path() -> PathBuf {
-    gage_home().join("store.git")
+    store_path_from(env::var_os("GAGE_STORE").as_deref(), &gage_home())
+}
+
+/// The store path for a `GAGE_STORE` value and a home.
+fn store_path_from(gage_store: Option<&OsStr>, home: &Path) -> PathBuf {
+    match gage_store {
+        Some(path) if !path.is_empty() => PathBuf::from(path),
+        _ => home.join("store.git"),
+    }
 }
 
 /// True when a bare Git repository is present at `path`.
@@ -426,6 +439,23 @@ mod tests {
     use crate::store::index_path;
     use crate::test_support::{cache_root_for, init_for_test, open, plant_blob, reopen};
     use crate::writer::{TreeInput, commit_tree, mktree};
+
+    #[test]
+    fn store_path_is_gage_store_when_set_else_under_the_home() {
+        let home = Path::new("/h/.gage");
+        assert_eq!(
+            store_path_from(None, home),
+            PathBuf::from("/h/.gage/store.git")
+        );
+        assert_eq!(
+            store_path_from(Some(OsStr::new("")), home),
+            PathBuf::from("/h/.gage/store.git")
+        );
+        assert_eq!(
+            store_path_from(Some(OsStr::new("/p/.gage/store.git")), home),
+            PathBuf::from("/p/.gage/store.git")
+        );
+    }
 
     #[test]
     fn init_creates_then_reinitializes() {

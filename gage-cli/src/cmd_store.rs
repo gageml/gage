@@ -23,8 +23,9 @@ use crate::style;
 pub enum StoreCommand {
     /// Create Gage store
     ///
-    /// Creates a bare Git repository at `$GAGE_HOME/store.git`. Running
-    /// it on an existing store is harmless.
+    /// Creates a bare Git repository at `$GAGE_HOME/store.git`, or at
+    /// `$GAGE_STORE` when that is set. Running it on an existing store
+    /// is harmless.
     Init,
 
     /// Show store status
