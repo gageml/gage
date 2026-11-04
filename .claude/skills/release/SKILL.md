@@ -16,6 +16,8 @@ workflows are used:
 
 The Release workflow creates the Git tag.
 
+## Release version
+
 The Gage version comes from the `version` field in the root `Cargo.toml`. The
 release notes come from the `## [VERSION]` section in `CHANGELOG.md`. Both must
 be set before the Build push.
