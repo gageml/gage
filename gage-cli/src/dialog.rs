@@ -1,5 +1,5 @@
 use std::fmt::Display;
-use std::io::{self, ErrorKind};
+use std::io::{self, ErrorKind, IsTerminal};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use cliclack as cli;
@@ -197,8 +197,18 @@ fn handle_result(result: Result<DialogResult, DialogError>) -> Result<(), CliErr
 /// The confirmation before a write; `yes` skips it. `initial` is the
 /// answer selected when the prompt opens.
 pub fn confirm(yes: bool, initial: bool) -> Result<(), DialogError> {
+    confirm_on(yes, initial, io::stdin().is_terminal())
+}
+
+/// `confirm` with the terminal check given: a prompt cannot be
+/// answered when stdin is not a terminal, and the failure names the
+/// flag that skips it.
+fn confirm_on(yes: bool, initial: bool, interactive: bool) -> Result<(), DialogError> {
     if yes {
         return Ok(());
+    }
+    if !interactive {
+        return Err(DialogError::Failed(NOT_A_TERMINAL.to_string()));
     }
     if !cli::confirm("Continue?")
         .initial_value(initial)
@@ -208,6 +218,9 @@ pub fn confirm(yes: bool, initial: bool) -> Result<(), DialogError> {
     }
     Ok(())
 }
+
+/// The failure of a confirmation prompt opened without a terminal
+pub const NOT_A_TERMINAL: &str = "stdin is not a terminal; pass --yes";
 
 /// The confirmation before a write that cannot be reversed. The remark
 /// informs the decision, so `yes` skips the remark along with the
@@ -296,6 +309,14 @@ mod tests {
     fn yes_skips_the_confirmation_without_a_terminal() {
         assert!(matches!(confirm(true, false), Ok(())));
         assert!(matches!(confirm_irreversible(true), Ok(())));
+    }
+
+    #[test]
+    fn a_confirmation_without_a_terminal_fails_naming_the_flag() {
+        match confirm_on(false, true, false) {
+            Err(DialogError::Failed(msg)) => assert_eq!(msg, NOT_A_TERMINAL),
+            _ => panic!("expected the not-a-terminal failure"),
+        }
     }
 
     #[test]

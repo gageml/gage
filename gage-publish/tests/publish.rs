@@ -45,6 +45,29 @@ const SYSTEM_SESSION: &str = concat!(
     "\n",
 );
 
+/// A session in which the harness sent a task notification as a user
+/// turn between the prompt and the reply.
+const TASK_NOTIFICATION_SESSION: &str = concat!(
+    r#"{"type":"user","uuid":"u1","timestamp":"2025-01-01T00:00:00Z","message":{"role":"user","content":"Hello"}}"#,
+    "\n",
+    r#"{"type":"user","uuid":"u2","timestamp":"2025-01-01T00:00:01Z","promptSource":"system","origin":{"kind":"task-notification","producer":"session-task","runId":"r1"},"message":{"role":"user","content":"<task-notification>\n<task-id>a1</task-id>\n<status>completed</status>\n</task-notification>"}}"#,
+    "\n",
+    r#"{"type":"assistant","uuid":"a1","timestamp":"2025-01-01T00:00:02Z","message":{"id":"m1","role":"assistant","content":[{"type":"text","text":"Hi"}],"usage":{"input_tokens":10,"output_tokens":1}}}"#,
+    "\n",
+);
+
+/// A session whose environment snapshot names the scratchpad directory
+/// and the OS version, and whose reply names a sibling of the
+/// scratchpad.
+const SNAPSHOT_SESSION: &str = concat!(
+    r#"{"type":"user","uuid":"u1","timestamp":"2025-01-01T00:00:00Z","message":{"role":"user","content":"Hello"}}"#,
+    "\n",
+    r#"{"type":"attachment","uuid":"at1","timestamp":"2025-01-01T00:00:00Z","attachment":{"type":"environment_snapshot","snapshot":{"scratchpadDirectory":"/tmp/claude-1000/-home-garrett-proj/s1/scratchpad","platform":"linux","osVersion":"Linux 6.17.0-1032-oem"}}}"#,
+    "\n",
+    r#"{"type":"assistant","uuid":"a1","timestamp":"2025-01-01T00:00:01Z","message":{"id":"m1","role":"assistant","content":[{"type":"text","text":"The log is at /tmp/claude-1000/-home-garrett-proj/s1/tasks/a.out"}],"usage":{"input_tokens":10,"output_tokens":1}}}"#,
+    "\n",
+);
+
 /// A session whose context entries, the request shape and blob, an
 /// attachment, and a meta user entry, sit between the conversation and
 /// an API request record.
@@ -643,6 +666,84 @@ async fn harness_filter_leaves_out_context_and_record_entries() {
             .iter()
             .all(|r| matches!(r.kind, ChangeKind::Entry | ChangeKind::Value)),
         "{records:#?}"
+    );
+    publisher.check(&id).await.unwrap();
+}
+
+/// The `harness` filter leaves out a task notification the harness
+/// sent as a user turn, as context, rather than leaving an empty user
+/// entry behind.
+#[tokio::test]
+async fn harness_filter_leaves_out_a_task_notification_user_turn() {
+    let f = fixture_with(TASK_NOTIFICATION_SESSION);
+    let publisher = Publisher::with_root(&f.store, &f.publish_root, registry());
+    let id = stage(&publisher, &f.original, &[filter("harness")]).await;
+    let lines = staged_lines(&f.publish_root, &id);
+    assert_eq!(lines.len(), 2, "{lines:#?}");
+    assert!(lines[0].contains("\"content\":\"Hello\""), "{}", lines[0]);
+    assert!(lines[1].contains("\"text\":\"Hi\""), "{}", lines[1]);
+    let records = changes(&f.publish_root, &id);
+    let dropped: Vec<(u32, Option<u32>, Option<&str>, &str)> = records
+        .iter()
+        .filter(|r| r.kind == ChangeKind::Entry)
+        .map(|r| (r.line, r.line_end, r.reason.as_deref(), r.author.as_str()))
+        .collect();
+    assert_eq!(dropped, [(2, Some(2), Some("scope"), "filter:harness")]);
+    publisher.check(&id).await.unwrap();
+}
+
+/// The `system` filter redacts the scratchpad directory's parent, so a
+/// sibling of the scratchpad is covered, and a filter's own row that
+/// matches nothing because the `harness` filter left its source entry
+/// out is not reported, while a hand-written row that matches nothing
+/// still is.
+#[tokio::test]
+async fn system_filter_covers_the_scratchpad_parent_and_a_filter_row_miss_is_not_reported() {
+    let f = fixture_with(SNAPSHOT_SESSION);
+    let publisher = Publisher::with_root(&f.store, &f.publish_root, registry());
+    let id = stage(
+        &publisher,
+        &f.original,
+        &[filter("system"), filter("harness")],
+    )
+    .await;
+    let lines = staged_lines(&f.publish_root, &id);
+    assert_eq!(lines.len(), 2, "{lines:#?}");
+    assert!(
+        lines[1].contains("The log is at [REDACTED]/tasks/a.out"),
+        "{}",
+        lines[1]
+    );
+    let definition = publisher.definition(&id).unwrap();
+    let system_rows: Vec<&str> = definition
+        .redact
+        .iter()
+        .filter(|t| t.author == "filter:system")
+        .map(|t| t.literal.as_str())
+        .collect();
+    assert!(
+        system_rows.contains(&"Linux 6.17.0-1032-oem"),
+        "{system_rows:?}"
+    );
+    assert!(
+        system_rows.contains(&"/tmp/claude-1000/-home-garrett-proj/s1"),
+        "{system_rows:?}"
+    );
+
+    let refreshed = edit(&publisher, &id, |d| {
+        d.push_redact("nothing-like-this", "custom", "user:test", true);
+    })
+    .await;
+    let definition = publisher.definition(&id).unwrap();
+    let position = definition
+        .redact
+        .iter()
+        .position(|t| t.literal == "nothing-like-this")
+        .unwrap()
+        + 1;
+    assert_eq!(
+        refreshed.unmatched,
+        [(position, "nothing-like-this".to_string())]
     );
     publisher.check(&id).await.unwrap();
 }

@@ -21,11 +21,13 @@ struct Lists {
 }
 
 /// The paths of one typed set in the transcript shape: fields whose
-/// string is the sensitive literal, fields whose whole value is left
-/// out, selectors over the entry, and named tag sets whose tags the
-/// set removes as spans wherever they appear in a text value.
+/// string is the sensitive literal, fields whose string is a path
+/// whose parent directory is the literal, fields whose whole value is
+/// left out, selectors over the entry, and named tag sets whose tags
+/// the set removes as spans wherever they appear in a text value.
 struct TypedLists {
     literal: &'static [&'static str],
+    literal_parent: &'static [&'static str],
     value: &'static [&'static str],
     entries: &'static [&'static str],
     remove_tags: &'static [&'static str],
@@ -37,15 +39,18 @@ fn typed_lists(set: TypedSet) -> TypedLists {
     match set {
         TypedSet::HarnessContext => TypedLists {
             literal: NO_PATHS,
+            literal_parent: NO_PATHS,
             value: NO_PATHS,
             entries: &[
                 "$[?$.type == 'api-request-shape' || $.type == 'api-request-blob' || $.type == 'attachment']",
                 "$[?$.type == 'user' && $.isMeta == true]",
+                "$[?$.type == 'user' && $.origin.kind == 'task-notification']",
             ],
             remove_tags: NO_PATHS,
         },
         TypedSet::HarnessRecord => TypedLists {
             literal: NO_PATHS,
+            literal_parent: NO_PATHS,
             value: &[
                 "$.version",
                 "$.entrypoint",
@@ -67,6 +72,7 @@ fn typed_lists(set: TypedSet) -> TypedLists {
         },
         TypedSet::Pii => TypedLists {
             literal: &["$..user_identity"],
+            literal_parent: NO_PATHS,
             value: &["$.attachment.context.userEmail"],
             entries: NO_PATHS,
             remove_tags: NO_PATHS,
@@ -78,6 +84,10 @@ fn typed_lists(set: TypedSet) -> TypedLists {
                 "$.attachment.snapshot.scratchpadDirectory",
                 "$.attachment.snapshot.osVersion",
             ],
+            // The scratchpad's parent is the session's temporary
+            // directory, which also holds the task outputs and the
+            // background shell logs.
+            literal_parent: &["$.attachment.snapshot.scratchpadDirectory"],
             value: &[
                 "$.cwd",
                 "$..live_cwd",
@@ -121,7 +131,14 @@ pub(crate) fn text_descriptor() -> TextDescriptor {
             .collect();
         let removes: Vec<&str> = removes.iter().map(String::as_str).collect();
         descriptor = descriptor
-            .with_typed(set, paths.literal, paths.value, paths.entries, &removes)
+            .with_typed(
+                set,
+                paths.literal,
+                paths.literal_parent,
+                paths.value,
+                paths.entries,
+                &removes,
+            )
             .expect("descriptor typed patterns should be JSONPath");
     }
     descriptor
@@ -302,13 +319,16 @@ mod tests {
     }
 
     /// The entry types the harness wrote into the model's context: the
-    /// request shape and blobs, attachments, and a user entry injected
-    /// as meta.
+    /// request shape and blobs, attachments, a user entry injected as
+    /// meta, and a task notification the harness sent as a user turn.
     fn is_context(entry: &serde_json::Value) -> bool {
         let ty = entry["type"].as_str().unwrap_or_default();
         match ty {
             "api-request-shape" | "api-request-blob" | "attachment" => true,
-            "user" => entry["isMeta"].as_bool() == Some(true),
+            "user" => {
+                entry["isMeta"].as_bool() == Some(true)
+                    || entry["origin"]["kind"].as_str() == Some("task-notification")
+            }
             _ => false,
         }
     }
@@ -330,6 +350,7 @@ mod tests {
     const SHAPES: &[&str] = &[
         r#"{"type":"user","message":{"role":"user","content":"hi"}}"#,
         r#"{"type":"user","isMeta":true,"message":{"role":"user","content":"<meta>"}}"#,
+        r#"{"type":"user","origin":{"kind":"task-notification","producer":"session-task"},"promptSource":"system","message":{"role":"user","content":"<task-notification>done</task-notification>"}}"#,
         r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}"#,
         r#"{"type":"system","subtype":"turn_duration","durationMs":5}"#,
         r#"{"type":"system","subtype":"informational","content":"note"}"#,
@@ -429,8 +450,8 @@ mod tests {
     /// The `system` filter names every field that holds a path, a
     /// host, or an OS version, wherever the classifier context nests
     /// it. The working directory, the home directory, the scratchpad
-    /// directory, and the OS version are literals as well, so their
-    /// copies in text are redacted.
+    /// directory, its parent, and the OS version are literals as well,
+    /// so their copies in text are redacted.
     #[test]
     fn system_filter_paths_select_paths_hosts_and_the_os_version() {
         let descriptor = text_descriptor();
@@ -482,7 +503,7 @@ mod tests {
                 .any(|h| h.pointer.ends_with("/user_identity"))
         );
 
-        let snapshot = r#"{"type":"attachment","attachment":{"type":"environment_snapshot","snapshot":{"workingDirectory":"/home/garrett/proj","scratchpadDirectory":"/tmp/s","additionalWorkingDirectories":["/home/garrett/other"],"platform":"linux","osVersion":"Linux 6.17.0-1032-oem","shell":"bash"}}}"#;
+        let snapshot = r#"{"type":"attachment","attachment":{"type":"environment_snapshot","snapshot":{"workingDirectory":"/home/garrett/proj","scratchpadDirectory":"/tmp/claude-1000/-home-garrett-proj/s1/scratchpad","additionalWorkingDirectories":["/home/garrett/other"],"platform":"linux","osVersion":"Linux 6.17.0-1032-oem","shell":"bash"}}}"#;
         let found = descriptor.typed_values(TypedSet::System, snapshot).unwrap();
         assert_eq!(
             pointers(&found),
@@ -493,7 +514,18 @@ mod tests {
                 "/attachment/snapshot/osVersion",
             ]
         );
-        assert_eq!(found.literals, ["/tmp/s", "Linux 6.17.0-1032-oem"]);
+        assert_eq!(
+            found.literals,
+            [
+                "/tmp/claude-1000/-home-garrett-proj/s1/scratchpad",
+                "Linux 6.17.0-1032-oem",
+                "/tmp/claude-1000/-home-garrett-proj/s1",
+            ]
+        );
+        // A shallow scratchpad has a parent too generic to redact
+        let shallow = r#"{"type":"attachment","attachment":{"type":"environment_snapshot","snapshot":{"scratchpadDirectory":"/tmp/s"}}}"#;
+        let found = descriptor.typed_values(TypedSet::System, shallow).unwrap();
+        assert_eq!(found.literals, ["/tmp/s"]);
         let backups = r#"{"type":"file-history-snapshot","snapshot":{"trackedFileBackups":{"src/a.rs":{"realParentDir":"/home/garrett/proj/src","backupFileName":"abc@v1"}}}}"#;
         let found = descriptor.typed_values(TypedSet::System, backups).unwrap();
         assert_eq!(

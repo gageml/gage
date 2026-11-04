@@ -160,16 +160,13 @@ fn truncate_with_ellipsis(s: &str, max_chars: usize) -> String {
 }
 
 /// Derive a session title from a user entry, used as a fallback when
-/// no `ai-title` entry is present. Returns `None` when the entry has
-/// no usable text (e.g. purely tag-wrapped meta content).
+/// no `ai-title` entry is present: the first non-empty line of the
+/// body. Returns `None` when the entry has no usable text (e.g. purely
+/// tag-wrapped meta content, or a text block emptied by a publish).
 fn session_title_from_entry(entry: &serde_json::Value) -> Option<String> {
     let text = entry_to_text(entry);
     let (body, _ide_tags) = split_ide_tags(&text);
-    let line_end = body.find('\n').unwrap_or(body.len());
-    let line = body.get(..line_end)?.trim();
-    if line.is_empty() {
-        return None;
-    }
+    let line = body.lines().map(str::trim).find(|line| !line.is_empty())?;
     Some(truncate_with_ellipsis(line, MAX_TITLE_LEN_FROM_MSG))
 }
 
@@ -731,6 +728,27 @@ mod tests {
         assert_eq!(attrs.output_tokens, 30);
         assert_eq!(attrs.cache_read_input_tokens, 300);
         assert_eq!(attrs.cache_creation_input_tokens, 21);
+    }
+
+    /// Without an `ai-title` entry the title is the first non-empty
+    /// line of the first user message. A publish that removes a
+    /// leading tag block leaves an empty first text block, so the
+    /// text opens with blank lines.
+    #[test]
+    fn title_falls_back_to_the_first_non_empty_line_of_the_first_user_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        let lines = [
+            json!({"type":"user","uuid":"u1","message":{"role":"user","content":[
+                {"type":"text","text":""},
+                {"type":"text","text":"\nCompare entire.com with Gage\nin detail"}]}}),
+            json!({"type":"user","uuid":"u2","message":{"role":"user","content":[
+                {"type":"tool_result","tool_use_id":"t1","content":"Launching skill: x"}]}}),
+        ];
+        let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
+        std::fs::write(&path, text).unwrap();
+        let attrs = derive_session("s", &path).unwrap().attrs;
+        assert_eq!(attrs.title.as_deref(), Some("Compare entire.com with Gage"));
     }
 
     #[test]

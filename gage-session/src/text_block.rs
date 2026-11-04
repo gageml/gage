@@ -7,6 +7,7 @@
 use std::collections::BTreeSet;
 use std::error::Error;
 use std::fmt;
+use std::path::Path;
 
 use regex::{Regex, RegexBuilder};
 use serde::de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor};
@@ -233,6 +234,9 @@ struct TypedPaths {
     set: TypedSet,
     /// Fields whose value is itself the sensitive literal
     literal: Vec<JsonPath>,
+    /// Fields whose value is a path inside the sensitive directory;
+    /// the literal is the path's parent
+    literal_parent: Vec<JsonPath>,
     /// Fields whose whole value is left out, each with its pattern text
     value: Vec<(String, JsonPath)>,
     /// Selectors over the entry; one that selects anything marks the
@@ -248,7 +252,8 @@ struct TypedPaths {
 /// What a set's typed-sensitive paths select in one entry.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TypedValues {
-    /// The string values at the set's `literal` paths
+    /// The string values at the set's `literal` paths and the parent
+    /// directories of the values at its `literal_parent` paths
     pub literals: Vec<String>,
     /// The string values at the set's `value` paths
     pub values: Vec<ValueHit>,
@@ -328,12 +333,15 @@ impl TextDescriptor {
         Ok(self)
     }
 
-    /// Add the typed-sensitive paths of `set`. `removes` are regexes
-    /// whose matches in a text value are spans the set removes.
+    /// Add the typed-sensitive paths of `set`. `literal_parent` paths
+    /// hold a path whose parent directory is the literal. `removes`
+    /// are regexes whose matches in a text value are spans the set
+    /// removes.
     pub fn with_typed(
         mut self,
         set: TypedSet,
         literal: &[&str],
+        literal_parent: &[&str],
         value: &[&str],
         entries: &[&str],
         removes: &[&str],
@@ -341,6 +349,7 @@ impl TextDescriptor {
         self.typed.push(TypedPaths {
             set,
             literal: compile(literal)?,
+            literal_parent: compile(literal_parent)?,
             value: value
                 .iter()
                 .map(|p| compile_one(p).map(|c| (p.to_string(), c)))
@@ -376,15 +385,23 @@ impl TextDescriptor {
             return Ok(TypedValues::default());
         };
         let entry: Value = serde_json::from_str(json)?;
-        let literals = paths
-            .literal
-            .iter()
-            .flat_map(|p| {
-                p.query(&entry)
-                    .iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect::<Vec<_>>()
-            })
+        let strings_at = |paths: &[JsonPath]| {
+            paths
+                .iter()
+                .flat_map(|p| {
+                    p.query(&entry)
+                        .iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+        };
+        let parents = strings_at(&paths.literal_parent)
+            .into_iter()
+            .filter_map(|path| parent_dir(&path));
+        let literals = strings_at(&paths.literal)
+            .into_iter()
+            .chain(parents)
             .filter(|literal| !self.allow.iter().any(|a| a.is_match(literal)))
             .collect();
         let values = paths
@@ -461,6 +478,15 @@ impl TextDescriptor {
             })
             .collect())
     }
+}
+
+/// The parent directory of `path`; `None` for a root or a bare name.
+fn parent_dir(path: &str) -> Option<String> {
+    Path::new(path)
+        .parent()
+        .and_then(Path::to_str)
+        .filter(|parent| !parent.is_empty())
+        .map(String::from)
 }
 
 /// Walks a JSON document in its written order and records every
@@ -618,6 +644,26 @@ mod tests {
         assert_eq!(pointers, ["/a~1b", "/c~0d", "/note"]);
     }
 
+    /// A `literal_parent` path yields the parent directory of its
+    /// value as the literal, subject to the allow list like any other.
+    #[test]
+    fn literal_parent_paths_yield_the_parent_directory() {
+        let descriptor = TextDescriptor::new(&[])
+            .unwrap()
+            .with_allow(&["^/(tmp|home)/?$"])
+            .unwrap()
+            .with_typed(TypedSet::System, &[], &["$.scratch"], &[], &[], &[])
+            .unwrap();
+        let line = r#"{"scratch":"/tmp/claude/proj/s1/scratchpad"}"#;
+        let found = descriptor.typed_values(TypedSet::System, line).unwrap();
+        assert_eq!(found.literals, ["/tmp/claude/proj/s1"]);
+        for shallow in ["/tmp/s", "/", "scratchpad"] {
+            let line = format!(r#"{{"scratch":"{shallow}"}}"#);
+            let found = descriptor.typed_values(TypedSet::System, &line).unwrap();
+            assert!(found.literals.is_empty(), "{shallow}: {found:?}");
+        }
+    }
+
     /// A literal on the allow list is not reported, whatever set
     /// selects it; the allow list does not touch whole values.
     #[test]
@@ -628,6 +674,7 @@ mod tests {
             .with_typed(
                 TypedSet::System,
                 &["$.cwd", "$..home_dir"],
+                &[],
                 &["$.cwd"],
                 &[],
                 &[],
@@ -653,6 +700,7 @@ mod tests {
             .with_typed(
                 TypedSet::Pii,
                 &["$..user_identity"],
+                &[],
                 &["$.context.email"],
                 &[],
                 &[],
@@ -660,6 +708,7 @@ mod tests {
             .unwrap()
             .with_typed(
                 TypedSet::HarnessRecord,
+                &[],
                 &[],
                 &["$.n", "$.params.n"],
                 &[],
@@ -702,6 +751,7 @@ mod tests {
                 &[],
                 &[],
                 &[],
+                &[],
                 &["(?s)<tag>.*?</tag>"],
             )
             .unwrap();
@@ -723,6 +773,7 @@ mod tests {
         let descriptor = descriptor()
             .with_typed(
                 TypedSet::HarnessRecord,
+                &[],
                 &[],
                 &[],
                 &[

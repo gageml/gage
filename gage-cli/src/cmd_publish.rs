@@ -986,12 +986,7 @@ async fn init(args: InitArgs) -> Result<(), CliError> {
         if !segments.is_empty() {
             dialog::step_list("Segments", segments.iter().map(|s| value_cell(s)))?;
         }
-        if !args.yes {
-            let confirmed = cli::confirm("Continue?").initial_value(true).interact()?;
-            if !confirmed {
-                return Err(DialogError::Canceled);
-            }
-        }
+        dialog::confirm(args.yes, true)?;
         let total = originals.len();
         let mut staged: Vec<String> = Vec::new();
         for original in originals.into_stored(&store) {
@@ -1506,12 +1501,7 @@ async fn refresh_dialog(
                 count(definition.redact.len(), "redaction")
             ),
         )?;
-        if confirm {
-            let confirmed = cli::confirm("Continue?").initial_value(true).interact()?;
-            if !confirmed {
-                return Err(DialogError::Canceled);
-            }
-        }
+        dialog::confirm(!confirm, true)?;
         let spinner = cli::spinner();
         spinner.start("Refreshing session");
         let refreshed = publisher
@@ -1617,12 +1607,7 @@ fn abort(args: AbortArgs) -> Result<(), CliError> {
         let lines: Vec<SessionLine> = pending.iter().map(SessionLine::from).collect();
         preview_sessions(&lines, IdKind::Gage, None)?;
         cli::log::remark("Original sessions are unaffected")?;
-        if !args.yes {
-            let confirmed = cli::confirm("Continue?").initial_value(false).interact()?;
-            if !confirmed {
-                return Err(DialogError::Canceled);
-            }
-        }
+        dialog::confirm(args.yes, false)?;
         for p in &pending {
             publish
                 .abort(&p.id)
@@ -1685,12 +1670,7 @@ async fn apply(args: ApplyArgs) -> Result<(), CliError> {
         if let Some(name) = &args.tag {
             dialog::step_value("Tag", name)?;
         }
-        if !args.yes {
-            let confirmed = cli::confirm("Continue?").initial_value(true).interact()?;
-            if !confirmed {
-                return Err(DialogError::Canceled);
-            }
-        }
+        dialog::confirm(args.yes, true)?;
         publisher
             .apply(&pending.id, args.force)
             .await

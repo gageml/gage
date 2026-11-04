@@ -148,7 +148,9 @@ pub struct Publisher<'a> {
 
 /// What a refresh produced: the spans the text redactions produced,
 /// the rows that took the refresh's author, and the rows that matched
-/// nothing, each by 1-based position with its literal.
+/// nothing, each by 1-based position with its literal. A filter's own
+/// row is not reported: the filter read its literal from the original,
+/// and a miss means another filter left the source entry out.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Refreshed {
     pub instances: usize,
@@ -284,6 +286,7 @@ impl<'a> Publisher<'a> {
             .redact
             .iter()
             .enumerate()
+            .filter(|(_, t)| !t.author.starts_with("filter:"))
             .filter(|(i, _)| built.counts.get(i).copied().unwrap_or(0) == 0)
             .map(|(i, t)| (i + 1, t.literal.clone()))
             .collect();
