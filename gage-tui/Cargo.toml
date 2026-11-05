@@ -12,8 +12,6 @@ gage-session = { path = "../gage-session" }
 gage-store = { path = "../gage-store" }
 ratatui = { version = "0.30", features = ["unstable-rendered-line-info"] }
 serde_json = { workspace = true }
-serde_yml = "0.0.12"
-syntect = { version = "5.3", default-features = false, features = ["default-syntaxes", "default-themes", "regex-onig"] }
 pulldown-cmark = { version = "0.13", default-features = false }
 unicode-linebreak = "0.1"
 unicode-segmentation = "1.13"

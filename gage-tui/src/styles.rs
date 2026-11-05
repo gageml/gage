@@ -214,7 +214,7 @@ impl Text {
     }
 }
 
-/// JSON syntax highlighting (see `syntax.rs`).
+/// JSON rendering (see `json.rs`).
 pub(crate) struct Syntax;
 
 impl Syntax {
@@ -232,10 +232,6 @@ impl Syntax {
 
     pub fn constant() -> Style {
         Style::new().fg(Color::Magenta).add_modifier(Modifier::BOLD)
-    }
-
-    pub fn comment() -> Style {
-        Style::new().add_modifier(Modifier::DIM)
     }
 }
 

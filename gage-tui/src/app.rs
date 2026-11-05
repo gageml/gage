@@ -33,9 +33,8 @@ use crate::options::ViewOptions;
 use crate::outline::{CollapseOutcome, Outline, RowKind};
 use crate::picker::{self, PickColumn, PickItem, Picker, PickerAction};
 use crate::session::{self, Backend};
-use crate::syntax::Highlighter;
 use crate::textarea::TextArea;
-use crate::{markdown, styles, tool};
+use crate::{json, markdown, styles, tool};
 
 pub async fn run(
     terminal: &mut DefaultTerminal,
@@ -690,7 +689,6 @@ pub(crate) struct AppState {
     /// A centering requested before the first draw, applied once the
     /// outline viewport is known
     center_pending: bool,
-    highlighter: Highlighter,
     dialog: Dialog,
     view: ViewOptions,
     source: DocSource,
@@ -739,7 +737,6 @@ impl AppState {
             body_viewport: 0,
             outline_viewport: 0,
             center_pending: false,
-            highlighter: Highlighter::new(),
             dialog: Dialog::None,
             view: options.clone(),
             source,
@@ -1701,9 +1698,8 @@ fn draw_body(frame: &mut Frame, state: &mut AppState, area: Rect) {
 
     match row_kind {
         Some(RowKind::Session) => {
-            let yaml = state.doc.session.yaml();
-            let lines = state.highlighter.highlight(&yaml, "yaml");
-            draw_scrollable(frame, state, lines, inner);
+            let rows = json::render(&state.doc.session.value, inner.width);
+            draw_scrollable(frame, state, rows, inner);
         }
         Some(RowKind::Entry { index }) => {
             let redactions = if state.view.changes {
@@ -1712,7 +1708,10 @@ fn draw_body(frame: &mut Frame, state: &mut AppState, area: Rect) {
                 Vec::new()
             };
             let snap = state.doc.entries.get(index).map(|e| EntrySnap {
-                yaml: e.yaml(),
+                source: state
+                    .view
+                    .source
+                    .then(|| json::render(&e.value, inner.width)),
                 body: state.doc.entry_body(index),
                 redactions,
             });
@@ -1914,7 +1913,9 @@ fn civil_from_days(z: i64) -> Option<(i32, u32, u32)> {
 }
 
 struct EntrySnap {
-    yaml: String,
+    /// The entry's value as rows fitted to the pane, when the source
+    /// view option is on
+    source: Option<Vec<Line<'static>>>,
     body: Option<EntryBody>,
     /// The entry's redaction records as listed, empty when the view
     /// option is off or the entry has none
@@ -1947,7 +1948,7 @@ fn draw_entry(frame: &mut Frame, state: &mut AppState, entry: &EntrySnap, area: 
             area.width,
         ));
     }
-    if state.view.source {
+    if let Some(source) = &entry.source {
         sections.push(Section::from_paragraph(
             Paragraph::new(Line::from(Span::styled(
                 "--- native source ---",
@@ -1955,11 +1956,7 @@ fn draw_entry(frame: &mut Frame, state: &mut AppState, entry: &EntrySnap, area: 
             ))),
             area.width,
         ));
-        sections.push(Section::from_paragraph(
-            Paragraph::new(state.highlighter.highlight(&entry.yaml, "yaml"))
-                .wrap(Wrap { trim: false }),
-            area.width,
-        ));
+        sections.push(Section::from_rows(source.clone()));
     }
 
     draw_stack(frame, state, sections, area);
@@ -1978,6 +1975,17 @@ impl Section {
         Self {
             widget: Box::new(move |area, buf| {
                 ratatui::widgets::Widget::render(p, area, buf);
+            }),
+            height,
+        }
+    }
+
+    /// Rows already fitted to the pane, painted without wrapping.
+    fn from_rows(rows: Vec<Line<'static>>) -> Self {
+        let height = u16::try_from(rows.len()).unwrap_or(u16::MAX);
+        Self {
+            widget: Box::new(move |area, buf| {
+                ratatui::widgets::Widget::render(Paragraph::new(rows), area, buf);
             }),
             height,
         }
@@ -2019,9 +2027,10 @@ fn draw_stack(frame: &mut Frame, state: &mut AppState, sections: Vec<Section>, a
     crate::stack::blit(frame, area, &virt, state.body_scroll);
 }
 
-fn draw_scrollable(frame: &mut Frame, state: &mut AppState, lines: Vec<Line<'static>>, area: Rect) {
-    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
-    let total = u16::try_from(paragraph.line_count(area.width)).unwrap_or(u16::MAX);
+/// Scroll through rows already fitted to the pane.
+fn draw_scrollable(frame: &mut Frame, state: &mut AppState, rows: Vec<Line<'static>>, area: Rect) {
+    let total = u16::try_from(rows.len()).unwrap_or(u16::MAX);
+    let paragraph = Paragraph::new(rows);
     state.body_max_scroll = total.saturating_sub(area.height);
     if state.body_scroll > state.body_max_scroll {
         state.body_scroll = state.body_max_scroll;
@@ -2575,7 +2584,7 @@ mod tests {
         assert!(
             rows[header + 1..]
                 .iter()
-                .any(|r| r.contains("subtype: stop_hook_summary")),
+                .any(|r| r.contains("\"subtype\": \"stop_hook_summary\"")),
             "{text}"
         );
     }

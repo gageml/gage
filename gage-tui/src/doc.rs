@@ -233,12 +233,6 @@ pub struct Session {
     pub pending: bool,
 }
 
-impl Session {
-    pub fn yaml(&self) -> String {
-        serde_yml::to_string(&self.value).expect("Value is always YAML serializable")
-    }
-}
-
 pub struct Entry {
     pub line: u32,
     /// The harness's id for the entry, from the `entry` table
@@ -325,10 +319,6 @@ impl Entry {
             Some("text") | None => &self.entry_type,
             Some(sub) => sub,
         }
-    }
-
-    pub fn yaml(&self) -> String {
-        serde_yml::to_string(&self.value).expect("Value is always YAML serializable")
     }
 }
 
@@ -435,20 +425,5 @@ mod tests {
             .map(|r| (r.line, r.line_end))
             .collect();
         assert_eq!(lines, [(2, Some(3)), (3, Some(3))]);
-    }
-
-    /// A nested object renders as an indented YAML mapping, not as
-    /// one quoted scalar.
-    #[test]
-    fn session_yaml_nests_object_values() {
-        let session = Session {
-            id: "s1".to_string(),
-            value: json!({"id": "s1", "summary": {"title": "T", "message_count": 2}}),
-            pending: false,
-        };
-        let yaml = session.yaml();
-        assert!(yaml.contains("\nsummary:\n"), "{yaml}");
-        assert!(yaml.contains("\n  title: T\n"), "{yaml}");
-        assert!(yaml.contains("\n  message_count: 2\n"), "{yaml}");
     }
 }

@@ -30,11 +30,11 @@ use ratatui::{DefaultTerminal, Frame};
 
 use crate::hint;
 use crate::item_table::ItemTable;
+use crate::json;
 use crate::panel::{header_row, panel_block};
 use crate::scroll::ScrollView;
 use crate::session_view::{pop_keyboard_enhancements, push_keyboard_enhancements};
 use crate::styles;
-use crate::syntax::Highlighter;
 use crate::text::hard_wrap;
 use crate::tree::{Collapse, Expand, Tree};
 
@@ -178,7 +178,6 @@ struct ViewState {
     listing_table: ItemTable,
     /// The selected blob's content, by SHA, read on selection
     blob: Option<(String, BlobContent)>,
-    highlighter: Highlighter,
     /// A load or refresh error; shown in the footer until the next
     /// keypress.
     error: Option<String>,
@@ -203,7 +202,6 @@ impl ViewState {
             scroll,
             listing_table: ItemTable::new(),
             blob: None,
-            highlighter: Highlighter::new(),
             error: None,
         }
     }
@@ -789,16 +787,11 @@ fn draw_detail(frame: &mut Frame, area: Rect, state: &mut ViewState) {
                 frame.render_widget(Paragraph::new(err_line(format!("read blob: {e}"))), inner);
                 return;
             }
-            let ViewState {
-                scroll,
-                blob,
-                highlighter,
-                ..
-            } = state;
+            let ViewState { scroll, blob, .. } = state;
             match blob {
                 Some((_, BlobContent::Text(text))) => {
                     scroll.render_in(frame, area, inner, active, |width| {
-                        blob_sections(text, &name, highlighter, width as usize)
+                        blob_sections(text, &name, width)
                     });
                 }
                 Some((_, BlobContent::Binary)) => {
@@ -891,37 +884,32 @@ fn listing_table_widget(entries: &[TreeEntry]) -> Table<'static> {
     .header(header_row(["Name", "Kind", "Mode", "Size", "Sha"]))
 }
 
-/// Blob text pre-wrapped to `width`, as sections of at most
-/// `BLOB_SECTION_ROWS` rows. A `.json` blob that parses is
-/// pretty-printed and highlighted; one that does not parse is shown as
-/// it is.
-fn blob_sections(
-    text: &str,
-    name: &str,
-    highlighter: &Highlighter,
-    width: usize,
-) -> Vec<Vec<Line<'static>>> {
+/// Blob text fitted to `width`, as sections of at most
+/// `BLOB_SECTION_ROWS` rows. A `.json` blob that parses is rendered
+/// as a value; one that does not parse is shown as it is.
+fn blob_sections(text: &str, name: &str, width: u16) -> Vec<Vec<Line<'static>>> {
     if text.is_empty() {
         return vec![vec![note_line("", "Empty")]];
     }
-    let lines: Vec<Line<'static>> = match pretty_json(text, name) {
-        Some(pretty) => highlighter.highlight(&pretty, "json"),
-        None => text.lines().map(|l| Line::raw(l.to_string())).collect(),
+    let rows: Vec<Line<'static>> = match parse_json(text, name) {
+        Some(value) => json::render(&value, width),
+        None => hard_wrap(
+            text.lines().map(|l| Line::raw(l.to_string())).collect(),
+            usize::from(width),
+        ),
     };
-    hard_wrap(lines, width)
-        .chunks(BLOB_SECTION_ROWS)
+    rows.chunks(BLOB_SECTION_ROWS)
         .map(|chunk| chunk.to_vec())
         .collect()
 }
 
-/// The pretty-printed form of a `.json` blob, or `None` when the name
-/// has another extension or the text is not JSON
-fn pretty_json(text: &str, name: &str) -> Option<String> {
+/// The value of a `.json` blob, or `None` when the name has another
+/// extension or the text is not JSON
+fn parse_json(text: &str, name: &str) -> Option<serde_json::Value> {
     if !name.ends_with(".json") {
         return None;
     }
-    let value: serde_json::Value = serde_json::from_str(text).ok()?;
-    serde_json::to_string_pretty(&value).ok()
+    serde_json::from_str(text).ok()
 }
 
 fn draw_footer(frame: &mut Frame, area: Rect, state: &ViewState) {
