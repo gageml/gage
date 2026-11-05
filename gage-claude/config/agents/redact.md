@@ -36,6 +36,11 @@ Scan every value for strings each filter's instructions say to redact. Apply
 each filter's instructions, including its exceptions, and use the reason code
 its section names.
 
+Return a value that plausibly matches a filter's instructions even when the
+context is ambiguous. The parent reviews every redaction before the publish is
+applied and restores a value that was not sensitive. A missed value is not
+reviewed and is published.
+
 Each item you return is an exact substring of a decoded value. A redaction
 removes every copy of that substring in the session, so choose the shortest
 substring that is the sensitive value itself and not its surrounding words.

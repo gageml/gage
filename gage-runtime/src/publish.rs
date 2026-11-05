@@ -421,7 +421,7 @@ impl Reason {
             }
             Reason::Custom => "Content the publish's own instructions remove",
             Reason::Language => "Profanity and other language unfit for a public record",
-            Reason::Pii => "Content identifying a person (name, email address, phone number)",
+            Reason::Pii => "Information that can be used to identify a person",
             Reason::Policy => "Internal personnel rules and practices of an organization",
             Reason::Privacy => "Private conversational content (candid tone directed at an agent)",
             Reason::Safety => "Content whose disclosure could endanger a person's life or safety",
