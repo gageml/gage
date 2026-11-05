@@ -40,7 +40,8 @@ their less obvious columns:
 - tool_use - one call with its result; `files_changed` is the paths written,
   null when unknown
 - changes - changes a publish made to its original; `kind` is line, value, text,
-  attr, or title
+  attr, or title; `reason` is why (pii, secret, system, scope, ...); `author` is
+  who asked, as filter:<name>, user:<name>, or session:<id>
 - note - `name` is the note kind; note_doc (note_name, doc) says what each kind
   holds; session_note (session_id, note_id, lines) cites a note's lines
 - issue, issue_event, issue_evidence (issue_id, note_id), session_issue
