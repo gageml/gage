@@ -2466,7 +2466,7 @@ mod tests {
                 &["trusted", "reading"],
                 &["secret".to_string(), "pii".to_string()]
             ),
-            ["language", "secret", "system", "harness", "pii"]
+            ["language", "secret", "harness", "pii"]
         );
         assert_eq!(
             names(&["public", "trusted"], &[]),
