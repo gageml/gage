@@ -663,14 +663,14 @@ pub struct ChangeRecord {
     pub kind: ChangeKind,
     /// The original line, 1-based: the first dropped line of a `Line`
     /// record, the line of a `Text` record. A `Title` record's line is
-    /// the derived session's line of the added entry. A `Value` or
-    /// `Attr` record is on no line and carries 0.
+    /// the derived session's line of the added entry. A `Value` record
+    /// is on no line and carries 0.
     pub line: u32,
     /// The last dropped line of a `Line` record, inclusive.
     pub line_end: Option<u32>,
     /// What the record refers to: nothing for a `Line`, the JSONPath
     /// selector of a `Value`, the JSON Pointer to the text value of a
-    /// `Text`, the attribute name of an `Attr`.
+    /// `Text`.
     pub reference: Option<String>,
     /// Zero-based UTF-8 byte offsets of a `Text` record's span in the
     /// published value, `span_end` exclusive. A removal is a span of
@@ -692,8 +692,6 @@ pub enum ChangeKind {
     /// A byte span of one text value was removed or replaced by the
     /// marker.
     Text,
-    /// An attribute of `attrs.json` was left out.
-    Attr,
     /// An entry that sets the session's title was added at the end.
     Title,
 }
@@ -705,7 +703,6 @@ impl ChangeKind {
             ChangeKind::Entry => "line",
             ChangeKind::Value => "value",
             ChangeKind::Text => "text",
-            ChangeKind::Attr => "attr",
             ChangeKind::Title => "title",
         }
     }
@@ -717,7 +714,6 @@ impl ChangeKind {
             "line" => Some(ChangeKind::Entry),
             "value" => Some(ChangeKind::Value),
             "text" => Some(ChangeKind::Text),
-            "attr" => Some(ChangeKind::Attr),
             "title" => Some(ChangeKind::Title),
             _ => None,
         }
@@ -729,7 +725,7 @@ impl ChangeKind {
 /// `["line", line or [line, line_end], reason, author]`,
 /// `["value", path, reason, author]`,
 /// `["text", line, pointer, span_start, span_end, reason, author]`,
-/// `["attr", name, reason, author]`, and `["title", line, author]`. A
+/// and `["title", line, author]`. A
 /// record whose tag this build does not know is passed over. Records
 /// come back in file order.
 pub fn parse_changes(bytes: &[u8]) -> Result<Vec<ChangeRecord>, StoreError> {
@@ -816,7 +812,7 @@ fn parse_change(kind: ChangeKind, fields: &[Value]) -> Result<ChangeRecord, Stri
                 author: text(3)?,
             }
         }
-        ChangeKind::Value | ChangeKind::Attr => {
+        ChangeKind::Value => {
             expect(4)?;
             ChangeRecord {
                 kind,
@@ -893,7 +889,7 @@ fn change_value(r: &ChangeRecord) -> Value {
             };
             json!([tag, lines, r.reason, r.author])
         }
-        ChangeKind::Value | ChangeKind::Attr => json!([tag, r.reference, r.reason, r.author]),
+        ChangeKind::Value => json!([tag, r.reference, r.reason, r.author]),
         ChangeKind::Title => json!([tag, r.line, r.author]),
         ChangeKind::Text => json!([
             tag,
@@ -1965,8 +1961,6 @@ pub(crate) mod tests {
             "\n",
             r#"  ["text", 5, "/message/content", 4, 14, "pii", "filter:pii"],"#,
             "\n",
-            r#"  ["attr", "project", "system", "filter:system"],"#,
-            "\n",
             r#"  ["title", 9, "user:t"],"#,
             "\n",
             r#"  ["later", 1]"#,
@@ -2033,15 +2027,6 @@ pub(crate) mod tests {
                     Some((4, 14)),
                     Some("pii"),
                     "filter:pii"
-                ),
-                record(
-                    ChangeKind::Attr,
-                    0,
-                    None,
-                    Some("project"),
-                    None,
-                    Some("system"),
-                    "filter:system"
                 ),
                 record(ChangeKind::Title, 9, None, None, None, None, "user:t"),
             ]

@@ -30,8 +30,6 @@ pub struct EntryText {
 /// The original session's entries and text values, read once.
 pub struct SessionText {
     pub entries: Vec<EntryText>,
-    /// The original's `project` attribute, when the caller supplies it
-    pub project: Option<String>,
     descriptor: TextDescriptor,
 }
 
@@ -50,17 +48,8 @@ impl SessionText {
         }
         Ok(Self {
             entries,
-            project: None,
             descriptor: descriptor.clone(),
         })
-    }
-
-    /// Whether the original carries the attribute `name`.
-    fn has_attr(&self, name: &str) -> bool {
-        match name {
-            "project" => self.project.is_some(),
-            _ => false,
-        }
     }
 
     /// The last line of the original.
@@ -73,8 +62,7 @@ impl SessionText {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Instance {
     /// The index in `redact` of the text redaction that produced a
-    /// span; none for a dropped entry, a left-out value, or an
-    /// attribute
+    /// span; none for a dropped entry or a left-out value
     pub entry: Option<usize>,
     pub reason: String,
     pub author: String,
@@ -97,8 +85,6 @@ pub enum InstanceKind {
     },
     /// The value at `pointer` is left out of the entry
     Value { line: u32, pointer: String },
-    /// The attribute `name` is left out of `attrs.json`
-    Attr { name: String },
 }
 
 impl Instance {
@@ -140,29 +126,23 @@ impl Instance {
                 ))
             }
             InstanceKind::Value { .. } => None,
-            InstanceKind::Attr { name } => {
-                Some(record(ChangeKind::Attr, 0, None, Some(name), None))
-            }
         }
     }
 
-    /// The line the instance is on; 0 for an attribute, which is on
-    /// none.
+    /// The line the instance is on.
     fn line(&self) -> u32 {
         match &self.kind {
             InstanceKind::Entry { line, .. }
             | InstanceKind::Span { line, .. }
             | InstanceKind::Value { line, .. } => *line,
-            InstanceKind::Attr { .. } => 0,
         }
     }
 
     /// The order instances are recorded in: by line, then pointer,
-    /// then offset, with an attribute first and a dropped run before
-    /// anything on its first line.
+    /// then offset, with a dropped run before anything on its first
+    /// line.
     fn order(&self) -> (u32, &str, usize) {
         match &self.kind {
-            InstanceKind::Attr { name } => (0, name, 0),
             InstanceKind::Entry { line, .. } => (*line, "", 0),
             InstanceKind::Value { line, pointer } => (*line, pointer, 0),
             InstanceKind::Span {
@@ -603,8 +583,8 @@ struct Expanded {
 
 /// Expand `definition` over `session` in order of precedence: the
 /// entries the filters leave out, then the lines outside every
-/// segment, then the attributes, values, and spans the filters leave
-/// out, then the spans of the text redactions. A match inside a
+/// segment, then the values and spans the filters leave out, then
+/// the spans of the text redactions. A match inside a
 /// dropped entry or a left-out value records nothing, and a value is
 /// left out once however many paths select it, so the record holds
 /// one instance per effect.
@@ -682,16 +662,6 @@ fn expand(
             author: author.clone(),
             kind,
         };
-        for (attr, reason) in &c.attrs {
-            if session.has_attr(attr) {
-                instances.push(instance(
-                    *reason,
-                    InstanceKind::Attr {
-                        name: attr.to_string(),
-                    },
-                ));
-            }
-        }
         let mut paths: BTreeSet<(String, Reason)> = BTreeSet::new();
         for (set, reason) in &c.values {
             for (line, values) in hits_of(hits, set) {
@@ -908,7 +878,7 @@ fn line_edits(
             InstanceKind::Span { pointer, start, .. } => {
                 members.entry(pointer).or_default().push((index, *start));
             }
-            InstanceKind::Entry { .. } | InstanceKind::Attr { .. } => {}
+            InstanceKind::Entry { .. } => {}
         }
     }
     let mut replaced = Vec::new();
@@ -976,25 +946,21 @@ fn apply_spans(text: &str, spans: &[Span]) -> (String, Vec<(usize, usize)>) {
     (out, positions)
 }
 
-/// Rewrite `size`, `project`, and the driver summary in the staged
-/// `attrs.json` from the content written. `staged` reads the staged
-/// content, not the original, so every summary field, the title
-/// included, describes the published content. `project` is the
-/// original's unless a redaction leaves it out.
+/// Rewrite `size` and the driver summary in the staged `attrs.json`
+/// from the content written, and leave `project` out. `staged` reads
+/// the staged content, not the original, so every summary field, the
+/// title included, describes the published content. A published
+/// session belongs to no project; `origin` names the original.
 pub fn update_attrs(
     layout: &SessionDirLayout,
     staged: &mut dyn StoredSession,
-    project: Option<&str>,
 ) -> Result<(), PublishError> {
     let size = dir_size(&layout.files_dir())?;
     let mut attrs: Value = serde_json::from_slice(&fs::read(layout.attrs_file())?)?;
     let summary = SummaryAttrs::from_attrs(staged.attrs()?.as_ref());
     if let Some(object) = attrs.as_object_mut() {
         object.insert("size".to_string(), json!(size));
-        match project {
-            Some(project) => object.insert("project".to_string(), json!(project)),
-            None => object.remove("project"),
-        };
+        object.remove("project");
         object.insert("summary".to_string(), serde_json::to_value(&summary)?);
     }
     let mut bytes = serde_json::to_vec(&attrs)?;
@@ -1050,11 +1016,6 @@ mod tests {
             })
             .record(None)
             .unwrap(),
-            instance(InstanceKind::Attr {
-                name: "project".to_string(),
-            })
-            .record(None)
-            .unwrap(),
             instance(InstanceKind::Span {
                 line: 5,
                 pointer: "/message/content".to_string(),
@@ -1066,15 +1027,13 @@ mod tests {
             .unwrap(),
         ];
         let parsed = parse_changes(format_changes(&records).as_bytes()).unwrap();
-        assert_eq!(parsed.len(), 3);
+        assert_eq!(parsed.len(), 2);
         assert_eq!(parsed[0].kind, ChangeKind::Entry);
         assert_eq!((parsed[0].line, parsed[0].line_end), (1, Some(4)));
-        assert_eq!(parsed[1].kind, ChangeKind::Attr);
-        assert_eq!(parsed[1].reference.as_deref(), Some("project"));
-        assert_eq!(parsed[2].kind, ChangeKind::Text);
-        assert_eq!(parsed[2].reference.as_deref(), Some("/message/content"));
+        assert_eq!(parsed[1].kind, ChangeKind::Text);
+        assert_eq!(parsed[1].reference.as_deref(), Some("/message/content"));
         assert_eq!(
-            (parsed[2].span_start, parsed[2].span_end),
+            (parsed[1].span_start, parsed[1].span_end),
             (Some(4), Some(14))
         );
         assert!(

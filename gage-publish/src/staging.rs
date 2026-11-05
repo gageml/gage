@@ -169,7 +169,7 @@ impl<'a> Staging<'a> {
             session_type: original.attrs.session_type.clone(),
             content_format: original.attrs.content_format.clone(),
             size,
-            project: original.attrs.project.clone(),
+            project: None,
             summary: original.attrs.summary.clone(),
         };
         let value = serde_json::to_value(&attrs)?;

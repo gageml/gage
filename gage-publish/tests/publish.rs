@@ -1357,6 +1357,12 @@ async fn apply_commits_the_derived_session_and_clears_the_staging() {
     let published = sessions.at_commit(&commit).unwrap();
     assert_eq!(published.id, init.id);
     assert_eq!(published.attrs.origin, init.origin);
+    // A published session belongs to no project, whatever filters ran
+    assert_eq!(
+        f.original.attrs.project.as_deref(),
+        Some("-home-garrett-proj")
+    );
+    assert_eq!(published.attrs.project, None);
     assert_eq!(sessions.iter().unwrap().count(), 2);
     let mut text = String::new();
     sessions
@@ -1558,12 +1564,8 @@ async fn apply_requires_a_change_unless_forced() {
 }
 
 #[tokio::test]
-async fn system_filter_leaves_out_system_values_and_drops_the_project_attribute() {
+async fn system_filter_leaves_out_system_values() {
     let f = fixture_with(SYSTEM_SESSION);
-    assert_eq!(
-        f.original.attrs.project.as_deref(),
-        Some("-home-garrett-proj")
-    );
     let publisher = Publisher::with_root(&f.store, &f.publish_root, registry());
     let filters = [filter("system"), filter("pii")];
     let id = stage(&publisher, &f.original, &filters).await;
@@ -1629,16 +1631,6 @@ async fn system_filter_leaves_out_system_values_and_drops_the_project_attribute(
     assert!(lines[3].contains("at [REDACTED]/a.txt"), "{}", lines[3]);
 
     let records = changes(&f.publish_root, &id);
-    let attrs: Vec<&ChangeRecord> = records
-        .iter()
-        .filter(|r| r.kind == ChangeKind::Attr)
-        .collect();
-    assert_eq!(attrs.len(), 1, "{records:#?}");
-    assert_eq!(attrs[0].reference.as_deref(), Some("project"));
-    assert_eq!(
-        (attrs[0].reason.as_deref(), attrs[0].author.as_str()),
-        (Some("system"), "filter:system")
-    );
     // One value rule per path, on no line, however many values it
     // selects; no text record is on a left-out value
     let values: Vec<&ChangeRecord> = records
@@ -1678,9 +1670,6 @@ async fn system_filter_leaves_out_system_values_and_drops_the_project_attribute(
         "{records:#?}"
     );
 
-    let attrs = staged_attrs(&f.publish_root, &id);
-    assert!(attrs.get("project").is_none(), "{attrs}");
-
     // A literal found only inside a left-out value changes nothing,
     // and is reported as such
     let refreshed = edit(&publisher, &id, |d| {
@@ -1694,8 +1683,6 @@ async fn system_filter_leaves_out_system_values_and_drops_the_project_attribute(
         d.redact.retain(|t| t.literal != "git.corp.example");
     })
     .await;
-    let attrs = staged_attrs(&f.publish_root, &id);
-    assert_eq!(attrs["project"], "-home-garrett-proj");
     let lines = staged_lines(&f.publish_root, &id);
     // The cwd is back, with the pii username redacted inside it; the
     // system literals went with the filter
@@ -1711,9 +1698,7 @@ async fn system_filter_leaves_out_system_values_and_drops_the_project_attribute(
     );
     let records = changes(&f.publish_root, &id);
     assert!(
-        !records
-            .iter()
-            .any(|r| r.kind == ChangeKind::Attr || r.kind == ChangeKind::Value),
+        !records.iter().any(|r| r.kind == ChangeKind::Value),
         "{records:#?}"
     );
 }

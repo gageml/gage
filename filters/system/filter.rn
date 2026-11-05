@@ -12,7 +12,6 @@ pub async fn system() {
     let t = Template::new(include_str!("redact-prompt.md.j2"))?;
     let redact_prompt = t.render(#{ prompt: params().prompt });
     publish()
-        .remove_attrs(["project"], Reason::System)
         .remove_values(Value::system(), Reason::System)
         .literal_redact(Literal::system(), Reason::System)
         .agent_redact(redact_prompt);

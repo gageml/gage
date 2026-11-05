@@ -73,8 +73,6 @@ pub struct Contribution {
     pub literals: Vec<(TypedSet, Reason)>,
     /// Typed sets whose spans are removed from text values
     pub spans: Vec<(TypedSet, Reason)>,
-    /// Attributes of `attrs.json` left out
-    pub attrs: Vec<(String, Reason)>,
     /// Pattern sets whose matches are text redactions
     pub patterns: Vec<(Patterns, Reason)>,
     /// Instruction text for the redaction agent
@@ -88,7 +86,6 @@ impl Contribution {
             && self.values.is_empty()
             && self.literals.is_empty()
             && self.spans.is_empty()
-            && self.attrs.is_empty()
             && self.patterns.is_empty()
             && self.instructions.is_empty()
     }
@@ -106,7 +103,6 @@ pub(crate) fn types_module() -> Result<Module, ContextError> {
     m.function_meta(TaskPublishDef::remove_entries)?;
     m.function_meta(TaskPublishDef::remove_values)?;
     m.function_meta(TaskPublishDef::remove_spans)?;
-    m.function_meta(TaskPublishDef::remove_attrs)?;
     m.function_meta(TaskPublishDef::literal_redact)?;
     m.function_meta(TaskPublishDef::pattern_redact)?;
     m.function_meta(TaskPublishDef::agent_redact)?;
@@ -185,14 +181,6 @@ impl TaskPublishDef {
         self.with(|c| c.spans.push((set.0, *reason)))
     }
 
-    /// Leave the named attributes out of the published `attrs.json`:
-    /// one name, or a list.
-    #[rune::function(instance)]
-    fn remove_attrs(&self, names: RuneValue, reason: Ref<Reason>) -> Result<Self, VmError> {
-        let names = string_list(&names)?;
-        Ok(self.with(|c| c.attrs.extend(names.into_iter().map(|n| (n, *reason)))))
-    }
-
     /// Redact the set's literal strings wherever they appear in text,
     /// under `reason`.
     #[rune::function(instance)]
@@ -248,20 +236,6 @@ fn patterns_of(value: &RuneValue) -> Result<Patterns, VmError> {
         patterns.push(pattern);
     }
     Ok(Patterns::new(patterns))
-}
-
-/// One string as a one-element list, or the strings of a Rune list,
-/// borrowed.
-fn string_list(v: &RuneValue) -> Result<Vec<String>, VmError> {
-    if let Ok(s) = v.borrow_string_ref() {
-        return Ok(vec![s.to_string()]);
-    }
-    let list = v.borrow_ref::<rune::runtime::Vec>()?;
-    let mut out = Vec::with_capacity(list.len());
-    for item in list.iter() {
-        out.push(item.borrow_string_ref()?.to_string());
-    }
-    Ok(out)
 }
 
 /// The entries of a typed set, for `remove_entries`.
@@ -535,8 +509,6 @@ mod tests {
                     .remove_entries(Entry::harness_context(), Reason::Scope)
                     .remove_values(Value::harness_record(), Reason::Scope)
                     .remove_spans(Span::harness_record(), Reason::Scope)
-                    .remove_attrs(["project"], Reason::System)
-                    .remove_attrs("size", Reason::System)
                     .literal_redact(Literal::pii(), Reason::Pii)
                     .pattern_redact(#{ email: "[a-z]+@[a-z]+" }, Reason::Pii)
                     .agent_redact("Remove every duck.\n\n");
@@ -549,13 +521,6 @@ mod tests {
         assert_eq!(c.entries, [(TypedSet::HarnessContext, Reason::Scope)]);
         assert_eq!(c.values, [(TypedSet::HarnessRecord, Reason::Scope)]);
         assert_eq!(c.spans, [(TypedSet::HarnessRecord, Reason::Scope)]);
-        assert_eq!(
-            c.attrs,
-            [
-                ("project".to_string(), Reason::System),
-                ("size".to_string(), Reason::System)
-            ]
-        );
         assert_eq!(c.literals, [(TypedSet::Pii, Reason::Pii)]);
         assert_eq!(c.patterns.len(), 1);
         assert_eq!(c.patterns[0].1, Reason::Pii);

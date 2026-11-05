@@ -450,27 +450,14 @@ impl<'a> Publisher<'a> {
             &layout,
             title_entry.as_deref(),
         )?;
-        let project_dropped = built
-            .instances
-            .iter()
-            .any(|i| matches!(&i.kind, InstanceKind::Attr { name } if name == "project"));
-        let project = if project_dropped {
-            None
-        } else {
-            original.record.attrs.project.as_deref()
-        };
-        derive::update_attrs(&layout, original.staged(&layout)?.as_mut(), project)?;
+        derive::update_attrs(&layout, original.staged(&layout)?.as_mut())?;
         Ok(built)
     }
 
-    /// The original's text values and `project` attribute, read once
-    /// per operation.
+    /// The original's text values, read once per operation.
     fn open_original(&self, id: &str) -> Result<derive::SessionText, PublishError> {
         let original = self.original(id)?;
-        let mut session =
-            derive::SessionText::read(original.stored()?.as_mut(), &original.descriptor)?;
-        session.project = original.record.attrs.project.clone();
-        Ok(session)
+        derive::SessionText::read(original.stored()?.as_mut(), &original.descriptor)
     }
 
     /// The original of the pending publish `id`, named by the staged

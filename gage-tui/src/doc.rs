@@ -45,7 +45,7 @@ impl Redaction {
     fn dropped_lines(&self) -> Option<(u32, u32)> {
         match self.kind {
             ChangeKind::Entry => Some((self.line, self.line_end.unwrap_or(self.line))),
-            ChangeKind::Value | ChangeKind::Text | ChangeKind::Attr | ChangeKind::Title => None,
+            ChangeKind::Value | ChangeKind::Text | ChangeKind::Title => None,
         }
     }
 }
@@ -131,7 +131,7 @@ impl Document {
             .filter(|r| match r.kind {
                 ChangeKind::Text => r.line == line,
                 ChangeKind::Title => r.line == entry.line,
-                ChangeKind::Entry | ChangeKind::Value | ChangeKind::Attr => false,
+                ChangeKind::Entry | ChangeKind::Value => false,
             })
             .collect()
     }
@@ -373,7 +373,6 @@ mod tests {
                 redaction(ChangeKind::Entry, 6, None),
                 redaction(ChangeKind::Entry, 9, Some(10)),
                 redaction(ChangeKind::Value, 0, None),
-                redaction(ChangeKind::Attr, 0, None),
                 redaction(ChangeKind::Title, 5, None),
             ],
         }

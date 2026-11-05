@@ -307,7 +307,6 @@ impl Backend {
                     "line" => ChangeKind::Entry,
                     "value" => ChangeKind::Value,
                     "text" => ChangeKind::Text,
-                    "attr" => ChangeKind::Attr,
                     "title" => ChangeKind::Title,
                     other => return Err(format!("unknown changes kind {other:?}").into()),
                 };

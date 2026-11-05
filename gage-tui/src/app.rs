@@ -1827,7 +1827,6 @@ fn redaction_location(r: &Redaction) -> String {
             _ => reference,
         },
         ChangeKind::Value => format!("values {reference}"),
-        ChangeKind::Attr => format!("attr {reference}"),
         ChangeKind::Title => format!("title added at line {}", r.line),
     }
 }
@@ -2291,24 +2290,24 @@ mod tests {
             reason: None,
             author: "user:t".into(),
         };
-        let attr = Redaction {
-            kind: ChangeKind::Attr,
+        let value = Redaction {
+            kind: ChangeKind::Value,
             line: 0,
             line_end: None,
-            reference: Some("project".into()),
+            reference: Some("$.cwd".into()),
             span_start: None,
             span_end: None,
             reason: Some("system".into()),
             author: "filter:system".into(),
         };
         assert_eq!(
-            text(&[&title, &attr]),
+            text(&[&title, &value]),
             [
                 "title added at line 6          user:t",
-                "attr project           system  filter:system",
+                "values $.cwd           system  filter:system",
             ]
         );
-        assert_eq!(text(&[&attr]), ["attr project  system  filter:system"]);
+        assert_eq!(text(&[&value]), ["values $.cwd  system  filter:system"]);
     }
 
     /// A run's label counts its lines, singular for one.

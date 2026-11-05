@@ -95,7 +95,6 @@ fn merge(into: &mut Contribution, from: Contribution) {
     into.values.extend(from.values);
     into.literals.extend(from.literals);
     into.spans.extend(from.spans);
-    into.attrs.extend(from.attrs);
     into.patterns.extend(from.patterns);
     into.instructions.extend(from.instructions);
 }
@@ -300,7 +299,6 @@ mod tests {
         assert!(secret.patterns[0].0.len() > 200);
         assert!(secret.instructions[0].starts_with("Remove every credential"));
         let system = by_name("system");
-        assert_eq!(system.attrs, [("project".to_string(), Reason::System)]);
         assert_eq!(system.values, [(TypedSet::System, Reason::System)]);
         assert_eq!(system.literals, [(TypedSet::System, Reason::System)]);
         let markdown = instructions_markdown(&outputs);
