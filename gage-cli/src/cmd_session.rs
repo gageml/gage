@@ -43,7 +43,7 @@ use crate::error::CliError;
 use crate::human::{count, format_elapsed_ms};
 use crate::session_filter::{
     FILTER_ARG_NAMES, SessionFilterArgs, SessionLine, SessionSelect, SessionSelectError,
-    native_session_lines, preview_sessions, select_sessions,
+    native_session_lines, preview_sessions, resolve_project_in, select_sessions, sql_str,
 };
 use crate::size_limit::SizeLimitArgs;
 use crate::source;
@@ -330,20 +330,17 @@ async fn list_native(source: Option<String>, args: SessionListArgs) -> Result<()
     let registry = source::driver_registry();
     let (driver, spec) = source::resolve_source(&registry, source.as_deref())
         .map_err(|e| anyhow!("gage session list: {e}"))?;
-    // The native session rows, the project filter, and the driver
-    // encoding all reach the source through SQL: `native_session`
-    // opens it, `project_for_path` resolves a directory to its project
-    // name. The command holds no source handle.
+    // The native session rows and the project filter reach the source
+    // through SQL: `native_session` opens it. The command holds no
+    // source handle.
     let ctx = ContextBuilder::new(None).build().await;
-    let from = format!("native_session('{}')", spec.replace('\'', "''"));
-    let project_pred = args
-        .project
-        .as_deref()
-        .map(|p| format!("project = project_for_path('{}')", p.replace('\'', "''")));
-    let (rows, total) =
-        query_sessions(&ctx, &args, Listing::Native, &from, project_pred.as_deref())
-            .await
-            .context("gage session list")?;
+    let from = format!("native_session('{}')", sql_str(&spec));
+    let predicates = project_predicates(&ctx, &from, args.project.as_deref())
+        .await
+        .context("gage session list")?;
+    let (rows, total) = query_sessions(&ctx, &args, Listing::Native, &from, &predicates)
+        .await
+        .context("gage session list")?;
     if total > 0 {
         let drivers: Vec<Arc<dyn Driver>> = vec![driver.clone(); rows.len()];
         render_table(&rows, &drivers, Listing::Native, args.full_id);
@@ -360,16 +357,14 @@ async fn list_native(source: Option<String>, args: SessionListArgs) -> Result<()
 /// and `--since` filters on it; the `Created` column shows when the
 /// session was first added.
 async fn list_stored(args: SessionListArgs) -> Result<(), CliError> {
-    if args.project.is_some() {
-        return Err(CliError::message(
-            "gage session list: --project does not apply to stored sessions",
-        ));
-    }
     let store = Store::open(&gage_store::store_path()).context("gage session list")?;
     let ctx = ContextBuilder::new(Some(Arc::new(Mutex::new(store))))
         .build()
         .await;
-    let (rows, total) = query_sessions(&ctx, &args, Listing::Stored, "session", None)
+    let predicates = project_predicates(&ctx, "session", args.project.as_deref())
+        .await
+        .context("gage session list")?;
+    let (rows, total) = query_sessions(&ctx, &args, Listing::Stored, "session", &predicates)
         .await
         .context("gage session list")?;
     if total > 0 {
@@ -387,11 +382,6 @@ async fn list_stored(args: SessionListArgs) -> Result<(), CliError> {
 /// dataset links, in member order: the `session` table scoped to the
 /// dataset, joined to `dataset_session` for the order.
 async fn list_dataset(args: SessionListArgs) -> Result<(), CliError> {
-    if args.project.is_some() {
-        return Err(CliError::message(
-            "gage session list: --project does not apply to stored sessions",
-        ));
-    }
     let prefix = args
         .dataset
         .as_deref()
@@ -403,8 +393,13 @@ async fn list_dataset(args: SessionListArgs) -> Result<(), CliError> {
     let store = Arc::new(Mutex::new(store));
     let ctx = ContextBuilder::new(Some(store)).build().await;
     let from = "session JOIN dataset_session m ON m.session_id = session.id";
-    let member = format!("m.dataset_id = '{}'", dataset.id);
-    let (rows, total) = query_sessions(&ctx, &args, Listing::Dataset, from, Some(&member))
+    let mut predicates = vec![format!("m.dataset_id = '{}'", dataset.id)];
+    predicates.extend(
+        project_predicates(&ctx, "session", args.project.as_deref())
+            .await
+            .context("gage session list")?,
+    );
+    let (rows, total) = query_sessions(&ctx, &args, Listing::Dataset, from, &predicates)
         .await
         .context("gage session list")?;
     if total == 0 {
@@ -416,6 +411,23 @@ async fn list_dataset(args: SessionListArgs) -> Result<(), CliError> {
     render_table(&rows, &drivers, Listing::Dataset, args.full_id);
     args.limit.print_summary(rows.len(), total, "session");
     Ok(())
+}
+
+/// The `project` predicate for a `--project` value, or none without
+/// one. The value resolves against the projects `from` records the way
+/// every session filter resolves it: a slug as given, the home-relative
+/// name the listing shows, or a path. A value naming no recorded
+/// project is an error.
+async fn project_predicates(
+    ctx: &SessionContext,
+    from: &str,
+    project: Option<&str>,
+) -> anyhow::Result<Vec<String>> {
+    let Some(value) = project else {
+        return Ok(Vec::new());
+    };
+    let slug = resolve_project_in(ctx, from, value).await?;
+    Ok(vec![format!("project = '{}'", sql_str(&slug))])
 }
 
 fn stored_drivers(registry: &DriverRegistry, rows: &[Row]) -> anyhow::Result<Vec<Arc<dyn Driver>>> {
@@ -480,9 +492,9 @@ async fn query_sessions(
     args: &SessionListArgs,
     listing: Listing,
     from: &str,
-    project_pred: Option<&str>,
+    predicates: &[String],
 ) -> datafusion::error::Result<(Vec<Row>, usize)> {
-    let where_clause = build_where_clause(args, listing, project_pred);
+    let where_clause = build_where_clause(args, listing, predicates);
     let limit_clause = match args.limit.fetch_limit() {
         Some(n) => format!(" LIMIT {n}"),
         None => String::new(),
@@ -514,15 +526,8 @@ async fn query_sessions(
     Ok((rows, total))
 }
 
-fn build_where_clause(
-    args: &SessionListArgs,
-    listing: Listing,
-    project_pred: Option<&str>,
-) -> String {
-    let mut clauses: Vec<String> = Vec::new();
-    if let Some(pred) = project_pred {
-        clauses.push(pred.to_string());
-    }
+fn build_where_clause(args: &SessionListArgs, listing: Listing, predicates: &[String]) -> String {
+    let mut clauses: Vec<String> = predicates.to_vec();
     if let Some(d) = args.since {
         let cutoff_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1813,7 +1818,78 @@ fn warm_picker_sessions(source: &dyn Source) -> Result<(), Box<dyn Error>> {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::path::Path;
+
+    use gage_session::SourceOptions;
+    use gage_store::SessionStore;
+
     use super::*;
+
+    /// Write a one-message Claude session `id` under `project` in
+    /// `claude_root` and add it to `store`.
+    fn add_stored(store: &Store, claude_root: &Path, project: &str, id: &str) {
+        let project_dir = claude_root.join("projects").join(project);
+        fs::create_dir_all(&project_dir).unwrap();
+        fs::write(
+            project_dir.join(format!("{id}.jsonl")),
+            concat!(
+                r#"{"type":"user","uuid":"u1","timestamp":"2025-01-01T00:00:00Z","message":{"role":"user","content":"hello"}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        let spec = format!("claude:{}", claude_root.display());
+        let registry = DriverRegistry::builtin();
+        let driver = registry.driver_for(&spec).unwrap();
+        let source = driver
+            .open_source(SourceOptions::new(&spec).cache_root(claude_root.join("cache")))
+            .unwrap();
+        let mut native = source.open_native(id).unwrap();
+        SessionStore::from(store)
+            .add(driver.as_ref(), native.as_mut())
+            .unwrap();
+    }
+
+    /// A stored listing's `--project` resolves against the store's own
+    /// projects the way every session filter does: a slug as given, or
+    /// the slug with its leading dash left off. A value naming no
+    /// stored project is an error, and no value is no predicate.
+    #[tokio::test]
+    async fn stored_listing_resolves_project_against_the_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("store.git");
+        gage_store::init(&path).unwrap();
+        let store = Store::open_with_cache_root(&path, &tmp.path().join("cache")).unwrap();
+        let claude_root = tmp.path().join("claude");
+        add_stored(
+            &store,
+            &claude_root,
+            "-w-proj",
+            "11111111-2222-3333-4444-555555555555",
+        );
+        add_stored(
+            &store,
+            &claude_root,
+            "-w-other",
+            "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        );
+        let ctx = ContextBuilder::new(Some(Arc::new(Mutex::new(store))))
+            .build()
+            .await;
+        let predicates = |value| project_predicates(&ctx, "session", value);
+        assert_eq!(
+            predicates(Some("-w-proj")).await.unwrap(),
+            ["project = '-w-proj'"]
+        );
+        assert_eq!(
+            predicates(Some("w-proj")).await.unwrap(),
+            ["project = '-w-proj'"]
+        );
+        assert!(predicates(None).await.unwrap().is_empty());
+        let err = predicates(Some("nope")).await.unwrap_err().to_string();
+        assert!(err.contains("no sessions for project 'nope'"), "{err}");
+    }
 
     /// One placed native session names its stored id; a dataset add
     /// names the dataset; more than one keeps the closing line. The

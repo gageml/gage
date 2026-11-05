@@ -453,7 +453,7 @@ fn utf8_column<'a>(
 /// Resolve a `--project` value against the projects recorded in the
 /// source. Slug forms are matched first; anything else resolves as a
 /// path through the driver's `project_for_path`.
-async fn resolve_project_in(
+pub(crate) async fn resolve_project_in(
     ctx: &SessionContext,
     from: &str,
     value: &str,
@@ -521,7 +521,7 @@ async fn string_column(ctx: &SessionContext, sql: &str) -> anyhow::Result<Vec<St
     Ok(out)
 }
 
-fn sql_str(s: &str) -> String {
+pub(crate) fn sql_str(s: &str) -> String {
     s.replace('\'', "''")
 }
 
