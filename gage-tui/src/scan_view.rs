@@ -763,7 +763,12 @@ async fn event_loop(
                     _ => {}
                 }
             }
-            _ = tick.tick() => state.refresh_log(),
+            // The tick serves the live scan only: it refreshes the log
+            // dialog and drives the spinner and running durations
+            // through the redraw. A finished scan has nothing animated,
+            // so the arm is disabled and the loop blocks on input and
+            // events alone.
+            _ = tick.tick(), if !state.model.finished => state.refresh_log(),
         }
     }
     stop_input.store(true, Ordering::Relaxed);
