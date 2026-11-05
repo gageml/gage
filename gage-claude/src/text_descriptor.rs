@@ -45,6 +45,7 @@ fn typed_lists(set: TypedSet) -> TypedLists {
                 "$[?$.type == 'api-request-shape' || $.type == 'api-request-blob' || $.type == 'attachment']",
                 "$[?$.type == 'user' && $.isMeta == true]",
                 "$[?$.type == 'user' && $.origin.kind == 'task-notification']",
+                "$[?$.type == 'system' && $.subtype == 'informational']",
             ],
             remove_tags: NO_PATHS,
         },
@@ -320,7 +321,9 @@ mod tests {
 
     /// The entry types the harness wrote into the model's context: the
     /// request shape and blobs, attachments, a user entry injected as
-    /// meta, and a task notification the harness sent as a user turn.
+    /// meta, a task notification the harness sent as a user turn, and
+    /// a harness notice (a safeguard stop, a compaction, an unknown
+    /// command).
     fn is_context(entry: &serde_json::Value) -> bool {
         let ty = entry["type"].as_str().unwrap_or_default();
         match ty {
@@ -329,13 +332,15 @@ mod tests {
                 entry["isMeta"].as_bool() == Some(true)
                     || entry["origin"]["kind"].as_str() == Some("task-notification")
             }
+            "system" => entry["subtype"].as_str() == Some("informational"),
             _ => false,
         }
     }
 
     /// What a publish keeps when both harness filters are on: user
     /// prompts, assistant messages, the system subtypes the message
-    /// table promotes, and the user-authored session labels.
+    /// table promotes other than a harness notice, and the
+    /// user-authored session labels.
     fn is_conversation(entry: &serde_json::Value) -> bool {
         let ty = entry["type"].as_str().unwrap_or_default();
         match ty {
@@ -353,7 +358,7 @@ mod tests {
         r#"{"type":"user","origin":{"kind":"task-notification","producer":"session-task"},"promptSource":"system","message":{"role":"user","content":"<task-notification>done</task-notification>"}}"#,
         r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}"#,
         r#"{"type":"system","subtype":"turn_duration","durationMs":5}"#,
-        r#"{"type":"system","subtype":"informational","content":"note"}"#,
+        r#"{"type":"system","subtype":"informational","content":"Fable 5.1's safeguards stopped the response above"}"#,
         r#"{"type":"system","subtype":"model_refusal_no_fallback","content":""}"#,
         r#"{"type":"system","content":"no subtype"}"#,
         r#"{"type":"custom-title","customTitle":"Ducks"}"#,

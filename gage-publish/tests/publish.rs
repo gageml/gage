@@ -46,13 +46,16 @@ const SYSTEM_SESSION: &str = concat!(
 );
 
 /// A session in which the harness sent a task notification as a user
-/// turn between the prompt and the reply.
+/// turn between the prompt and the reply, and wrote a safeguard notice
+/// after the reply.
 const TASK_NOTIFICATION_SESSION: &str = concat!(
     r#"{"type":"user","uuid":"u1","timestamp":"2025-01-01T00:00:00Z","message":{"role":"user","content":"Hello"}}"#,
     "\n",
     r#"{"type":"user","uuid":"u2","timestamp":"2025-01-01T00:00:01Z","promptSource":"system","origin":{"kind":"task-notification","producer":"session-task","runId":"r1"},"message":{"role":"user","content":"<task-notification>\n<task-id>a1</task-id>\n<status>completed</status>\n</task-notification>"}}"#,
     "\n",
     r#"{"type":"assistant","uuid":"a1","timestamp":"2025-01-01T00:00:02Z","message":{"id":"m1","role":"assistant","content":[{"type":"text","text":"Hi"}],"usage":{"input_tokens":10,"output_tokens":1}}}"#,
+    "\n",
+    r#"{"type":"system","subtype":"informational","uuid":"s1","timestamp":"2025-01-01T00:00:03Z","level":"notice","content":"Fable 5.1's safeguards stopped the response above · continuing once with that noted"}"#,
     "\n",
 );
 
@@ -672,9 +675,9 @@ async fn harness_filter_leaves_out_context_and_record_entries() {
 
 /// The `harness` filter leaves out a task notification the harness
 /// sent as a user turn, as context, rather than leaving an empty user
-/// entry behind.
+/// entry behind, and leaves out a harness notice the same way.
 #[tokio::test]
-async fn harness_filter_leaves_out_a_task_notification_user_turn() {
+async fn harness_filter_leaves_out_a_task_notification_user_turn_and_a_harness_notice() {
     let f = fixture_with(TASK_NOTIFICATION_SESSION);
     let publisher = Publisher::with_root(&f.store, &f.publish_root, registry());
     let id = stage(&publisher, &f.original, &[filter("harness")]).await;
@@ -688,7 +691,13 @@ async fn harness_filter_leaves_out_a_task_notification_user_turn() {
         .filter(|r| r.kind == ChangeKind::Entry)
         .map(|r| (r.line, r.line_end, r.reason.as_deref(), r.author.as_str()))
         .collect();
-    assert_eq!(dropped, [(2, Some(2), Some("scope"), "filter:harness")]);
+    assert_eq!(
+        dropped,
+        [
+            (2, Some(2), Some("scope"), "filter:harness"),
+            (4, Some(4), Some("scope"), "filter:harness"),
+        ]
+    );
     publisher.check(&id).await.unwrap();
 }
 
