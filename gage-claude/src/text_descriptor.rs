@@ -66,7 +66,7 @@ fn typed_lists(set: TypedSet) -> TypedLists {
                 "$.message.usage",
             ],
             entries: &[
-                "$[?$.type != 'user' && $.type != 'assistant' && $.type != 'system' && $.type != 'custom-title' && $.type != 'agent-name' && $.type != 'api-request-shape' && $.type != 'api-request-blob' && $.type != 'attachment']",
+                "$[?$.type != 'user' && $.type != 'assistant' && $.type != 'system' && $.type != 'ai-title' && $.type != 'custom-title' && $.type != 'agent-name' && $.type != 'api-request-shape' && $.type != 'api-request-blob' && $.type != 'attachment']",
                 "$[?$.type == 'system' && $.subtype != 'api_error' && $.subtype != 'away_summary' && $.subtype != 'compact_boundary' && $.subtype != 'informational' && $.subtype != 'local_command' && $.subtype != 'model_refusal_no_fallback' && $.subtype != 'model_refusal_fallback']",
             ],
             remove_tags: &["ide_tags"],
@@ -339,13 +339,13 @@ mod tests {
 
     /// What a publish keeps when both harness filters are on: user
     /// prompts, assistant messages, the system subtypes the message
-    /// table promotes other than a harness notice, and the
-    /// user-authored session labels.
+    /// table promotes other than a harness notice, and the session
+    /// labels, the generated title included.
     fn is_conversation(entry: &serde_json::Value) -> bool {
         let ty = entry["type"].as_str().unwrap_or_default();
         match ty {
             "user" => !is_context(entry),
-            "assistant" | "custom-title" | "agent-name" => true,
+            "assistant" | "ai-title" | "custom-title" | "agent-name" => true,
             "system" => message_subtype(entry).is_some(),
             _ => false,
         }
@@ -361,6 +361,7 @@ mod tests {
         r#"{"type":"system","subtype":"informational","content":"Fable 5.1's safeguards stopped the response above"}"#,
         r#"{"type":"system","subtype":"model_refusal_no_fallback","content":""}"#,
         r#"{"type":"system","content":"no subtype"}"#,
+        r#"{"type":"ai-title","aiTitle":"Ducks on the pond"}"#,
         r#"{"type":"custom-title","customTitle":"Ducks"}"#,
         r#"{"type":"agent-name","agentName":"mallard"}"#,
         r#"{"type":"attachment","attachment":{"type":"skill_listing"}}"#,

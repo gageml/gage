@@ -71,6 +71,19 @@ const SNAPSHOT_SESSION: &str = concat!(
     "\n",
 );
 
+/// A session whose generated title names an email address, followed
+/// by a progress record.
+const TITLED_SESSION: &str = concat!(
+    r#"{"type":"user","uuid":"u1","timestamp":"2025-01-01T00:00:00Z","message":{"role":"user","content":"Hello"}}"#,
+    "\n",
+    r#"{"type":"ai-title","sessionId":"s1","aiTitle":"Mail for alice@example.com"}"#,
+    "\n",
+    r#"{"type":"assistant","uuid":"a1","timestamp":"2025-01-01T00:00:01Z","message":{"id":"m1","role":"assistant","content":[{"type":"text","text":"Hi"}],"usage":{"input_tokens":10,"output_tokens":1}}}"#,
+    "\n",
+    r#"{"type":"progress","uuid":"p1","timestamp":"2025-01-01T00:00:02Z","data":{}}"#,
+    "\n",
+);
+
 /// A session whose context entries, the request shape and blob, an
 /// attachment, and a meta user entry, sit between the conversation and
 /// an API request record.
@@ -697,6 +710,46 @@ async fn harness_filter_leaves_out_a_task_notification_user_turn_and_a_harness_n
             (2, Some(2), Some("scope"), "filter:harness"),
             (4, Some(4), Some("scope"), "filter:harness"),
         ]
+    );
+    publisher.check(&id).await.unwrap();
+}
+
+/// The `harness` filter keeps the generated title entry, so the
+/// published session keeps its title, and the title's text is redacted
+/// like any other text value.
+#[tokio::test]
+async fn harness_filter_keeps_the_generated_title_and_its_text_is_redacted() {
+    let f = fixture_with(TITLED_SESSION);
+    assert_eq!(
+        f.original.attrs.summary.title.as_deref(),
+        Some("Mail for alice@example.com")
+    );
+    let publisher = Publisher::with_root(&f.store, &f.publish_root, registry());
+    let id = stage(&publisher, &f.original, &[filter("harness"), filter("pii")]).await;
+    let lines = staged_lines(&f.publish_root, &id);
+    assert_eq!(lines.len(), 3, "{lines:#?}");
+    assert!(
+        lines[1].contains(r#""aiTitle":"Mail for [REDACTED]""#),
+        "{}",
+        lines[1]
+    );
+    let records = changes(&f.publish_root, &id);
+    let dropped: Vec<(u32, &str)> = records
+        .iter()
+        .filter(|r| r.kind == ChangeKind::Entry)
+        .map(|r| (r.line, r.author.as_str()))
+        .collect();
+    assert_eq!(dropped, [(4, "filter:harness")]);
+    assert!(
+        records.iter().any(|r| r.kind == ChangeKind::Text
+            && r.line == 2
+            && r.reference.as_deref() == Some("/aiTitle")
+            && r.author == "filter:pii"),
+        "{records:#?}"
+    );
+    assert_eq!(
+        staged_summary(&f.publish_root, &id)["title"],
+        "Mail for [REDACTED]"
     );
     publisher.check(&id).await.unwrap();
 }
