@@ -185,8 +185,9 @@ pub enum PublishCommand {
     /// Query pending publish sessions
     ///
     /// Query pending publish sessions with SQL, as gage query does.
-    /// Tables session, entry, message, tool_use, and changes hold
-    /// staged sessions and nothing else; no other table is present.
+    /// Tables session, entry, message, tool_use, tool_use_file, and
+    /// session_change hold staged sessions and nothing else; no other
+    /// table is present.
     Query(QueryRunArgs),
 
     /// Show definition of a pending publish

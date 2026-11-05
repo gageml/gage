@@ -1,4 +1,4 @@
-//! The `changes` table shape: one row per record of a stored
+//! The `session_change` table shape: one row per record of a stored
 //! session's `changes.json`, the changes its publish made to the
 //! original. A session that is not a publish has no rows.
 
@@ -13,7 +13,7 @@ use gage_store::ChangeRecord;
 static SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
     Arc::new(Schema::new(vec![
         Field::new("session_id", DataType::Utf8, false),
-        Field::new("kind", DataType::Utf8, false),
+        Field::new("type", DataType::Utf8, false),
         Field::new("line", DataType::Int64, false),
         Field::new("line_end", DataType::Int64, true),
         Field::new("ref", DataType::Utf8, true),
@@ -24,12 +24,12 @@ static SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
     ]))
 });
 
-pub fn changes_schema() -> SchemaRef {
+pub fn session_change_schema() -> SchemaRef {
     SCHEMA.clone()
 }
 
-/// The `changes` rows of one session, in record order.
-pub fn changes_batch(session_id: &str, records: &[ChangeRecord]) -> Result<RecordBatch> {
+/// The `session_change` rows of one session, in record order.
+pub fn session_change_batch(session_id: &str, records: &[ChangeRecord]) -> Result<RecordBatch> {
     let mut session_ids = StringBuilder::new();
     let mut kinds = StringBuilder::new();
     let mut lines = Int64Builder::new();
@@ -51,7 +51,7 @@ pub fn changes_batch(session_id: &str, records: &[ChangeRecord]) -> Result<Recor
         authors.append_value(&r.author);
     }
     Ok(RecordBatch::try_new(
-        changes_schema(),
+        session_change_schema(),
         vec![
             Arc::new(session_ids.finish()),
             Arc::new(kinds.finish()),

@@ -12,9 +12,9 @@
 //! sessions: the core resolves the session set and plans every read
 //! ([`scope`]), and the driver that wrote each session deserializes
 //! its bytes into normalized rows the core turns into batches
-//! ([`rows`], [`stored_rows`]). `changes` is the records of a
+//! ([`rows`], [`stored_rows`]). `session_change` is the records of a
 //! published session's `changes.json`, over the same session set
-//! ([`changes`]).
+//! ([`session_change`]).
 //! `note` is one row per live note object, from
 //! [`gage_store::StoredNoteTable`]. `issue` is one row per live issue
 //! object and `issue_event` one row per change entry across them.
@@ -40,7 +40,6 @@
 
 mod age;
 mod blame;
-pub mod changes;
 mod json;
 mod native;
 mod patch;
@@ -49,6 +48,7 @@ mod project;
 mod repl;
 pub mod rows;
 pub mod scope;
+pub mod session_change;
 pub mod stored_rows;
 pub mod system_cols;
 pub mod text;
@@ -227,8 +227,8 @@ impl ContextBuilder {
                 )),
             ),
             (
-                "changes",
-                Arc::new(StoredRowsTable::new(RowKind::Changes, sessions)),
+                "session_change",
+                Arc::new(StoredRowsTable::new(RowKind::SessionChange, sessions)),
             ),
             ("note", Arc::new(StoredNoteTable::new(Arc::clone(&store)))),
             ("dataset", dataset_table(Arc::clone(&store))),
@@ -289,8 +289,8 @@ impl ContextBuilder {
 }
 
 /// Register the external scope's tables: `session` over the given
-/// session directories, and `entry`, `message`, `tool_use`, and
-/// `changes` over the same set. Notes, issues, and the other store
+/// session directories, and `entry`, `message`, `tool_use`,
+/// `tool_use_file`, and `session_change` over the same set. Notes, issues, and the other store
 /// tables are absent, since an external session is not a store object
 /// and nothing targets it.
 fn build_external_scope(
@@ -331,8 +331,8 @@ fn build_external_scope(
             )),
         ),
         (
-            "changes",
-            Arc::new(StoredRowsTable::new(RowKind::Changes, sessions)),
+            "session_change",
+            Arc::new(StoredRowsTable::new(RowKind::SessionChange, sessions)),
         ),
     ];
     for (name, table) in tables {
@@ -348,8 +348,9 @@ fn build_external_scope(
 }
 
 /// Register one scan's tables: `session` at the members' linked
-/// versions, `entry`, `message`, `tool_use`, and `changes` over
-/// them, and every other table from the scan source.
+/// versions, `entry`, `message`, `tool_use`, `tool_use_file`, and
+/// `session_change` over them, and every other table from the scan
+/// source.
 fn build_scan_scope(
     ctx: SessionContext,
     store: Arc<Mutex<Store>>,
@@ -402,8 +403,8 @@ fn build_scan_scope(
             )),
         ),
         (
-            "changes",
-            Arc::new(StoredRowsTable::new(RowKind::Changes, sessions)),
+            "session_change",
+            Arc::new(StoredRowsTable::new(RowKind::SessionChange, sessions)),
         ),
     ];
     tables.extend(scan_scope_tables(&store, scope.source()));
@@ -1290,7 +1291,7 @@ mod tests {
         assert_eq!(native_rows, ["Edit", "Read"]);
     }
 
-    /// `changes` reads a published session's `changes.json`: one row
+    /// `session_change` reads a published session's `changes.json`: one row
     /// per record with the record's fields in the table's columns, a
     /// title record with no reason, under the scope's session filter
     /// and the `line` filter. The original session has no rows.
@@ -1370,13 +1371,13 @@ mod tests {
             .await;
         let rows = strings(
             &ctx,
-            "SELECT kind || ' ' || CAST(line AS VARCHAR) \
+            "SELECT type || ' ' || CAST(line AS VARCHAR) \
                  || ' ' || COALESCE(CAST(line_end AS VARCHAR), '-') \
                  || ' ' || COALESCE(ref, '-') \
                  || ' ' || COALESCE(CAST(span_start AS VARCHAR), '-') \
                  || ' ' || COALESCE(CAST(span_end AS VARCHAR), '-') \
                  || ' ' || COALESCE(reason, '-') || ' ' || author \
-             FROM changes ORDER BY line, kind",
+             FROM session_change ORDER BY line, type",
         )
         .await;
         assert_eq!(
@@ -1390,13 +1391,15 @@ mod tests {
 
         let by_session = strings(
             &ctx,
-            &format!("SELECT kind FROM changes WHERE session_id = '{published_id}' AND line = 2"),
+            &format!(
+                "SELECT type FROM session_change WHERE session_id = '{published_id}' AND line = 2"
+            ),
         )
         .await;
         assert_eq!(by_session, ["line"]);
         let none = strings(
             &ctx,
-            &format!("SELECT kind FROM changes WHERE session_id = '{original_id}'"),
+            &format!("SELECT type FROM session_change WHERE session_id = '{original_id}'"),
         )
         .await;
         assert!(none.is_empty(), "{none:?}");

@@ -1,5 +1,6 @@
 //! An external-scoped context serves a session directory in the
-//! `session`, `entry`, `message`, `tool_use`, and `changes` tables,
+//! `session`, `entry`, `message`, `tool_use`, `tool_use_file`, and
+//! `session_change` tables,
 //! and nothing else; a rewritten directory is re-read by the same
 //! context.
 
@@ -140,7 +141,7 @@ async fn external_scope_serves_session_directories_in_the_session_tables() {
     // reload relies on.
     let empty = strings(
         &ctx,
-        &format!("SELECT kind FROM changes WHERE session_id = '{id}'"),
+        &format!("SELECT type FROM session_change WHERE session_id = '{id}'"),
     )
     .await;
     assert!(
@@ -175,7 +176,8 @@ async fn external_scope_serves_session_directories_in_the_session_tables() {
     let records = strings(
         &ctx,
         &format!(
-            "SELECT kind || ' ' || ref || ' ' || reason FROM changes WHERE session_id = '{id}'"
+            "SELECT type || ' ' || ref || ' ' || reason FROM session_change \
+             WHERE session_id = '{id}'"
         ),
     )
     .await;

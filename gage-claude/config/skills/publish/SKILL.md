@@ -126,12 +126,12 @@ gage publish edit -y <SESSION> --title "<TEXT>"
 ## Review the session
 
 Use `mcp__plugin_gage_gage__Query` with the `publish` flag set to `true` to
-review staged sessions. The `changes` table records what the filters and
-redactions removed:
+review staged sessions. The `session_change` table records what the filters
+and redactions removed:
 
 ```sql
-select kind, reason, author, count(*) as n from changes
-group by kind, reason, author order by kind, n desc
+select type, reason, author, count(*) as n from session_change
+group by type, reason, author order by type, n desc
 ```
 
 Report the staged title and message count as the `session` table returns them:

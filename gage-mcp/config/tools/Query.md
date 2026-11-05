@@ -15,7 +15,7 @@ description = "Page of the cursor's result to return, starting at 1 (default 1).
 
 [parameters.publish]
 type = "boolean"
-description = "Run sql over pending publish sessions instead: sessions staged by gage publish and not yet applied. session, entry, message, tool_use, and changes hold them and nothing else; no other table is present. Goes with sql."
+description = "Run sql over pending publish sessions instead: sessions staged by gage publish and not yet applied. session, entry, message, tool_use, tool_use_file, and session_change hold them and nothing else; no other table is present. Goes with sql."
 
 [annotations]
 read_only_hint = true
@@ -42,9 +42,9 @@ their less obvious columns:
   path it names; `type` is write (the record proves the write), read (the
   record proves no write), or cite (a shell command names the path and the
   record does not say)
-- changes - changes a publish made to its original; `kind` is line, value, text,
-  or title; `reason` is why (pii, secret, system, scope, ...); `author` is who
-  asked, as filter:<name>, user:<name>, or session:<id>
+- session_change - changes a publish made to its original; `type` is line,
+  value, text, or title; `reason` is why (pii, secret, system, scope, ...);
+  `author` is who asked, as filter:<name>, user:<name>, or session:<id>
 - note - `name` is the note kind; note_doc (note_name, doc) says what each kind
   holds; session_note (session_id, note_id, lines) cites a note's lines
 - issue, issue_event, issue_evidence (issue_id, note_id), session_issue

@@ -789,10 +789,11 @@ mod tests {
         assert_eq!(
             names(
                 "SELECT table_name FROM information_schema.tables \
-                 WHERE table_name IN ('session', 'entry', 'message', 'tool_use', 'changes')"
+                 WHERE table_name IN ('session', 'entry', 'message', 'tool_use', \
+                                      'tool_use_file', 'session_change')"
             )
             .await,
-            5
+            6
         );
 
         let without = QueryConfig {

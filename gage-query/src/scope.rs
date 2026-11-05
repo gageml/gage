@@ -98,8 +98,8 @@ impl ScanScope {
     }
 }
 
-use crate::changes::changes_batch;
 use crate::rows::{RowCache, derive_batch};
+use crate::session_change::session_change_batch;
 
 /// One session selected for a scan
 #[derive(Debug, Clone)]
@@ -385,19 +385,19 @@ impl SessionSet {
         Ok(batch)
     }
 
-    /// The `changes` batch of `session`: the records of its
+    /// The `session_change` batch of `session`: the records of its
     /// `changes.json`, from the session directory of an external
     /// session or the blob of a commit, cached as [`rows`] caches the
     /// derived batch.
     ///
     /// [`rows`]: SessionSet::rows
-    pub(crate) fn changes(
+    pub(crate) fn session_changes(
         &self,
         session: &StoredSessionRef,
         cache: &RowCache,
     ) -> Result<Arc<RecordBatch>> {
         let key = session.cache_key();
-        if let Some(batch) = cache.get_changes(&key) {
+        if let Some(batch) = cache.get_session_changes(&key) {
             return Ok(batch);
         }
         let records = match &session.source {
@@ -408,8 +408,8 @@ impl SessionSet {
             }
         }
         .map_err(external)?;
-        let batch = Arc::new(changes_batch(&session.id, &records)?);
-        cache.insert_changes(&key, Arc::clone(&batch));
+        let batch = Arc::new(session_change_batch(&session.id, &records)?);
+        cache.insert_session_changes(&key, Arc::clone(&batch));
         Ok(batch)
     }
 
