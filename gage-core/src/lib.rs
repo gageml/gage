@@ -5,6 +5,7 @@ pub mod datetime;
 pub mod front_matter;
 pub mod fs;
 pub mod glob;
+pub mod human;
 pub mod path;
 pub mod stopwatch;
 pub mod style;

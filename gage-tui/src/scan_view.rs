@@ -3678,7 +3678,7 @@ mod tests {
     use gage_store::Store;
 
     use super::*;
-    use crate::doc::{Document, Session};
+    use crate::doc::{Document, Session, SessionAttrs};
 
     /// A host with nothing behind it, for views the tests drive
     /// without data
@@ -3797,6 +3797,7 @@ mod tests {
                 id: "s1".into(),
                 value: serde_json::json!({}),
                 pending: false,
+                attrs: SessionAttrs::default(),
             },
             entries: Vec::new(),
             turns: Vec::new(),

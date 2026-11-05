@@ -26,7 +26,7 @@ use ratatui::widgets::{
 use serde_json::Value;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
-use crate::doc::{Document, Dropped, EntryBody, Note, Redaction};
+use crate::doc::{Document, Dropped, EntryBody, Note, Redaction, SessionAttrs};
 use crate::hint;
 use crate::input::spawn_input_thread;
 use crate::options::ViewOptions;
@@ -1698,8 +1698,12 @@ fn draw_body(frame: &mut Frame, state: &mut AppState, area: Rect) {
 
     match row_kind {
         Some(RowKind::Session) => {
-            let rows = json::render(&state.doc.session.value, inner.width);
-            draw_scrollable(frame, state, rows, inner);
+            let lines = session_lines(&state.doc.session.attrs);
+            let source = state
+                .view
+                .source
+                .then(|| json::render(&state.doc.session.value, inner.width));
+            draw_session(frame, state, lines, source, inner);
         }
         Some(RowKind::Entry { index }) => {
             let redactions = if state.view.changes {
@@ -1948,16 +1952,72 @@ fn draw_entry(frame: &mut Frame, state: &mut AppState, entry: &EntrySnap, area: 
         ));
     }
     if let Some(source) = &entry.source {
-        sections.push(Section::from_paragraph(
-            Paragraph::new(Line::from(Span::styled(
-                "--- native source ---",
-                styles::Text::dim(),
-            ))),
-            area.width,
-        ));
+        sections.push(source_banner(area.width));
         sections.push(Section::from_rows(source.clone()));
     }
 
+    draw_stack(frame, state, sections, area);
+}
+
+fn source_banner(width: u16) -> Section {
+    Section::from_paragraph(
+        Paragraph::new(Line::from(Span::styled(
+            "--- source ---",
+            styles::Text::dim(),
+        ))),
+        width,
+    )
+}
+
+/// The session's attributes as the root row shows them: the title in
+/// bold, a blank line, then one line per field with a dim label padded
+/// to the widest so the values share a column two spaces past it.
+fn session_lines(attrs: &SessionAttrs) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    if !attrs.title.is_empty() {
+        lines.push(Line::from(Span::styled(
+            attrs.title.clone(),
+            Style::new().add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(""));
+    }
+    let width = attrs
+        .fields
+        .iter()
+        .map(|(label, _)| label.len() + 1)
+        .max()
+        .unwrap_or(0);
+    for (label, value) in &attrs.fields {
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{:<width$}  ", format!("{label}:")),
+                styles::Text::dim(),
+            ),
+            Span::raw(value.clone()),
+        ]));
+    }
+    lines
+}
+
+/// The root row: the session's attributes, then its row as a source
+/// banner and fitted rows when the source view option is on.
+fn draw_session(
+    frame: &mut Frame,
+    state: &mut AppState,
+    lines: Vec<Line<'static>>,
+    source: Option<Vec<Line<'static>>>,
+    area: Rect,
+) {
+    let mut sections = vec![Section::from_paragraph(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(Block::default().padding(Padding::uniform(1))),
+        area.width,
+    )];
+    if let Some(source) = source {
+        sections.push(source_banner(area.width));
+        sections.push(Section::from_rows(source));
+    }
     draw_stack(frame, state, sections, area);
 }
 
@@ -2024,17 +2084,6 @@ fn draw_stack(frame: &mut Frame, state: &mut AppState, sections: Vec<Section>, a
     }
 
     crate::stack::blit(frame, area, &virt, state.body_scroll);
-}
-
-/// Scroll through rows already fitted to the pane.
-fn draw_scrollable(frame: &mut Frame, state: &mut AppState, rows: Vec<Line<'static>>, area: Rect) {
-    let total = u16::try_from(rows.len()).unwrap_or(u16::MAX);
-    let paragraph = Paragraph::new(rows);
-    state.body_max_scroll = total.saturating_sub(area.height);
-    if state.body_scroll > state.body_max_scroll {
-        state.body_scroll = state.body_max_scroll;
-    }
-    frame.render_widget(paragraph.scroll((state.body_scroll, 0)), area);
 }
 
 fn draw_placeholder(frame: &mut Frame, text: &'static str, area: Rect) {
@@ -2197,6 +2246,27 @@ mod tests {
         .unwrap()
     }
 
+    /// Modifiers of the first `ch` in the first row that contains
+    /// `marker`, for asserting a cell's style.
+    fn cell_modifiers(terminal: &Terminal<TestBackend>, marker: &str, ch: char) -> Modifier {
+        let buffer = terminal.backend().buffer();
+        let needle = ch.to_string();
+        for y in 0..buffer.area.height {
+            let row: String = (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect();
+            if !row.contains(marker) {
+                continue;
+            }
+            for x in 0..buffer.area.width {
+                if buffer[(x, y)].symbol() == needle {
+                    return buffer[(x, y)].modifier;
+                }
+            }
+        }
+        panic!("no row contains {marker:?}");
+    }
+
     /// Background color of the first `ch` in the first row that contains
     /// `marker`, for asserting a cell's style.
     fn cell_bg(terminal: &Terminal<TestBackend>, marker: &str, ch: char) -> ratatui::style::Color {
@@ -2250,6 +2320,7 @@ mod tests {
                 id: "s1".into(),
                 value: serde_json::json!({}),
                 pending: false,
+                attrs: SessionAttrs::default(),
             },
             entries: Vec::new(),
             turns: Vec::new(),
@@ -2427,7 +2498,7 @@ mod tests {
         // The body pane is the last bordered column of a row
         let body = |row: &str| row.rsplit('│').nth(1).unwrap_or("").trim().to_string();
         assert!(body(rows[record + 1]).is_empty(), "{text}");
-        assert_eq!(body(rows[record + 2]), "--- native source ---", "{text}");
+        assert_eq!(body(rows[record + 2]), "--- source ---", "{text}");
         press(&mut state, &backend, KeyCode::Char('v'));
         press(&mut state, &backend, KeyCode::Char('s'));
         press(&mut state, &backend, KeyCode::Enter);
@@ -2502,6 +2573,7 @@ mod tests {
                 id: "s1".into(),
                 value: serde_json::json!({}),
                 pending: false,
+                attrs: SessionAttrs::default(),
             },
             entries: (1..=count)
                 .map(|line| Entry {
@@ -2544,8 +2616,92 @@ mod tests {
             terminal.draw(|frame| draw(frame, &mut state)).unwrap();
             let text = screen(&terminal);
             assert!(text.contains(expected), "line {line}:\n{text}");
-            assert!(!text.contains("native source"), "line {line}:\n{text}");
+            assert!(!text.contains("--- source ---"), "line {line}:\n{text}");
         }
+    }
+
+    /// The root row shows the session's attributes as the listing
+    /// does: the title in bold, then one line per field, padded like
+    /// an entry body. The row's JSON follows a source banner only when
+    /// the source option is on.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_root_row_shows_the_session_attributes() {
+        let mut doc = doc_with_entries(1);
+        doc.session.value = serde_json::json!({"origin": "claude:abc"});
+        doc.session.attrs = SessionAttrs {
+            title: "Fix the widget".into(),
+            fields: vec![
+                ("Project", "proj".into()),
+                ("Type", "claude".into()),
+                ("Model", "claude-x".into()),
+                ("Size", "1.5 kB".into()),
+                ("Messages", "2".into()),
+                ("Created", "3h ago".into()),
+            ],
+        };
+        let backend = test_backend().await;
+        let mut state = AppState::new(doc, &ViewOptions::default(), DocSource::Backend, false);
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        state.select_first();
+        assert!(matches!(selected_kind(&state), RowKind::Session));
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let text = screen(&terminal);
+        let rows: Vec<&str> = text.lines().collect();
+        // The body pane is the last bordered column of a row
+        let body = |row: &str| row.rsplit('│').nth(1).unwrap_or("").to_string();
+        let title = rows
+            .iter()
+            .position(|r| r.contains("Fix the widget"))
+            .unwrap_or_else(|| panic!("{text}"));
+        // One padding row above and one column to the left
+        assert!(body(rows[title - 1]).trim().is_empty(), "{text}");
+        assert!(body(rows[title]).starts_with(" Fix the widget"), "{text}");
+        assert!(
+            cell_modifiers(&terminal, "Fix the widget", 'F').contains(Modifier::BOLD),
+            "{text}"
+        );
+        assert!(body(rows[title + 1]).trim().is_empty(), "{text}");
+        // The labels are padded to the widest plus two spaces so the
+        // values share a column, and they take the caption style
+        let expected = [
+            " Project:   proj",
+            " Type:      claude",
+            " Model:     claude-x",
+            " Size:      1.5 kB",
+            " Messages:  2",
+            " Created:   3h ago",
+        ];
+        for (i, line) in expected.iter().enumerate() {
+            assert!(body(rows[title + 2 + i]).starts_with(line), "{text}");
+        }
+        assert!(
+            cell_modifiers(&terminal, "Project:", 'P').contains(Modifier::DIM),
+            "{text}"
+        );
+        assert!(
+            !cell_modifiers(&terminal, "Project:", 'p').contains(Modifier::DIM),
+            "{text}"
+        );
+        assert!(!text.contains("--- source ---"), "{text}");
+        assert!(!text.contains("claude:abc"), "{text}");
+
+        press(&mut state, &backend, KeyCode::Char('v'));
+        press(&mut state, &backend, KeyCode::Char('s'));
+        press(&mut state, &backend, KeyCode::Enter);
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let text = screen(&terminal);
+        let rows: Vec<&str> = text.lines().collect();
+        let banner = rows
+            .iter()
+            .position(|r| r.contains("--- source ---"))
+            .unwrap_or_else(|| panic!("{text}"));
+        assert!(banner > title + 7, "{text}");
+        assert!(
+            rows[banner + 1..]
+                .iter()
+                .any(|r| r.contains("\"origin\": \"claude:abc\"")),
+            "{text}"
+        );
     }
 
     /// An entry with no rendering shows nothing until the source option
@@ -2567,7 +2723,7 @@ mod tests {
         state.select_line(1);
         terminal.draw(|frame| draw(frame, &mut state)).unwrap();
         let text = screen(&terminal);
-        assert!(!text.contains("native source"), "{text}");
+        assert!(!text.contains("--- source ---"), "{text}");
         assert!(!text.contains("stop_hook_summary"), "{text}");
 
         press(&mut state, &backend, KeyCode::Char('v'));
@@ -2578,7 +2734,7 @@ mod tests {
         let rows: Vec<&str> = text.lines().collect();
         let header = rows
             .iter()
-            .position(|r| r.contains("--- native source ---"))
+            .position(|r| r.contains("--- source ---"))
             .unwrap_or_else(|| panic!("{text}"));
         assert!(
             rows[header + 1..]
