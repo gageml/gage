@@ -9,13 +9,13 @@
 
 use std::collections::HashSet;
 use std::io;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use gage_store::{ChangeKind, NoteValue};
 use ratatui::DefaultTerminal;
 use ratatui::Frame;
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Margin, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -24,9 +24,11 @@ use ratatui::widgets::{
     ScrollbarState, Wrap,
 };
 use serde_json::Value;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use crate::doc::{Document, Dropped, EntryBody, Note, Redaction};
 use crate::hint;
+use crate::input::spawn_input_thread;
 use crate::options::ViewOptions;
 use crate::outline::{CollapseOutcome, Outline, RowKind};
 use crate::picker::{self, PickColumn, PickItem, Picker, PickerAction};
@@ -35,7 +37,7 @@ use crate::syntax::Highlighter;
 use crate::textarea::TextArea;
 use crate::{markdown, styles, tool};
 
-pub fn run(
+pub async fn run(
     terminal: &mut DefaultTerminal,
     doc: Option<Document>,
     line: Option<u32>,
@@ -43,11 +45,60 @@ pub fn run(
     backend: &Backend,
     enhanced_keys: bool,
 ) -> io::Result<()> {
+    let stop_input = Arc::new(AtomicBool::new(false));
+    let (events, view_events) = unbounded_channel();
+    let mut inbox = Inbox {
+        input: spawn_input_thread(Arc::clone(&stop_input)),
+        events,
+        view_events,
+    };
+    let outcome = run_in(
+        terminal,
+        doc,
+        line,
+        options,
+        backend,
+        enhanced_keys,
+        &mut inbox,
+    )
+    .await;
+    stop_input.store(true, Ordering::Relaxed);
+    outcome
+}
+
+/// What a view loop blocks on. The loop draws once per message and
+/// otherwise sleeps.
+struct Inbox {
+    /// Terminal events from the input thread
+    input: UnboundedReceiver<Event>,
+    /// The sender the page loader is given
+    events: UnboundedSender<ViewEvent>,
+    /// The loader's events
+    view_events: UnboundedReceiver<ViewEvent>,
+}
+
+impl Inbox {
+    /// The next loader event. The inbox holds a sender, so the
+    /// channel never closes.
+    fn view_event(&self, received: Option<ViewEvent>) -> ViewEvent {
+        received.expect("inbox holds a view event sender")
+    }
+}
+
+async fn run_in(
+    terminal: &mut DefaultTerminal,
+    doc: Option<Document>,
+    line: Option<u32>,
+    options: &ViewOptions,
+    backend: &Backend,
+    enhanced_keys: bool,
+    inbox: &mut Inbox,
+) -> io::Result<()> {
     let doc = match doc {
         Some(doc) => doc,
         // No session given: the open dialog doubles as the initial
         // picker; canceling it exits the app.
-        None => match standalone_pick(terminal, backend)? {
+        None => match standalone_pick(terminal, backend, inbox).await? {
             Some(doc) => doc,
             None => return Ok(()),
         },
@@ -58,54 +109,74 @@ pub fn run(
         state.select_line(line);
     }
     loop {
-        poll_pages(&mut state)?;
         terminal.draw(|frame| draw(frame, &mut state))?;
-        if event::poll(EVENT_POLL)?
-            && let Event::Key(key) = event::read()?
-            && key.kind == KeyEventKind::Press
-            && handle_key(&mut state, key, backend)? == KeyOutcome::Close
-        {
-            return Ok(());
+        tokio::select! {
+            ev = inbox.input.recv() => match ev {
+                Some(Event::Key(key)) if key.kind == KeyEventKind::Press => {
+                    if handle_key(&mut state, key, backend, &inbox.events)? == KeyOutcome::Close {
+                        return Ok(());
+                    }
+                }
+                // A resize or another terminal event: redraw
+                Some(_) => {}
+                // Terminal input is gone; without keys the view can
+                // never be closed, so exit rather than trap the user.
+                None => return Ok(()),
+            },
+            ev = inbox.view_events.recv() => apply_event(&mut state, inbox.view_event(ev))?,
         }
     }
 }
 
 /// Run the open dialog on a blank background until the user picks a
 /// session or cancels.
-fn standalone_pick(
+async fn standalone_pick(
     terminal: &mut DefaultTerminal,
     backend: &Backend,
+    inbox: &mut Inbox,
 ) -> io::Result<Option<Document>> {
-    let (mut picker, loader) = open_session_picker(backend, None)?;
+    let (mut picker, loader) = open_session_picker(backend, None, inbox.events.clone())?;
     loop {
-        loader.poll(&mut picker)?;
         terminal.draw(|frame| {
             draw_empty_shell(frame);
             picker.draw(frame);
         })?;
-        if event::poll(EVENT_POLL)?
-            && let Event::Key(key) = event::read()?
-            && key.kind == KeyEventKind::Press
-        {
-            match picker.handle_key(key.code) {
-                PickerAction::None => {}
-                PickerAction::Close => return Ok(None),
-                PickerAction::Open(id) => return load_doc_blocking(&id, backend).map(Some),
-                PickerAction::LoadMore => loader.start(picker.loaded()),
-            }
+        tokio::select! {
+            ev = inbox.input.recv() => match ev {
+                Some(Event::Key(key)) if key.kind == KeyEventKind::Press => {
+                    match picker.handle_key(key.code) {
+                        PickerAction::None => {}
+                        PickerAction::Close => return Ok(None),
+                        PickerAction::Open(id) => {
+                            return backend
+                                .load(&id)
+                                .await
+                                .map(Some)
+                                .map_err(|e| io::Error::other(e.to_string()));
+                        }
+                        PickerAction::LoadMore => loader.start(picker.loaded()),
+                    }
+                }
+                Some(_) => {}
+                None => return Ok(None),
+            },
+            ev = inbox.view_events.recv() => match inbox.view_event(ev) {
+                ViewEvent::Page(page) => {
+                    let page = page?;
+                    picker.append(page.items, page.has_more);
+                }
+                ViewEvent::LoadingDue => {}
+            },
         }
     }
 }
-
-/// How long an event loop waits for a key before it checks for a
-/// landed picker page
-const EVENT_POLL: Duration = Duration::from_millis(50);
 
 /// The session-open picker with its first page loaded, and the loader
 /// that fetches the pages after it.
 fn open_session_picker(
     backend: &Backend,
     current: Option<&str>,
+    events: UnboundedSender<ViewEvent>,
 ) -> io::Result<(Picker, PageLoader)> {
     let page_size = session::picker_page_size();
     let items = tokio::task::block_in_place(|| {
@@ -115,60 +186,81 @@ fn open_session_picker(
     let has_more = items.len() == page_size;
     let picker = session_picker(backend, pick_items(backend, items), current)
         .with_paging(has_more, "Reading sessions...");
-    Ok((picker, PageLoader::new(backend.clone(), page_size)))
+    Ok((picker, PageLoader::new(backend.clone(), page_size, events)))
 }
 
-/// Fetches picker pages on the runtime. The event loop polls between
-/// key events and appends a page once it lands.
+/// Fetches picker pages on the runtime and sends each to the loop
+/// that drives the view, which applies it with [`apply_event`].
 pub(crate) struct PageLoader {
     backend: Backend,
     page_size: usize,
-    /// Where the page in flight lands
-    slot: Arc<Mutex<Option<io::Result<Vec<PickItem>>>>>,
+    events: UnboundedSender<ViewEvent>,
+}
+
+/// What the page loader sends to the loop that drives the view.
+pub(crate) enum ViewEvent {
+    /// A page the loader fetched
+    Page(io::Result<Page>),
+    /// The picker's loading dialog delay has passed since a fetch
+    /// began; the redraw shows the dialog if the page is still out
+    LoadingDue,
+}
+
+/// One page of picker rows.
+pub(crate) struct Page {
+    items: Vec<PickItem>,
+    /// Rows beyond this page exist
+    has_more: bool,
 }
 
 impl PageLoader {
-    fn new(backend: Backend, page_size: usize) -> Self {
+    fn new(backend: Backend, page_size: usize, events: UnboundedSender<ViewEvent>) -> Self {
         Self {
             backend,
             page_size,
-            slot: Arc::new(Mutex::new(None)),
+            events,
         }
     }
 
-    /// Fetch the page starting at `offset`.
+    /// Fetch the page starting at `offset`, and wake the loop once
+    /// the loading dialog is due.
     fn start(&self, offset: usize) {
         let backend = self.backend.clone();
-        let slot = Arc::clone(&self.slot);
         let page_size = self.page_size;
+        let events = self.events.clone();
         tokio::spawn(async move {
             let page = backend
                 .list_recent(page_size, offset)
                 .await
-                .map(|items| pick_items(&backend, items))
+                .map(|items| Page {
+                    has_more: items.len() == page_size,
+                    items: pick_items(&backend, items),
+                })
                 .map_err(|e| io::Error::other(e.to_string()));
-            *slot.lock().unwrap() = Some(page);
+            // A closed channel means the loop that would show the
+            // page has exited.
+            if let Ok(()) = events.send(ViewEvent::Page(page)) {}
         });
-    }
-
-    /// Append the landed page, if any, to `picker`.
-    fn poll(&self, picker: &mut Picker) -> io::Result<()> {
-        let landed = self.slot.lock().unwrap().take();
-        if let Some(page) = landed {
-            let items = page?;
-            let has_more = items.len() == self.page_size;
-            picker.append(items, has_more);
-        }
-        Ok(())
+        let events = self.events.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(picker::LOADING_DIALOG_DELAY).await;
+            if let Ok(()) = events.send(ViewEvent::LoadingDue) {}
+        });
     }
 }
 
-/// Append any landed picker page while the open dialog is up. Called
-/// by every loop that drives the view, so a page lands without a key
-/// press in the view's own loop and on the next key in a host's.
-pub(crate) fn poll_pages(state: &mut AppState) -> io::Result<()> {
-    if let Dialog::OpenSession { picker, loader } = &mut state.dialog {
-        loader.poll(picker)?;
+/// Apply a page loader event to the view. A page that lands after the
+/// picker closed has nothing to update; a page that failed is the
+/// loop's error.
+pub(crate) fn apply_event(state: &mut AppState, event: ViewEvent) -> io::Result<()> {
+    match event {
+        ViewEvent::Page(page) => {
+            let page = page?;
+            if let Dialog::OpenSession { picker, .. } = &mut state.dialog {
+                picker.append(page.items, page.has_more);
+            }
+        }
+        ViewEvent::LoadingDue => {}
     }
     Ok(())
 }
@@ -269,8 +361,8 @@ pub(crate) fn handle_key(
     state: &mut AppState,
     key: KeyEvent,
     backend: &Backend,
+    events: &UnboundedSender<ViewEvent>,
 ) -> io::Result<KeyOutcome> {
-    poll_pages(state)?;
     match &mut state.dialog {
         Dialog::AddNote { .. } | Dialog::EditNote { .. } => {
             handle_note_dialog(state, key, backend)?;
@@ -452,7 +544,8 @@ pub(crate) fn handle_key(
             KeyOutcome::Consumed
         }
         KeyCode::Char('o') => {
-            let (picker, loader) = open_session_picker(backend, Some(&state.doc.session.id))?;
+            let (picker, loader) =
+                open_session_picker(backend, Some(&state.doc.session.id), events.clone())?;
             state.dialog = Dialog::OpenSession { picker, loader };
             KeyOutcome::Consumed
         }
@@ -2086,7 +2179,14 @@ mod tests {
     }
 
     fn press(state: &mut AppState, backend: &Backend, code: KeyCode) -> KeyOutcome {
-        handle_key(state, KeyEvent::new(code, KeyModifiers::NONE), backend).unwrap()
+        let (events, _view_events) = unbounded_channel();
+        handle_key(
+            state,
+            KeyEvent::new(code, KeyModifiers::NONE),
+            backend,
+            &events,
+        )
+        .unwrap()
     }
 
     /// Background color of the first `ch` in the first row that contains
@@ -3198,5 +3298,67 @@ mod tests {
         let enhanced = screen(&terminal);
         assert!(enhanced.contains("Shift+Enter newline"), "{enhanced}");
         assert!(!enhanced.contains("Alt+Enter"), "{enhanced}");
+    }
+
+    /// The loader sends the fetched page and the loading-dialog wake
+    /// to the loop that drives the view; applying the page appends it
+    /// to the open picker.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_fetched_page_arrives_as_an_event_and_fills_the_picker() {
+        // The fixture stays in scope: its temp dirs hold the store
+        // the pages are read from.
+        let fx = fixture();
+        let backend = Backend::stored(fx.store).await;
+        let (events, mut inbox) = unbounded_channel();
+        let (picker, loader) = open_session_picker(&backend, None, events).unwrap();
+        let loaded = picker.loaded();
+        loader.start(0);
+        let mut state = AppState::new(
+            doc_with_entries(1),
+            &ViewOptions::default(),
+            DocSource::Backend,
+            false,
+        );
+        state.dialog = Dialog::OpenSession { picker, loader };
+
+        let mut page = None;
+        let mut loading_due = false;
+        for _ in 0..2 {
+            match inbox.recv().await.unwrap() {
+                ViewEvent::Page(p) => page = Some(p),
+                ViewEvent::LoadingDue => loading_due = true,
+            }
+        }
+        assert!(loading_due);
+        let page = page.unwrap().unwrap();
+        assert_eq!(page.items.len(), 1);
+
+        apply_event(&mut state, ViewEvent::Page(Ok(page))).unwrap();
+        let Dialog::OpenSession { picker, .. } = &state.dialog else {
+            panic!("picker should stay open");
+        };
+        assert_eq!(picker.loaded(), loaded + 1);
+    }
+
+    /// A page that lands after the picker closed has nothing to
+    /// update; a page that failed is the loop's error either way.
+    #[test]
+    fn a_page_after_the_picker_closed_is_dropped_and_a_failed_page_is_an_error() {
+        let mut state = AppState::new(
+            doc_with_entries(1),
+            &ViewOptions::default(),
+            DocSource::Backend,
+            false,
+        );
+        let page = Page {
+            items: Vec::new(),
+            has_more: false,
+        };
+        apply_event(&mut state, ViewEvent::Page(Ok(page))).unwrap();
+        assert!(matches!(state.dialog, Dialog::None));
+
+        let err =
+            apply_event(&mut state, ViewEvent::Page(Err(io::Error::other("boom")))).unwrap_err();
+        assert_eq!(err.to_string(), "boom");
     }
 }

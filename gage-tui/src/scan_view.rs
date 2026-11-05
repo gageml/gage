@@ -37,13 +37,14 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Cell, Clear, Paragraph, Row, Table, Widget, Wrap};
 use ratatui::{DefaultTerminal, Frame};
-use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::attrs::attr_lines;
 use crate::dialog;
 use crate::doc::Document;
+use crate::input::spawn_input_thread;
 use crate::item_table::ItemTable;
 use crate::panel::{COLUMN_SPACING, header_row, panel_block};
 use crate::picker::{self, PickColumn, PickItem, Picker, PickerAction};
@@ -649,7 +650,11 @@ fn standalone_scan_pick(
     let mut picker = scan_picker(host.as_ref(), None)?;
     // Empty panels behind the picker, so picking renders in place
     // with no flash.
-    let mut shell = ViewState::new(ScanModel::default(), Arc::clone(host));
+    let mut shell = ViewState::new(
+        ScanModel::default(),
+        Arc::clone(host),
+        unbounded_channel().0,
+    );
     loop {
         terminal.draw(|frame| {
             draw(frame, &mut shell);
@@ -710,7 +715,8 @@ async fn event_loop(
     allow_open: bool,
     enhanced_keys: bool,
 ) -> io::Result<()> {
-    let mut state = ViewState::new(model, host);
+    let (view_events, mut view_inbox) = unbounded_channel();
+    let mut state = ViewState::new(model, host, view_events);
     state.allow_open = allow_open;
     state.enhanced_keys = enhanced_keys;
     let mut stop_input = Arc::new(AtomicBool::new(false));
@@ -721,6 +727,10 @@ async fn event_loop(
         state.promote_pending_dialog();
         terminal.draw(|frame| draw(frame, &mut state))?;
         tokio::select! {
+            ev = view_inbox.recv() => {
+                let ev = ev.expect("state holds the view event sender");
+                state.apply_view_event(ev)?;
+            }
             ev = events.recv(), if !events_closed => {
                 match ev {
                     Some(ev) => {
@@ -818,32 +828,6 @@ async fn run_resolve_session(
         }
     }
     Ok(())
-}
-
-/// Reads terminal input on a dedicated thread. `event::read` blocks,
-/// so the thread polls with a timeout and checks `stop` between polls
-/// to exit promptly once the view closes.
-fn spawn_input_thread(stop: Arc<AtomicBool>) -> UnboundedReceiver<TermEvent> {
-    let (tx, rx) = unbounded_channel();
-    std::thread::spawn(move || {
-        while !stop.load(Ordering::Relaxed) {
-            // A poll/read error means terminal input is gone (closed
-            // tty); the view exits on the dropped channel.
-            match event::poll(Duration::from_millis(200)) {
-                Ok(true) => match event::read() {
-                    Ok(ev) => {
-                        if tx.send(ev).is_err() {
-                            break;
-                        }
-                    }
-                    Err(_) => break,
-                },
-                Ok(false) => {}
-                Err(_) => break,
-            }
-        }
-    });
-    rx
 }
 
 /// Returns true when the view should close.
@@ -1115,6 +1099,9 @@ struct ViewState {
     /// position for a second phase.
     max_ratio: f64,
     host: Arc<dyn ScanHost>,
+    /// Where the embedded session view's page loader sends its
+    /// events; the event loop receives them
+    view_events: UnboundedSender<app::ViewEvent>,
     /// Whether `o` and the picker may open another scan; off for a
     /// live scan
     allow_open: bool,
@@ -1238,7 +1225,11 @@ enum SessionNav {
 }
 
 impl ViewState {
-    fn new(model: ScanModel, host: Arc<dyn ScanHost>) -> Self {
+    fn new(
+        model: ScanModel,
+        host: Arc<dyn ScanHost>,
+        view_events: UnboundedSender<app::ViewEvent>,
+    ) -> Self {
         let mut state = Self {
             tasks: ItemTable::new(),
             expanded: HashSet::new(),
@@ -1257,6 +1248,7 @@ impl ViewState {
             session_ui: HashMap::new(),
             max_ratio: 0.0,
             host,
+            view_events,
             allow_open: false,
             enhanced_keys: false,
             model,
@@ -1265,13 +1257,23 @@ impl ViewState {
         state
     }
 
+    /// Apply an event from the embedded session view's page loader.
+    /// An event that lands after the session dialog closed has
+    /// nothing to update.
+    fn apply_view_event(&mut self, event: app::ViewEvent) -> io::Result<()> {
+        match &mut self.dialog {
+            Dialog::Session { view, .. } => app::apply_event(view, event),
+            _ => Ok(()),
+        }
+    }
+
     /// Swap in a different scan's model (historical only), resetting
     /// the view.
     fn replace_model(&mut self, mut model: ScanModel) {
         model.finished = true;
         let allow_open = self.allow_open;
         let enhanced_keys = self.enhanced_keys;
-        *self = ViewState::new(model, Arc::clone(&self.host));
+        *self = ViewState::new(model, Arc::clone(&self.host), self.view_events.clone());
         self.allow_open = allow_open;
         self.enhanced_keys = enhanced_keys;
     }
@@ -1892,7 +1894,7 @@ impl ViewState {
             // Pinned views are transient peeks positioned at a tool-use
             // entry; saving them would clobber the browsed position.
             let remember = !matches!(nav, SessionNav::PinnedAgent | SessionNav::PinnedSession);
-            match app::handle_key(view, key, backend) {
+            match app::handle_key(view, key, backend, &self.view_events) {
                 Ok(app::KeyOutcome::Consumed) => {}
                 Ok(app::KeyOutcome::Close) => {
                     if remember {
@@ -3784,7 +3786,7 @@ mod tests {
             elapsed: None,
             log_key: None,
         };
-        let mut state = ViewState::new(model, Arc::new(NullHost));
+        let mut state = ViewState::new(model, Arc::new(NullHost), unbounded_channel().0);
         let doc = Document {
             session: Session {
                 id: "s1".into(),
@@ -3849,7 +3851,7 @@ mod tests {
             elapsed: None,
             log_key: None,
         };
-        let mut state = ViewState::new(model, Arc::new(NullHost));
+        let mut state = ViewState::new(model, Arc::new(NullHost), unbounded_channel().0);
         let before = state.progress_ratio();
         state.model.tasks.first_mut().unwrap().progress = Some((0, 4));
         let after = state.progress_ratio();
@@ -3960,7 +3962,7 @@ mod tests {
             log_key: None,
         };
         let host = StoreHost(Arc::new(Mutex::new(f.store)));
-        let mut state = ViewState::new(model, Arc::new(host));
+        let mut state = ViewState::new(model, Arc::new(host), unbounded_channel().0);
         let item = SessionItem {
             id: f.session_id.clone(),
             title: "s".into(),
@@ -4041,7 +4043,11 @@ mod tests {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
-        let mut state = ViewState::new(ScanModel::default(), Arc::new(NullHost));
+        let mut state = ViewState::new(
+            ScanModel::default(),
+            Arc::new(NullHost),
+            unbounded_channel().0,
+        );
         state.prompt = Some(Prompt::Comment {
             issue: Box::new(IssueItem {
                 id: "i1".into(),

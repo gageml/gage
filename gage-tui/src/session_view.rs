@@ -35,7 +35,8 @@ pub async fn run(
         &options,
         &backend,
         enhanced_keys,
-    );
+    )
+    .await;
     if enhanced_keys {
         pop_keyboard_enhancements();
     }

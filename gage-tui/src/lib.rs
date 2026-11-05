@@ -4,6 +4,7 @@ mod dialog;
 mod doc;
 mod format;
 mod hint;
+mod input;
 mod item_table;
 mod markdown;
 mod options;

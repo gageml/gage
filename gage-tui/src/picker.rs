@@ -48,7 +48,7 @@ struct Paging {
 
 /// How long a page load runs before its dialog shows, so a fast page
 /// does not flash one
-const LOADING_DIALOG_DELAY: Duration = Duration::from_millis(100);
+pub(crate) const LOADING_DIALOG_DELAY: Duration = Duration::from_millis(100);
 
 pub(crate) struct PickColumn {
     heading: &'static str,
