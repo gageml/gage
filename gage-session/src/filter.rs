@@ -365,31 +365,57 @@ fn narrow_bounds(expr: &Expr, col: &str, bounds: &mut TimeBounds) {
     }
 }
 
-/// The values `filters` require `col`, a list column, to hold through
-/// `array_has(col, '<value>')`, from the conjunction's top level. A
-/// walk skips a session whose recorded members lack any of them.
-pub fn required_members(filters: &[Expr], col: &str) -> Vec<String> {
+/// The literal values `filters` admit for `col`, one set per term,
+/// from the top level of the conjunction: `col = 'v'` admits `v`,
+/// and `col IN ('v', 'w')` admits either. A row must satisfy every
+/// term, so a walk skips a session none of whose recorded values for
+/// `col` lies in each set. A term under `OR`, a negation, or a
+/// non-literal operand admits everything and yields no set.
+pub fn literal_members(filters: &[Expr], col: &str) -> Vec<Vec<String>> {
     let mut out = Vec::new();
     for f in filters {
-        collect_members(f, col, &mut out);
+        collect_literal_members(f, col, &mut out);
     }
     out
 }
 
-fn collect_members(expr: &Expr, col: &str, out: &mut Vec<String>) {
+fn collect_literal_members(expr: &Expr, col: &str, out: &mut Vec<Vec<String>>) {
     match expr {
         Expr::BinaryExpr(b) if b.op == Operator::And => {
-            collect_members(&b.left, col, out);
-            collect_members(&b.right, col, out);
+            collect_literal_members(&b.left, col, out);
+            collect_literal_members(&b.right, col, out);
         }
-        Expr::ScalarFunction(f) if f.func.name() == "array_has" => {
-            if let [haystack, Expr::Literal(ScalarValue::Utf8(Some(needle)), _)] = f.args.as_slice()
-                && is_column(haystack, col)
+        Expr::BinaryExpr(b) if b.op == Operator::Eq => {
+            if let Some(v) =
+                literal_eq(&b.left, &b.right, col).or_else(|| literal_eq(&b.right, &b.left, col))
             {
-                out.push(needle.clone());
+                out.push(vec![v]);
+            }
+        }
+        Expr::InList(in_list) if !in_list.negated && is_column(&in_list.expr, col) => {
+            let values: Option<Vec<String>> = in_list.list.iter().map(utf8_literal).collect();
+            if let Some(values) = values {
+                out.push(values);
             }
         }
         _ => {}
+    }
+}
+
+/// `value` when `column` is `col` and `value` is a string literal.
+fn literal_eq(column: &Expr, value: &Expr, col: &str) -> Option<String> {
+    is_column(column, col)
+        .then(|| utf8_literal(value))
+        .flatten()
+}
+
+fn utf8_literal(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Literal(ScalarValue::Utf8(Some(s)), _)
+        | Expr::Literal(ScalarValue::LargeUtf8(Some(s)), _)
+        | Expr::Literal(ScalarValue::Utf8View(Some(s)), _) => Some(s.clone()),
+        Expr::Cast(c) => utf8_literal(&c.expr),
+        _ => None,
     }
 }
 
@@ -421,7 +447,6 @@ fn timestamp_ms(expr: &Expr) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use datafusion::functions_nested::expr_fn::array_has;
     use datafusion::logical_expr::{BinaryExpr, Like, Operator, expr::InList};
 
     fn col(name: &str) -> Expr {
@@ -728,24 +753,31 @@ mod tests {
     }
 
     #[test]
-    fn required_members_come_from_top_level_array_has() {
+    fn literal_members_come_from_top_level_equality_and_in_list() {
         let filters = [
-            array_has(col("files_changed"), lit_str("/w/a.rs")),
+            cmp(col("path"), Operator::Eq, lit_str("/w/a.rs")),
             cmp(
-                array_has(col("files_changed"), lit_str("/w/b.rs")),
+                col("path").in_list(vec![lit_str("/w/b.rs"), lit_str("/w/c.rs")], false),
                 Operator::And,
                 cmp(col("line"), Operator::Gt, ts(1)),
             ),
+            cmp(lit_str("/w/d.rs"), Operator::Eq, col("path")),
             cmp(
-                array_has(col("files_changed"), lit_str("/w/c.rs")),
+                cmp(col("path"), Operator::Eq, lit_str("/w/e.rs")),
                 Operator::Or,
-                col("files_changed").is_null(),
+                col("path").is_null(),
             ),
-            array_has(col("other"), lit_str("/w/d.rs")),
+            col("path").in_list(vec![lit_str("/w/f.rs")], true),
+            cmp(col("type"), Operator::Eq, lit_str("write")),
         ];
         assert_eq!(
-            required_members(&filters, "files_changed"),
-            ["/w/a.rs", "/w/b.rs"]
+            literal_members(&filters, "path"),
+            [
+                vec!["/w/a.rs".to_string()],
+                vec!["/w/b.rs".to_string(), "/w/c.rs".to_string()],
+                vec!["/w/d.rs".to_string()],
+            ]
         );
+        assert_eq!(literal_members(&filters, "type"), [["write"]]);
     }
 }

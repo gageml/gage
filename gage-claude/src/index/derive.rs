@@ -6,7 +6,7 @@
 //! here; the in-memory cache in `gage-query` holds the results.
 
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, LazyLock};
 use std::time::UNIX_EPOCH;
 
@@ -18,7 +18,7 @@ use arrow::array::{Int64Builder, StringBuilder, TimestampMillisecondBuilder};
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use arrow::record_batch::RecordBatch;
 use chrono::DateTime;
-use gage_session::{Entry, Message, ToolUseBatch};
+use gage_session::{Entry, Message, ToolUseBatch, ToolUseFile, ToolUseFileBatch};
 use serde::{Deserialize, Serialize};
 
 use super::Result;
@@ -126,16 +126,11 @@ pub struct ClaudeSessionAttrs {
     /// The latest entry timestamp, epoch milliseconds
     #[serde(default)]
     pub last_timestamp_ms: Option<i64>,
-    /// Every path a tool call of the session wrote, as the `tool_use`
-    /// rows record, each once, sorted
+    /// Every path a tool call names with what the record proves about
+    /// the call and the path, each pair once, sorted: the session's
+    /// `tool_use_file` rows without the call. The walk prunes on it.
     #[serde(default)]
-    pub files_changed: Vec<PathBuf>,
-    /// Every other path a tool call's input referred to, each once,
-    /// sorted: an argument the harness names as a path, or a
-    /// path-shaped token of a shell command. Disjoint from
-    /// `files_changed`.
-    #[serde(default)]
-    pub files_referenced: Vec<PathBuf>,
+    pub files: Vec<ToolUseFile>,
 }
 
 pub struct DerivedSession {
@@ -143,6 +138,8 @@ pub struct DerivedSession {
     pub batch: RecordBatch,
     /// The session's `tool_use` rows
     pub tool_uses: RecordBatch,
+    /// The session's `tool_use_file` rows.
+    pub tool_use_files: RecordBatch,
     pub attrs: ClaudeSessionAttrs,
     pub fingerprint: Fingerprint,
 }
@@ -552,23 +549,20 @@ pub fn derive_session_from<R: std::io::Read>(
     }
 
     let mut tool_use_batch = ToolUseBatch::new();
-    attrs.files_referenced = tool_uses.referenced().to_vec();
+    let mut tool_use_file_batch = ToolUseFileBatch::new();
     for t in tool_uses.finish() {
         tool_use_batch.push(session_id, &t);
-        attrs
-            .files_changed
-            .extend(t.files_changed.iter().flatten().cloned());
+        tool_use_file_batch.push(session_id, &t);
+        attrs.files.extend(t.files.iter().cloned());
     }
-    attrs.files_changed.sort();
-    attrs.files_changed.dedup();
-    attrs
-        .files_referenced
-        .retain(|p| attrs.files_changed.binary_search(p).is_err());
+    attrs.files.sort();
+    attrs.files.dedup();
 
     Ok(DerivedSession {
         session_id: session_id.to_string(),
         batch: b.finish()?,
         tool_uses: tool_use_batch.finish()?,
+        tool_use_files: tool_use_file_batch.finish()?,
         attrs,
         fingerprint,
     })
@@ -659,12 +653,18 @@ pub fn derive_entry(session_id: &str, line_num: u32, entry: &serde_json::Value) 
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
     use arrow::array::{Array, StringArray};
+    use gage_session::FileType;
     use serde_json::json;
 
+    /// The attrs carry the distinct `(path, type)` pairs of the
+    /// session's calls, and the `tool_use_file` batch carries one row
+    /// per call per path.
     #[test]
-    fn summary_carries_the_time_span_and_the_files_written() {
+    fn summary_carries_the_time_span_and_the_files_named() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("s.jsonl");
         let lines = [
@@ -691,17 +691,22 @@ mod tests {
         let derived = derive_session("s", &path).unwrap();
         assert_eq!(derived.attrs.first_timestamp_ms, Some(1_735_689_601_000));
         assert_eq!(derived.attrs.last_timestamp_ms, Some(1_735_689_609_000));
-        assert_eq!(
-            derived.attrs.files_changed,
-            [PathBuf::from("/w/a.rs"), PathBuf::from("/w/b.rs")]
-        );
         let home = std::env::var_os("HOME").map(PathBuf::from).unwrap();
+        let file = |path: PathBuf, type_: FileType| ToolUseFile { path, type_ };
+        let mut expected = vec![
+            file(home.join("c.json"), FileType::Cite),
+            file(PathBuf::from("/w/a.rs"), FileType::Write),
+            file(PathBuf::from("/w/a.rs"), FileType::Cite),
+            file(PathBuf::from("/w/b.rs"), FileType::Write),
+            file(PathBuf::from("/w/d/e.rs"), FileType::Cite),
+        ];
+        expected.sort();
         assert_eq!(
-            derived.attrs.files_referenced,
-            [home.join("c.json"), PathBuf::from("/w/d/e.rs")],
-            "referenced paths exclude the judged writes"
+            derived.attrs.files, expected,
+            "a path a judged call wrote and an unjudged call named is two pairs"
         );
         assert_eq!(derived.tool_uses.num_rows(), 3);
+        assert_eq!(derived.tool_use_files.num_rows(), 5);
     }
 
     #[test]

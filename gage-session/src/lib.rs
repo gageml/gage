@@ -28,6 +28,7 @@ pub mod status;
 pub mod system_col;
 pub mod text_block;
 pub mod tool_use;
+pub mod tool_use_file;
 
 pub use agent::{
     AgentEvent, AgentMcp, AgentSession, AgentSpec, SystemPrompt, ToolUseEntries, TurnResult,
@@ -42,6 +43,9 @@ pub use text_block::{
     DescriptorError, SpanHit, TextDescriptor, TextValue, TypedSet, TypedValues, ValueHit,
 };
 pub use tool_use::{ToolUse, ToolUseBatch, tool_use_batch, tool_use_schema};
+pub use tool_use_file::{
+    FileType, ToolUseFile, ToolUseFileBatch, tool_use_file_batch, tool_use_file_schema,
+};
 
 /// What a driver opens and how it reads it. `new` names the source as
 /// the user gave it: empty for the driver's default location, a body
@@ -463,6 +467,7 @@ pub struct DriverTables {
     pub message: Arc<dyn TableProvider>,
     pub entry: Arc<dyn TableProvider>,
     pub tool_use: Arc<dyn TableProvider>,
+    pub tool_use_file: Arc<dyn TableProvider>,
 }
 
 pub trait NativeSession {
@@ -485,8 +490,8 @@ pub trait StoredSession {
     /// `entry` and `message` tables from the result.
     fn entries(&mut self) -> Box<dyn Iterator<Item = Result<Entry, DriverError>> + '_>;
     /// The session's tool invocations in `tool_use` table shape, in
-    /// call-line order. The core builds the `tool_use` table from the
-    /// result.
+    /// call-line order, each with the files it names. The core builds
+    /// the `tool_use` and `tool_use_file` tables from the result.
     fn tool_uses(&mut self) -> Box<dyn Iterator<Item = Result<ToolUse, DriverError>> + '_>;
     /// The native JSON text of each entry, in line order, for the
     /// text-value walk: the same lines `entries` yields rows for, as

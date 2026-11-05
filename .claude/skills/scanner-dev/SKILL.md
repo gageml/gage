@@ -178,7 +178,8 @@ for (s, (start, end)) in sessions {
         // msg.text, msg.timestamp, msg.line, msg.type, msg.subtype, msg.model()
     }
     for t in s.tool_uses().name(["Edit", "Write"]).await? {
-        // t.name, t.line, t.files_changed (Some(paths), Some([]), or None)
+        // t.name, t.line; t.files() is the call's tool_use_file rows,
+        // each #{ path, type } with type "write", "read", or "cite"
     }
 }
 ```

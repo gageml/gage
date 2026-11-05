@@ -18,9 +18,9 @@
 //! to now. A renamed file is followed, and each line is matched
 //! against calls that wrote the file under the path it had at its
 //! commit. Without git, or for a file git does not track, every call
-//! to the file is a candidate. The sessions read are those of the
-//! file's directory and its ancestors, as the driver names projects,
-//! that wrote the file under any of its paths.
+//! to the file is a candidate. The sessions read are those with a
+//! call that wrote or cited the file under any of its paths, as the
+//! `tool_use_file` table records them, in any project.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -31,8 +31,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use aho_corasick::AhoCorasick;
 use async_trait::async_trait;
 use datafusion::arrow::array::{
-    Array, Int64Array, Int64Builder, ListArray, StringArray, StringBuilder,
-    TimestampMillisecondArray, TimestampMillisecondBuilder,
+    Array, Int64Array, Int64Builder, StringArray, StringBuilder, TimestampMillisecondArray,
+    TimestampMillisecondBuilder,
 };
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use datafusion::arrow::record_batch::RecordBatch;
@@ -43,9 +43,9 @@ use datafusion::error::{DataFusionError, Result};
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::prelude::{Expr, SessionContext};
 use gage_registry::driver::DriverRegistry;
-use gage_session::{Source, SourceOptions};
+use gage_session::{FileType, SourceOptions};
+use gage_store::Store;
 use gage_store::url::LineSelection;
-use gage_store::{Store, StoredSessionTable};
 
 use crate::native::string_literal;
 use crate::new_context;
@@ -53,9 +53,9 @@ use crate::patch;
 use crate::scope::SessionSet;
 use crate::stored_rows::{RowKind, StoredRowsTable};
 
-/// `blame(file [, lines])` over the stored sessions. The source the
-/// project names are resolved through keeps its derived state under
-/// `cache_root`, or the default root when it is `None`.
+/// `blame(file [, lines])` over the stored sessions. The context it
+/// reads through keeps its derived state under `cache_root`, or the
+/// default root when it is `None`.
 pub fn blame_fn(
     store: Arc<Mutex<Store>>,
     cache_root: Option<PathBuf>,
@@ -95,8 +95,7 @@ pub fn blame_schema() -> SchemaRef {
 }
 
 /// Which sessions a blame reads. The native scope's source is an
-/// argument of the call; the stored scope names projects through the
-/// default source's driver, the source stored sessions were added from.
+/// argument of the call; the stored scope reads every stored session.
 #[derive(Debug, Clone)]
 enum Scope {
     Native { show_agents: bool },
@@ -189,8 +188,8 @@ impl TableProvider for BlameTable {
         limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let lines = blamed_lines(&self.path, self.selection.as_ref())?;
-        let (ctx, projects) = self.open(&lines).await?;
-        let rows = blame(&ctx, &projects, lines, &self.scope).await?;
+        let ctx = self.open().await?;
+        let rows = blame(&ctx, lines).await?;
         MemTable::try_new(blame_schema(), vec![vec![blame_batch(&rows)?]])?
             .scan(state, projection, filters, limit)
             .await
@@ -198,29 +197,28 @@ impl TableProvider for BlameTable {
 }
 
 impl BlameTable {
-    /// A context with the scope's `session`, `tool_use`, and `message`
-    /// tables, and the names of the projects whose sessions could have
-    /// written the file under any of its paths.
-    async fn open(&self, lines: &[BlamedLine]) -> Result<(SessionContext, Vec<String>)> {
-        let registry = DriverRegistry::builtin();
-        let spec = self.source.clone().unwrap_or_default();
-        let mut options = SourceOptions::new(&spec);
+    /// A context with the scope's `tool_use_file`, `tool_use`, and
+    /// `message` tables.
+    async fn open(&self) -> Result<SessionContext> {
         let show_agents = match self.scope {
             Scope::Native { show_agents } => show_agents,
             Scope::Stored(_) => false,
         };
-        options.show_agents(show_agents);
-        if let Some(root) = &self.cache_root {
-            options.cache_root(root);
-        }
-        let source = registry.open_source(&options).map_err(external)?;
-        let projects = project_names(source.as_ref(), lines)?;
         let ctx = new_context(false, show_agents, self.cache_root.clone());
         let tables: [(&str, Arc<dyn TableProvider>); 3] = match &self.scope {
             Scope::Native { .. } => {
+                let spec = self.source.clone().unwrap_or_default();
+                let mut options = SourceOptions::new(&spec);
+                options.show_agents(show_agents);
+                if let Some(root) = &self.cache_root {
+                    options.cache_root(root);
+                }
+                let source = DriverRegistry::builtin()
+                    .open_source(&options)
+                    .map_err(external)?;
                 let tables = source.tables().map_err(external)?;
                 [
-                    ("session", tables.session),
+                    ("tool_use_file", tables.tool_use_file),
                     ("tool_use", tables.tool_use),
                     ("message", tables.message),
                 ]
@@ -229,8 +227,11 @@ impl BlameTable {
                 let sessions = Arc::new(SessionSet::all(Arc::clone(store)));
                 [
                     (
-                        "session",
-                        Arc::new(StoredSessionTable::new(Arc::clone(store))),
+                        "tool_use_file",
+                        Arc::new(StoredRowsTable::new(
+                            RowKind::ToolUseFile,
+                            Arc::clone(&sessions),
+                        )),
                     ),
                     (
                         "tool_use",
@@ -249,23 +250,8 @@ impl BlameTable {
         for (name, table) in tables {
             ctx.register_table(name, table)?;
         }
-        Ok((ctx, projects))
+        Ok(ctx)
     }
-}
-
-/// The project names of each path's directory and every ancestor, as
-/// `source` names them, without repeats.
-fn project_names(source: &dyn Source, lines: &[BlamedLine]) -> Result<Vec<String>> {
-    let mut names = Vec::new();
-    for path in distinct_paths(lines) {
-        for dir in path.ancestors().skip(1) {
-            let name = source.project_name(dir).map_err(external)?;
-            if !names.contains(&name) {
-                names.push(name);
-            }
-        }
-    }
-    Ok(names)
 }
 
 fn distinct_paths(lines: &[BlamedLine]) -> Vec<&Path> {
@@ -595,19 +581,12 @@ struct OutRow {
     rank: i64,
 }
 
-/// Attribute `lines` to the calls that wrote them. The scoped pass
-/// reads the sessions of `projects` that the driver judged wrote the
-/// file. When it attributes nothing --- a file outside the projects,
-/// or one only a shell command touched --- a wide pass reads every
-/// session whose summary names the file, written or merely referenced.
-/// Each line keeps every matching call, ranked by evidence; a line
-/// between two patch matches of one call takes that call.
-async fn blame(
-    ctx: &SessionContext,
-    projects: &[String],
-    lines: Vec<BlamedLine>,
-    scope: &Scope,
-) -> Result<Vec<OutRow>> {
+/// Attribute `lines` to the calls that wrote them. The sessions read
+/// are those with a call that wrote or cited one of the lines' paths,
+/// as `tool_use_file` records them. Each line keeps every matching
+/// call, ranked by evidence; a line between two patch matches of one
+/// call takes that call.
+async fn blame(ctx: &SessionContext, lines: Vec<BlamedLine>) -> Result<Vec<OutRow>> {
     let paths: Vec<String> = distinct_paths(&lines)
         .into_iter()
         .map(|p| {
@@ -621,38 +600,12 @@ async fn blame(
     if paths.is_empty() {
         return Ok(Vec::new());
     }
-    let has = |col: &str| {
-        paths
-            .iter()
-            .map(|p| format!("array_has({col}, {})", quote(p)))
-            .collect::<Vec<_>>()
-            .join(" OR ")
-    };
-    let wrote_path = has("files_changed");
-
-    let scoped = match scope {
-        Scope::Native { .. } => writer_sessions(ctx, projects, &wrote_path).await?,
-        Scope::Stored(_) => {
-            let scoped = session_ids(ctx, projects).await?;
-            writers_of(ctx, &scoped, &wrote_path).await?
-        }
-    };
-    let mut found = if scoped.is_empty() {
+    let ids = candidate_sessions(ctx, &paths).await?;
+    let mut found = if ids.is_empty() {
         BTreeMap::new()
     } else {
-        match_calls(ctx, &scoped, &wrote_path, &lines).await?
+        match_calls(ctx, &ids, &paths, &lines).await?
     };
-
-    // The wide pass filters the `session` table on its path lists,
-    // which only the native scope carries; the stored session table
-    // does not expose them, and its writers are already found through
-    // `writers_of` over `tool_use`.
-    if found.is_empty() && matches!(scope, Scope::Native { .. }) {
-        let wide = wide_sessions(ctx, &wrote_path, &has("files_referenced")).await?;
-        if !wide.is_empty() {
-            found = match_calls(ctx, &wide, &wrote_path, &lines).await?;
-        }
-    }
 
     add_neighbors(&mut found, &lines);
     let prompts = prompt_lines(ctx, &found).await?;
@@ -668,16 +621,17 @@ async fn blame(
     Ok(build_rows(found))
 }
 
-/// Every session whose summary names the file, in any project: a
-/// judged write, or a path a call's input referred to. Empty for a
-/// scope whose summaries carry no path lists, as the stored sessions
-/// do not yet, so the wide pass is a native fallback.
-async fn wide_sessions(
-    ctx: &SessionContext,
-    wrote_path: &str,
-    referenced_path: &str,
-) -> Result<Vec<String>> {
-    let sql = format!("SELECT id FROM session WHERE ({wrote_path}) OR ({referenced_path})");
+/// The sessions with a call that wrote or cited one of `paths`. A
+/// call the record proves did not write a path is no candidate for
+/// it. The literal paths reach the native walk, which skips every
+/// session whose recorded files name none of them before parsing it.
+async fn candidate_sessions(ctx: &SessionContext, paths: &[String]) -> Result<Vec<String>> {
+    let sql = format!(
+        "SELECT DISTINCT session_id FROM tool_use_file \
+         WHERE path IN ({}) AND type IN ('write', 'cite') \
+         ORDER BY session_id",
+        quoted_list(paths)
+    );
     strings(ctx, &sql, &[]).await
 }
 
@@ -759,61 +713,14 @@ fn quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
 }
 
-/// Literal ids for an `IN` list. Literal ids reach the session walk
-/// as path pruning; a subquery over the session table does not.
-fn id_list(ids: &[String]) -> String {
-    ids.iter()
-        .map(|id| quote(id))
+/// Literals for an `IN` list. Literal ids and paths reach the session
+/// walk as pruning; a subquery does not.
+fn quoted_list(values: &[String]) -> String {
+    values
+        .iter()
+        .map(|v| quote(v))
         .collect::<Vec<_>>()
         .join(", ")
-}
-
-/// The sessions of `projects` with a write the driver attributes to
-/// the file, read from the session table. A native session's summary
-/// lists the paths it wrote, so the writers are found without opening
-/// a session. A stored session's summary lists no paths yet, so the
-/// stored scope finds its writers through `writers_of`.
-async fn writer_sessions(
-    ctx: &SessionContext,
-    projects: &[String],
-    wrote_path: &str,
-) -> Result<Vec<String>> {
-    if projects.is_empty() {
-        return Ok(Vec::new());
-    }
-    let sql = format!(
-        "SELECT id FROM session WHERE project IN ({}) AND ({wrote_path})",
-        id_list(projects)
-    );
-    strings(ctx, &sql, &[]).await
-}
-
-/// The ids of the sessions in `projects`, read through the session
-/// table so the walk prunes by project.
-async fn session_ids(ctx: &SessionContext, projects: &[String]) -> Result<Vec<String>> {
-    if projects.is_empty() {
-        return Ok(Vec::new());
-    }
-    let sql = format!(
-        "SELECT id FROM session WHERE project IN ({})",
-        id_list(projects)
-    );
-    strings(ctx, &sql, &[]).await
-}
-
-/// The sessions among `ids` with a write the driver attributes to the
-/// file. The `array_has` literals reach the walk, which skips every
-/// session whose summary lists none of the paths before parsing it.
-async fn writers_of(ctx: &SessionContext, ids: &[String], wrote_path: &str) -> Result<Vec<String>> {
-    if ids.is_empty() {
-        return Ok(Vec::new());
-    }
-    let sql = format!(
-        "SELECT DISTINCT session_id FROM tool_use \
-         WHERE session_id IN ({ids}) AND ({wrote_path})",
-        ids = id_list(ids),
-    );
-    strings(ctx, &sql, &[]).await
 }
 
 async fn strings(ctx: &SessionContext, sql: &str, params: &[ScalarValue]) -> Result<Vec<String>> {
@@ -837,18 +744,17 @@ const MIN_MATCH_CHARS: usize = 4;
 
 /// Every call of `ids`, in the union of the lines' windows, that a
 /// line's text matches: its recorded patch added the line (`patch`),
-/// its input carries the line and the driver judged it wrote the file
-/// (`input`), or its input carries the line and the driver could not
-/// judge the write (`command`). The calls read are those the driver
-/// attributes to one of the file's paths, or could not judge
-/// (`files_changed` null, as for a shell command whose result carries
-/// no diff). Each line keeps one candidate per call, at the call's
-/// strongest tier. Each call's input and patch are scanned once for
-/// every line's text.
+/// its input carries the line and the record proves it wrote the
+/// file (`input`), or its input carries the line and the record does
+/// not say whether it wrote the file (`command`). A call that neither
+/// wrote nor cited the line's path is no candidate for the line. Each
+/// line keeps one candidate per call, at the call's strongest tier.
+/// Each call's input and patch are scanned once for every line's
+/// text.
 async fn match_calls(
     ctx: &SessionContext,
     ids: &[String],
-    wrote_path: &str,
+    paths: &[String],
     lines: &[BlamedLine],
 ) -> Result<BTreeMap<u64, Vec<Candidate>>> {
     // Distinct line texts, each with the lines that carry it
@@ -877,6 +783,7 @@ async fn match_calls(
         return Ok(found);
     }
     let searcher = AhoCorasick::new(&patterns).map_err(|e| external_msg(e.to_string()))?;
+    let relations = call_files(ctx, ids, paths).await?;
 
     // The union of the lines' windows as literal bounds on the scan,
     // which the session walk prunes on
@@ -894,12 +801,11 @@ async fn match_calls(
         span.push_str(" AND result_timestamp > $2");
     }
     let sql = format!(
-        "SELECT session_id, id, name, line, result_timestamp, input_raw, files_changed, result_raw \
+        "SELECT session_id, id, name, line, result_timestamp, input_raw, result_raw \
          FROM tool_use \
          WHERE session_id IN ({ids}) AND {span} \
-           AND ({wrote_path} OR files_changed IS NULL) \
          ORDER BY result_timestamp, line",
-        ids = id_list(ids),
+        ids = quoted_list(ids),
     );
     let batches = ctx
         .sql(&sql)
@@ -923,16 +829,18 @@ async fn match_calls(
                 external_msg("result_timestamp is not a millisecond timestamp".into())
             })?;
         let inputs = str_col(batch, 5);
-        let files = batch
-            .column(6)
-            .as_any()
-            .downcast_ref::<ListArray>()
-            .ok_or_else(|| external_msg("files_changed is not a list".into()))?;
-        let results = str_col(batch, 7);
+        let results = str_col(batch, 6);
         for i in 0..batch.num_rows() {
             if timestamps.is_null(i) {
                 continue;
             }
+            let key = (
+                session_ids.value(i).to_string(),
+                call_ids.value(i).to_string(),
+            );
+            let Some(files) = relations.get(&key) else {
+                continue;
+            };
             let timestamp = timestamps.value(i);
             let input = normalize_json_text(inputs.value(i));
             in_input.clear();
@@ -956,22 +864,6 @@ async fn match_calls(
             if in_input.is_empty() && in_patch.is_empty() {
                 continue;
             }
-            let items;
-            let changed: Option<Vec<&str>> = if files.is_null(i) {
-                None
-            } else {
-                items = files.value(i);
-                let items = items
-                    .as_any()
-                    .downcast_ref::<StringArray>()
-                    .expect("files_changed items are strings");
-                Some(
-                    (0..items.len())
-                        .filter(|&j| !items.is_null(j))
-                        .map(|j| items.value(j))
-                        .collect(),
-                )
-            };
             for &p in in_patch.iter().chain(in_input.iter()) {
                 for &line in by_pattern.get(p).into_iter().flatten() {
                     if timestamp > line.window_end
@@ -979,17 +871,16 @@ async fn match_calls(
                     {
                         continue;
                     }
-                    let wrote_line_path = match &changed {
-                        None => true,
-                        Some(changed) => line.path.to_str().is_some_and(|p| changed.contains(&p)),
+                    let Some(relation) = line.path.to_str().and_then(|p| files.get(p)) else {
+                        continue;
                     };
-                    let tier = if in_patch.contains(&p) && wrote_line_path {
+                    let tier = if in_patch.contains(&p) {
                         Tier::Patch
                     } else if in_input.contains(&p) {
-                        match &changed {
-                            None => Tier::Command,
-                            Some(_) if wrote_line_path => Tier::Input,
-                            Some(_) => continue,
+                        match relation {
+                            FileType::Write => Tier::Input,
+                            FileType::Cite => Tier::Command,
+                            FileType::Read => continue,
                         }
                     } else {
                         continue;
@@ -1017,6 +908,39 @@ async fn match_calls(
 /// Add `cand` for `line`, or lower an existing candidate for the same
 /// call to its stronger tier. A line matching one call through both
 /// its patch and its input keeps the patch.
+/// The paths among `paths` each call of `ids` wrote or cited, keyed
+/// by session and call. A call with no such path is absent.
+async fn call_files(
+    ctx: &SessionContext,
+    ids: &[String],
+    paths: &[String],
+) -> Result<HashMap<(String, String), HashMap<String, FileType>>> {
+    let sql = format!(
+        "SELECT session_id, tool_use_id, path, type FROM tool_use_file \
+         WHERE session_id IN ({}) AND path IN ({}) AND type IN ('write', 'cite')",
+        quoted_list(ids),
+        quoted_list(paths),
+    );
+    let batches = ctx.sql(&sql).await?.collect().await?;
+    let mut out: HashMap<(String, String), HashMap<String, FileType>> = HashMap::new();
+    for batch in &batches {
+        let session_ids = str_col(batch, 0);
+        let call_ids = str_col(batch, 1);
+        let file_paths = str_col(batch, 2);
+        let types = str_col(batch, 3);
+        for i in 0..batch.num_rows() {
+            let type_: FileType = types.value(i).parse().map_err(external_msg)?;
+            out.entry((
+                session_ids.value(i).to_string(),
+                call_ids.value(i).to_string(),
+            ))
+            .or_default()
+            .insert(file_paths.value(i).to_string(), type_);
+        }
+    }
+    Ok(out)
+}
+
 fn record(found: &mut BTreeMap<u64, Vec<Candidate>>, line: u64, cand: Candidate) {
     let cands = found.entry(line).or_default();
     match cands.iter_mut().find(|c| c.same_call(&cand)) {
@@ -1115,7 +1039,7 @@ async fn prompt_lines(
     let sql = format!(
         "SELECT session_id, line FROM message \
          WHERE session_id IN ({}) AND type = 'user' AND subtype = 'text'",
-        id_list(&ids)
+        quoted_list(&ids)
     );
     let batches = ctx.sql(&sql).await?.collect().await?;
     for batch in &batches {
@@ -1393,11 +1317,13 @@ filename f.rs
         ]
     }
 
-    /// A Bash call and a result without a diff, as session lines.
-    fn shell(n: u32, id: &str, command: &str, ts: &str) -> [String; 2] {
+    /// A Bash call made in `cwd` and a result without a diff, as
+    /// session lines.
+    fn shell(n: u32, id: &str, cwd: &Path, command: &str, ts: &str) -> [String; 2] {
         [
             serde_json::json!({
                 "type": "assistant", "uuid": format!("a{n}"), "timestamp": ts,
+                "cwd": cwd.display().to_string(),
                 "message": {"role": "assistant", "content": [{
                     "type": "tool_use", "id": id, "name": "Bash",
                     "input": {"command": command}
@@ -1497,7 +1423,9 @@ filename f.rs
     /// not yet written, an Edit adding it, a later Edit quoting that
     /// line as context while adding another, an Edit after the second
     /// commit writing a line the committed file carries reflowed over
-    /// two lines, and a shell append whose result has no diff.
+    /// two lines, and a shell append whose result has no diff. The
+    /// shell commands name the file as `./a.rs`: a token is a path
+    /// only when it holds a slash, so a bare `a.rs` is not cited.
     fn fixture() -> (tempfile::TempDir, tempfile::TempDir, PathBuf, String) {
         let repo = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(repo.path()).unwrap();
@@ -1526,7 +1454,8 @@ filename f.rs
         lines.extend(shell(
             2,
             "t0",
-            "grep -n 'fn two_added_later() {}' a.rs",
+            &root,
+            "grep -n 'fn two_added_later() {}' ./a.rs",
             "2025-01-01T10:00:01Z",
         ));
         lines.extend(edit(
@@ -1561,7 +1490,8 @@ filename f.rs
         lines.extend(shell(
             11,
             "t4",
-            "printf 'fn three_by_shell() {}\\n' >> a.rs",
+            &root,
+            "printf 'fn three_by_shell() {}\\n' >> ./a.rs",
             "2025-01-03T01:00:00Z",
         ));
         let claude_root = tempfile::tempdir().unwrap();
@@ -1826,10 +1756,10 @@ filename f.rs
     }
 
     /// A file outside the session's project, written by a shell
-    /// heredoc the driver could not judge, is found through the wide
-    /// fallback on the summary's referenced paths.
+    /// heredoc the record does not judge, is found through the
+    /// command's citation of the path.
     #[tokio::test]
-    async fn the_wide_fallback_finds_a_file_named_only_in_a_command() {
+    async fn a_file_named_only_in_a_command_is_found_in_any_project() {
         let home = tempfile::tempdir().unwrap();
         let home = std::fs::canonicalize(home.path()).unwrap();
         let project_root = home.join("projA");
@@ -1840,7 +1770,13 @@ filename f.rs
 
         let command = format!("cat > {} <<'EOF'\n{body}EOF\n", file.display());
         let mut lines = vec![prompt(1, "set up dprint", "2025-01-01T00:00:00Z")];
-        lines.extend(shell(2, "t1", &command, "2025-01-01T00:00:05Z"));
+        lines.extend(shell(
+            2,
+            "t1",
+            &project_root,
+            &command,
+            "2025-01-01T00:00:05Z",
+        ));
         let claude_root = tempfile::tempdir().unwrap();
         // The session belongs to projA, not to any ancestor of the file
         let spec = write_session(claude_root.path(), &project_root, NATIVE_ID, &lines);
@@ -1873,13 +1809,12 @@ filename f.rs
         );
     }
 
-    /// The native writer lookup reads the session summaries: it names
-    /// the project's session that wrote the file and leaves out the
-    /// project's session that wrote another file and the other
-    /// project's session that wrote this one. The `tool_use` lookup
-    /// the stored scope uses names the same session.
+    /// Candidate sessions come from `tool_use_file` in every project:
+    /// the project's session that wrote the file and another project's
+    /// session that wrote it are both named, and the project's session
+    /// that wrote another file is not.
     #[tokio::test]
-    async fn native_writers_are_read_from_the_session_summaries() {
+    async fn candidates_are_the_sessions_that_wrote_or_cited_the_file_in_any_project() {
         let home = tempfile::tempdir().unwrap();
         let home = std::fs::canonicalize(home.path()).unwrap();
         let (proj_a, proj_b) = (home.join("projA"), home.join("projB"));
@@ -1909,21 +1844,81 @@ filename f.rs
             path: file.clone(),
             selection: None,
         };
-        let lines = blamed_lines(&file, None).unwrap();
-        let (ctx, projects) = table.open(&lines).await.unwrap();
-        let wrote_path = format!(
-            "array_has(files_changed, {})",
-            quote(file.to_str().unwrap())
-        );
+        let ctx = table.open().await.unwrap();
+        let paths = vec![file.to_str().unwrap().to_string()];
+        let found = candidate_sessions(&ctx, &paths).await.unwrap();
+        assert_eq!(found, [writer.to_string(), elsewhere.to_string()]);
+    }
 
-        let from_summaries = writer_sessions(&ctx, &projects, &wrote_path).await.unwrap();
-        assert_eq!(from_summaries, [writer.to_string()]);
+    /// The heredoc-written file is attributed from the stored copy of
+    /// the session through the stored `tool_use_file` table, as it is
+    /// from the native source.
+    #[tokio::test]
+    async fn blame_finds_a_file_named_only_in_a_command_in_stored_sessions() {
+        let home = tempfile::tempdir().unwrap();
+        let home = std::fs::canonicalize(home.path()).unwrap();
+        let project_root = home.join("projA");
+        std::fs::create_dir_all(&project_root).unwrap();
+        let file = home.join("dprint.jsonc");
+        let body = "\"lineWidth\": 80,\n\"plugin\": \"markdown\"\n";
+        std::fs::write(&file, body).unwrap();
+        let command = format!("cat > {} <<'EOF'\n{body}EOF\n", file.display());
+        let mut lines = vec![prompt(1, "set up dprint", "2025-01-01T00:00:00Z")];
+        lines.extend(shell(
+            2,
+            "t1",
+            &project_root,
+            &command,
+            "2025-01-01T00:00:05Z",
+        ));
+        let claude_root = tempfile::tempdir().unwrap();
+        let spec = write_session(claude_root.path(), &project_root, NATIVE_ID, &lines);
 
-        let scoped = session_ids(&ctx, &projects).await.unwrap();
-        let from_calls = writers_of(&ctx, &scoped, &wrote_path).await.unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let store_path = tmp.path().join("store.git");
+        gage_store::init(&store_path).unwrap();
+        let store = Arc::new(Mutex::new(
+            Store::open_with_cache_root(&store_path, &tmp.path().join("cache")).unwrap(),
+        ));
+        let registry = DriverRegistry::builtin();
+        let driver = registry.driver_for(&spec).unwrap();
+        let source = driver
+            .open_source(SourceOptions::new(&spec).cache_root(claude_root.path().join("cache")))
+            .unwrap();
+        let mut native = source.open_native(NATIVE_ID).unwrap();
+        {
+            let store = store.lock().unwrap();
+            SessionStore::from(&*store)
+                .add(driver.as_ref(), native.as_mut())
+                .unwrap();
+        }
+        let ctx = ContextBuilder::new(Some(store))
+            .cache_root(claude_root.path().join("cache"))
+            .build()
+            .await;
+        let stored_id = strings(&ctx, "SELECT id FROM session", &[]).await.unwrap();
+        let rows = rows(&ctx, &format!("blame('{}')", file.display())).await;
+        let shape: Vec<_> = rows
+            .iter()
+            .map(|r| {
+                (
+                    r.line,
+                    r.line_end,
+                    r.session.clone(),
+                    r.tool_use_id.clone(),
+                    r.tier.clone(),
+                )
+            })
+            .collect();
         assert_eq!(
-            from_calls, from_summaries,
-            "both lookups name the same writer"
+            shape,
+            [(
+                1,
+                Some(2),
+                Some(stored_id[0].clone()),
+                some("t1"),
+                some("command")
+            )]
         );
     }
 }

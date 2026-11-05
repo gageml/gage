@@ -37,7 +37,8 @@ use gage_session::filter;
 /// cache
 const PRUNE: SummaryPrune = SummaryPrune {
     time_col: Some("timestamp"),
-    files_col: None,
+    path_col: None,
+    type_col: None,
 };
 
 /// The derived columns serving the `message` table, in table-column

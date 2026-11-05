@@ -45,7 +45,7 @@ use crate::session::{
 };
 use crate::session_reader::SessionReader;
 use crate::skill::skill_command;
-use crate::tables::{EntryTable, MessageTable, SessionTable, ToolUseTable};
+use crate::tables::{EntryTable, MessageTable, SessionTable, ToolUseFileTable, ToolUseTable};
 use crate::text_descriptor;
 
 /// MCP server name under which Gage registers in `.mcp.json`.
@@ -545,6 +545,7 @@ impl Source for ClaudeSource {
             message: Arc::new(MessageTable::new(Arc::clone(&self.store))),
             entry: Arc::new(EntryTable::new(Arc::clone(&self.store))),
             tool_use: Arc::new(ToolUseTable::new(Arc::clone(&self.store))),
+            tool_use_file: Arc::new(ToolUseFileTable::new(Arc::clone(&self.store))),
         })
     }
 

@@ -197,7 +197,9 @@ impl DerivedSession {
     /// Arrow memory of the session's batches, the cache's unit of
     /// residency
     pub fn memory_size(&self) -> usize {
-        self.batch.get_array_memory_size() + self.tool_uses.get_array_memory_size()
+        self.batch.get_array_memory_size()
+            + self.tool_uses.get_array_memory_size()
+            + self.tool_use_files.get_array_memory_size()
     }
 }
 

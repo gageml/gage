@@ -314,18 +314,15 @@ pub async fn scan_sessions() {
 }
 
 async fn skip_session(s) {
-    if s.tool_uses().await.iter().any(changed_files) {
+    if s.tool_uses().await.iter().any(wrote_a_file) {
         Ok(None)
     } else {
         Ok(Some("no file edits"))
     }
 }
 
-fn changed_files(t) {
-    match t.files_changed {
-        Some(files) => !files.is_empty(),
-        None => false,
-    }
+fn wrote_a_file(t) {
+    t.files().iter().any(|f| f.type == "write")
 }
 
 async fn summary_notes_by_attachment() {

@@ -4,18 +4,17 @@
 //! [`ToolUseBatch`] builds the table's batch from them, so every
 //! driver and both the native and stored paths produce one schema.
 
-use std::path::PathBuf;
 use std::sync::{Arc, LazyLock};
 
 use datafusion::arrow::array::{
-    BooleanBuilder, Int64Builder, ListBuilder, StringBuilder, TimestampMillisecondBuilder,
+    BooleanBuilder, Int64Builder, StringBuilder, TimestampMillisecondBuilder,
 };
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use datafusion::arrow::error::ArrowError;
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::error::{DataFusionError, Result};
 
-use crate::DriverError;
+use crate::{DriverError, ToolUseFile};
 
 /// One tool invocation of a session. The call side is always present;
 /// the result side is `None` throughout when the record holds no
@@ -43,10 +42,10 @@ pub struct ToolUse {
     pub input_raw: String,
     /// The harness's result record for the call, JSON as recorded
     pub result_raw: Option<String>,
-    /// The paths the call wrote, as the driver determines from its
-    /// record. `Some(vec![])` is a call that wrote nothing; `None` is
-    /// a call the driver cannot judge.
-    pub files_changed: Option<Vec<PathBuf>>,
+    /// The paths the call names, each with what the record proves
+    /// about the call and the path; the `tool_use_file` rows of the
+    /// call.
+    pub files: Vec<ToolUseFile>,
 }
 
 static SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
@@ -65,11 +64,6 @@ static SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
         Field::new("is_error", DataType::Boolean, true),
         Field::new("input_raw", DataType::Utf8, false),
         Field::new("result_raw", DataType::Utf8, true),
-        Field::new(
-            "files_changed",
-            DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
-            true,
-        ),
     ]))
 });
 
@@ -92,7 +86,6 @@ pub struct ToolUseBatch {
     is_errors: BooleanBuilder,
     input_raws: StringBuilder,
     result_raws: StringBuilder,
-    files_changed: ListBuilder<StringBuilder>,
 }
 
 impl Default for ToolUseBatch {
@@ -117,7 +110,6 @@ impl ToolUseBatch {
             is_errors: BooleanBuilder::new(),
             input_raws: StringBuilder::new(),
             result_raws: StringBuilder::new(),
-            files_changed: ListBuilder::new(StringBuilder::new()),
         }
     }
 
@@ -137,17 +129,6 @@ impl ToolUseBatch {
         self.is_errors.append_option(t.is_error);
         self.input_raws.append_value(&t.input_raw);
         self.result_raws.append_option(t.result_raw.as_deref());
-        match &t.files_changed {
-            Some(paths) => {
-                for p in paths {
-                    self.files_changed
-                        .values()
-                        .append_value(p.to_string_lossy());
-                }
-                self.files_changed.append(true);
-            }
-            None => self.files_changed.append(false),
-        }
     }
 
     pub fn finish(mut self) -> std::result::Result<RecordBatch, ArrowError> {
@@ -167,7 +148,6 @@ impl ToolUseBatch {
                 Arc::new(self.is_errors.finish()),
                 Arc::new(self.input_raws.finish()),
                 Arc::new(self.result_raws.finish()),
-                Arc::new(self.files_changed.finish()),
             ],
         )
     }
@@ -190,7 +170,7 @@ pub fn tool_use_batch(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use datafusion::arrow::array::{Array, ListArray, StringArray};
+    use datafusion::arrow::array::{Array, StringArray};
 
     fn call(id: &str) -> ToolUse {
         ToolUse {
@@ -206,12 +186,12 @@ mod tests {
             is_error: None,
             input_raw: "{}".to_string(),
             result_raw: None,
-            files_changed: None,
+            files: Vec::new(),
         }
     }
 
     #[test]
-    fn batch_matches_the_schema_and_keeps_list_nullability() {
+    fn batch_matches_the_schema_and_keeps_result_nullability() {
         let answered = ToolUse {
             result_line: Some(4),
             result_uuid: Some("u1".to_string()),
@@ -219,31 +199,25 @@ mod tests {
             output: Some("ok".to_string()),
             is_error: Some(false),
             result_raw: Some("{\"filePath\":\"/w/a.rs\"}".to_string()),
-            files_changed: Some(vec![PathBuf::from("/w/a.rs")]),
             ..call("t1")
         };
-        let wrote_nothing = ToolUse {
-            files_changed: Some(vec![]),
-            ..call("t2")
-        };
-        let unknown = call("t3");
+        let unanswered = call("t2");
 
-        let batch = tool_use_batch("s1", [Ok(answered), Ok(wrote_nothing), Ok(unknown)]).unwrap();
+        let batch = tool_use_batch("s1", [Ok(answered), Ok(unanswered)]).unwrap();
         assert_eq!(batch.schema(), tool_use_schema());
-        assert_eq!(batch.num_rows(), 3);
+        assert_eq!(batch.num_rows(), 2);
 
-        let files = batch
-            .column_by_name("files_changed")
+        let results = batch
+            .column_by_name("result_raw")
             .unwrap()
             .as_any()
-            .downcast_ref::<ListArray>()
+            .downcast_ref::<StringArray>()
             .unwrap();
-        let first = files.value(0);
-        let first = first.as_any().downcast_ref::<StringArray>().unwrap();
-        assert_eq!(first.value(0), "/w/a.rs");
-        assert_eq!(files.value(1).len(), 0);
-        assert!(files.is_valid(1), "an empty list is a judged call");
-        assert!(files.is_null(2), "null is an unjudged call");
+        assert_eq!(results.value(0), "{\"filePath\":\"/w/a.rs\"}");
+        assert!(
+            results.is_null(1),
+            "an unanswered call has no result record"
+        );
     }
 
     #[test]

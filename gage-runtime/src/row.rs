@@ -3,8 +3,10 @@
 //! fragments for a `.type(spec)` or `.name(spec)` filter and a line
 //! range.
 
+use std::collections::HashMap;
+
 use datafusion::arrow::array::{
-    Array, BooleanArray, Int64Array, ListArray, StringArray, TimestampMillisecondArray,
+    Array, BooleanArray, Int64Array, StringArray, TimestampMillisecondArray,
 };
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::ScalarValue;
@@ -167,6 +169,7 @@ pub fn register_row_types(m: &mut Module) -> Result<(), ContextError> {
     }
     m.function_meta(ToolUse::input)?;
     m.function_meta(ToolUse::result)?;
+    m.function_meta(ToolUse::files)?;
     m.function_meta(ToolUse::to_json)?;
     m.function_meta(ToolUse::debug)?;
     Ok(())
@@ -527,7 +530,7 @@ pub fn entries_from_batches(batches: Vec<RecordBatch>) -> Vec<Entry> {
 }
 
 /// The attributes of a `ToolUse`, in `tool_use` column order
-const TOOL_USE_ATTRS: [&str; 14] = [
+const TOOL_USE_ATTRS: [&str; 13] = [
     "session_id",
     "id",
     "name",
@@ -541,14 +544,16 @@ const TOOL_USE_ATTRS: [&str; 14] = [
     "is_error",
     "input_raw",
     "result_raw",
-    "files_changed",
 ];
 
 /// One row of the `tool_use` table: a call and, when the record holds
-/// one, its result.
+/// one, its result, with the call's `tool_use_file` rows.
 #[derive(Any)]
 pub struct ToolUse {
     pub inner: Object,
+    /// The call's `tool_use_file` rows as `(path, type)`.
+    #[rune(skip)]
+    pub files: Vec<(String, String)>,
 }
 
 impl ToolUse {
@@ -582,6 +587,28 @@ impl ToolUse {
         self.parsed("result_raw")
     }
 
+    /// The call's `tool_use_file` rows, each `#{ path, type }` with
+    /// `type` one of "write", "read", or "cite". A new list on every
+    /// call, so a caller's edits do not reach the row.
+    #[rune::function]
+    pub fn files(&self) -> Value {
+        self.file_values()
+    }
+
+    fn file_values(&self) -> Value {
+        let files: Vec<Value> = self
+            .files
+            .iter()
+            .map(|(path, type_)| {
+                let mut file = Object::new();
+                file.insert(key("path"), str_to_val(path)).unwrap();
+                file.insert(key("type"), str_to_val(type_)).unwrap();
+                rune::to_value(file).unwrap()
+            })
+            .collect();
+        rune::to_value(files).unwrap()
+    }
+
     #[rune::function]
     pub fn to_json(&self) -> Value {
         rune::to_value(self.inner.try_clone().unwrap()).unwrap()
@@ -600,7 +627,13 @@ impl ToolUse {
     }
 }
 
-pub fn tool_uses_from_batches(batches: Vec<RecordBatch>) -> Vec<ToolUse> {
+/// The `ToolUse` rows of `batches`, each with its files from
+/// `file_batches`, the `tool_use_file` rows of the same sessions.
+pub fn tool_uses_from_batches(
+    batches: Vec<RecordBatch>,
+    file_batches: Vec<RecordBatch>,
+) -> Vec<ToolUse> {
+    let mut files = files_by_call(&file_batches);
     let mut rows = Vec::new();
     for batch in &batches {
         if batch.num_rows() == 0 {
@@ -645,11 +678,6 @@ pub fn tool_uses_from_batches(batches: Vec<RecordBatch>) -> Vec<ToolUse> {
             .unwrap();
         let input_raws = string_col("input_raw");
         let result_raws = string_col("result_raw");
-        let files_changed = batch
-            .column(schema.index_of("files_changed").unwrap())
-            .as_any()
-            .downcast_ref::<ListArray>()
-            .unwrap();
 
         for row in 0..batch.num_rows() {
             let mut inner = Object::new();
@@ -670,11 +698,46 @@ pub fn tool_uses_from_batches(batches: Vec<RecordBatch>) -> Vec<ToolUse> {
             put("is_error", optional_bool_to_val(is_errors, row));
             put("input_raw", str_to_val(input_raws.value(row)));
             put("result_raw", optional_str_to_val(result_raws, row));
-            put("files_changed", optional_strings_to_val(files_changed, row));
-            rows.push(ToolUse { inner });
+            let call = (
+                session_ids.value(row).to_string(),
+                ids.value(row).to_string(),
+            );
+            rows.push(ToolUse {
+                inner,
+                files: files.remove(&call).unwrap_or_default(),
+            });
         }
     }
     rows
+}
+
+/// The `(path, type)` rows of `tool_use_file` batches, keyed by
+/// session and call.
+fn files_by_call(batches: &[RecordBatch]) -> HashMap<(String, String), Vec<(String, String)>> {
+    let mut out: HashMap<(String, String), Vec<(String, String)>> = HashMap::new();
+    for batch in batches {
+        let schema = batch.schema();
+        let string_col = |name: &str| {
+            batch
+                .column(schema.index_of(name).unwrap())
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap()
+        };
+        let session_ids = string_col("session_id");
+        let call_ids = string_col("tool_use_id");
+        let paths = string_col("path");
+        let types = string_col("type");
+        for row in 0..batch.num_rows() {
+            out.entry((
+                session_ids.value(row).to_string(),
+                call_ids.value(row).to_string(),
+            ))
+            .or_default()
+            .push((paths.value(row).to_string(), types.value(row).to_string()));
+        }
+    }
+    out
 }
 
 fn optional_int_to_val(arr: &Int64Array, row: usize) -> Value {
@@ -693,23 +756,12 @@ fn optional_bool_to_val(arr: &BooleanArray, row: usize) -> Value {
     }
 }
 
-fn optional_strings_to_val(arr: &ListArray, row: usize) -> Value {
-    if arr.is_null(row) {
-        return rune::to_value(Option::<Vec<String>>::None).unwrap();
-    }
-    let items = arr.value(row);
-    let items = items
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .expect("files_changed holds strings");
-    let items: Vec<String> = items.iter().flatten().map(String::from).collect();
-    rune::to_value(Some(items)).unwrap()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gage_session::{ToolUse as ToolUseRow, ToolUseBatch};
+    use gage_session::{
+        FileType, ToolUse as ToolUseRow, ToolUseBatch, ToolUseFile, ToolUseFileBatch,
+    };
     use serde_json::json;
     use std::path::PathBuf;
 
@@ -742,7 +794,7 @@ mod tests {
         assert!(err.to_string().contains("non-empty"), "{err}");
     }
 
-    fn row(id: &str, files_changed: Option<Vec<PathBuf>>) -> ToolUseRow {
+    fn row(id: &str, files: Vec<ToolUseFile>) -> ToolUseRow {
         ToolUseRow {
             id: id.to_string(),
             name: "Edit".to_string(),
@@ -756,8 +808,27 @@ mod tests {
             is_error: Some(false),
             input_raw: r#"{"file_path":"/w/a.rs"}"#.to_string(),
             result_raw: None,
-            files_changed,
+            files,
         }
+    }
+
+    fn file(path: &str, type_: FileType) -> ToolUseFile {
+        ToolUseFile {
+            path: PathBuf::from(path),
+            type_,
+        }
+    }
+
+    /// The `tool_use` and `tool_use_file` batches of `rows` under one
+    /// session.
+    fn batches(rows: &[ToolUseRow]) -> (Vec<RecordBatch>, Vec<RecordBatch>) {
+        let mut calls = ToolUseBatch::new();
+        let mut files = ToolUseFileBatch::new();
+        for r in rows {
+            calls.push("s1", r);
+            files.push("s1", r);
+        }
+        (vec![calls.finish().unwrap()], vec![files.finish().unwrap()])
     }
 
     /// One attribute as JSON; the timestamp attributes are `DateTime`
@@ -768,10 +839,11 @@ mod tests {
 
     #[test]
     fn tool_use_rows_expose_columns_and_decode_json() {
-        let mut batch = ToolUseBatch::new();
-        batch.push("s1", &row("t1", Some(vec![PathBuf::from("/w/a.rs")])));
-        batch.push("s1", &row("t2", None));
-        let rows = tool_uses_from_batches(vec![batch.finish().unwrap()]);
+        let (calls, files) = batches(&[
+            row("t1", vec![file("/w/a.rs", FileType::Write)]),
+            row("t2", vec![]),
+        ]);
+        let rows = tool_uses_from_batches(calls, files);
         assert_eq!(rows.len(), 2);
 
         let first = &rows[0];
@@ -779,21 +851,52 @@ mod tests {
         assert_eq!(attr(first, "line"), json!(2));
         assert_eq!(attr(first, "result_line"), json!(3));
         assert_eq!(attr(first, "is_error"), json!(false));
-        assert_eq!(attr(first, "files_changed"), json!(["/w/a.rs"]));
         assert_eq!(
             crate::value::value_to_json(&first.parsed("input_raw")).unwrap(),
             json!({"file_path": "/w/a.rs"})
         );
         let second = &rows[1];
-        assert_eq!(attr(second, "files_changed"), json!(null));
         assert_eq!(attr(second, "result_raw"), json!(null));
+    }
+
+    /// `files()` passes the call's `tool_use_file` rows through as
+    /// `#{ path, type }` objects with `type` a string, and builds a new
+    /// list on each call.
+    #[test]
+    fn tool_use_files_are_the_calls_file_rows() {
+        let (calls, files) = batches(&[
+            row(
+                "t1",
+                vec![
+                    file("/w/a.rs", FileType::Write),
+                    file("/w/b.rs", FileType::Read),
+                    file("/w/c.rs", FileType::Cite),
+                ],
+            ),
+            row("t2", vec![]),
+        ]);
+        let rows = tool_uses_from_batches(calls, files);
+        let first = crate::value::value_to_json(&rows[0].file_values()).unwrap();
+        assert_eq!(
+            first,
+            json!([
+                {"path": "/w/a.rs", "type": "write"},
+                {"path": "/w/b.rs", "type": "read"},
+                {"path": "/w/c.rs", "type": "cite"},
+            ])
+        );
+        assert_eq!(
+            crate::value::value_to_json(&rows[1].file_values()).unwrap(),
+            json!([])
+        );
+        let again = crate::value::value_to_json(&rows[0].file_values()).unwrap();
+        assert_eq!(again, first, "a second call reads the same rows");
     }
 
     #[test]
     fn tool_use_timestamps_expose_a_datetime_option() {
-        let mut batch = ToolUseBatch::new();
-        batch.push("s1", &row("t1", None));
-        let rows = tool_uses_from_batches(vec![batch.finish().unwrap()]);
+        let (calls, files) = batches(&[row("t1", vec![])]);
+        let rows = tool_uses_from_batches(calls, files);
         let first = &rows[0];
 
         #[expect(

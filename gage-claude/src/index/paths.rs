@@ -1,8 +1,8 @@
 //! The paths a tool call refers to, read from its input: every
 //! argument the harness names as a path, and every path-shaped token
 //! of a shell command. A write the harness did not record, such as a
-//! heredoc, is found through these; the judged writes are
-//! `files_changed`.
+//! heredoc, is found through these; the collector types each path by
+//! what the call's result proves about it.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -71,7 +71,7 @@ fn command_tokens(command: &str) -> impl Iterator<Item = &str> {
 }
 
 /// `token` as a path when it is path-shaped, resolved and normalized.
-fn resolve(token: &str, cwd: Option<&Path>, home: Option<&Path>) -> Option<PathBuf> {
+pub(crate) fn resolve(token: &str, cwd: Option<&Path>, home: Option<&Path>) -> Option<PathBuf> {
     let token = token.trim_end_matches(['.', ',', ':', ';', ')']);
     if !token.contains('/')
         || token.contains("://")

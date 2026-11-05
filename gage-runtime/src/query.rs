@@ -378,9 +378,22 @@ fn entry_sql(q: &EntryQuery, clauses: &[String]) -> String {
 
 async fn fetch_tool_uses(q: ToolUseQuery) -> Result<Vec<ToolUse>, VmError> {
     let (clauses, params) = session_clauses(&q.session_id, q.lines);
-    Ok(tool_uses_from_batches(
-        run(&tool_use_sql(&q, &clauses), params).await?,
-    ))
+    let calls = run(&tool_use_sql(&q, &clauses), params).await?;
+    let files = fetch_tool_use_files(&q.session_id).await?;
+    Ok(tool_uses_from_batches(calls, files))
+}
+
+/// The `tool_use_file` rows of one session, for the `files()` of the
+/// `ToolUse` rows a query returns.
+async fn fetch_tool_use_files(
+    session_id: &str,
+) -> Result<Vec<datafusion::arrow::record_batch::RecordBatch>, VmError> {
+    run(
+        "SELECT session_id, tool_use_id, path, type FROM tool_use_file \
+         WHERE session_id = $1 ORDER BY tool_use_id, path",
+        vec![ScalarValue::Utf8(Some(session_id.to_string()))],
+    )
+    .await
 }
 
 async fn fetch_filtered_tool_uses(q: FilteredToolUseQuery) -> Fetched<Vec<ToolUse>> {
@@ -397,8 +410,9 @@ async fn fetch_filtered_tool_uses(q: FilteredToolUseQuery) -> Fetched<Vec<ToolUs
         Ok(clause) => clauses.push(clause),
         Err(e) => return Ok(Err(e)),
     }
-    let batches = run(&tool_use_sql(&q.query, &clauses), params).await?;
-    Ok(Ok(tool_uses_from_batches(batches)))
+    let calls = run(&tool_use_sql(&q.query, &clauses), params).await?;
+    let files = fetch_tool_use_files(&q.query.session_id).await?;
+    Ok(Ok(tool_uses_from_batches(calls, files)))
 }
 
 fn tool_use_sql(q: &ToolUseQuery, clauses: &[String]) -> String {

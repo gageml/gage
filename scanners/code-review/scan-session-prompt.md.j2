@@ -42,12 +42,16 @@ filtering by `session_id = '{{ session_id }}'`. `message` table columns:
 (session_id, line, uuid, type, subtype, text, timestamp, attachments,
 ide_tags, raw).
 
-The code changes are the rows of the `tool_use` table whose `files_changed`
-is non-empty: one row per tool call, with the call's `input_raw` (the edit or
-the shell command) and the harness's `result_raw`. Query
-`SELECT line, name, files_changed, input_raw FROM tool_use WHERE session_id =
-'{{ session_id }}' AND cardinality(files_changed) > 0 ORDER BY line` for the
-full set, then read the conversation around each `line` in `message`.
+The code changes are the tool calls with a `write` row in the `tool_use_file`
+table: one row per call per path, `type` being `write` for a recorded write,
+`read` for a path the call named without writing, and `cite` for a path a
+shell command named with no recorded outcome. Query
+`SELECT t.line, t.name, f.path, t.input_raw FROM tool_use t JOIN tool_use_file f
+ON f.session_id = t.session_id AND f.tool_use_id = t.id WHERE t.session_id =
+'{{ session_id }}' AND f.type = 'write' ORDER BY t.line` for the full set, with
+the call's `input_raw` (the edit or the shell command) and the harness's
+`result_raw` on `tool_use`, then read the conversation around each `line` in
+`message`.
 
 ## Writing findings
 

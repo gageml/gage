@@ -197,12 +197,13 @@ pub fn message_rows(derived: &RecordBatch) -> Result<RecordBatch> {
 
 /// Per-commit batches shared by every row-table scan on one query
 /// context: the derived batch serving `entry` and `message`, the
-/// `tool_use` batch, and the `changes` batch. Each is read on first
-/// use, the first two through the driver.
+/// `tool_use` and `tool_use_file` batches, and the `changes` batch.
+/// Each is read on first use, the first three through the driver.
 #[derive(Debug, Default)]
 pub struct RowCache {
     derived: Mutex<HashMap<String, Arc<RecordBatch>>>,
     tool_uses: Mutex<HashMap<String, Arc<RecordBatch>>>,
+    tool_use_files: Mutex<HashMap<String, Arc<RecordBatch>>>,
     changes: Mutex<HashMap<String, Arc<RecordBatch>>>,
 }
 
@@ -225,6 +226,14 @@ impl RowCache {
 
     pub fn insert_tool_uses(&self, commit: &str, batch: Arc<RecordBatch>) {
         lock(&self.tool_uses).insert(commit.to_string(), batch);
+    }
+
+    pub fn get_tool_use_files(&self, commit: &str) -> Option<Arc<RecordBatch>> {
+        lock(&self.tool_use_files).get(commit).cloned()
+    }
+
+    pub fn insert_tool_use_files(&self, commit: &str, batch: Arc<RecordBatch>) {
+        lock(&self.tool_use_files).insert(commit.to_string(), batch);
     }
 
     pub fn get_changes(&self, commit: &str) -> Option<Arc<RecordBatch>> {

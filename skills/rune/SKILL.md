@@ -503,10 +503,10 @@ for s in scan().sessions() {
     // msg.timestamp is a DateTime; msg.as_object(), msg.model(), msg.to_json()
     for t in s.tool_uses().await { }                          // all tool calls
     for t in s.tool_uses().name(["Edit", "Write"]).await? { } // by tool name
-    // t.name, t.line, t.result_line, t.output, t.is_error, t.files_changed
-    // (Some(paths), Some([]) for a call that wrote nothing, None when
-    // unknown); t.input() and t.result() are the JSON columns as values;
-    // .lines(a, b), .latest_first(), .limit(n)
+    // t.name, t.line, t.result_line, t.output, t.is_error; t.files() is
+    // the call's tool_use_file rows, each #{ path, type } with type
+    // "write", "read", or "cite"; t.input() and t.result() are the JSON
+    // columns as values; .lines(a, b), .latest_first(), .limit(n)
     // s.native().await? is Some(Native) with .source and .project_dir,
     // None for another driver's session; Err(Error::Driver) on a
     // driver failure

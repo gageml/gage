@@ -32,7 +32,8 @@ use gage_session::{filter, tool_use_schema};
 /// cache
 const PRUNE: SummaryPrune = SummaryPrune {
     time_col: Some("result_timestamp"),
-    files_col: Some("files_changed"),
+    path_col: None,
+    type_col: None,
 };
 
 /// Positions of `session_id` and `line` in the `tool_use` schema, the

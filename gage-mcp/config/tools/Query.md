@@ -37,8 +37,11 @@ their less obvious columns:
   when reported; `origin` is the session's source URL
 - entry - one row per transcript line, `raw` its JSON
 - message - conversation text; `type` is user, assistant, or system
-- tool_use - one call with its result; `files_changed` is the paths written,
-  null when unknown
+- tool_use - one call with its result
+- tool_use_file (session_id, tool_use_id, path, type) - one row per call per
+  path it names; `type` is write (the record proves the write), read (the
+  record proves no write), or cite (a shell command names the path and the
+  record does not say)
 - changes - changes a publish made to its original; `kind` is line, value, text,
   or title; `reason` is why (pii, secret, system, scope, ...); `author` is who
   asked, as filter:<name>, user:<name>, or session:<id>
@@ -66,9 +69,9 @@ json_extract(raw, '$.message.usage.output_tokens') or -> and ->>; CAST the text
 for arithmetic, never to json or jsonb.
 
 Native source functions read a driver source directly, including sessions not in
-the store: native_session, native_message, native_entry, and native_tool_use,
-each taking '<source>': '' is the default source, 'claude:' the default Claude
-Code source, 'claude:/path' a projects directory.
+the store: native_session, native_message, native_entry, native_tool_use, and
+native_tool_use_file, each taking '<source>': '' is the default source,
+'claude:' the default Claude Code source, 'claude:/path' a projects directory.
 
 Read a session by `session_id` ordered by `line`, taking `substr(text, 1, 800)`
 over full `text` or `raw` on wide rows.

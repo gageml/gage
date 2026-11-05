@@ -7,20 +7,24 @@
 //! two by id over one pass of a session's entries.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use gage_session::ToolUse;
+use gage_session::{FileType, ToolUse, ToolUseFile};
 use serde_json::Value;
 
 use super::derive::{entry_timestamp_ms, tool_result_text};
-use super::paths::referenced_paths;
+use super::paths::{referenced_paths, resolve};
 
 #[derive(Default)]
 pub struct ToolUseCollector {
     rows: Vec<ToolUse>,
     by_id: HashMap<String, usize>,
-    /// Every path a call's input refers to, each once
-    referenced: Vec<PathBuf>,
+    /// Per row: the paths the call's input names, and the working
+    /// directory of the entry that made the call.
+    named: Vec<(Vec<PathBuf>, Option<PathBuf>)>,
+    /// Per row: the paths the record proves the call wrote; `None`
+    /// until a result judges the call.
+    judged: Vec<Option<Vec<PathBuf>>>,
     /// The home directory `~` resolves to, read once
     home: Option<PathBuf>,
 }
@@ -73,13 +77,11 @@ impl ToolUseCollector {
             return;
         };
         let input = block.get("input").cloned().unwrap_or(Value::Null);
-        let cwd = entry.get("cwd").and_then(Value::as_str).map(Path::new);
-        for path in referenced_paths(name, &input, cwd, self.home.as_deref()) {
-            if !self.referenced.contains(&path) {
-                self.referenced.push(path);
-            }
-        }
+        let cwd = entry.get("cwd").and_then(Value::as_str).map(PathBuf::from);
+        let named = referenced_paths(name, &input, cwd.as_deref(), self.home.as_deref());
         self.by_id.insert(id.to_string(), self.rows.len());
+        self.named.push((named, cwd));
+        self.judged.push(None);
         self.rows.push(ToolUse {
             id: id.to_string(),
             name: name.to_string(),
@@ -93,7 +95,7 @@ impl ToolUseCollector {
             is_error: None,
             input_raw: input.to_string(),
             result_raw: None,
-            files_changed: None,
+            files: Vec::new(),
         });
     }
 
@@ -101,7 +103,14 @@ impl ToolUseCollector {
         let Some(id) = block.get("tool_use_id").and_then(Value::as_str) else {
             return;
         };
-        let Some(row) = self.by_id.get(id).and_then(|&idx| self.rows.get_mut(idx)) else {
+        let Some(&idx) = self.by_id.get(id) else {
+            return;
+        };
+        let (Some(row), Some((_, cwd)), Some(judged)) = (
+            self.rows.get_mut(idx),
+            self.named.get(idx),
+            self.judged.get_mut(idx),
+        ) else {
             return;
         };
         row.result_line = Some(line);
@@ -115,18 +124,46 @@ impl ToolUseCollector {
                 .unwrap_or(false),
         );
         row.result_raw = sidecar.map(Value::to_string);
-        row.files_changed = files_changed(&row.name, &row.input_raw, row.is_error, sidecar);
+        *judged = judged_writes(&row.name, &row.input_raw, row.is_error, sidecar).map(|paths| {
+            paths
+                .iter()
+                .filter_map(|p| resolve(p, cwd.as_deref(), self.home.as_deref()))
+                .collect()
+        });
     }
 
-    pub fn finish(self) -> Vec<ToolUse> {
+    /// The rows, each with its files: a path the record proves the
+    /// call wrote is `write`; any other path the input names is
+    /// `read` when a result judged the call and `cite` when none did.
+    pub fn finish(mut self) -> Vec<ToolUse> {
+        for ((row, (named, _)), judged) in self.rows.iter_mut().zip(self.named).zip(self.judged) {
+            row.files = files(named, judged);
+        }
         self.rows
     }
+}
 
-    /// The paths every call's input referred to, in order of first
-    /// appearance.
-    pub fn referenced(&self) -> &[PathBuf] {
-        &self.referenced
-    }
+fn files(named: Vec<PathBuf>, judged: Option<Vec<PathBuf>>) -> Vec<ToolUseFile> {
+    let file = |path: PathBuf, type_: FileType| ToolUseFile { path, type_ };
+    let mut out: Vec<ToolUseFile> = match judged {
+        None => named
+            .into_iter()
+            .map(|path| file(path, FileType::Cite))
+            .collect(),
+        Some(wrote) => {
+            let read: Vec<ToolUseFile> = named
+                .into_iter()
+                .filter(|p| !wrote.contains(p))
+                .map(|path| file(path, FileType::Read))
+                .collect();
+            read.into_iter()
+                .chain(wrote.into_iter().map(|path| file(path, FileType::Write)))
+                .collect()
+        }
+    };
+    out.sort();
+    out.dedup();
+    out
 }
 
 /// Tools whose input names the file they write
@@ -158,24 +195,25 @@ const NON_WRITERS: &[&str] = &[
     "WebSearch",
 ];
 
-/// The paths a completed call wrote. A file-writing tool wrote its
-/// input path unless the result is an error. Bash wrote the paths of
-/// its `bashEditDiff`, which the harness records only when a command
-/// changed files; a Bash result without one is unjudged, since older
-/// records never carry the diff. Any other tool is unjudged.
-fn files_changed(
+/// The paths a completed call wrote, as its input names them. A
+/// file-writing tool wrote its input path unless the result is an
+/// error. Bash wrote the paths of its `bashEditDiff`, which the
+/// harness records only when a command changed files; a Bash result
+/// without one is unjudged, since older records never carry the diff.
+/// Any other tool is unjudged.
+fn judged_writes(
     name: &str,
     input_raw: &str,
     is_error: Option<bool>,
     sidecar: Option<&Value>,
-) -> Option<Vec<PathBuf>> {
+) -> Option<Vec<String>> {
     if let Some((_, key)) = FILE_WRITERS.iter().find(|(n, _)| *n == name) {
         if is_error == Some(true) {
             return Some(vec![]);
         }
         let input: Value = serde_json::from_str(input_raw).ok()?;
         let path = input.get(key).and_then(Value::as_str)?;
-        return Some(vec![PathBuf::from(path)]);
+        return Some(vec![path.to_string()]);
     }
     if NON_WRITERS.contains(&name) {
         return Some(vec![]);
@@ -195,7 +233,7 @@ fn files_changed(
                 })
                 .unwrap_or_default(),
         };
-        return Some(paths.into_iter().map(PathBuf::from).collect());
+        return Some(paths.into_iter().map(String::from).collect());
     }
     None
 }
@@ -247,6 +285,13 @@ mod tests {
         c.finish()
     }
 
+    fn file(path: &str, type_: FileType) -> ToolUseFile {
+        ToolUseFile {
+            path: PathBuf::from(path),
+            type_,
+        }
+    }
+
     #[test]
     fn pairs_a_call_with_its_result_by_id() {
         let rows = collect(&[
@@ -287,7 +332,7 @@ mod tests {
             t.result_raw.as_deref(),
             Some(r#"{"filePath":"/w/a.rs","newString":"y","oldString":"x"}"#)
         );
-        assert_eq!(t.files_changed, Some(vec![PathBuf::from("/w/a.rs")]));
+        assert_eq!(t.files, [file("/w/a.rs", FileType::Write)]);
     }
 
     #[test]
@@ -304,7 +349,11 @@ mod tests {
         assert_eq!(t.output, None);
         assert_eq!(t.is_error, None);
         assert_eq!(t.result_raw, None);
-        assert_eq!(t.files_changed, None);
+        assert_eq!(
+            t.files,
+            [file("/w/a.rs", FileType::Cite)],
+            "a call without a result is unjudged, so its path is a citation"
+        );
     }
 
     #[test]
@@ -325,7 +374,7 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!((rows[0].id.as_str(), rows[0].result_line), ("t1", Some(3)));
         assert_eq!((rows[1].id.as_str(), rows[1].result_line), ("t2", Some(2)));
-        assert_eq!(rows[0].files_changed, Some(vec![]));
+        assert_eq!(rows[0].files, [file("/a", FileType::Read)]);
     }
 
     #[test]
@@ -349,7 +398,11 @@ mod tests {
         ]);
         let t = &rows[0];
         assert_eq!(t.is_error, Some(true));
-        assert_eq!(t.files_changed, Some(vec![]));
+        assert_eq!(
+            t.files,
+            [file("/w/a.rs", FileType::Read)],
+            "an errored write names its path without writing it"
+        );
         assert_eq!(
             t.result_raw.as_deref(),
             Some(r#""Error: File has not been read yet.""#)
@@ -396,10 +449,72 @@ mod tests {
             ),
         ]);
         assert_eq!(
-            rows[0].files_changed,
-            Some(vec![PathBuf::from("/w/x.rs"), PathBuf::from("/w/y.rs")])
+            rows[0].files,
+            [
+                file("/w/x.rs", FileType::Write),
+                file("/w/y.rs", FileType::Write)
+            ]
         );
-        assert_eq!(rows[1].files_changed, None);
+        assert_eq!(rows[1].files, []);
+    }
+
+    /// A shell command whose result carries no diff is unjudged: every
+    /// path its text names is a citation. One whose result carries a
+    /// diff is judged: a path the diff lists is a write, and any other
+    /// path the text names is a read.
+    #[test]
+    fn shell_paths_are_citations_without_a_diff_and_reads_beside_one() {
+        let mut heredoc = call(
+            "a1",
+            "2025-01-01T00:00:01Z",
+            "t1",
+            "Bash",
+            json!({"command": "cat > out/gen.rs <<EOF\nfn x() {}\nEOF\ncat /w/in.rs"}),
+        );
+        heredoc["cwd"] = json!("/w");
+        let mut copy = call(
+            "a2",
+            "2025-01-01T00:00:03Z",
+            "t2",
+            "Bash",
+            json!({"command": "cp /w/in.rs /w/copy.rs"}),
+        );
+        copy["cwd"] = json!("/w");
+        let rows = collect(&[
+            heredoc,
+            result(
+                "u1",
+                "2025-01-01T00:00:02Z",
+                "t1",
+                json!(""),
+                Some(json!({"stdout": "", "stderr": "", "interrupted": false})),
+            ),
+            copy,
+            result(
+                "u2",
+                "2025-01-01T00:00:04Z",
+                "t2",
+                json!(""),
+                Some(json!({
+                    "stdout": "", "stderr": "", "interrupted": false,
+                    "bashEditDiff": {"changedFiles": ["/w/copy.rs"]}
+                })),
+            ),
+        ]);
+        assert_eq!(
+            rows[0].files,
+            [
+                file("/w/in.rs", FileType::Cite),
+                file("/w/out/gen.rs", FileType::Cite)
+            ]
+        );
+        assert_eq!(
+            rows[1].files,
+            [
+                file("/w/copy.rs", FileType::Write),
+                file("/w/in.rs", FileType::Read)
+            ]
+        );
     }
 
     #[test]

@@ -11,20 +11,27 @@ description for the table catalog and column lists.
 
 ## Sessions not in the store: the native source functions
 
-The `session`, `entry`, `message`, and `tool_use` tables hold stored sessions
-only. A session named by its native UUID (the Claude Code transcript id) may not
-be stored. `native_session(source)`, `native_message(source)`,
-`native_entry(source)`, and `native_tool_use(source)` read the source directly.
-The argument is required: `''` names the default source, `'claude:'` is the
-default Claude Code source, and `'claude:/path'` names a projects directory. The
-native tables use the native UUID: `id` in `native_session`, `session_id` in the
-other three. The table `native_session` returns is `(id, title, project, mtime,
-content_format, size, summary, is_empty, files_changed, files_referenced)`:
-`mtime` and `size` are the session file's, where the stored table has `created`
-and `modified` and the stored content size; `summary` is the same JSON object
-the stored table carries; `is_empty` is `summary.is_empty` as a typed column;
-`files_changed` and `files_referenced` are the paths the session's tool calls
-wrote and named. The other three return their stored tables' columns.
+The `session`, `entry`, `message`, `tool_use`, and `tool_use_file` tables hold
+stored sessions only. A session named by its native UUID (the Claude Code
+transcript id) may not be stored. `native_session(source)`,
+`native_message(source)`, `native_entry(source)`, `native_tool_use(source)`, and
+`native_tool_use_file(source)` read the source directly. The argument is
+required: `''` names the default source, `'claude:'` is the default Claude Code
+source, and `'claude:/path'` names a projects directory. The native tables use
+the native UUID: `id` in `native_session`, `session_id` in the other four. The
+table `native_session` returns is `(id, title, project, mtime, content_format,
+size, summary, is_empty)`: `mtime` and `size` are the session file's, where the
+stored table has `created` and `modified` and the stored content size; `summary`
+is the same JSON object the stored table carries; `is_empty` is
+`summary.is_empty` as a typed column. The other four return their stored tables'
+columns.
+
+`tool_use_file` is `(session_id, tool_use_id, path, type)`, one row per tool
+call per path it names. `type` is `write` when the record proves the call wrote
+the path, `read` when the record proves it did not, and `cite` when a shell
+command names the path and the record does not say. The sessions that touched a
+file are `SELECT DISTINCT session_id FROM tool_use_file WHERE path = '<path>'`;
+add `AND type = 'write'` for the sessions that wrote it.
 
 The `summary` JSON on `session` and on `native_session`'s result holds `title`,
 `model`, `message_count`, `line_count`, `is_empty`, the token totals, and

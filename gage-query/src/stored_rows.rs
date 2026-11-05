@@ -1,14 +1,14 @@
-//! The `entry`, `message`, `tool_use`, and `changes` tables over
-//! stored sessions.
+//! The `entry`, `message`, `tool_use`, `tool_use_file`, and `changes`
+//! tables over stored sessions.
 //!
-//! One provider type serves the four tables; [`RowKind`] selects the
+//! One provider type serves the five tables; [`RowKind`] selects the
 //! shape. A scan resolves the session set through the
 //! [`SessionSet`], then streams one batch per session, reading each
 //! session's rows through its driver on first touch. Filters on
 //! `session_id` prune the session set before any content is read;
-//! filters on `line` mask rows per batch. `LIMIT` stops the stream
-//! once enough rows have been produced, so a limited query reads only
-//! the sessions it needs.
+//! filters on `line` mask rows per batch of a kind that has one.
+//! `LIMIT` stops the stream once enough rows have been produced, so a
+//! limited query reads only the sessions it needs.
 
 use std::fmt::{self, Formatter};
 use std::sync::Arc;
@@ -37,7 +37,7 @@ use gage_session::filter::{self, RowFilter};
 use crate::changes::changes_schema;
 use crate::rows::{RowCache, entry_rows, entry_schema, message_rows, message_schema};
 use crate::scope::{SessionSet, StoredSessionRef};
-use gage_session::tool_use_schema;
+use gage_session::{tool_use_file_schema, tool_use_schema};
 
 const SESSION_ID_COL: &str = "session_id";
 
@@ -46,6 +46,7 @@ pub enum RowKind {
     Entry,
     Message,
     ToolUse,
+    ToolUseFile,
     Changes,
 }
 
@@ -55,6 +56,7 @@ impl RowKind {
             RowKind::Entry => entry_schema(),
             RowKind::Message => message_schema(),
             RowKind::ToolUse => tool_use_schema(),
+            RowKind::ToolUseFile => tool_use_file_schema(),
             RowKind::Changes => changes_schema(),
         }
     }
@@ -70,17 +72,19 @@ impl RowKind {
             RowKind::Entry => entry_rows(scope.rows(session, cache)?.as_ref()),
             RowKind::Message => message_rows(scope.rows(session, cache)?.as_ref()),
             RowKind::ToolUse => Ok(scope.tool_uses(session, cache)?.as_ref().clone()),
+            RowKind::ToolUseFile => Ok(scope.tool_use_files(session, cache)?.as_ref().clone()),
             RowKind::Changes => Ok(scope.changes(session, cache)?.as_ref().clone()),
         }
     }
 
-    /// Position of `line` in this kind's schema; `session_id` is
-    /// column 0 of every kind.
-    fn line_col(self) -> usize {
+    /// Position of `line` in this kind's schema, for the kinds that
+    /// carry one; `session_id` is column 0 of every kind.
+    fn line_col(self) -> Option<usize> {
         match self {
-            RowKind::Entry | RowKind::Message => 1,
-            RowKind::Changes => 2,
-            RowKind::ToolUse => 3,
+            RowKind::Entry | RowKind::Message => Some(1),
+            RowKind::Changes => Some(2),
+            RowKind::ToolUse => Some(3),
+            RowKind::ToolUseFile => None,
         }
     }
 }
@@ -120,14 +124,18 @@ impl TableProvider for StoredRowsTable {
     }
 
     /// Filters over `session_id` and `line` alone are applied by the
-    /// scan; anything else needs the derived columns.
+    /// scan; anything else needs the derived columns. A kind without
+    /// a `line` column applies `session_id` filters alone.
     fn supports_filters_pushdown(
         &self,
         filters: &[&Expr],
     ) -> Result<Vec<TableProviderFilterPushDown>> {
         Ok(filters
             .iter()
-            .map(|f| filter::pushdown_lines(f, SESSION_ID_COL))
+            .map(|f| match self.kind.line_col() {
+                Some(_) => filter::pushdown_lines(f, SESSION_ID_COL),
+                None => filter::pushdown(f, SESSION_ID_COL),
+            })
             .collect())
     }
 
@@ -139,7 +147,10 @@ impl TableProvider for StoredRowsTable {
         limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let sessions = self.scope.sessions(filters)?;
-        let row_filter = RowFilter::new(filters, SESSION_ID_COL)?;
+        let row_filter = match self.kind.line_col() {
+            Some(_) => RowFilter::new(filters, SESSION_ID_COL)?,
+            None => None,
+        };
         let cache = row_cache(state)?;
         let projected_schema = match projection {
             Some(indices) => Arc::new(self.schema.project(indices)?),
@@ -249,8 +260,8 @@ impl ExecutionPlan for StoredRowsExec {
 
         let batches = futures::stream::iter(sessions).map(move |session| {
             let mut batch = work.kind.rows(&work.scope, &session, &work.cache)?;
-            if let Some(f) = &work.row_filter {
-                batch = f.filter_batch(&batch, 0, work.kind.line_col())?;
+            if let (Some(f), Some(line_col)) = (&work.row_filter, work.kind.line_col()) {
+                batch = f.filter_batch(&batch, 0, line_col)?;
             }
             match &work.projection {
                 Some(p) => Ok(batch.project(p)?),

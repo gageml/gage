@@ -1,6 +1,7 @@
-//! `native_session(source)`, `native_message(source)`, and
-//! `native_entry(source)`, and `native_tool_use(source)` --- table
-//! functions over a driver source.
+//! `native_session(source)`, `native_message(source)`,
+//! `native_entry(source)`, `native_tool_use(source)`, and
+//! `native_tool_use_file(source)` --- table functions over a driver
+//! source.
 //!
 //! Each returns one of the driver's native tables for a source, so a
 //! user can see what a source holds and choose which sessions to add
@@ -29,6 +30,7 @@ pub enum NativeTable {
     Message,
     Entry,
     ToolUse,
+    ToolUseFile,
 }
 
 impl NativeTable {
@@ -38,6 +40,7 @@ impl NativeTable {
             NativeTable::Message => "native_message",
             NativeTable::Entry => "native_entry",
             NativeTable::ToolUse => "native_tool_use",
+            NativeTable::ToolUseFile => "native_tool_use_file",
         }
     }
 
@@ -47,6 +50,7 @@ impl NativeTable {
             NativeTable::Message => tables.message,
             NativeTable::Entry => tables.entry,
             NativeTable::ToolUse => tables.tool_use,
+            NativeTable::ToolUseFile => tables.tool_use_file,
         }
     }
 }

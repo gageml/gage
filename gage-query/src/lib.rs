@@ -220,6 +220,13 @@ impl ContextBuilder {
                 )),
             ),
             (
+                "tool_use_file",
+                Arc::new(StoredRowsTable::new(
+                    RowKind::ToolUseFile,
+                    Arc::clone(&sessions),
+                )),
+            ),
+            (
                 "changes",
                 Arc::new(StoredRowsTable::new(RowKind::Changes, sessions)),
             ),
@@ -293,7 +300,7 @@ fn build_external_scope(
     skip_system_cols: bool,
 ) -> SessionContext {
     let sessions = Arc::new(SessionSet::external(Arc::clone(&store), external.clone()));
-    let tables: [(&str, Arc<dyn TableProvider>); 5] = [
+    let tables: [(&str, Arc<dyn TableProvider>); 6] = [
         (
             "session",
             Arc::new(StoredSessionTable::external(store, external)),
@@ -313,6 +320,13 @@ fn build_external_scope(
             "tool_use",
             Arc::new(StoredRowsTable::new(
                 RowKind::ToolUse,
+                Arc::clone(&sessions),
+            )),
+        ),
+        (
+            "tool_use_file",
+            Arc::new(StoredRowsTable::new(
+                RowKind::ToolUseFile,
                 Arc::clone(&sessions),
             )),
         ),
@@ -377,6 +391,13 @@ fn build_scan_scope(
             "tool_use",
             Arc::new(StoredRowsTable::new(
                 RowKind::ToolUse,
+                Arc::clone(&sessions),
+            )),
+        ),
+        (
+            "tool_use_file",
+            Arc::new(StoredRowsTable::new(
+                RowKind::ToolUseFile,
                 Arc::clone(&sessions),
             )),
         ),
@@ -533,11 +554,12 @@ pub fn repl_functions() -> Vec<TvfInfo> {
         .collect()
 }
 
-const NATIVE_TABLES: [NativeTable; 4] = [
+const NATIVE_TABLES: [NativeTable; 5] = [
     NativeTable::Session,
     NativeTable::Message,
     NativeTable::Entry,
     NativeTable::ToolUse,
+    NativeTable::ToolUseFile,
 ];
 
 /// A context carrying the shared configuration --- the `RowCache`
@@ -953,11 +975,12 @@ mod tests {
         assert_eq!(parsed["type"], "object");
     }
 
-    /// The session row lists the judged writes and the other paths a
-    /// call named, so a file a heredoc wrote is found by the session
-    /// that named it.
+    /// `native_tool_use_file` lists one row per call per path it
+    /// names: a judged write is `write`, and a path a shell command
+    /// names with no recorded outcome is `cite`, resolved against the
+    /// entry's cwd. The path lists are gone from `native_session`.
     #[tokio::test]
-    async fn native_session_lists_the_files_a_session_wrote_and_named() {
+    async fn native_tool_use_file_lists_the_paths_each_call_names() {
         let claude_root = tempfile::tempdir().unwrap();
         let dir = claude_root.path().join("projects").join("-w-proj");
         std::fs::create_dir_all(&dir).unwrap();
@@ -979,8 +1002,22 @@ mod tests {
             .cache_root(claude_root.path().join("cache"))
             .build()
             .await;
-        let from = format!("native_session('{spec}')");
-        assert_eq!(strings(&ctx, &format!("SELECT id FROM {from}")).await, [id]);
+        let from = format!("native_tool_use_file('{spec}')");
+        assert_eq!(
+            strings(
+                &ctx,
+                &format!(
+                    "SELECT tool_use_id || ' ' || type || ' ' || path FROM {from} \
+                     ORDER BY tool_use_id, path"
+                )
+            )
+            .await,
+            [
+                "t1 write /w/proj/a.rs",
+                "t2 cite /etc/x/cfg.json",
+                "t2 cite /w/proj/b/c.rs",
+            ]
+        );
         assert!(
             claude_root.path().join("cache").is_dir(),
             "the source's cache is under the context's root"
@@ -988,30 +1025,19 @@ mod tests {
         assert_eq!(
             strings(
                 &ctx,
-                &format!("SELECT array_to_string(files_changed, ',') FROM {from}")
-            )
-            .await,
-            ["/w/proj/a.rs"]
-        );
-        assert_eq!(
-            strings(
-                &ctx,
-                &format!("SELECT array_to_string(files_referenced, ',') FROM {from}")
-            )
-            .await,
-            ["/etc/x/cfg.json,/w/proj/b/c.rs"],
-            "referenced paths are resolved against cwd and exclude the judged write"
-        );
-        assert_eq!(
-            strings(
-                &ctx,
-                &format!(
-                    "SELECT id FROM {from} WHERE array_has(files_referenced, '/etc/x/cfg.json')"
-                )
+                &format!("SELECT DISTINCT session_id FROM {from} WHERE path = '/etc/x/cfg.json'")
             )
             .await,
             [id]
         );
+        let err = ctx
+            .sql(&format!(
+                "SELECT files_changed FROM native_session('{spec}')"
+            ))
+            .await
+            .err()
+            .unwrap();
+        assert!(err.to_string().contains("files_changed"), "{err}");
     }
 
     /// `native_session` carries the driver's projection as the same
@@ -1244,15 +1270,17 @@ mod tests {
         .await;
         assert_eq!(paired, ["done"]);
 
-        let changed = strings(
+        let files = strings(
             &ctx,
-            "SELECT id FROM tool_use WHERE cardinality(files_changed) > 0 AND line >= 2",
+            "SELECT tool_use_id || ' ' || type || ' ' || path FROM tool_use_file \
+             ORDER BY tool_use_id",
         )
         .await;
-        assert_eq!(changed, ["t1"]);
-
-        let unjudged = strings(&ctx, "SELECT id FROM tool_use WHERE files_changed IS NULL").await;
-        assert_eq!(unjudged, ["t2"]);
+        assert_eq!(
+            files,
+            ["t1 write /w/proj/a.rs", "t2 cite /w/proj/b.rs"],
+            "the stored tool_use_file rows come from the same derivation"
+        );
 
         let native_rows = strings(
             &ctx,

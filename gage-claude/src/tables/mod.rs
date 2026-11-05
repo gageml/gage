@@ -12,6 +12,7 @@ pub mod entry;
 pub mod message;
 pub mod session;
 pub mod tool_use;
+pub mod tool_use_file;
 pub mod walk;
 
 pub use cache::SessionCache;
@@ -19,6 +20,7 @@ pub use entry::EntryTable;
 pub use message::MessageTable;
 pub use session::SessionTable;
 pub use tool_use::ToolUseTable;
+pub use tool_use_file::ToolUseFileTable;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
