@@ -423,14 +423,12 @@ impl Reason {
             Reason::Language => "Profanity and other language unfit for a public record",
             Reason::Pii => "Information that can be used to identify a person",
             Reason::Policy => "Internal personnel rules and practices of an organization",
-            Reason::Privacy => "Private conversational content (candid tone directed at an agent)",
-            Reason::Safety => "Content whose disclosure could endanger a person's life or safety",
+            Reason::Privacy => "Private conversational content",
+            Reason::Safety => "Content whose disclosure could endanger a person's safety",
             Reason::Scope => "Content not applicable to the publish scope",
-            Reason::Secret => "A credential or key (password, API key, token)",
+            Reason::Secret => "A private credential or key",
             Reason::Statute => "Content a statute exempts from disclosure",
-            Reason::System => {
-                "Information about the machine or network the session ran on (path, host, OS version)"
-            }
+            Reason::System => "Information about the machine or network the session ran on",
         }
     }
 
