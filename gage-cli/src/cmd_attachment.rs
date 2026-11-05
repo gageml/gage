@@ -581,12 +581,7 @@ pub fn remove(args: AttachmentRemoveArgs) -> Result<(), CliError> {
         if dataset_id.is_some() {
             cli::log::remark("Attachments stay in the store")?;
         }
-        if !args.yes {
-            let confirmed = cli::confirm("Continue?").initial_value(false).interact()?;
-            if !confirmed {
-                return Err(DialogError::Canceled);
-            }
-        }
+        dialog::confirm(args.yes, false)?;
 
         // Every argument resolved above, so the single commit below
         // takes the whole set or nothing

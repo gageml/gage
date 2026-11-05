@@ -138,9 +138,7 @@ pub async fn main(args: BackupArgs) -> Result<(), CliError> {
         if !sources.is_empty() {
             dialog::step_list("Sources", sources.iter().cloned())?;
         }
-        if !args.yes && !cli::confirm("Continue?").initial_value(false).interact()? {
-            return Err(DialogError::Canceled);
-        }
+        dialog::confirm(args.yes, false)?;
         for source in &sources {
             let added = cmd_session::add_all(&store, source, max_bytes).await?;
             cli::log::info(added)?;
@@ -175,12 +173,8 @@ pub async fn main(args: BackupArgs) -> Result<(), CliError> {
         }
         if destructive && !args.yes {
             cli::log::remark(dialog::IRREVERSIBLE)?;
-            if !cli::confirm(replace_prompt(set.force.len(), set.delete.len(), remote))
-                .initial_value(false)
-                .interact()?
-            {
-                return Err(DialogError::Canceled);
-            }
+            let prompt = replace_prompt(set.force.len(), set.delete.len(), remote);
+            dialog::confirm_prompt(false, &prompt, false)?;
         }
         let message = if !set.is_empty() {
             format!("Backing up {} to {remote}", count(set.len(), "ref"))

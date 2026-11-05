@@ -76,9 +76,7 @@ pub fn add(args: RemoteAddArgs) -> Result<(), CliError> {
         if args.backup {
             dialog::step_value("Backup target", "yes")?;
         }
-        if !args.yes && !cli::confirm("Continue?").initial_value(true).interact()? {
-            return Err(DialogError::Canceled);
-        }
+        dialog::confirm(args.yes, true)?;
         let remote = RemoteStore::from(&store)
             .add(&args.name, &args.url, args.backup)
             .map_err(|e| DialogError::Failed(e.to_string()))?;
@@ -160,12 +158,7 @@ pub fn delete(args: RemoteDeleteArgs) -> Result<(), CliError> {
         dialog::step_list("Remotes", lines)?;
 
         cli::log::remark("Nothing on the remote is changed")?;
-        if !args.yes {
-            let confirmed = cli::confirm("Continue?").initial_value(false).interact()?;
-            if !confirmed {
-                return Err(DialogError::Canceled);
-            }
-        }
+        dialog::confirm(args.yes, false)?;
 
         let mut deleted = 0;
         for name in &args.names {

@@ -197,23 +197,31 @@ fn handle_result(result: Result<DialogResult, DialogError>) -> Result<(), CliErr
 /// The confirmation before a write; `yes` skips it. `initial` is the
 /// answer selected when the prompt opens.
 pub fn confirm(yes: bool, initial: bool) -> Result<(), DialogError> {
-    confirm_on(yes, initial, io::stdin().is_terminal())
+    confirm_prompt(yes, "Continue?", initial)
 }
 
-/// `confirm` with the terminal check given: a prompt cannot be
+/// `confirm` with the question given, for a write whose prompt names
+/// its effect.
+pub fn confirm_prompt(yes: bool, prompt: &str, initial: bool) -> Result<(), DialogError> {
+    confirm_on(yes, prompt, initial, io::stdin().is_terminal())
+}
+
+/// `confirm_prompt` with the terminal check given: a prompt cannot be
 /// answered when stdin is not a terminal, and the failure names the
 /// flag that skips it.
-fn confirm_on(yes: bool, initial: bool, interactive: bool) -> Result<(), DialogError> {
+fn confirm_on(
+    yes: bool,
+    prompt: &str,
+    initial: bool,
+    interactive: bool,
+) -> Result<(), DialogError> {
     if yes {
         return Ok(());
     }
     if !interactive {
         return Err(DialogError::Failed(NOT_A_TERMINAL.to_string()));
     }
-    if !cli::confirm("Continue?")
-        .initial_value(initial)
-        .interact()?
-    {
+    if !cli::confirm(prompt).initial_value(initial).interact()? {
         return Err(DialogError::Canceled);
     }
     Ok(())
@@ -313,7 +321,7 @@ mod tests {
 
     #[test]
     fn a_confirmation_without_a_terminal_fails_naming_the_flag() {
-        match confirm_on(false, true, false) {
+        match confirm_on(false, "Continue?", true, false) {
             Err(DialogError::Failed(msg)) => assert_eq!(msg, NOT_A_TERMINAL),
             _ => panic!("expected the not-a-terminal failure"),
         }

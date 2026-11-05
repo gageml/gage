@@ -1741,12 +1741,7 @@ async fn prepare_scan_dialog(
     }
 
     // Confirmation.
-    if !args.yes {
-        let confirmed = cli::confirm("Continue?").initial_value(true).interact()?;
-        if !confirmed {
-            return Err(DialogError::Canceled);
-        }
-    }
+    dialog::confirm(args.yes, true)?;
 
     if let DatasetPlan::New { selected } = &plan
         && selected.ids().is_empty()

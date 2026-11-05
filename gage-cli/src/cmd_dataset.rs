@@ -191,9 +191,7 @@ async fn add_dialog(args: &DatasetAddArgs, store: &Store) -> Result<DialogResult
     } else {
         Vec::new()
     };
-    if !args.yes && !cli::confirm("Continue?").initial_value(true).interact()? {
-        return Err(DialogError::Canceled);
-    }
+    dialog::confirm(args.yes, true)?;
 
     let dataset_id = create_dataset(store, None).map_err(|e| DialogError::Failed(e.to_string()))?;
     if let Some(name) = &args.tag {
@@ -244,9 +242,7 @@ pub fn refresh(args: DatasetRefreshArgs) -> Result<(), CliError> {
         if members.is_empty() {
             return Ok(format!("Nothing to refresh in dataset {shown}").into());
         }
-        if !args.yes && !cli::confirm("Continue?").initial_value(true).interact()? {
-            return Err(DialogError::Canceled);
-        }
+        dialog::confirm(args.yes, true)?;
 
         // Each member's native id is looked back up in the source by
         // the add; a member whose native session is gone fails the

@@ -374,12 +374,7 @@ pub fn add(args: NoteAddArgs) -> Result<(), CliError> {
                 .interact()?,
         };
 
-        if !args.yes {
-            let confirmed = cli::confirm("Continue?").initial_value(true).interact()?;
-            if !confirmed {
-                return Err(DialogError::Canceled);
-            }
-        }
+        dialog::confirm(args.yes, true)?;
 
         let author = format!("user:{username}");
         let id = NoteStore::from(&store)
@@ -589,12 +584,7 @@ pub fn edit(args: NoteEditArgs) -> Result<(), CliError> {
             NoteValue::Text(text)
         };
 
-        if !args.yes {
-            let confirmed = cli::confirm("Continue?").initial_value(true).interact()?;
-            if !confirmed {
-                return Err(DialogError::Canceled);
-            }
-        }
+        dialog::confirm(args.yes, true)?;
 
         // Only what differs is sent, so an unchanged target keeps the
         // commit it was linked at

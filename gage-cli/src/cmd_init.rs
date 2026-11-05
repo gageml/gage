@@ -38,12 +38,7 @@ fn install_dialog(args: &InitArgs) -> Result<DialogResult, DialogError> {
         driver.name()
     ))?;
 
-    if !args.yes {
-        let confirmed = cli::confirm("Continue?").initial_value(true).interact()?;
-        if !confirmed {
-            return Err(DialogError::Canceled);
-        }
-    }
+    dialog::confirm(args.yes, true)?;
 
     let spinner = cli::spinner();
     spinner.start("Initializing store");
@@ -102,12 +97,7 @@ fn remove_dialog(args: &InitArgs) -> Result<DialogResult, DialogError> {
 
     cli::log::step(format!("Driver\n{}", driver.name()))?;
 
-    if !args.yes {
-        let confirmed = cli::confirm("Continue?").initial_value(false).interact()?;
-        if !confirmed {
-            return Err(DialogError::Canceled);
-        }
-    }
+    dialog::confirm(args.yes, false)?;
 
     let mut ui = SpinnerUi::default();
     driver

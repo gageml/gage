@@ -1433,12 +1433,7 @@ pub fn remove(
             Some(_) => "Sessions stay in the store",
             None => "Native sessions are unaffected",
         })?;
-        if !args.yes {
-            let confirmed = cli::confirm("Continue?").initial_value(false).interact()?;
-            if !confirmed {
-                return Err(DialogError::Canceled);
-            }
-        }
+        dialog::confirm(args.yes, false)?;
 
         // Every argument resolved above, so the single commit below
         // takes the whole set or nothing
@@ -1612,12 +1607,7 @@ fn move_dialog(args: &SessionMoveArgs, source: &dyn Source) -> Result<DialogResu
 
     cli::log::remark(format!("Session: {}", short_uuid(&id)))?;
     cli::log::remark(format!("To: {}", dir.display()))?;
-    if !args.yes {
-        let confirmed = cli::confirm("Continue?").initial_value(false).interact()?;
-        if !confirmed {
-            return Err(DialogError::Canceled);
-        }
-    }
+    dialog::confirm(args.yes, false)?;
 
     source
         .move_native(&id, &dir)

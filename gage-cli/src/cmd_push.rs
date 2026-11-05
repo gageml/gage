@@ -23,7 +23,7 @@ use gage_store::{
 };
 
 use crate::cmd_session::run_query;
-use crate::dialog::{self, DialogError};
+use crate::dialog;
 use crate::error::CliError;
 
 #[derive(Args)]
@@ -118,9 +118,7 @@ pub async fn main(args: PushArgs) -> Result<(), CliError> {
     let mut confirmed = false;
     dialog::run(&format!("Push to {remote}"), || {
         cli::log::remark(summary.join("\n"))?;
-        if !args.yes && !cli::confirm("Continue?").initial_value(false).interact()? {
-            return Err(DialogError::Canceled);
-        }
+        dialog::confirm(args.yes, false)?;
         confirmed = true;
         Ok(format!("Pushing {} refs to {remote}", send_names.len()).into())
     })?;

@@ -126,9 +126,7 @@ pub fn add(args: TagAddArgs) -> Result<(), CliError> {
             let from = format!("{} {}", type_name(&p.object_type), short_uuid(&p.id));
             dialog::step_value("Moves from", &from)?;
         }
-        if !args.yes && !cli::confirm("Continue?").initial_value(true).interact()? {
-            return Err(DialogError::Canceled);
-        }
+        dialog::confirm(args.yes, true)?;
         let added = tags
             .add(&args.name, &args.object, args.force)
             .map_err(|e| DialogError::Failed(e.to_string()))?;
@@ -251,12 +249,7 @@ pub fn delete(args: TagDeleteArgs) -> Result<(), CliError> {
         dialog::step_list("Tags", lines)?;
 
         cli::log::remark("Tagged objects are unaffected")?;
-        if !args.yes {
-            let confirmed = cli::confirm("Continue?").initial_value(false).interact()?;
-            if !confirmed {
-                return Err(DialogError::Canceled);
-            }
-        }
+        dialog::confirm(args.yes, false)?;
 
         let mut deleted = 0;
         for name in &args.names {

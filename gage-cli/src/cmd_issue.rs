@@ -735,12 +735,7 @@ pub fn add(args: IssueAddArgs) -> Result<(), CliError> {
         };
         cli::log::step(format!("Status\n{}", style(status).dim()))?;
 
-        if !args.yes {
-            let confirmed = cli::confirm("Continue?").initial_value(true).interact()?;
-            if !confirmed {
-                return Err(DialogError::Canceled);
-            }
-        }
+        dialog::confirm(args.yes, true)?;
 
         let author = resolve_author(Some(username));
         let id = issues
@@ -868,12 +863,7 @@ pub fn close(args: IssueCloseArgs) -> Result<(), CliError> {
             ))?;
         }
         let message = prompt_message(given_message.clone(), args.yes, "Type a message (optional)")?;
-        if !args.yes {
-            let confirmed = cli::confirm("Continue?").initial_value(true).interact()?;
-            if !confirmed {
-                return Err(DialogError::Canceled);
-            }
-        }
+        dialog::confirm(args.yes, true)?;
         let author = resolve_author(None);
         let mut closed = 0;
         for issue in &targets {
@@ -917,12 +907,7 @@ pub fn open(args: IssueOpenArgs) -> Result<(), CliError> {
     dialog::run("Open issues", || {
         issues_step(&targets)?;
         let message = prompt_message(given_message.clone(), args.yes, "Type a message (optional)")?;
-        if !args.yes {
-            let confirmed = cli::confirm("Continue?").initial_value(true).interact()?;
-            if !confirmed {
-                return Err(DialogError::Canceled);
-            }
-        }
+        dialog::confirm(args.yes, true)?;
         let author = resolve_author(None);
         let mut opened = 0;
         for issue in &targets {
@@ -970,12 +955,7 @@ pub fn comment(args: IssueCommentArgs) -> Result<(), CliError> {
         if message.trim().is_empty() {
             return Err(DialogError::Failed("comment is empty".into()));
         }
-        if !args.yes {
-            let confirmed = cli::confirm("Continue?").initial_value(true).interact()?;
-            if !confirmed {
-                return Err(DialogError::Canceled);
-            }
-        }
+        dialog::confirm(args.yes, true)?;
         let author = resolve_author(None);
         let mut commented = 0;
         for issue in &targets {
