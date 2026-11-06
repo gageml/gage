@@ -2612,12 +2612,13 @@ mod tests {
         }
     }
 
-    /// An attachment row's body opens with its type, then the text
-    /// the harness sent to the model, item by item. A row the harness
-    /// never sent shows its type alone.
+    /// An attachment row's body opens with its type, and its subtype
+    /// when it has one, then the text the harness sent to the model
+    /// without its wrapper, item by item. A row the harness never sent
+    /// shows its type alone.
     #[test]
     fn attachment_rows_render_their_type_and_rendered_text() {
-        let mut doc = doc_with_entries(2);
+        let mut doc = doc_with_entries(3);
         for entry in &mut doc.entries {
             entry.entry_type = "attachment".into();
             entry.message_subtype = None;
@@ -2634,6 +2635,11 @@ mod tests {
             "type": "attachment",
             "attachment": {"type": "credential_org", "organizationUuid": "o1"},
         });
+        doc.entries[2].value = serde_json::json!({
+            "type": "attachment",
+            "attachment": {"type": "auto_mode", "reminderType": "bash_first"},
+            "rendered": [{"content": "<system-reminder>\nWhile auto mode is active\n</system-reminder>"}],
+        });
         let options = ViewOptions {
             all_entries: true,
             ..ViewOptions::default()
@@ -2644,26 +2650,30 @@ mod tests {
         state.select_line(1);
         terminal.draw(|frame| draw(frame, &mut state)).unwrap();
         let text = screen(&terminal);
-        assert!(text.contains("Attachment type  environment"), "{text}");
-        assert!(text.contains("# Environment"), "{text}");
+        assert!(text.contains("Type  environment"), "{text}");
         assert!(text.contains("second item"), "{text}");
+        assert!(!text.contains("system-reminder"), "{text}");
         let rows: Vec<&str> = text.lines().collect();
         let header = rows
             .iter()
-            .position(|r| r.contains("Attachment type"))
+            .position(|r| r.contains("Type  environment"))
             .unwrap();
         let body = |row: &str| row.rsplit('│').nth(1).unwrap_or("").to_string();
         assert!(body(rows[header + 1]).trim().is_empty(), "{text}");
-        assert!(
-            body(rows[header + 2]).contains("<system-reminder>"),
-            "{text}"
-        );
+        assert!(body(rows[header + 2]).contains("# Environment"), "{text}");
 
         state.select_line(2);
         terminal.draw(|frame| draw(frame, &mut state)).unwrap();
         let text = screen(&terminal);
-        assert!(text.contains("Attachment type  credential_org"), "{text}");
-        assert!(!text.contains("system-reminder"), "{text}");
+        assert!(text.contains("Type  credential_org"), "{text}");
+        assert!(!text.contains("Subtype"), "{text}");
+
+        state.select_line(3);
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let text = screen(&terminal);
+        assert!(text.contains("Type     auto_mode"), "{text}");
+        assert!(text.contains("Subtype  bash_first"), "{text}");
+        assert!(text.contains("While auto mode is active"), "{text}");
     }
 
     /// The root row shows the session's attributes as the listing

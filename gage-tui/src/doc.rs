@@ -276,16 +276,17 @@ pub enum EntryBody {
 }
 
 /// An attachment entry as the viewer shows it, read from the entry's
-/// own row: the harness's `attachment.type`, a qualifier a few types
+/// own row: the harness's `attachment.type`, a subtype a few types
 /// carry beside it, and the text the harness sent to the model.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Attachment {
     pub kind: String,
     /// `reminderType` where present, else the hook event and name
-    pub qualifier: Option<String>,
-    /// The `content` of each `rendered` item, in order; empty for a
-    /// bookkeeping row the harness never sent and for a row written
-    /// before the harness recorded `rendered`
+    pub subtype: Option<String>,
+    /// The text of each `rendered` item in order, without the
+    /// `<system-reminder>` wrapper the harness puts around it; empty
+    /// for a bookkeeping row the harness never sent and for a row
+    /// written before the harness recorded `rendered`
     pub rendered: Vec<String>,
 }
 
@@ -350,27 +351,42 @@ fn attachment_body(value: &Value) -> Attachment {
             .and_then(Value::as_str)
             .map(str::to_string)
     };
-    let qualifier =
-        field("reminderType").or_else(|| match (field("hookEvent"), field("hookName")) {
-            (Some(event), Some(name)) => Some(format!("{event} {name}")),
-            (event, name) => event.or(name),
-        });
+    let subtype = field("reminderType").or_else(|| match (field("hookEvent"), field("hookName")) {
+        (Some(event), Some(name)) => Some(format!("{event} {name}")),
+        (event, name) => event.or(name),
+    });
     let rendered = value
         .get("rendered")
         .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|item| item.get("content").and_then(Value::as_str))
-                .map(str::to_string)
-                .collect()
-        })
+        .map(|items| items.iter().filter_map(rendered_text).collect())
         .unwrap_or_default();
     Attachment {
         kind: field("type").unwrap_or_default(),
-        qualifier,
+        subtype,
         rendered,
     }
+}
+
+/// The text of one `rendered` item. Its `content` is a string, or on a
+/// queued command a list of text blocks, which are joined. One outer
+/// `<system-reminder>` wrapper is removed; the harness puts it around
+/// every item, and a reader of the body knows the text is injected.
+fn rendered_text(item: &Value) -> Option<String> {
+    let text = match item.get("content")? {
+        Value::String(s) => s.clone(),
+        Value::Array(blocks) => blocks
+            .iter()
+            .filter_map(|b| b.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n\n"),
+        _ => return None,
+    };
+    let trimmed = text.trim();
+    let inner = trimmed
+        .strip_prefix("<system-reminder>")
+        .and_then(|t| t.strip_suffix("</system-reminder>"))
+        .unwrap_or(trimmed);
+    Some(inner.trim().to_string())
 }
 
 impl Entry {
@@ -508,23 +524,45 @@ mod tests {
         }
     }
 
-    /// An attachment row's body is its `attachment.type` and the
-    /// `content` of each `rendered` item in order, whatever its
-    /// message subtype.
+    /// An attachment row's body is its `attachment.type` and the text
+    /// of each `rendered` item in order, whatever its message subtype.
+    /// The `<system-reminder>` wrapper is removed; text without one is
+    /// kept as it is.
     #[test]
     fn an_attachment_row_shows_its_type_and_rendered_text() {
         let doc = attachment_doc(json!({
             "type": "attachment",
             "attachment": {"type": "file", "filename": "a.rs"},
-            "rendered": [{"content": "Called the Read tool"}, {"content": "fn a() {}"}],
+            "rendered": [
+                {"content": "<system-reminder>\nCalled the Read tool\n</system-reminder>"},
+                {"content": "fn a() {}"},
+            ],
         }));
         assert_eq!(
             attachment(&doc),
             Attachment {
                 kind: "file".to_string(),
-                qualifier: None,
+                subtype: None,
                 rendered: vec!["Called the Read tool".to_string(), "fn a() {}".to_string()],
             }
+        );
+    }
+
+    /// A queued command's rendered content is a list of text blocks;
+    /// their texts are joined into one item.
+    #[test]
+    fn rendered_text_blocks_are_joined_into_one_item() {
+        let doc = attachment_doc(json!({
+            "type": "attachment",
+            "attachment": {"type": "queued_command", "prompt": "stop"},
+            "rendered": [{"content": [
+                {"type": "text", "text": "<system-reminder>\nThe user sent a new message:\nstop"},
+                {"type": "text", "text": "Do not proceed.\n</system-reminder>"},
+            ]}],
+        }));
+        assert_eq!(
+            attachment(&doc).rendered,
+            ["The user sent a new message:\nstop\n\nDo not proceed."]
         );
     }
 
@@ -539,7 +577,7 @@ mod tests {
             attachment(&doc),
             Attachment {
                 kind: "credential_org".to_string(),
-                qualifier: None,
+                subtype: None,
                 rendered: Vec::new(),
             }
         );
@@ -548,15 +586,12 @@ mod tests {
     /// A reminder's `reminderType` qualifies its type; a hook row is
     /// qualified by its event and hook name.
     #[test]
-    fn an_attachment_qualifier_is_the_reminder_type_or_the_hook() {
+    fn an_attachment_subtype_is_the_reminder_type_or_the_hook() {
         let reminder = attachment_doc(json!({
             "type": "attachment",
             "attachment": {"type": "auto_mode", "reminderType": "bash_first"},
         }));
-        assert_eq!(
-            attachment(&reminder).qualifier.as_deref(),
-            Some("bash_first")
-        );
+        assert_eq!(attachment(&reminder).subtype.as_deref(), Some("bash_first"));
         let hook = attachment_doc(json!({
             "type": "attachment",
             "attachment": {
@@ -566,7 +601,7 @@ mod tests {
             },
         }));
         assert_eq!(
-            attachment(&hook).qualifier.as_deref(),
+            attachment(&hook).subtype.as_deref(),
             Some("PostToolUse PostToolUse:Edit")
         );
     }
