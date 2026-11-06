@@ -1,4 +1,5 @@
 mod app;
+mod attachment;
 mod attrs;
 mod dialog;
 mod doc;

@@ -271,6 +271,22 @@ pub enum EntryBody {
     ToolCalls(Vec<ToolUse>),
     /// The results a tool result entry returned
     ToolResults(Vec<ToolUse>),
+    /// The content the harness injected beside a turn
+    Attachment(Attachment),
+}
+
+/// An attachment entry as the viewer shows it, read from the entry's
+/// own row: the harness's `attachment.type`, a qualifier a few types
+/// carry beside it, and the text the harness sent to the model.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Attachment {
+    pub kind: String,
+    /// `reminderType` where present, else the hook event and name
+    pub qualifier: Option<String>,
+    /// The `content` of each `rendered` item, in order; empty for a
+    /// bookkeeping row the harness never sent and for a row written
+    /// before the harness recorded `rendered`
+    pub rendered: Vec<String>,
 }
 
 /// One row of the `tool_use` table, as the viewer shows it.
@@ -291,11 +307,14 @@ pub struct ToolUse {
 impl Document {
     /// The rendered view's content for the entry at `index`: its tool
     /// calls for a tool call row, its results for a tool result row,
-    /// its message text for any other message, nothing for an entry
-    /// without a message or for a tool row the `tool_use` table has
-    /// no rows for.
+    /// its attachment for an attachment row, its message text for any
+    /// other message, nothing for an entry without a message or for a
+    /// tool row the `tool_use` table has no rows for.
     pub fn entry_body(&self, index: usize) -> Option<EntryBody> {
         let entry = self.entries.get(index)?;
+        if entry.entry_type == "attachment" {
+            return Some(EntryBody::Attachment(attachment_body(&entry.value)));
+        }
         match entry.message_subtype.as_deref() {
             Some("tool_use") => {
                 let calls: Vec<ToolUse> = self
@@ -317,6 +336,40 @@ impl Document {
             }
             _ => entry.message_text.clone().map(EntryBody::Text),
         }
+    }
+}
+
+/// The attachment an entry row carries. The viewer reads it from the
+/// row because no table normalizes attachments; the `message` table
+/// has no row for one.
+fn attachment_body(value: &Value) -> Attachment {
+    let attachment = value.get("attachment");
+    let field = |key: &str| {
+        attachment
+            .and_then(|a| a.get(key))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    };
+    let qualifier =
+        field("reminderType").or_else(|| match (field("hookEvent"), field("hookName")) {
+            (Some(event), Some(name)) => Some(format!("{event} {name}")),
+            (event, name) => event.or(name),
+        });
+    let rendered = value
+        .get("rendered")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.get("content").and_then(Value::as_str))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    Attachment {
+        kind: field("type").unwrap_or_default(),
+        qualifier,
+        rendered,
     }
 }
 
@@ -439,5 +492,82 @@ mod tests {
             .map(|r| (r.line, r.line_end))
             .collect();
         assert_eq!(lines, [(2, Some(3)), (3, Some(3))]);
+    }
+
+    fn attachment_doc(value: Value) -> Document {
+        let mut doc = derived();
+        doc.entries[0].entry_type = "attachment".to_string();
+        doc.entries[0].value = value;
+        doc
+    }
+
+    fn attachment(doc: &Document) -> Attachment {
+        match doc.entry_body(0) {
+            Some(EntryBody::Attachment(a)) => a,
+            _ => panic!("an attachment row has an attachment body"),
+        }
+    }
+
+    /// An attachment row's body is its `attachment.type` and the
+    /// `content` of each `rendered` item in order, whatever its
+    /// message subtype.
+    #[test]
+    fn an_attachment_row_shows_its_type_and_rendered_text() {
+        let doc = attachment_doc(json!({
+            "type": "attachment",
+            "attachment": {"type": "file", "filename": "a.rs"},
+            "rendered": [{"content": "Called the Read tool"}, {"content": "fn a() {}"}],
+        }));
+        assert_eq!(
+            attachment(&doc),
+            Attachment {
+                kind: "file".to_string(),
+                qualifier: None,
+                rendered: vec!["Called the Read tool".to_string(), "fn a() {}".to_string()],
+            }
+        );
+    }
+
+    /// A row without `rendered` keeps its type; the body has no text.
+    #[test]
+    fn an_attachment_row_without_rendered_text_keeps_its_type() {
+        let doc = attachment_doc(json!({
+            "type": "attachment",
+            "attachment": {"type": "credential_org", "organizationUuid": "o1"},
+        }));
+        assert_eq!(
+            attachment(&doc),
+            Attachment {
+                kind: "credential_org".to_string(),
+                qualifier: None,
+                rendered: Vec::new(),
+            }
+        );
+    }
+
+    /// A reminder's `reminderType` qualifies its type; a hook row is
+    /// qualified by its event and hook name.
+    #[test]
+    fn an_attachment_qualifier_is_the_reminder_type_or_the_hook() {
+        let reminder = attachment_doc(json!({
+            "type": "attachment",
+            "attachment": {"type": "auto_mode", "reminderType": "bash_first"},
+        }));
+        assert_eq!(
+            attachment(&reminder).qualifier.as_deref(),
+            Some("bash_first")
+        );
+        let hook = attachment_doc(json!({
+            "type": "attachment",
+            "attachment": {
+                "type": "hook_success",
+                "hookEvent": "PostToolUse",
+                "hookName": "PostToolUse:Edit",
+            },
+        }));
+        assert_eq!(
+            attachment(&hook).qualifier.as_deref(),
+            Some("PostToolUse PostToolUse:Edit")
+        );
     }
 }

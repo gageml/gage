@@ -34,7 +34,7 @@ use crate::outline::{CollapseOutcome, Outline, RowKind};
 use crate::picker::{self, PickColumn, PickItem, Picker, PickerAction};
 use crate::session::{self, Backend};
 use crate::textarea::TextArea;
-use crate::{json, markdown, styles, tool};
+use crate::{attachment, json, markdown, styles, tool};
 
 pub async fn run(
     terminal: &mut DefaultTerminal,
@@ -1932,6 +1932,7 @@ fn draw_entry(frame: &mut Frame, state: &mut AppState, entry: &EntrySnap, area: 
             EntryBody::Text(text) => markdown::render(text),
             EntryBody::ToolCalls(calls) => tool::calls(calls),
             EntryBody::ToolResults(results) => tool::results(results),
+            EntryBody::Attachment(attachment) => attachment::body(attachment),
         };
         let panel = Paragraph::new(lines)
             .wrap(Wrap { trim: false })
@@ -2618,6 +2619,60 @@ mod tests {
             assert!(text.contains(expected), "line {line}:\n{text}");
             assert!(!text.contains("--- source ---"), "line {line}:\n{text}");
         }
+    }
+
+    /// An attachment row's body opens with its type, then the text
+    /// the harness sent to the model, item by item. A row the harness
+    /// never sent shows its type alone.
+    #[test]
+    fn attachment_rows_render_their_type_and_rendered_text() {
+        let mut doc = doc_with_entries(2);
+        for entry in &mut doc.entries {
+            entry.entry_type = "attachment".into();
+            entry.message_subtype = None;
+        }
+        doc.entries[0].value = serde_json::json!({
+            "type": "attachment",
+            "attachment": {"type": "environment", "snapshot": {"platform": "linux"}},
+            "rendered": [
+                {"content": "<system-reminder>\n# Environment\nPlatform: linux\n</system-reminder>"},
+                {"content": "second item"},
+            ],
+        });
+        doc.entries[1].value = serde_json::json!({
+            "type": "attachment",
+            "attachment": {"type": "credential_org", "organizationUuid": "o1"},
+        });
+        let options = ViewOptions {
+            all_entries: true,
+            ..ViewOptions::default()
+        };
+        let mut state = AppState::new(doc, &options, DocSource::Backend, false);
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+
+        state.select_line(1);
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let text = screen(&terminal);
+        assert!(text.contains("Attachment type  environment"), "{text}");
+        assert!(text.contains("# Environment"), "{text}");
+        assert!(text.contains("second item"), "{text}");
+        let rows: Vec<&str> = text.lines().collect();
+        let header = rows
+            .iter()
+            .position(|r| r.contains("Attachment type"))
+            .unwrap();
+        let body = |row: &str| row.rsplit('│').nth(1).unwrap_or("").to_string();
+        assert!(body(rows[header + 1]).trim().is_empty(), "{text}");
+        assert!(
+            body(rows[header + 2]).contains("<system-reminder>"),
+            "{text}"
+        );
+
+        state.select_line(2);
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let text = screen(&terminal);
+        assert!(text.contains("Attachment type  credential_org"), "{text}");
+        assert!(!text.contains("system-reminder"), "{text}");
     }
 
     /// The root row shows the session's attributes as the listing
