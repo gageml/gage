@@ -26,6 +26,7 @@ use ratatui::widgets::{
 use serde_json::Value;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
+use crate::attrs::attr_lines;
 use crate::doc::{Document, Dropped, EntryBody, Note, Redaction, SessionAttrs};
 use crate::hint;
 use crate::input::spawn_input_thread;
@@ -1971,8 +1972,7 @@ fn source_banner(width: u16) -> Section {
 }
 
 /// The session's attributes as the root row shows them: the title in
-/// bold, a blank line, then one line per field with a dim label padded
-/// to the widest so the values share a column two spaces past it.
+/// bold, a blank line, then the fields as caption/value rows.
 fn session_lines(attrs: &SessionAttrs) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     if !attrs.title.is_empty() {
@@ -1982,21 +1982,12 @@ fn session_lines(attrs: &SessionAttrs) -> Vec<Line<'static>> {
         )));
         lines.push(Line::from(""));
     }
-    let width = attrs
+    let fields: Vec<(&'static str, &str)> = attrs
         .fields
         .iter()
-        .map(|(label, _)| label.len() + 1)
-        .max()
-        .unwrap_or(0);
-    for (label, value) in &attrs.fields {
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!("{:<width$}  ", format!("{label}:")),
-                styles::Text::dim(),
-            ),
-            Span::raw(value.clone()),
-        ]));
-    }
+        .map(|(label, value)| (*label, value.as_str()))
+        .collect();
+    lines.extend(attr_lines(&fields));
     lines
 }
 
@@ -2719,22 +2710,22 @@ mod tests {
         // The labels are padded to the widest plus two spaces so the
         // values share a column, and they take the caption style
         let expected = [
-            " Project:   proj",
-            " Type:      claude",
-            " Model:     claude-x",
-            " Size:      1.5 kB",
-            " Messages:  2",
-            " Created:   3h ago",
+            " Project   proj",
+            " Type      claude",
+            " Model     claude-x",
+            " Size      1.5 kB",
+            " Messages  2",
+            " Created   3h ago",
         ];
         for (i, line) in expected.iter().enumerate() {
             assert!(body(rows[title + 2 + i]).starts_with(line), "{text}");
         }
         assert!(
-            cell_modifiers(&terminal, "Project:", 'P').contains(Modifier::DIM),
+            cell_modifiers(&terminal, "Project ", 'P').contains(Modifier::DIM),
             "{text}"
         );
         assert!(
-            !cell_modifiers(&terminal, "Project:", 'p').contains(Modifier::DIM),
+            !cell_modifiers(&terminal, "Project ", 'p').contains(Modifier::DIM),
             "{text}"
         );
         assert!(!text.contains("--- source ---"), "{text}");
@@ -2832,7 +2823,7 @@ mod tests {
         state.select_line(2);
         terminal.draw(|frame| draw(frame, &mut state)).unwrap();
         let text = screen(&terminal);
-        assert!(text.contains("Tool  Bash"), "{text}");
+        assert!(text.contains("Tool    Bash"), "{text}");
         assert!(text.contains("Status  error"), "{text}");
         assert!(text.contains("file.txt"), "{text}");
         assert!(!text.contains("RESULT-TEXT-NOT-SHOWN"), "{text}");

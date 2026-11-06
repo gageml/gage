@@ -4,9 +4,8 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use serde_json::Value;
 
-use crate::attrs::attr_lines;
+use crate::attrs::{attr_lines, styled_attr_lines};
 use crate::doc::ToolUse;
-use crate::styles;
 
 /// The calls an entry made: each call's tool and its input, with a
 /// blank line between calls.
@@ -31,13 +30,11 @@ pub fn results(results: &[ToolUse]) -> Vec<Line<'static>> {
         if !out.is_empty() {
             out.push(Line::raw(""));
         }
-        out.extend(attr_lines(&[("Tool", &result.name)]));
+        let mut attrs = vec![("Tool", result.name.as_str(), Style::new())];
         if result.is_error == Some(true) {
-            out.push(Line::from(vec![
-                Span::styled("Status  ", styles::Text::dim()),
-                Span::styled("error", Style::new().fg(Color::Red)),
-            ]));
+            attrs.push(("Status", "error", Style::new().fg(Color::Red)));
         }
+        out.extend(styled_attr_lines(&attrs));
         if let Some(output) = &result.output {
             out.push(Line::raw(""));
             append_maybe_json(&mut out, output);
