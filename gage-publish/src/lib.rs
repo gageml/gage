@@ -27,7 +27,7 @@ use std::sync::Arc;
 
 use gage_registry::driver::DriverRegistry;
 use gage_registry::filter::FilterRegistry;
-use gage_session::{Driver, DriverError, EditError, StoredSession, TextDescriptor};
+use gage_session::{Driver, DriverError, EntryCodec, EntryValue, StoredSession};
 use gage_store::{
     DirContentSource, SessionAttrsRecord, SessionDirLayout, SessionRecord, SessionStore, Store,
     StoreError,
@@ -50,7 +50,6 @@ pub enum PublishError {
     Driver(DriverError),
     Io(io::Error),
     Json(serde_json::Error),
-    Edit(EditError),
     /// A spec or argument the caller gave is malformed
     Input(String),
     /// The definition file has these problems, each at its position
@@ -75,7 +74,6 @@ impl fmt::Display for PublishError {
             PublishError::Driver(e) => write!(f, "{e}"),
             PublishError::Io(e) => write!(f, "{e}"),
             PublishError::Json(e) => write!(f, "{e}"),
-            PublishError::Edit(e) => write!(f, "{e}"),
             PublishError::Input(m) | PublishError::Refused(m) | PublishError::Filter(m) => {
                 write!(f, "{m}")
             }
@@ -101,7 +99,6 @@ impl Error for PublishError {
             PublishError::Driver(e) => Some(e),
             PublishError::Io(e) => Some(e),
             PublishError::Json(e) => Some(e),
-            PublishError::Edit(e) => Some(e),
             _ => None,
         }
     }
@@ -128,12 +125,6 @@ impl From<io::Error> for PublishError {
 impl From<serde_json::Error> for PublishError {
     fn from(e: serde_json::Error) -> Self {
         PublishError::Json(e)
-    }
-}
-
-impl From<EditError> for PublishError {
-    fn from(e: EditError) -> Self {
-        PublishError::Edit(e)
     }
 }
 
@@ -343,16 +334,19 @@ impl<'a> Publisher<'a> {
         let outputs = self.outputs(&definition).await?;
         let original = self.original(id)?;
         let layout = self.staging.layout(id).session();
-        let source = derive::SessionText::read(original.stored()?.as_mut(), &original.descriptor)?;
-        let staged =
-            derive::SessionText::read(original.staged(&layout)?.as_mut(), &original.descriptor)?;
+        let source =
+            derive::SessionText::read(original.stored()?.as_mut(), original.codec.descriptor())?;
+        let staged = derive::SessionText::read(
+            original.staged(&layout)?.as_mut(),
+            original.codec.descriptor(),
+        )?;
         let title_entry = original.title_entry(&definition)?;
         derive::check_removal_only(
             &definition,
             &source,
             &staged,
             &outputs,
-            title_entry.as_deref(),
+            title_entry.as_ref(),
         )
     }
 
@@ -448,7 +442,7 @@ impl<'a> Publisher<'a> {
             outputs,
             original.stored()?.as_mut(),
             &layout,
-            title_entry.as_deref(),
+            title_entry.as_ref(),
         )?;
         derive::update_attrs(&layout, original.staged(&layout)?.as_mut())?;
         Ok(built)
@@ -457,7 +451,7 @@ impl<'a> Publisher<'a> {
     /// The original's text values, read once per operation.
     fn open_original(&self, id: &str) -> Result<derive::SessionText, PublishError> {
         let original = self.original(id)?;
-        derive::SessionText::read(original.stored()?.as_mut(), &original.descriptor)
+        derive::SessionText::read(original.stored()?.as_mut(), original.codec.descriptor())
     }
 
     /// The original of the pending publish `id`, named by the staged
@@ -489,30 +483,25 @@ impl<'a> Publisher<'a> {
             .drivers
             .for_name(&record.driver_name)
             .ok_or_else(|| PublishError::NoDriver(record.driver_name.clone()))?;
-        let descriptor = driver
-            .text_descriptor(&record.attrs.content_format)
-            .ok_or_else(|| {
-                PublishError::Input(format!(
-                    "driver {:?} describes no text for content format {:?}",
-                    record.driver_name, record.attrs.content_format
-                ))
-            })?;
+        let codec = driver
+            .codec(&record.attrs.content_format)
+            .map_err(|e| PublishError::Input(format!("driver {:?}: {e}", record.driver_name)))?;
         Ok(Original {
             store: self.store,
             record,
             driver,
-            descriptor,
+            codec,
         })
     }
 }
 
 /// The original of a pending publish: its record, the driver that
-/// wrote it, and the driver's descriptor.
+/// wrote it, and the driver's codec for its content format.
 struct Original<'a> {
     store: &'a Store,
     record: SessionRecord,
     driver: Arc<dyn Driver>,
-    descriptor: TextDescriptor,
+    codec: Arc<dyn EntryCodec>,
 }
 
 impl Original<'_> {
@@ -539,7 +528,10 @@ impl Original<'_> {
     /// The entry the driver adds after the last line to set the title
     /// `definition` names; `None` when it names none. A driver with no
     /// such entry for the content format cannot set a title.
-    fn title_entry(&self, definition: &PublishDefinition) -> Result<Option<String>, PublishError> {
+    fn title_entry(
+        &self,
+        definition: &PublishDefinition,
+    ) -> Result<Option<EntryValue>, PublishError> {
         let Some(title) = &definition.title else {
             return Ok(None);
         };

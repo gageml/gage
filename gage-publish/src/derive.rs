@@ -7,8 +7,8 @@ use std::fs;
 
 use gage_runtime::Reason;
 use gage_session::{
-    Derivation, EntryJson, StoredSession, TextDescriptor, TextValue, TypedSet, TypedValues,
-    delete_values, edit_strings,
+    DecodedEntry, Derivation, EntryValue, StoredSession, TextDescriptor, TextValue, TypedSet,
+    TypedValues,
 };
 use gage_store::{
     ChangeKind, ChangeRecord, DirContentSink, SessionDirLayout, SummaryAttrs, format_changes,
@@ -20,10 +20,10 @@ use crate::definition::{PublishDefinition, Segment, TextEntry};
 use crate::filter::FilterOutput;
 use crate::{MARKER, PublishError};
 
-/// One entry of the original with its text values.
+/// One entry of the original, decoded, with its text values.
 pub struct EntryText {
     pub line: u32,
-    pub json: String,
+    pub value: EntryValue,
     pub values: Vec<TextValue>,
 }
 
@@ -39,12 +39,14 @@ impl SessionText {
         descriptor: &TextDescriptor,
     ) -> Result<Self, PublishError> {
         let mut entries = Vec::new();
-        for item in stored.entry_json() {
-            let EntryJson { line, json } = item?;
-            let values = descriptor
-                .text_values(&json)
-                .map_err(|e| PublishError::Input(format!("line {line}: {e}")))?;
-            entries.push(EntryText { line, json, values });
+        for item in stored.entry_values() {
+            let DecodedEntry { line, value } = item?;
+            let values = descriptor.text_values(&value);
+            entries.push(EntryText {
+                line,
+                value,
+                values,
+            });
         }
         Ok(Self {
             entries,
@@ -193,10 +195,7 @@ pub fn run_filters(
                 }
             }
             for (set, reason) in &c.literals {
-                let found = session
-                    .descriptor
-                    .typed_values(*set, &entry.json)
-                    .map_err(|e| PublishError::Input(format!("line {}: {e}", entry.line)))?;
+                let found = session.descriptor.typed_values(*set, &entry.value);
                 for literal in found.literals {
                     literals.entry(literal).or_insert(*reason);
                 }
@@ -227,7 +226,7 @@ pub fn build(
     outputs: &[FilterOutput],
     stored: &mut dyn StoredSession,
     layout: &SessionDirLayout,
-    title_entry: Option<&str>,
+    title_entry: Option<&EntryValue>,
 ) -> Result<Built, PublishError> {
     let Expanded {
         mut instances,
@@ -245,14 +244,14 @@ pub fn build(
             continue;
         }
         let edits = line_edits(entry, &instances, &spans, &mut published)?;
-        if let Some(json) = edits.apply(&entry.json)? {
-            replaced.insert(entry.line, json);
+        if let Some(value) = edits.apply(&entry.value)? {
+            replaced.insert(entry.line, value);
         }
     }
     let derivation = Derivation {
         dropped,
         replaced,
-        appended: title_entry.into_iter().map(String::from).collect(),
+        appended: title_entry.into_iter().cloned().collect(),
     };
     let mut sink = DirContentSink::new(layout.files_dir());
     let added = stored.write_derived(&derivation, &mut sink)?;
@@ -473,7 +472,7 @@ pub fn check_removal_only(
     original: &SessionText,
     staged: &SessionText,
     outputs: &[FilterOutput],
-    title_entry: Option<&str>,
+    title_entry: Option<&EntryValue>,
 ) -> Result<(), PublishError> {
     let refuse =
         |m: String| PublishError::Refused(format!("staged session is not removal-only: {m}"));
@@ -489,7 +488,7 @@ pub fn check_removal_only(
         let Some((last, rest)) = staged_entries.split_last() else {
             return Err(refuse("no title entry staged".to_string()));
         };
-        if last.json != entry {
+        if &last.value != entry {
             return Err(refuse(format!(
                 "staged line {} is not the title entry",
                 last.line
@@ -526,11 +525,13 @@ pub fn check_removal_only(
                 _ => None,
             })
             .collect();
-        let expected_json = delete_values(&source.json, &deleted)?;
-        let expected_values = original
-            .descriptor
-            .text_values(&expected_json)
-            .map_err(|e| at(e.to_string()))?;
+        let mut expected = source.value.clone();
+        for pointer in &deleted {
+            expected
+                .remove(pointer)
+                .ok_or_else(|| at(format!("{pointer} names no value to leave out")))?;
+        }
+        let expected_values = original.descriptor.text_values(&expected);
         for value in &derived.values {
             let Some(source_value) = expected_values.iter().find(|v| v.pointer == value.pointer)
             else {
@@ -544,7 +545,7 @@ pub fn check_removal_only(
             }
         }
         let pointers: Vec<&str> = expected_values.iter().map(|v| v.pointer.as_str()).collect();
-        if blank_values(&expected_json, &pointers)? != blank_values(&derived.json, &pointers)? {
+        if blank_values(&expected, &pointers) != blank_values(&derived.value, &pointers) {
             return Err(at("entry differs outside its text values".to_string()));
         }
     }
@@ -562,16 +563,16 @@ fn is_removal_only(original: &str, derived: &str) -> bool {
         .all(|c| rest.by_ref().any(|o| o == c))
 }
 
-/// The entry `json` with the string at each of `pointers` set to the
-/// empty string, as a value, for comparison outside the text values.
-fn blank_values(json: &str, pointers: &[&str]) -> Result<Value, PublishError> {
-    let mut value: Value = serde_json::from_str(json)?;
+/// The entry with the string at each of `pointers` set to the empty
+/// string, for comparison outside the text values.
+fn blank_values(entry: &EntryValue, pointers: &[&str]) -> EntryValue {
+    let mut value = entry.clone();
     for pointer in pointers {
         if let Some(slot) = value.pointer_mut(pointer) {
-            *slot = Value::String(String::new());
+            *slot = EntryValue::String(String::new());
         }
     }
-    Ok(value)
+    value
 }
 
 /// What the definition does to the session: the instances, and the
@@ -612,10 +613,7 @@ fn expand(
         for set in sets {
             let mut mine = Vec::with_capacity(session.entries.len());
             for entry in &session.entries {
-                let values = session
-                    .descriptor
-                    .typed_values(set, &entry.json)
-                    .map_err(|e| PublishError::Input(format!("line {}: {e}", entry.line)))?;
+                let values = session.descriptor.typed_values(set, &entry.value);
                 mine.push((entry.line, values));
             }
             hits.insert(set, mine);
@@ -837,21 +835,26 @@ struct LineEdits {
 }
 
 impl LineEdits {
-    /// `json` with the edits applied, or `None` when there are none.
+    /// `entry` with the edits applied, or `None` when there are none.
     /// The replacements go first, so every pointer names a position
     /// in the entry as written.
-    fn apply(&self, json: &str) -> Result<Option<String>, PublishError> {
+    fn apply(&self, entry: &EntryValue) -> Result<Option<EntryValue>, PublishError> {
         if self.replaced.is_empty() && self.deleted.is_empty() {
             return Ok(None);
         }
-        let pairs: Vec<(&str, &str)> = self
-            .replaced
-            .iter()
-            .map(|(p, t)| (p.as_str(), t.as_str()))
-            .collect();
-        let replaced = edit_strings(json, &pairs)?;
-        let deleted: Vec<&str> = self.deleted.iter().map(String::as_str).collect();
-        Ok(Some(delete_values(&replaced, &deleted)?))
+        let mut value = entry.clone();
+        for (pointer, text) in &self.replaced {
+            let slot = value
+                .pointer_mut(pointer)
+                .ok_or_else(|| PublishError::Input(format!("no value at {pointer}")))?;
+            *slot = EntryValue::String(text.clone());
+        }
+        for pointer in &self.deleted {
+            value
+                .remove(pointer)
+                .ok_or_else(|| PublishError::Input(format!("no value at {pointer}")))?;
+        }
+        Ok(Some(value))
     }
 }
 
@@ -1115,7 +1118,7 @@ mod tests {
     fn a_contained_mark_leaves_a_silent_removal_and_keeps_both_records() {
         let entry = EntryText {
             line: 1,
-            json: String::new(),
+            value: EntryValue::Null,
             values: vec![TextValue {
                 pointer: "/v".to_string(),
                 text: "A <B>x</B> C".to_string(),

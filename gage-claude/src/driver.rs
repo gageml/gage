@@ -21,14 +21,15 @@ use std::time::{Duration, SystemTime};
 
 use gage_core::config::{default_cache_root, plugin_marketplace_dir};
 use gage_session::{
-    AgentSession, AgentSpec, AuthInfo, ContentSchema, ContentSink, ContentSource, Derivation,
-    Driver, DriverError, DriverStatus, DriverTables, Entry, EntryJson, Field, HarnessInfo,
-    HarnessSession, InstallInfo, InstallReport, InstallUi, MaintenanceOutcome, MaintenanceStatus,
-    MessageTextHit, NativeLookupError, NativeSession, SessionAttrs, SessionLiveError, SkillSession,
-    Source, SourceOptions, StoredSession, TextDescriptor, ToolUse, split_scheme,
+    AgentSession, AgentSpec, AuthInfo, ContentSchema, ContentSink, ContentSource, DecodedEntry,
+    Derivation, Driver, DriverError, DriverStatus, DriverTables, Entry, EntryCodec, EntryValue,
+    Field, HarnessInfo, HarnessSession, InstallInfo, InstallReport, InstallUi, MaintenanceOutcome,
+    MaintenanceStatus, MessageTextHit, NativeLookupError, NativeSession, SessionAttrs,
+    SessionLiveError, SkillSession, Source, SourceOptions, StoredSession, ToolUse, split_scheme,
 };
 use serde::Deserialize;
 
+use crate::codec::codec;
 use crate::content_schema;
 use crate::home::ClaudeHome;
 use crate::index::{
@@ -43,10 +44,9 @@ use crate::session::{
     SESSION_RE, SessionInfo, delete_session, encode_project_dir, is_agent_tmp_slug, move_session,
     projects_dir,
 };
-use crate::session_reader::SessionReader;
+use crate::session_reader::{ReadError, SessionReader};
 use crate::skill::skill_command;
 use crate::tables::{EntryTable, MessageTable, SessionTable, ToolUseFileTable, ToolUseTable};
-use crate::text_descriptor;
 
 /// MCP server name under which Gage registers in `.mcp.json`.
 pub(crate) const MCP_SERVER_NAME: &str = "gage";
@@ -125,17 +125,26 @@ impl Driver for ClaudeDriver {
         content_schema::content_schemas()
     }
 
-    fn title_entry(&self, content_format: &str, title: &str) -> Option<String> {
+    fn title_entry(&self, content_format: &str, title: &str) -> Option<EntryValue> {
         (content_format == CONTENT_FORMAT).then(|| {
-            format!(
+            let text = format!(
                 r#"{{"type":"custom-title","customTitle":{}}}"#,
                 serde_json::Value::from(title)
-            )
+            );
+            codec()
+                .decode(text.as_bytes())
+                .expect("a title entry is one JSON object")
         })
     }
 
-    fn text_descriptor(&self, content_format: &str) -> Option<TextDescriptor> {
-        (content_format == CONTENT_FORMAT).then(text_descriptor::text_descriptor)
+    fn codec(&self, content_format: &str) -> Result<Arc<dyn EntryCodec>, DriverError> {
+        if content_format != CONTENT_FORMAT {
+            return Err(DriverError::Other(format!(
+                "content format {content_format:?} has no codec in this build; \
+                 this build reads {CONTENT_FORMAT:?} (upgrade gage)"
+            )));
+        }
+        Ok(codec())
     }
 
     fn format_model(&self, model: &str) -> String {
@@ -1178,10 +1187,20 @@ impl StoredSession for ClaudeStoredSession {
             Err(e) => return Box::new(std::iter::once(Err(DriverError::Io(e)))),
         };
         let native_id = self.native_id.clone();
-        // Read failures pass through; only a typeless line is dropped
+        // Read failures pass through; a line that does not decode is
+        // reported and left out, as it is for a native session, and a
+        // typeless line yields no row
         Box::new(reader.filter_map(move |item| match item {
-            Ok((line_num, value)) => derive_entry(&native_id, line_num, &value).map(Ok),
-            Err(e) => Some(Err(DriverError::Io(e))),
+            Ok((line_num, decoded)) => {
+                let raw = decoded.to_string();
+                let value = serde_json::Value::from(decoded);
+                derive_entry(&native_id, line_num, &value, raw).map(Ok)
+            }
+            Err(ReadError::Decode { line, error }) => {
+                tracing::warn!(session_id = %native_id, line, "skipping line that does not decode: {error}");
+                None
+            }
+            Err(ReadError::Io(e)) => Some(Err(DriverError::Io(e))),
         }))
     }
 
@@ -1198,37 +1217,40 @@ impl StoredSession for ClaudeStoredSession {
         let mut failures = Vec::new();
         for item in reader {
             match item {
-                Ok((line_num, value)) => collector.push(line_num, &value),
-                Err(e) => failures.push(Err(DriverError::Io(e))),
+                Ok((line_num, decoded)) => {
+                    collector.push(line_num, &serde_json::Value::from(decoded));
+                }
+                Err(ReadError::Decode { line, error }) => {
+                    tracing::warn!(session_id = %self.native_id, line, "skipping line that does not decode: {error}");
+                }
+                Err(ReadError::Io(e)) => failures.push(Err(DriverError::Io(e))),
             }
         }
         Box::new(collector.finish().into_iter().map(Ok).chain(failures))
     }
 
-    /// Each line of `session.jsonl` as written, numbered as `entries`
-    /// numbers it. Blank lines, unparseable lines, and lines without a
-    /// type consume a line number and yield nothing, as they do for
-    /// `entries`.
-    fn entry_json(&mut self) -> Box<dyn Iterator<Item = Result<EntryJson, DriverError>> + '_> {
+    /// Each entry of `session.jsonl` decoded, numbered as `entries`
+    /// numbers it. A blank line and a line without a type consume a
+    /// line number and yield nothing, as they do for `entries`; a line
+    /// that does not decode is an error naming the line.
+    fn entry_values(&mut self) -> Box<dyn Iterator<Item = Result<DecodedEntry, DriverError>> + '_> {
         use std::io::BufRead;
         let reader = match self.source.open("session.jsonl") {
             Ok(r) => io::BufReader::new(r),
             Err(e) => return Box::new(std::iter::once(Err(DriverError::Io(e)))),
         };
-        Box::new(
-            reader
-                .lines()
-                .enumerate()
-                .filter_map(|(i, item)| match item {
-                    Ok(text) => is_entry(&text).then(|| {
-                        Ok(EntryJson {
-                            line: i as u32 + 1,
-                            json: text,
-                        })
-                    }),
-                    Err(e) => Some(Err(DriverError::Io(e))),
-                }),
-        )
+        let codec = codec();
+        Box::new(reader.lines().enumerate().filter_map(move |(i, item)| {
+            let line = i as u32 + 1;
+            match item {
+                Ok(text) if text.trim().is_empty() => None,
+                Ok(text) => match codec.decode(text.as_bytes()) {
+                    Ok(value) => is_entry(&value).then_some(Ok(DecodedEntry { line, value })),
+                    Err(e) => Some(Err(DriverError::Other(format!("line {line}: {e}")))),
+                },
+                Err(e) => Some(Err(DriverError::Io(e))),
+            }
+        }))
     }
 
     fn write_derived(
@@ -1279,6 +1301,7 @@ impl ClaudeStoredSession {
                 io::copy(&mut reader, &mut writer)?;
                 continue;
             }
+            let codec = codec();
             let mut written: u32 = 0;
             for (i, line) in io::BufReader::new(reader).lines().enumerate() {
                 let line = line?;
@@ -1286,13 +1309,15 @@ impl ClaudeStoredSession {
                 if derivation.dropped.contains(&number) {
                     continue;
                 }
-                let text = derivation.replaced.get(&number).unwrap_or(&line);
-                writer.write_all(text.as_bytes())?;
+                match derivation.replaced.get(&number) {
+                    Some(value) => writer.write_all(&codec.encode(value)?)?,
+                    None => writer.write_all(line.as_bytes())?,
+                }
                 writer.write_all(b"\n")?;
                 written += 1;
             }
-            for text in &derivation.appended {
-                writer.write_all(text.as_bytes())?;
+            for value in &derivation.appended {
+                writer.write_all(&codec.encode(value)?)?;
                 writer.write_all(b"\n")?;
                 written += 1;
                 appended.push(written);
@@ -1302,15 +1327,10 @@ impl ClaudeStoredSession {
     }
 }
 
-/// Whether a transcript line is one `entries` yields a row for: JSON
+/// Whether a decoded line is one `entries` yields a row for: an entry
 /// with a `type`.
-fn is_entry(text: &str) -> bool {
-    if text.trim().is_empty() {
-        return false;
-    }
-    serde_json::from_str::<serde_json::Value>(text)
-        .ok()
-        .is_some_and(|v| v.get("type").and_then(serde_json::Value::as_str).is_some())
+fn is_entry(value: &EntryValue) -> bool {
+    value.get("type").and_then(EntryValue::as_str).is_some()
 }
 
 #[cfg(test)]
@@ -1763,13 +1783,14 @@ mod tests {
             .title_entry(CONTENT_FORMAT, "Ducks \"quoted\"")
             .unwrap();
         assert_eq!(
-            title,
+            title.to_string(),
             r#"{"type":"custom-title","customTitle":"Ducks \"quoted\""}"#
         );
         assert_eq!(driver.title_entry("other 1", "x"), None);
+        let c2 = codec().decode(b"{\"type\":\"c2\"}").unwrap();
         let derivation = Derivation {
             dropped: [2].into_iter().collect(),
-            replaced: [(3, "{\"type\":\"c2\"}".to_string())].into_iter().collect(),
+            replaced: [(3, c2)].into_iter().collect(),
             appended: vec![title.clone()],
         };
         let mut sink = MemorySink::default();

@@ -13,10 +13,11 @@ use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use std::time::{Duration, SystemTime};
 
+use crate::codec::codec;
 use gage_core::config::gage_home;
+use gage_session::{DriverError, EntryCodec, EntryValue};
 use regex::Regex;
 use serde::{Serialize, Serializer};
-use serde_json::Value;
 
 pub static SESSION_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.jsonl$").unwrap()
@@ -426,27 +427,30 @@ pub fn move_session(path: &Path, dest_dir: &Path, new_cwd: &Path) -> io::Result<
 }
 
 /// Copy the transcript at `src` to `dest` with every entry's `cwd`
-/// set to `new_cwd`. An entry whose `cwd` is absent or not a string is
-/// copied as is. A non-empty line that is not JSON is an error naming
-/// the line.
+/// set to `new_cwd`. A line whose `cwd` is absent or not a string is
+/// copied byte for byte; a line with one is decoded, changed at `cwd`
+/// alone, and encoded through the codec. A non-empty line that does
+/// not decode is an error naming the line.
 fn rewrite_cwd(src: &Path, dest: &Path, new_cwd: &Path) -> io::Result<()> {
     let reader = BufReader::new(File::open(src)?);
     let mut out = BufWriter::new(File::create(dest)?);
-    let new_cwd = Value::String(new_cwd.to_string_lossy().into_owned());
+    let codec = codec();
+    let new_cwd = new_cwd.to_string_lossy().into_owned();
     for (index, line) in reader.lines().enumerate() {
         let line = line?;
+        let at = |e: DriverError| io::Error::other(format!("{}:{}: {e}", src.display(), index + 1));
         if line.trim().is_empty() {
             out.write_all(b"\n")?;
             continue;
         }
-        let mut entry: Value = serde_json::from_str(&line)
-            .map_err(|e| io::Error::other(format!("{}:{}: {e}", src.display(), index + 1)))?;
-        if let Some(cwd) = entry.get_mut("cwd")
-            && cwd.is_string()
-        {
-            *cwd = new_cwd.clone();
+        let mut entry = codec.decode(line.as_bytes()).map_err(at)?;
+        match entry.pointer_mut("/cwd") {
+            Some(cwd @ EntryValue::String(_)) => {
+                *cwd = EntryValue::String(new_cwd.clone());
+                out.write_all(&codec.encode(&entry).map_err(at)?)?;
+            }
+            _ => out.write_all(line.as_bytes())?,
         }
-        serde_json::to_writer(&mut out, &entry)?;
         out.write_all(b"\n")?;
     }
     out.flush()
@@ -506,14 +510,15 @@ mod tests {
         assert!(!path.exists());
         assert!(!sidecar.exists());
         assert!(dest_dir.join("abc").join("subagents").is_dir());
+        // The line with a `cwd` string changes at that value alone and
+        // keeps its key order; every other line is copied byte for byte
         let moved = fs::read_to_string(dest_dir.join("abc.jsonl")).unwrap();
-        let lines: Vec<Value> = moved
-            .lines()
-            .map(|l| serde_json::from_str(l).unwrap())
-            .collect();
-        assert_eq!(lines[0]["cwd"], "/new");
-        assert!(lines[1].get("cwd").is_none());
-        assert_eq!(lines[2]["cwd"], 7);
+        assert_eq!(
+            moved,
+            "{\"type\":\"user\",\"cwd\":\"/new\"}\n\
+             {\"type\":\"summary\"}\n\
+             {\"type\":\"assistant\",\"cwd\":7}\n"
+        );
         assert!(!dest_dir.join("abc.jsonl.tmp").exists());
     }
 

@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod codec;
 pub mod config;
 mod content_schema;
 pub mod driver;

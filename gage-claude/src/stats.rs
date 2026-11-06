@@ -52,9 +52,14 @@ pub fn compute_session_stats(path: &Path) -> io::Result<SessionStats> {
     let mut max_turn: usize = 0;
 
     for item in reader {
-        let (_, entry) = match item {
-            Ok(p) => p,
-            Err(_) => continue,
+        // Stats are a tolerant reading; a line that does not decode
+        // is left out of the counts.
+        let entry = match item {
+            Ok((_, decoded)) => Value::from(decoded),
+            Err(e) => {
+                tracing::warn!(path = %path.display(), "skipping line: {e}");
+                continue;
+            }
         };
 
         // Every row of one API response repeats its usage; the first row

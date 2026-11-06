@@ -170,7 +170,11 @@ mod tests {
 
     use super::*;
     use crate::entry::{SYSTEM_MESSAGE_SUBTYPES, message_subtype};
-    use gage_session::{TextValue, TypedValues};
+    use gage_session::{EntryValue, TextValue, TypedValues};
+
+    fn decoded(line: &str) -> EntryValue {
+        serde_json::from_str(line).unwrap()
+    }
 
     fn pointers(found: &TypedValues) -> Vec<String> {
         found.values.iter().map(|h| h.pointer.clone()).collect()
@@ -183,7 +187,7 @@ mod tests {
         text.lines()
             .enumerate()
             .filter(|(_, l)| !l.trim().is_empty())
-            .map(|(i, l)| (i + 1, descriptor.text_values(l).unwrap()))
+            .map(|(i, l)| (i + 1, descriptor.text_values(&decoded(l))))
             .collect()
     }
 
@@ -278,12 +282,12 @@ mod tests {
             if line.trim().is_empty() {
                 continue;
             }
-            let Ok(every) = all.text_values(line) else {
+            let Ok(value) = serde_json::from_str::<EntryValue>(line) else {
                 continue;
             };
+            let every = all.text_values(&value);
             let kept: HashSet<String> = real
-                .text_values(line)
-                .unwrap()
+                .text_values(&value)
                 .into_iter()
                 .map(|v| v.pointer)
                 .collect();
@@ -389,8 +393,7 @@ mod tests {
         for line in sample_and_shapes() {
             let entry: serde_json::Value = serde_json::from_str(line).unwrap();
             let dropped = descriptor
-                .typed_values(TypedSet::HarnessContext, line)
-                .unwrap()
+                .typed_values(TypedSet::HarnessContext, &decoded(line))
                 .dropped;
             assert_eq!(dropped, is_context(&entry), "{line}");
         }
@@ -406,8 +409,7 @@ mod tests {
         for line in sample_and_shapes() {
             let entry: serde_json::Value = serde_json::from_str(line).unwrap();
             let dropped = descriptor
-                .typed_values(TypedSet::HarnessRecord, line)
-                .unwrap()
+                .typed_values(TypedSet::HarnessRecord, &decoded(line))
                 .dropped;
             let expected = !is_conversation(&entry) && !is_context(&entry);
             assert_eq!(dropped, expected, "{line}");
@@ -415,8 +417,7 @@ mod tests {
         for (subtype, _) in SYSTEM_MESSAGE_SUBTYPES {
             let line = format!(r#"{{"type":"system","subtype":"{subtype}","content":"x"}}"#);
             let dropped = descriptor
-                .typed_values(TypedSet::HarnessRecord, &line)
-                .unwrap()
+                .typed_values(TypedSet::HarnessRecord, &decoded(&line))
                 .dropped;
             assert!(!dropped, "{line}");
         }
@@ -428,9 +429,7 @@ mod tests {
     fn harness_record_removes_ide_tag_spans_in_a_user_message() {
         let descriptor = text_descriptor();
         let line = r#"{"type":"user","message":{"content":"<ide_opened_file>opened /x</ide_opened_file> the prompt"}}"#;
-        let found = descriptor
-            .typed_values(TypedSet::HarnessRecord, line)
-            .unwrap();
+        let found = descriptor.typed_values(TypedSet::HarnessRecord, &decoded(line));
         assert!(!found.dropped, "{found:?}");
         let hit = found.spans.first().expect("one ide-tag span");
         let text = "<ide_opened_file>opened /x</ide_opened_file> the prompt";
@@ -443,12 +442,10 @@ mod tests {
     #[test]
     fn pii_filter_paths_select_the_username_and_the_email_field() {
         let line = r#"{"type":"api-request","params":{"safeguards":[{"classifier_context":{"user_identity":"garrett","home_dir":"/home/garrett"}}]}}"#;
-        let found = text_descriptor().typed_values(TypedSet::Pii, line).unwrap();
+        let found = text_descriptor().typed_values(TypedSet::Pii, &decoded(line));
         assert_eq!(found.literals, ["garrett"]);
         let attachment = r#"{"type":"attachment","attachment":{"context":{"userEmail":"The user's email address is g@x.y"}}}"#;
-        let found = text_descriptor()
-            .typed_values(TypedSet::Pii, attachment)
-            .unwrap();
+        let found = text_descriptor().typed_values(TypedSet::Pii, &decoded(attachment));
         assert_eq!(pointers(&found), ["/attachment/context/userEmail"]);
         assert_eq!(found.values[0].path, "$.attachment.context.userEmail");
     }
@@ -462,7 +459,7 @@ mod tests {
     fn system_filter_paths_select_paths_hosts_and_the_os_version() {
         let descriptor = text_descriptor();
         let user = r#"{"type":"user","cwd":"/home/garrett/proj","gitBranch":"main","message":{"role":"user","content":"hi"}}"#;
-        let found = descriptor.typed_values(TypedSet::System, user).unwrap();
+        let found = descriptor.typed_values(TypedSet::System, &decoded(user));
         assert_eq!(pointers(&found), ["/cwd"]);
         assert_eq!(found.values[0].path, "$.cwd");
         assert_eq!(found.literals, ["/home/garrett/proj"]);
@@ -470,12 +467,12 @@ mod tests {
         // too generic to redact as text
         for cwd in ["/", "/tmp", "/home/"] {
             let line = format!(r#"{{"type":"user","cwd":"{cwd}"}}"#);
-            let found = descriptor.typed_values(TypedSet::System, &line).unwrap();
+            let found = descriptor.typed_values(TypedSet::System, &decoded(&line));
             assert_eq!(pointers(&found), ["/cwd"], "{cwd}");
             assert!(found.literals.is_empty(), "{cwd}: {found:?}");
         }
         let request = r#"{"type":"api-request","params":{"safeguards":[{"classifier_context":{"user_identity":"garrett","home_dir":"/home/garrett","live_cwd":"/home/garrett/proj","rule_roots":{"userSettings":"/home/garrett/.claude"},"trusted_directories":{"primary":{"path":"/home/garrett/proj","resolved":["/home/garrett/proj"]}},"git_state":{"cwd":"/home/garrett/proj","root":"/home/garrett/proj","branch":"main","visibility":{"push_remote":"origin","origin":{"remote":"git@git.example:a/b.git","host":"git.example","visibility":"private"},"remotes":[{"name":"origin","remote":"git@git.example:a/b.git","host":"git.example","visibility":"private"}]}},"prior_turn_context":[{"context":{"live_cwd":"/home/garrett/proj"}}]}}]}}"#;
-        let found = descriptor.typed_values(TypedSet::System, request).unwrap();
+        let found = descriptor.typed_values(TypedSet::System, &decoded(request));
         let context = "/params/safeguards/0/classifier_context";
         let expected: Vec<String> = [
             "/live_cwd",
@@ -510,7 +507,7 @@ mod tests {
         );
 
         let snapshot = r#"{"type":"attachment","attachment":{"type":"environment_snapshot","snapshot":{"workingDirectory":"/home/garrett/proj","scratchpadDirectory":"/tmp/claude-1000/-home-garrett-proj/s1/scratchpad","additionalWorkingDirectories":["/home/garrett/other"],"platform":"linux","osVersion":"Linux 6.17.0-1032-oem","shell":"bash"}}}"#;
-        let found = descriptor.typed_values(TypedSet::System, snapshot).unwrap();
+        let found = descriptor.typed_values(TypedSet::System, &decoded(snapshot));
         assert_eq!(
             pointers(&found),
             [
@@ -530,10 +527,10 @@ mod tests {
         );
         // A shallow scratchpad has a parent too generic to redact
         let shallow = r#"{"type":"attachment","attachment":{"type":"environment_snapshot","snapshot":{"scratchpadDirectory":"/tmp/s"}}}"#;
-        let found = descriptor.typed_values(TypedSet::System, shallow).unwrap();
+        let found = descriptor.typed_values(TypedSet::System, &decoded(shallow));
         assert_eq!(found.literals, ["/tmp/s"]);
         let backups = r#"{"type":"file-history-snapshot","snapshot":{"trackedFileBackups":{"src/a.rs":{"realParentDir":"/home/garrett/proj/src","backupFileName":"abc@v1"}}}}"#;
-        let found = descriptor.typed_values(TypedSet::System, backups).unwrap();
+        let found = descriptor.typed_values(TypedSet::System, &decoded(backups));
         assert_eq!(
             pointers(&found),
             ["/snapshot/trackedFileBackups/src~1a.rs/realParentDir"]

@@ -1,8 +1,8 @@
 //! The text values of a stored session's entries, in document order
-//! within each entry. A driver yields each entry's native JSON text and
-//! a [`TextDescriptor`] that names the fields whose type is not text;
-//! the walk here emits the rest. The publish engine and the candidate
-//! listing read it.
+//! within each entry. A driver's codec decodes each entry into an
+//! [`EntryValue`] and supplies a [`TextDescriptor`] that names the
+//! fields whose type is not text; the walk here emits the rest. The
+//! publish engine and the candidate listing read it.
 
 use std::collections::BTreeSet;
 use std::error::Error;
@@ -10,9 +10,10 @@ use std::fmt;
 use std::path::Path;
 
 use regex::{Regex, RegexBuilder};
-use serde::de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor};
 use serde_json::Value;
 use serde_json_path::JsonPath;
+
+use crate::codec::EntryValue;
 
 /// What a driver knows about the strings of one content format: the
 /// fields whose type is not text, per typed set the fields whose type
@@ -376,15 +377,14 @@ impl TextDescriptor {
     /// What `set`'s typed-sensitive paths select in one entry. Empty
     /// for a set without paths. A literal on the allow list is left
     /// out.
-    pub fn typed_values(
-        &self,
-        set: TypedSet,
-        json: &str,
-    ) -> std::result::Result<TypedValues, serde_json::Error> {
+    pub fn typed_values(&self, set: TypedSet, entry: &EntryValue) -> TypedValues {
         let Some(paths) = self.typed.iter().find(|t| t.set == set) else {
-            return Ok(TypedValues::default());
+            return TypedValues::default();
         };
-        let entry: Value = serde_json::from_str(json)?;
+        // JSONPath evaluates on the unordered form; a pointer is the
+        // same in both.
+        let decoded = entry;
+        let entry: Value = decoded.into();
         let strings_at = |paths: &[JsonPath]| {
             paths
                 .iter()
@@ -421,7 +421,7 @@ impl TextDescriptor {
         let spans = if paths.removes.is_empty() {
             Vec::new()
         } else {
-            self.text_values(json)?
+            self.text_values(decoded)
                 .iter()
                 .flat_map(|value| {
                     paths.removes.iter().flat_map(move |re| {
@@ -437,46 +437,33 @@ impl TextDescriptor {
                 })
                 .collect()
         };
-        Ok(TypedValues {
+        TypedValues {
             literals,
             values,
             spans,
             dropped,
-        })
+        }
     }
 
-    /// The text values of one entry, in document order. `json` is the
-    /// entry as the harness wrote it. A string at or under a safe path
-    /// is excluded. The entry is parsed into a `Value` only when an
-    /// irregular pattern needs it.
-    pub fn text_values(
-        &self,
-        json: &str,
-    ) -> std::result::Result<Vec<TextValue>, serde_json::Error> {
-        let value: Option<Value> = if self.safe.has_irregular() {
-            Some(serde_json::from_str(json)?)
-        } else {
-            None
-        };
+    /// The text values of one entry, in document order. A string at or
+    /// under a safe path is excluded.
+    pub fn text_values(&self, entry: &EntryValue) -> Vec<TextValue> {
+        let value: Option<Value> = self.safe.has_irregular().then(|| entry.into());
         let safe_roots = self.safe.irregular_pointers(value.as_ref());
-        let mut strings = Vec::new();
-        let mut pointer = String::new();
-        let mut deserializer = serde_json::Deserializer::from_str(json);
-        Collect {
-            pointer: &mut pointer,
-            out: &mut strings,
-        }
-        .deserialize(&mut deserializer)?;
-        Ok(strings
+        entry
+            .strings()
             .into_iter()
             .filter_map(|(pointer, text)| {
                 let key = normalize(&pointer);
                 if self.safe.covers(&pointer, &key, &safe_roots) {
                     return None;
                 }
-                Some(TextValue { pointer, text })
+                Some(TextValue {
+                    pointer,
+                    text: text.to_string(),
+                })
             })
-            .collect())
+            .collect()
     }
 }
 
@@ -489,116 +476,13 @@ fn parent_dir(path: &str) -> Option<String> {
         .map(String::from)
 }
 
-/// Walks a JSON document in its written order and records every
-/// string with its JSON Pointer. `serde_json::Value` sorts object
-/// keys, so the walk runs on the deserializer, whose map visitor
-/// receives keys in input order.
-struct Collect<'a> {
-    /// The pointer to the node being visited: one buffer for the whole
-    /// walk, extended by a segment on descent and truncated on return.
-    pointer: &'a mut String,
-    out: &'a mut Vec<(String, String)>,
-}
-
-impl<'de> DeserializeSeed<'de> for Collect<'_> {
-    type Value = ();
-
-    fn deserialize<D: de::Deserializer<'de>>(
-        self,
-        deserializer: D,
-    ) -> std::result::Result<(), D::Error> {
-        deserializer.deserialize_any(self)
-    }
-}
-
-impl<'de> Visitor<'de> for Collect<'_> {
-    type Value = ();
-
-    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.write_str("a JSON value")
-    }
-
-    fn visit_str<E: de::Error>(self, v: &str) -> std::result::Result<(), E> {
-        self.out.push((self.pointer.clone(), v.to_string()));
-        Ok(())
-    }
-
-    fn visit_string<E: de::Error>(self, v: String) -> std::result::Result<(), E> {
-        self.out.push((self.pointer.clone(), v));
-        Ok(())
-    }
-
-    fn visit_bool<E: de::Error>(self, _: bool) -> std::result::Result<(), E> {
-        Ok(())
-    }
-
-    fn visit_i64<E: de::Error>(self, _: i64) -> std::result::Result<(), E> {
-        Ok(())
-    }
-
-    fn visit_u64<E: de::Error>(self, _: u64) -> std::result::Result<(), E> {
-        Ok(())
-    }
-
-    fn visit_f64<E: de::Error>(self, _: f64) -> std::result::Result<(), E> {
-        Ok(())
-    }
-
-    fn visit_unit<E: de::Error>(self) -> std::result::Result<(), E> {
-        Ok(())
-    }
-
-    fn visit_none<E: de::Error>(self) -> std::result::Result<(), E> {
-        Ok(())
-    }
-
-    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> std::result::Result<(), A::Error> {
-        let len = self.pointer.len();
-        while let Some(key) = map.next_key::<String>()? {
-            self.pointer.push('/');
-            push_escaped(self.pointer, &key);
-            map.next_value_seed(Collect {
-                pointer: &mut *self.pointer,
-                out: &mut *self.out,
-            })?;
-            self.pointer.truncate(len);
-        }
-        Ok(())
-    }
-
-    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> std::result::Result<(), A::Error> {
-        use std::fmt::Write;
-        let len = self.pointer.len();
-        let mut index = 0usize;
-        loop {
-            write!(self.pointer, "/{index}").expect("writing to a String cannot fail");
-            let next = seq.next_element_seed(Collect {
-                pointer: &mut *self.pointer,
-                out: &mut *self.out,
-            })?;
-            self.pointer.truncate(len);
-            if next.is_none() {
-                return Ok(());
-            }
-            index += 1;
-        }
-    }
-}
-
-/// Append `key` to `pointer` as a JSON Pointer reference token.
-fn push_escaped(pointer: &mut String, key: &str) {
-    for c in key.chars() {
-        match c {
-            '~' => pointer.push_str("~0"),
-            '/' => pointer.push_str("~1"),
-            c => pointer.push(c),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn entry(line: &str) -> EntryValue {
+        serde_json::from_str(line).unwrap()
+    }
 
     fn descriptor() -> TextDescriptor {
         TextDescriptor::new(&[
@@ -615,7 +499,7 @@ mod tests {
     #[test]
     fn text_values_follow_document_order_and_the_descriptor() {
         let line = r#"{"zeta":"last key first","uuid":"u1","type":"assistant","message":{"content":[{"type":"text","text":"hi"},{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls"}}]},"toolUseResult":{"stdout":"out"},"alpha":"first key last"}"#;
-        let values = descriptor().text_values(line).unwrap();
+        let values = descriptor().text_values(&entry(line));
         let summary: Vec<(&str, &str)> = values
             .iter()
             .map(|v| (v.pointer.as_str(), v.text.as_str()))
@@ -639,7 +523,7 @@ mod tests {
     #[test]
     fn pointers_escape_member_names() {
         let line = r#"{"a/b":"x","c~d":"y","note":"11111111-2222-3333-4444-555555555555"}"#;
-        let values = descriptor().text_values(line).unwrap();
+        let values = descriptor().text_values(&entry(line));
         let pointers: Vec<&str> = values.iter().map(|v| v.pointer.as_str()).collect();
         assert_eq!(pointers, ["/a~1b", "/c~0d", "/note"]);
     }
@@ -655,11 +539,11 @@ mod tests {
             .with_typed(TypedSet::System, &[], &["$.scratch"], &[], &[], &[])
             .unwrap();
         let line = r#"{"scratch":"/tmp/claude/proj/s1/scratchpad"}"#;
-        let found = descriptor.typed_values(TypedSet::System, line).unwrap();
+        let found = descriptor.typed_values(TypedSet::System, &entry(line));
         assert_eq!(found.literals, ["/tmp/claude/proj/s1"]);
         for shallow in ["/tmp/s", "/", "scratchpad"] {
             let line = format!(r#"{{"scratch":"{shallow}"}}"#);
-            let found = descriptor.typed_values(TypedSet::System, &line).unwrap();
+            let found = descriptor.typed_values(TypedSet::System, &entry(&line));
             assert!(found.literals.is_empty(), "{shallow}: {found:?}");
         }
     }
@@ -681,11 +565,11 @@ mod tests {
             )
             .unwrap();
         let line = r#"{"cwd":"/","params":{"home_dir":"/HOME/"}}"#;
-        let found = descriptor.typed_values(TypedSet::System, line).unwrap();
+        let found = descriptor.typed_values(TypedSet::System, &entry(line));
         assert!(found.literals.is_empty(), "{found:?}");
         assert_eq!(found.values.len(), 1);
         let line = r#"{"cwd":"/home/garrett","params":{"home_dir":"/tmp/x"}}"#;
-        let found = descriptor.typed_values(TypedSet::System, line).unwrap();
+        let found = descriptor.typed_values(TypedSet::System, &entry(line));
         assert_eq!(found.literals, ["/home/garrett", "/tmp/x"]);
         let err = TextDescriptor::new(&[])
             .unwrap()
@@ -716,7 +600,7 @@ mod tests {
             )
             .unwrap();
         let line = r#"{"context":{"email":"The user is a@b.c"},"params":{"classifier":{"user_identity":"garrett"},"n":3},"n":{"user_identity":5}}"#;
-        let found = descriptor.typed_values(TypedSet::Pii, line).unwrap();
+        let found = descriptor.typed_values(TypedSet::Pii, &entry(line));
         assert_eq!(found.literals, ["garrett"]);
         assert_eq!(
             found.values,
@@ -726,13 +610,11 @@ mod tests {
             }]
         );
         // A value path selects a value of any type: an object and a number
-        let record = descriptor
-            .typed_values(TypedSet::HarnessRecord, line)
-            .unwrap();
+        let record = descriptor.typed_values(TypedSet::HarnessRecord, &entry(line));
         let pointers: Vec<&str> = record.values.iter().map(|v| v.pointer.as_str()).collect();
         assert_eq!(pointers, ["/n", "/params/n"]);
         assert_eq!(
-            descriptor.typed_values(TypedSet::System, line).unwrap(),
+            descriptor.typed_values(TypedSet::System, &entry(line)),
             TypedValues::default()
         );
         assert_eq!(
@@ -756,9 +638,7 @@ mod tests {
             )
             .unwrap();
         let line = r#"{"message":{"content":"<tag>drop me</tag> keep"}}"#;
-        let found = descriptor
-            .typed_values(TypedSet::HarnessRecord, line)
-            .unwrap();
+        let found = descriptor.typed_values(TypedSet::HarnessRecord, &entry(line));
         let hit = found.spans.first().expect("one span");
         assert_eq!(found.spans.len(), 1);
         assert_eq!(hit.pointer, "/message/content");
@@ -785,8 +665,7 @@ mod tests {
             .unwrap();
         let dropped = |line: &str| {
             descriptor
-                .typed_values(TypedSet::HarnessRecord, line)
-                .unwrap()
+                .typed_values(TypedSet::HarnessRecord, &entry(line))
                 .dropped
         };
         assert!(dropped(r#"{"type":"progress","data":{}}"#));
@@ -796,8 +675,7 @@ mod tests {
         assert!(!dropped(r#"{"type":"user","message":{"content":"hi"}}"#));
         assert!(
             !descriptor
-                .typed_values(TypedSet::Pii, r#"{"type":"progress"}"#)
-                .unwrap()
+                .typed_values(TypedSet::Pii, &entry(r#"{"type":"progress"}"#))
                 .dropped
         );
     }
@@ -814,8 +692,7 @@ mod tests {
         .unwrap();
         let line = r#"{"message":{"usage":{"service_tier":"standard","iterations":[{"type":"message"}]},"text":"hi"},"permissionDecision":{"decision":"accept"},"params":{"git_state":{"error":"pending","root":"/w"}}}"#;
         let pointers: Vec<String> = descriptor
-            .text_values(line)
-            .unwrap()
+            .text_values(&entry(line))
             .into_iter()
             .map(|v| v.pointer)
             .collect();

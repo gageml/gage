@@ -21,9 +21,9 @@ use datafusion::datasource::TableProvider;
 use serde::{Deserialize, Serialize};
 
 pub mod agent;
+pub mod codec;
 pub mod content_schema;
 pub mod filter;
-pub mod json_edit;
 pub mod status;
 pub mod system_col;
 pub mod text_block;
@@ -33,10 +33,10 @@ pub mod tool_use_file;
 pub use agent::{
     AgentEvent, AgentMcp, AgentSession, AgentSpec, SystemPrompt, ToolUseEntries, TurnResult,
 };
+pub use codec::{DecodedEntry, EntryCodec, EntryValue};
 pub use content_schema::{
     ContentField, ContentSchema, content_schema_batch, content_schema_schema,
 };
-pub use json_edit::{EditError, delete_values, edit_strings};
 pub use status::{AuthInfo, DriverStatus, Field, HarnessInfo, InstallInfo};
 pub use system_col::{SYSTEM_META_KEY, is_system, system};
 pub use text_block::{
@@ -158,20 +158,22 @@ pub trait Driver: Send + Sync {
         Vec::new()
     }
 
-    /// The driver's description of the strings it writes in
-    /// `content_format`: which fields are not text, and which fields
-    /// a named filter treats as sensitive by type, for the publish
-    /// redaction engine. The default is none,
-    /// for a driver whose sessions cannot be published.
-    /// The entry JSON that sets a stored session's title to `title`
-    /// when appended after its last line. `None` when the driver has no
+    /// The entry that sets a stored session's title to `title` when
+    /// appended after its last line. `None` when the driver has no
     /// such entry for `content_format`.
-    fn title_entry(&self, _content_format: &str, _title: &str) -> Option<String> {
+    fn title_entry(&self, _content_format: &str, _title: &str) -> Option<EntryValue> {
         None
     }
 
-    fn text_descriptor(&self, _content_format: &str) -> Option<TextDescriptor> {
-        None
+    /// The codec for `content_format`: how this driver decodes an
+    /// entry of that format from its native bytes and encodes one
+    /// back, and which of its strings are not text. The default is an
+    /// error, for a driver whose content cannot be decoded.
+    fn codec(&self, content_format: &str) -> Result<Arc<dyn EntryCodec>, DriverError> {
+        Err(DriverError::Other(format!(
+            "driver {:?} has no codec for content format {content_format:?}",
+            self.name()
+        )))
     }
 
     /// Start an agent on this driver's harness and return the handle
@@ -493,17 +495,17 @@ pub trait StoredSession {
     /// call-line order, each with the files it names. The core builds
     /// the `tool_use` and `tool_use_file` tables from the result.
     fn tool_uses(&mut self) -> Box<dyn Iterator<Item = Result<ToolUse, DriverError>> + '_>;
-    /// The native JSON text of each entry, in line order, for the
-    /// text-value walk: the same lines `entries` yields rows for, as
-    /// the harness wrote them, so the walk sees each entry's document
-    /// order.
-    fn entry_json(&mut self) -> Box<dyn Iterator<Item = Result<EntryJson, DriverError>> + '_>;
+    /// Each entry decoded through the session's codec, in line order:
+    /// the same lines `entries` yields rows for. An entry that does
+    /// not decode is an error, not a skipped line; a reader of the
+    /// decoded session reproduces it and cannot leave one out.
+    fn entry_values(&mut self) -> Box<dyn Iterator<Item = Result<DecodedEntry, DriverError>> + '_>;
     /// Write this session's content into `sink` with `derivation`
     /// applied: a dropped line is left out, a replaced line is written
-    /// as the given text, an appended entry is written after the last
-    /// line, and every other byte of every path is reproduced as
-    /// stored. Returns the line of each appended entry in the derived
-    /// content, in order.
+    /// as the given value encoded through the codec, an appended entry
+    /// is written after the last line, and every other byte of every
+    /// path is reproduced as stored. Returns the line of each appended
+    /// entry in the derived content, in order.
     fn write_derived(
         &mut self,
         derivation: &Derivation,
@@ -518,24 +520,14 @@ pub trait StoredSession {
 
 /// The changes a derived session makes to its original, by native
 /// line number.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Derivation {
     /// Lines left out of the derived content
     pub dropped: BTreeSet<u32>,
-    /// Lines written as the given entry JSON text instead of the
-    /// original
-    pub replaced: BTreeMap<u32, String>,
-    /// Entry JSON texts written after the last line, in order
-    pub appended: Vec<String>,
-}
-
-/// One entry of a stored session as the harness wrote it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EntryJson {
-    /// 1-based line in the session's native content
-    pub line: u32,
-    /// The entry's JSON text
-    pub json: String,
+    /// Lines written as the given entry instead of the original
+    pub replaced: BTreeMap<u32, EntryValue>,
+    /// Entries written after the last line, in order
+    pub appended: Vec<EntryValue>,
 }
 
 /// The attributes of a native session. An implementation decides how

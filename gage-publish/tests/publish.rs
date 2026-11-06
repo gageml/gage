@@ -249,6 +249,34 @@ async fn instances_of(publisher: &Publisher<'_>, id: &str, literal: &str) -> usi
     *counts.get(&index).unwrap()
 }
 
+/// A publish with no filters and no redactions reproduces the original
+/// byte for byte, keys in the order the harness wrote them. A text
+/// redaction changes only the lines that hold the literal, and each of
+/// those is the original line with the literal replaced and nothing
+/// else moved or reformatted.
+#[tokio::test]
+async fn a_publish_changes_only_the_bytes_it_redacts() {
+    let f = fixture();
+    let publisher = Publisher::with_root(&f.store, &f.publish_root, registry());
+    let id = stage(&publisher, &f.original, &[]).await;
+    assert_eq!(
+        fs::read_to_string(staged_file(&f.publish_root, &id)).unwrap(),
+        SESSION
+    );
+
+    edit(&publisher, &id, |d| {
+        d.push_redact("alice@example.com", "pii", "user:test", true);
+    })
+    .await;
+    let staged = staged_lines(&f.publish_root, &id);
+    let original: Vec<&str> = SESSION.lines().collect();
+    assert_eq!(staged.len(), original.len());
+    for (i, (got, want)) in staged.iter().zip(&original).enumerate() {
+        let expected = want.replace("alice@example.com", "[REDACTED]");
+        assert_eq!(got, &expected, "line {}", i + 1);
+    }
+}
+
 #[tokio::test]
 async fn init_runs_the_named_filters_and_records_their_instances() {
     let f = fixture();

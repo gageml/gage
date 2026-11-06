@@ -13,7 +13,7 @@ use std::time::UNIX_EPOCH;
 use crate::entry::{
     entry_attachment_blocks, entry_subtype, entry_to_text, message_subtype, split_ide_tags,
 };
-use crate::session_reader::SessionReader;
+use crate::session_reader::{ReadError, SessionReader};
 use arrow::array::{Int64Builder, StringBuilder, TimestampMillisecondBuilder};
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use arrow::record_batch::RecordBatch;
@@ -463,10 +463,26 @@ pub fn derive_session_from<R: std::io::Read>(
     let mut counted_responses: HashSet<String> = HashSet::new();
 
     for result in reader {
-        let (line_num, entry) = match result {
+        // The tables are a tolerant reading: a line that does not
+        // read or decode is reported and left out, and the rest of the
+        // session is still served.
+        let (line_num, decoded) = match result {
             Ok(pair) => pair,
-            Err(_) => continue,
+            Err(ReadError::Decode { line, error }) => {
+                tracing::warn!(
+                    session_id,
+                    line,
+                    "skipping line that does not decode: {error}"
+                );
+                continue;
+            }
+            Err(ReadError::Io(e)) => {
+                tracing::warn!(session_id, "skipping unreadable line: {e}");
+                continue;
+            }
         };
+        let raw = decoded.to_string();
+        let entry = serde_json::Value::from(decoded);
 
         let entry_type = entry.get("type").and_then(|v| v.as_str());
         attrs.line_count = u64::from(line_num);
@@ -542,7 +558,7 @@ pub fn derive_session_from<R: std::io::Read>(
             _ => {}
         }
 
-        if let Some(row) = derive_entry(session_id, line_num, &entry) {
+        if let Some(row) = derive_entry(session_id, line_num, &entry, raw) {
             b.push(session_id, &row);
         }
         tool_uses.push(line_num, &entry);
@@ -580,7 +596,13 @@ pub(crate) fn entry_timestamp_ms(entry: &serde_json::Value) -> Option<i64> {
 /// calls it per line without the session aggregates. `session_id`
 /// labels diagnostics only. A line without a `type` is not an entry
 /// and yields `None`, as an unparseable line yields no row.
-pub fn derive_entry(session_id: &str, line_num: u32, entry: &serde_json::Value) -> Option<Entry> {
+/// `raw` is the entry's text as the codec renders it, the `raw` column.
+pub fn derive_entry(
+    session_id: &str,
+    line_num: u32,
+    entry: &serde_json::Value,
+    raw: String,
+) -> Option<Entry> {
     let Some(entry_type) = entry.get("type").and_then(|v| v.as_str()) else {
         tracing::warn!(session_id, line = line_num, "entry without a type");
         return None;
@@ -646,7 +668,7 @@ pub fn derive_entry(session_id: &str, line_num: u32, entry: &serde_json::Value) 
         entry_type: entry_type.to_string(),
         subtype: entry_subtype(entry).map(String::from),
         timestamp_ms,
-        raw: Some(entry.to_string()),
+        raw: Some(raw),
         message,
     })
 }
