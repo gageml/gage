@@ -460,6 +460,7 @@ mod tests {
     use datafusion::arrow::datatypes::{DataType, Field, Schema};
     use datafusion::arrow::record_batch::RecordBatch;
     use datafusion::datasource::MemTable;
+    use gage_query::help::help_topics;
     use tempfile::TempDir;
 
     use super::*;
@@ -718,6 +719,23 @@ mod tests {
         assert_eq!(properties["cursor"]["type"], "string");
         assert_eq!(properties["page"]["type"], "integer");
         assert_eq!(properties["publish"]["type"], "boolean");
+    }
+
+    /// The help menu embedded in the description stays in sync with the
+    /// help table: the same topics, in order, with the same short lines.
+    #[test]
+    fn help_menu_matches_the_help_table() {
+        let meta = build_tool_meta(MD);
+        let body = meta.description.as_deref().expect("Query.md has a body");
+        let menu: Vec<(&str, &str)> = body
+            .lines()
+            .filter_map(|line| line.split_once(": "))
+            .filter(|(topic, _)| {
+                !topic.is_empty() && topic.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')
+            })
+            .collect();
+        let table: Vec<(&str, &str)> = help_topics().iter().map(|t| (t.topic, t.short)).collect();
+        assert_eq!(menu, table);
     }
 
     /// `publish` goes with `sql`: true selects the pending publishes,

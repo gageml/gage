@@ -31,7 +31,9 @@
 //! sessions to add to the store; none is a named table.
 //! `content_schema` is on every context too: each builtin driver's
 //! description of what it writes into `raw`, `input_raw`, and
-//! `result_raw`, per content format.
+//! `result_raw`, per content format. `help` is on every context as
+//! well: one row per usage-note topic that SQL introspection cannot
+//! supply, read with `SELECT full FROM help WHERE topic = '<topic>'`.
 //!
 //! Session tables carry [`system_cols`], the columns a program needs
 //! to render or address a row. A context includes them by default;
@@ -40,6 +42,7 @@
 
 mod age;
 mod blame;
+pub mod help;
 mod json;
 mod native;
 mod patch;
@@ -72,6 +75,7 @@ use gage_store::{
 
 use crate::age::age_udf;
 use crate::blame::{blame_fn, blame_schema, native_blame_fn};
+use crate::help::help_table;
 use crate::json::json_extract_udf;
 use crate::native::{NativeTable, NativeTableFn};
 use crate::patch::patch_lines_udf;
@@ -566,9 +570,9 @@ const NATIVE_TABLES: [NativeTable; 5] = [
 /// A context carrying the shared configuration --- the `RowCache`
 /// extension, the PostgreSQL SQL dialect, `information_schema`, the
 /// native table functions, the JSON functions, the `project_for_path`
-/// UDF, and the `content_schema` table --- with no store tables
-/// registered. Sources the functions open keep their derived state
-/// under `cache_root`, or the default root when it is `None`.
+/// UDF, and the `content_schema` and `help` tables --- with no store
+/// tables registered. Sources the functions open keep their derived
+/// state under `cache_root`, or the default root when it is `None`.
 pub(crate) fn new_context(
     skip_system_cols: bool,
     show_agents: bool,
@@ -608,6 +612,7 @@ pub(crate) fn new_context(
     ctx.register_udf(patch_lines_udf());
     ctx.register_table("content_schema", content_schema_table())
         .unwrap();
+    ctx.register_table("help", help_table()).unwrap();
     ctx
 }
 
@@ -646,6 +651,7 @@ mod tests {
     };
     use tempfile::TempDir;
 
+    use super::help::help_topics;
     use super::{ContextBuilder, ScanScope};
 
     /// A session directory named by `id` under `root`: `attrs.json`,
@@ -974,6 +980,19 @@ mod tests {
         .await;
         let parsed: serde_json::Value = serde_json::from_str(&schema[0]).unwrap();
         assert_eq!(parsed["type"], "object");
+    }
+
+    /// `help` is queryable on every context, one row per usage-note
+    /// topic, each with a non-empty short and full.
+    #[tokio::test]
+    async fn help_serves_one_row_per_topic() {
+        let ctx = ContextBuilder::new(None).build().await;
+        let topics = strings(&ctx, "SELECT topic FROM help ORDER BY topic").await;
+        let mut expected: Vec<String> = help_topics().iter().map(|t| t.topic.to_string()).collect();
+        expected.sort();
+        assert_eq!(topics, expected);
+        let empty = strings(&ctx, "SELECT topic FROM help WHERE full = '' OR short = ''").await;
+        assert!(empty.is_empty(), "{empty:?}");
     }
 
     /// `native_tool_use_file` lists one row per call per path it

@@ -27,51 +27,34 @@ are YAML pages naming their cursor and next page.
 
 Discover the schema through SQL. information_schema.tables lists the tables;
 information_schema.columns gives a table's columns and types;
-information_schema.routines lists the scalar and table functions by name. A
-function's result columns are read with DESCRIBE SELECT * FROM <func>(<args>),
-the only way to see the native functions' driver-dependent shape. The tables and
-their less obvious columns:
+information_schema.routines lists the scalar and table functions. A function's
+result columns come from DESCRIBE SELECT * FROM <func>(<args>).
 
-- session - `title` is the session's title; `summary` is the driver's JSON:
-  title, model, message_count, line_count, is_empty, token totals, and cost_usd
-  when reported; `origin` is the session's source URL
-- entry - one row per transcript line, `raw` its JSON
-- message - conversation text; `type` is user, assistant, or system
-- tool_use - one call with its result
-- tool_use_file (session_id, tool_use_id, path, type) - one row per call per
-  path it names; `type` is write (the record proves the write), read (the
-  record proves no write), or cite (a shell command names the path and the
-  record does not say)
-- session_change - changes a publish made to its original; `type` is line,
-  value, text, or title; `reason` is why (pii, secret, system, scope, ...);
-  `author` is who asked, as filter:<name>, user:<name>, or session:<id>
-- note - `name` is the note kind; note_doc (note_name, doc) says what each kind
-  holds; session_note (session_id, note_id, lines) cites a note's lines
-- issue, issue_event, issue_evidence (issue_id, note_id), session_issue
-- scan, scan_log (name is out, err, or records), scan_session, scan_note,
-  scan_issue, scan_task, scan_task_agent
-- dataset, dataset_session; attachment, attachment_file (path, size, text)
-- content_schema (content_format, name, schema) - each native content shape as a
-  JSON Schema; `name` is entry, tool_use_input, or tool_use_result
+The `help` table holds the usage notes introspection cannot: the table
+functions' call signatures, the column and table semantics, the full-text query
+syntax, and the dialect limits. Read a topic with
+`SELECT full FROM help WHERE topic = '<topic>'`. The topics:
 
-Functions, with their result columns read via DESCRIBE: issue_report('<id>')
-renders one issue as markdown; related_issue('<id>' [, min_score]) lists likely
-duplicates. blame('<file>' [, lines]) and native_blame('<source>', '<file>' [,
-lines]) give the session call that wrote each file line; lines is a number or
-'10-20,42'. message_text('<query>' [, snippet_len]) and
-native_message_text('<source>', '<query>' [, snippet_len]) search message text,
-best match first; `+a +b` requires both, `-a` excludes, "a b" is a phrase,
-`type:assistant` restricts; LIMIT caps the hits, default 100.
+native: session functions that read a source directly, for sessions not in the store
+message_text: full-text message search and its query syntax
+blame: the session call that wrote each line of a file
+json: reading raw, input_raw, result_raw, and content_schema
+summary: the summary JSON fields and token totals
+tool_use_file: the write, read, and cite file-touch rows
+notes: the note, session_note, and note_doc tables
+issues: issue_report, related_issue, and the issue tables
+scans: the scan cohort, task, agent, and log tables
+links: the commit-bearing link tables
+system_cols: the row-addressing system columns
+limitations: DataFusion dialect limits to plan around
+scopes: what a scan-scoped context restricts
 
-`raw`, `input_raw`, and `result_raw` are JSON text in the driver's native shape.
-Scope rows to one `content_format` (from `session`) before reading with
-json_extract(raw, '$.message.usage.output_tokens') or -> and ->>; CAST the text
-for arithmetic, never to json or jsonb.
-
-Native source functions read a driver source directly, including sessions not in
-the store: native_session, native_message, native_entry, native_tool_use, and
-native_tool_use_file, each taking '<source>': '' is the default source,
-'claude:' the default Claude Code source, 'claude:/path' a projects directory.
+The named tables are session, entry, message, tool_use, tool_use_file,
+session_change, note, note_doc, issue, issue_event, issue_evidence, scan and its
+link and log tables, dataset, attachment, and content_schema. session carries
+`title` and a `summary` JSON (model, counts, token totals, cost_usd), and
+`origin` the source URL; entry and message carry `raw`, tool_use carries
+`input_raw` and `result_raw`, each JSON in the driver's native shape.
 
 Read a session by `session_id` ordered by `line`, taking `substr(text, 1, 800)`
 over full `text` or `raw` on wide rows.
