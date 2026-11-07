@@ -8,7 +8,6 @@ description: |
   record holds the discussion, the model's thinking, and the edits that
   produced each line, and is consulted with the same instinct as git log
   and code comments.
-disable-model-invocation: false
 argument-hint: "FILE[:LINES] [question]"
 ---
 

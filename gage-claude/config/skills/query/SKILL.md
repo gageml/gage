@@ -2,7 +2,6 @@
 description:
   Instructions for using mcp__plugin_gage_gage__Query (SQL access to Claude code
   session content, Gage notes, and issues)
-disable-model-invocation: false
 user-invocable: false
 ---
 
