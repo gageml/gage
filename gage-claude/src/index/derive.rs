@@ -105,8 +105,17 @@ pub struct ClaudeSessionAttrs {
     #[serde(default)]
     pub project: String,
     pub title: Option<String>,
+    /// The model of the first assistant row the API produced, else the
+    /// model the first API request named. Claude Code writes the rows
+    /// it generates itself, such as API error text, with the model
+    /// `<synthetic>`; those never name the model.
     pub model: Option<String>,
     pub message_count: i64,
+    /// The token totals of the last `cost-state` record when the
+    /// session has one, else the sum over the assistant rows with each
+    /// API response counted once. A refused request leaves no assistant
+    /// row but is counted in `cost-state`, as are subagent runs and the
+    /// title model; the totals then match `cost_usd`.
     pub input_tokens: i64,
     pub output_tokens: i64,
     pub cache_read_input_tokens: i64,
@@ -461,6 +470,8 @@ pub fn derive_session_from<R: std::io::Read>(
     };
     let mut has_custom_title = false;
     let mut counted_responses: HashSet<String> = HashSet::new();
+    let mut requested_model: Option<String> = None;
+    let mut cost_state_usage: Option<TokenUsage> = None;
 
     for result in reader {
         // A line that does not read or decode fails the session. The
@@ -489,6 +500,7 @@ pub fn derive_session_from<R: std::io::Read>(
                         attrs.model = msg
                             .and_then(|m| m.get("model"))
                             .and_then(|m| m.as_str())
+                            .filter(|m| *m != SYNTHETIC_MODEL)
                             .map(String::from);
                     }
                     // One API response is written as one row per content
@@ -536,9 +548,20 @@ pub fn derive_session_from<R: std::io::Read>(
                     has_custom_title = true;
                 }
             }
+            "api-request" => {
+                if requested_model.is_none() {
+                    requested_model = entry
+                        .pointer("/params/model")
+                        .and_then(|m| m.as_str())
+                        .map(String::from);
+                }
+            }
             "cost-state" => {
                 if let Some(cost) = entry.get("totalCostUSD").and_then(|v| v.as_f64()) {
                     attrs.cost_usd = Some(cost);
+                }
+                if let Some(usage) = cost_state_token_usage(&entry) {
+                    cost_state_usage = Some(usage);
                 }
             }
             _ => {}
@@ -559,6 +582,15 @@ pub fn derive_session_from<R: std::io::Read>(
     }
     attrs.files.sort();
     attrs.files.dedup();
+    if attrs.model.is_none() {
+        attrs.model = requested_model;
+    }
+    if let Some(usage) = cost_state_usage {
+        attrs.input_tokens = usage.input;
+        attrs.output_tokens = usage.output;
+        attrs.cache_read_input_tokens = usage.cache_read;
+        attrs.cache_creation_input_tokens = usage.cache_creation;
+    }
 
     Ok(DerivedSession {
         session_id: session_id.to_string(),
@@ -568,6 +600,37 @@ pub fn derive_session_from<R: std::io::Read>(
         attrs,
         fingerprint,
     })
+}
+
+/// The model Claude Code writes on an assistant row it generated
+/// itself rather than received from the API
+const SYNTHETIC_MODEL: &str = "<synthetic>";
+
+struct TokenUsage {
+    input: i64,
+    output: i64,
+    cache_read: i64,
+    cache_creation: i64,
+}
+
+/// The token totals of a `cost-state` entry summed over its
+/// `modelUsage` map; `None` when the entry has no such map.
+fn cost_state_token_usage(entry: &serde_json::Value) -> Option<TokenUsage> {
+    let models = entry.get("modelUsage")?.as_object()?;
+    let mut usage = TokenUsage {
+        input: 0,
+        output: 0,
+        cache_read: 0,
+        cache_creation: 0,
+    };
+    for model in models.values() {
+        let count = |k| model.get(k).and_then(|v| v.as_i64()).unwrap_or(0);
+        usage.input += count("inputTokens");
+        usage.output += count("outputTokens");
+        usage.cache_read += count("cacheReadInputTokens");
+        usage.cache_creation += count("cacheCreationInputTokens");
+    }
+    Some(usage)
 }
 
 /// The entry's `timestamp` as epoch milliseconds; `None` when absent
@@ -780,6 +843,82 @@ mod tests {
         let no_cost = dir.path().join("t.jsonl");
         std::fs::write(&no_cost, format!("{}\n", lines[0])).unwrap();
         assert_eq!(derive_session("t", &no_cost).unwrap().attrs.cost_usd, None);
+    }
+
+    fn write_lines(dir: &Path, name: &str, lines: &[serde_json::Value]) -> PathBuf {
+        let path = dir.join(name);
+        let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
+        std::fs::write(&path, text).unwrap();
+        path
+    }
+
+    fn assistant_row(model: &str, id: &str) -> serde_json::Value {
+        json!({"type":"assistant","uuid":id,"message":{"id":id,"role":"assistant","model":model,
+               "content":[{"type":"text","text":"t"}]}})
+    }
+
+    /// A refused request leaves only a `<synthetic>` assistant row,
+    /// which never names the model; the request that was refused does.
+    #[test]
+    fn model_skips_synthetic_rows_and_falls_back_to_the_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let request = json!({"type":"api-request","sessionId":"s",
+                             "params":{"model":"claude-fable-5-1","max_tokens":1}});
+        let refused = write_lines(
+            dir.path(),
+            "refused.jsonl",
+            &[request.clone(), assistant_row("<synthetic>", "e1")],
+        );
+        let attrs = derive_session("s", &refused).unwrap().attrs;
+        assert_eq!(attrs.model.as_deref(), Some("claude-fable-5-1"));
+
+        let answered = write_lines(
+            dir.path(),
+            "answered.jsonl",
+            &[
+                request,
+                assistant_row("<synthetic>", "e1"),
+                assistant_row("claude-x", "m1"),
+            ],
+        );
+        let attrs = derive_session("s", &answered).unwrap().attrs;
+        assert_eq!(attrs.model.as_deref(), Some("claude-x"));
+
+        let no_request = write_lines(
+            dir.path(),
+            "none.jsonl",
+            &[assistant_row("<synthetic>", "e1")],
+        );
+        assert_eq!(derive_session("s", &no_request).unwrap().attrs.model, None);
+    }
+
+    /// The harness's `modelUsage` counts what the assistant rows cannot:
+    /// refused requests, subagent runs, and the title model. Its totals
+    /// replace the row sums so the tokens match `cost_usd`.
+    #[test]
+    fn token_totals_prefer_the_cost_state_model_usage() {
+        let dir = tempfile::tempdir().unwrap();
+        let usage = json!({"input_tokens":3,"output_tokens":10,
+                           "cache_read_input_tokens":100,"cache_creation_input_tokens":7});
+        let path = write_lines(
+            dir.path(),
+            "s.jsonl",
+            &[
+                json!({"type":"assistant","uuid":"a1","message":{"id":"msg_1","role":"assistant",
+                       "content":[{"type":"text","text":"one"}],"usage":usage}}),
+                json!({"type":"cost-state","sessionId":"s","totalCostUSD":0.1,"modelUsage":{
+                    "claude-fable-5-1":{"inputTokens":4,"outputTokens":0,
+                        "cacheReadInputTokens":29123,"cacheCreationInputTokens":45882},
+                    "claude-opus-4-7":{"inputTokens":1199,"outputTokens":19,
+                        "cacheReadInputTokens":0,"cacheCreationInputTokens":0}}}),
+            ],
+        );
+        let attrs = derive_session("s", &path).unwrap().attrs;
+        assert_eq!(attrs.input_tokens, 1203);
+        assert_eq!(attrs.output_tokens, 19);
+        assert_eq!(attrs.cache_read_input_tokens, 29123);
+        assert_eq!(attrs.cache_creation_input_tokens, 45882);
+        assert_eq!(attrs.cost_usd, Some(0.1));
     }
 
     fn system_entry(subtype: &str, extra: serde_json::Value) -> serde_json::Value {

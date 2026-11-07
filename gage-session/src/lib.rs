@@ -553,7 +553,10 @@ pub trait SessionAttrs {
     /// Every prompt token the session sent, cached or not, summed
     /// over its API responses with each response counted once. A
     /// harness that reports cached tokens apart from input adds them
-    /// here. The default is that the driver does not report usage.
+    /// here. When the harness reports its own total, the driver takes
+    /// it, and the total covers what `cost_usd` covers, subagent runs
+    /// and refused requests included. The default is that the driver
+    /// does not report usage.
     fn input_tokens(&self) -> Option<u64> {
         None
     }

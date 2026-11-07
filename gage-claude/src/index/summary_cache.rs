@@ -22,7 +22,7 @@ use super::derive::ClaudeSessionAttrs;
 /// schema or semantic change to `ClaudeSessionAttrs` (new field,
 /// changed title heuristic, fixed token accounting, ...). A directory
 /// whose manifest records another version is discarded and rebuilt.
-pub const VERSION: u32 = 8;
+pub const VERSION: u32 = 9;
 
 /// The manifest file beside the session files
 pub(crate) const MANIFEST_FILE: &str = "manifest.json";
