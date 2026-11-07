@@ -20,6 +20,8 @@ mod tool_use;
 
 use std::fmt;
 
+use crate::session_reader::ReadError;
+
 pub use derive::{
     COL_ATTACHMENTS, COL_IDE_TAGS, COL_LINE, COL_MESSAGE_SUBTYPE, COL_RAW, COL_SESSION_ID,
     COL_SUBTYPE, COL_TEXT, COL_TIMESTAMP, COL_TYPE, COL_UUID, ClaudeSessionAttrs, DerivedSession,
@@ -36,6 +38,10 @@ pub enum IndexError {
     Arrow(arrow::error::ArrowError),
     Json(serde_json::Error),
     Text(gage_index::Error),
+    /// A transcript line that does not read or decode. The session is
+    /// not derived: a line in a shape the codec does not recognize is
+    /// a session the build knows nothing about.
+    Read(ReadError),
 }
 
 impl fmt::Display for IndexError {
@@ -45,6 +51,7 @@ impl fmt::Display for IndexError {
             IndexError::Arrow(e) => write!(f, "arrow error: {e}"),
             IndexError::Json(e) => write!(f, "json error: {e}"),
             IndexError::Text(e) => write!(f, "{e}"),
+            IndexError::Read(e) => write!(f, "{e}"),
         }
     }
 }
@@ -72,6 +79,12 @@ impl From<serde_json::Error> for IndexError {
 impl From<gage_index::Error> for IndexError {
     fn from(e: gage_index::Error) -> Self {
         IndexError::Text(e)
+    }
+}
+
+impl From<ReadError> for IndexError {
+    fn from(e: ReadError) -> Self {
+        IndexError::Read(e)
     }
 }
 

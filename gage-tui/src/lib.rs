@@ -6,6 +6,7 @@ mod doc;
 mod format;
 mod hint;
 mod input;
+mod invalid_entry;
 mod item_table;
 mod json;
 mod markdown;

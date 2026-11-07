@@ -13,7 +13,7 @@ use std::time::UNIX_EPOCH;
 use crate::entry::{
     entry_attachment_blocks, entry_subtype, entry_to_text, message_subtype, split_ide_tags,
 };
-use crate::session_reader::{ReadError, SessionReader};
+use crate::session_reader::SessionReader;
 use arrow::array::{Int64Builder, StringBuilder, TimestampMillisecondBuilder};
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use arrow::record_batch::RecordBatch;
@@ -463,24 +463,10 @@ pub fn derive_session_from<R: std::io::Read>(
     let mut counted_responses: HashSet<String> = HashSet::new();
 
     for result in reader {
-        // The tables are a tolerant reading: a line that does not
-        // read or decode is reported and left out, and the rest of the
-        // session is still served.
-        let (line_num, decoded) = match result {
-            Ok(pair) => pair,
-            Err(ReadError::Decode { line, error }) => {
-                tracing::warn!(
-                    session_id,
-                    line,
-                    "skipping line that does not decode: {error}"
-                );
-                continue;
-            }
-            Err(ReadError::Io(e)) => {
-                tracing::warn!(session_id, "skipping unreadable line: {e}");
-                continue;
-            }
-        };
+        // A line that does not read or decode fails the session. The
+        // codec stands in for the corruption it recognizes with an
+        // invalid entry, which derives a row like any other line.
+        let (line_num, decoded) = result?;
         let raw = decoded.to_string();
         let entry = serde_json::Value::from(decoded);
 
@@ -900,5 +886,61 @@ mod tests {
         assert!(text.contains("formatted: 529 Overloaded"), "{text}");
         assert!(text.contains("retryAttempt: 1"), "{text}");
         assert!(text.contains("maxRetries: 10"), "{text}");
+    }
+
+    /// A torn line, one entry cut short with the next entry's bytes
+    /// on the same line, is a row of the invalid entry type whose raw
+    /// column holds the line; the lines around it derive as usual.
+    #[test]
+    fn a_torn_line_is_a_row_of_the_invalid_entry_type() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        let torn = r#"{"type":"user","uuid":"u2","message":{"role":"user","content":"Exit co{"type":"last-prompt","lastPrompt":"go"}"#;
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n{torn}\n{}\n",
+                json!({"type":"user","uuid":"u1","timestamp":"2025-01-01T00:00:05Z",
+                       "message":{"role":"user","content":"go"}}),
+                json!({"type":"summary","summary":"s","leafUuid":"u1"}),
+            ),
+        )
+        .unwrap();
+        let derived = derive_session("s", &path).unwrap();
+        assert_eq!(derived.batch.num_rows(), 3);
+        assert_eq!(derived.attrs.line_count, 3);
+        let column = |col: usize| {
+            derived
+                .batch
+                .column(col)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap()
+                .value(1)
+                .to_string()
+        };
+        assert_eq!(column(COL_TYPE), "$gage-invalid-entry");
+        let raw: serde_json::Value = serde_json::from_str(&column(COL_RAW)).unwrap();
+        assert_eq!(raw["raw"], torn);
+        assert!(
+            raw["error"]
+                .as_str()
+                .is_some_and(|e| e.contains("expected")),
+            "{raw}"
+        );
+    }
+
+    /// A line the codec does not recognize fails the derivation, and
+    /// the error names the line.
+    #[test]
+    fn a_line_the_codec_does_not_recognize_fails_the_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        std::fs::write(&path, "{\"type\":\"summary\"}\nnot an entry\n").unwrap();
+        let err = match derive_session("s", &path) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("a line the codec does not recognize was derived"),
+        };
+        assert!(err.starts_with("line 2: "), "{err}");
     }
 }

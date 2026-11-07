@@ -33,7 +33,7 @@ pub mod tool_use_file;
 pub use agent::{
     AgentEvent, AgentMcp, AgentSession, AgentSpec, SystemPrompt, ToolUseEntries, TurnResult,
 };
-pub use codec::{DecodedEntry, EntryCodec, EntryValue};
+pub use codec::{DecodedEntry, EntryCodec, EntryValue, INVALID_ENTRY_TYPE};
 pub use content_schema::{
     ContentField, ContentSchema, content_schema_batch, content_schema_schema,
 };

@@ -52,15 +52,8 @@ pub fn compute_session_stats(path: &Path) -> io::Result<SessionStats> {
     let mut max_turn: usize = 0;
 
     for item in reader {
-        // Stats are a tolerant reading; a line that does not decode
-        // is left out of the counts.
-        let entry = match item {
-            Ok((_, decoded)) => Value::from(decoded),
-            Err(e) => {
-                tracing::warn!(path = %path.display(), "skipping line: {e}");
-                continue;
-            }
-        };
+        let (_, decoded) = item?;
+        let entry = Value::from(decoded);
 
         // Every row of one API response repeats its usage; the first row
         // opens a new turn, and a row without a message id is its own

@@ -22,7 +22,9 @@ pub struct SessionReader<R: Read = File> {
 #[derive(Debug)]
 pub enum ReadError {
     Io(io::Error),
-    /// A non-blank line the codec did not decode
+    /// A non-blank line the codec did not decode. The codec stands in
+    /// for the corruption it recognizes, so this is a line in a shape
+    /// the build knows nothing about, and a reader fails the session.
     Decode {
         line: u32,
         error: DriverError,
@@ -45,6 +47,15 @@ impl From<ReadError> for DriverError {
         match e {
             ReadError::Io(e) => DriverError::Io(e),
             ReadError::Decode { .. } => DriverError::Other(e.to_string()),
+        }
+    }
+}
+
+impl From<ReadError> for io::Error {
+    fn from(e: ReadError) -> Self {
+        match e {
+            ReadError::Io(e) => e,
+            ReadError::Decode { .. } => io::Error::new(io::ErrorKind::InvalidData, e.to_string()),
         }
     }
 }

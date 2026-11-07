@@ -20,6 +20,14 @@ use crate::text_block::TextDescriptor;
 /// `deserialize_any` when its `arbitrary_precision` feature is on.
 const NUMBER_TOKEN: &str = "$serde_json::private::Number";
 
+/// The `type` of the entry a codec stands in for one native entry it
+/// cannot decode: `{"type":"$gage-invalid-entry","error":..,"raw":..}`.
+/// The entry keeps the native line's place in the sequence, `raw` is
+/// the line's text, and `encode` writes `raw` back unchanged. A codec
+/// returns it only for a corruption it recognizes; any other input it
+/// cannot decode is an error.
+pub const INVALID_ENTRY_TYPE: &str = "$gage-invalid-entry";
+
 /// A session entry as its codec decodes it, with object keys in
 /// document order.
 #[derive(Debug, Clone, PartialEq)]
@@ -44,9 +52,13 @@ pub struct DecodedEntry {
 /// describes the strings it writes. A driver returns one per content
 /// format it reads.
 pub trait EntryCodec: Send + Sync {
-    /// The native bytes of one entry as a value.
+    /// The native bytes of one entry as a value. Bytes in a corrupt
+    /// state the codec recognizes decode to an [`INVALID_ENTRY_TYPE`]
+    /// entry holding them; bytes it cannot decode otherwise are an
+    /// error, and a session holding such bytes is not read.
     fn decode(&self, raw: &[u8]) -> Result<EntryValue, DriverError>;
-    /// The native bytes of `value`.
+    /// The native bytes of `value`; the `raw` text of an
+    /// [`INVALID_ENTRY_TYPE`] entry.
     fn encode(&self, value: &EntryValue) -> Result<Vec<u8>, DriverError>;
     /// Which strings of this format are not text, and which a typed
     /// set selects.
@@ -54,6 +66,26 @@ pub trait EntryCodec: Send + Sync {
 }
 
 impl EntryValue {
+    /// The entry that stands in for a native entry that does not
+    /// decode: `error` says why, `raw` is its text.
+    pub fn invalid_entry(error: &str, raw: &str) -> EntryValue {
+        let mut map = IndexMap::new();
+        map.insert(
+            "type".to_string(),
+            EntryValue::String(INVALID_ENTRY_TYPE.into()),
+        );
+        map.insert("error".to_string(), EntryValue::String(error.into()));
+        map.insert("raw".to_string(), EntryValue::String(raw.into()));
+        EntryValue::Object(map)
+    }
+
+    /// The `raw` text of an [`INVALID_ENTRY_TYPE`] entry; `None` for
+    /// any other entry.
+    pub fn invalid_entry_raw(&self) -> Option<&str> {
+        let is_invalid = self.get("type").and_then(EntryValue::as_str) == Some(INVALID_ENTRY_TYPE);
+        is_invalid.then(|| self.get("raw").and_then(EntryValue::as_str))?
+    }
+
     /// The member `key` of an object; `None` for another kind of value.
     pub fn get(&self, key: &str) -> Option<&EntryValue> {
         match self {
@@ -495,5 +527,25 @@ mod tests {
     fn the_private_number_token_decodes_as_a_number() {
         let v = decode(&format!(r#"{{"{NUMBER_TOKEN}":"42"}}"#));
         assert_eq!(v, EntryValue::Number(42.into()));
+    }
+
+    /// An invalid entry is the fixed three-key shape, and only an
+    /// entry of that type yields its raw text.
+    #[test]
+    fn an_invalid_entry_carries_its_raw_text() {
+        let v = EntryValue::invalid_entry("expected `,`", r#"{"type":"user","a{"b":1}"#);
+        assert_eq!(
+            v.to_string(),
+            r#"{"type":"$gage-invalid-entry","error":"expected `,`","raw":"{\"type\":\"user\",\"a{\"b\":1}"}"#
+        );
+        assert_eq!(v.invalid_entry_raw(), Some(r#"{"type":"user","a{"b":1}"#));
+        assert_eq!(
+            decode(r#"{"type":"user","raw":"x"}"#).invalid_entry_raw(),
+            None
+        );
+        assert_eq!(
+            decode(r#"{"type":"$gage-invalid-entry"}"#).invalid_entry_raw(),
+            None
+        );
     }
 }

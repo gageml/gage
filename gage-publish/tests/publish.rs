@@ -277,6 +277,35 @@ async fn a_publish_changes_only_the_bytes_it_redacts() {
     }
 }
 
+/// A session with a torn line publishes: the staged file is the
+/// original byte for byte, and a redaction of text inside the torn
+/// line changes that line alone, as the raw text with the literal
+/// replaced.
+#[tokio::test]
+async fn a_torn_line_publishes_byte_for_byte_and_redacts_in_place() {
+    let torn = r#"{"type":"user","uuid":"u9","message":{"role":"user","content":"mail alice@example.com{"type":"last-prompt","lastPrompt":"go"}"#;
+    let session = format!("{SESSION}{torn}\n");
+    let f = fixture_with(&session);
+    let publisher = Publisher::with_root(&f.store, &f.publish_root, registry());
+    let id = stage(&publisher, &f.original, &[]).await;
+    assert_eq!(
+        fs::read_to_string(staged_file(&f.publish_root, &id)).unwrap(),
+        session
+    );
+
+    edit(&publisher, &id, |d| {
+        d.push_redact("alice@example.com", "pii", "user:test", true);
+    })
+    .await;
+    let staged = staged_lines(&f.publish_root, &id);
+    let original: Vec<&str> = session.lines().collect();
+    assert_eq!(staged.len(), original.len());
+    for (i, (got, want)) in staged.iter().zip(&original).enumerate() {
+        let expected = want.replace("alice@example.com", "[REDACTED]");
+        assert_eq!(got, &expected, "line {}", i + 1);
+    }
+}
+
 #[tokio::test]
 async fn init_runs_the_named_filters_and_records_their_instances() {
     let f = fixture();

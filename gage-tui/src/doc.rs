@@ -5,6 +5,7 @@
 //! plus a `yaml()` serializer. The two follow the same pattern so the body
 //! pane renders them through the same highlighter path.
 
+use gage_session::INVALID_ENTRY_TYPE;
 use gage_store::{ChangeKind, NoteValue};
 use serde_json::Value;
 
@@ -273,6 +274,17 @@ pub enum EntryBody {
     ToolResults(Vec<ToolUse>),
     /// The content the harness injected beside a turn
     Attachment(Attachment),
+    /// A native line the driver's codec could not decode, as the
+    /// codec stands in for it
+    InvalidEntry(InvalidEntry),
+}
+
+/// The entry the codec writes in place of a native line it could not
+/// decode: why, and the line's text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InvalidEntry {
+    pub error: String,
+    pub raw: String,
 }
 
 /// An attachment entry as the viewer shows it, read from the entry's
@@ -316,6 +328,9 @@ impl Document {
         if entry.entry_type == "attachment" {
             return Some(EntryBody::Attachment(attachment_body(&entry.value)));
         }
+        if entry.entry_type == INVALID_ENTRY_TYPE {
+            return Some(EntryBody::InvalidEntry(invalid_entry_body(&entry.value)));
+        }
         match entry.message_subtype.as_deref() {
             Some("tool_use") => {
                 let calls: Vec<ToolUse> = self
@@ -337,6 +352,22 @@ impl Document {
             }
             _ => entry.message_text.clone().map(EntryBody::Text),
         }
+    }
+}
+
+/// The error and raw text of an invalid entry row; each is empty when
+/// the row lacks it.
+fn invalid_entry_body(value: &Value) -> InvalidEntry {
+    let field = |key: &str| {
+        value
+            .get(key)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    InvalidEntry {
+        error: field("error"),
+        raw: field("raw"),
     }
 }
 
@@ -515,6 +546,30 @@ mod tests {
         doc.entries[0].entry_type = "attachment".to_string();
         doc.entries[0].value = value;
         doc
+    }
+
+    /// An invalid entry row's body is the codec's error and the raw
+    /// line.
+    #[test]
+    fn an_invalid_entry_row_shows_its_error_and_raw_line() {
+        let mut doc = derived();
+        doc.entries[0].entry_type = INVALID_ENTRY_TYPE.to_string();
+        doc.entries[0].value = json!({
+            "type": INVALID_ENTRY_TYPE,
+            "error": "expected `,` or `}` at line 1 column 30",
+            "raw": "{\"type\":\"user\",\"x\":\"cu{\"type\":\"c\"}",
+        });
+        let body = match doc.entry_body(0) {
+            Some(EntryBody::InvalidEntry(body)) => body,
+            _ => panic!("an invalid entry row has an invalid entry body"),
+        };
+        assert_eq!(
+            body,
+            InvalidEntry {
+                error: "expected `,` or `}` at line 1 column 30".to_string(),
+                raw: "{\"type\":\"user\",\"x\":\"cu{\"type\":\"c\"}".to_string(),
+            }
+        );
     }
 
     fn attachment(doc: &Document) -> Attachment {

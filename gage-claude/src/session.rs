@@ -522,6 +522,31 @@ mod tests {
         assert!(!dest_dir.join("abc.jsonl.tmp").exists());
     }
 
+    /// A torn line moves byte for byte; only the line with a `cwd`
+    /// string changes.
+    #[test]
+    fn move_session_copies_a_torn_line_byte_for_byte() {
+        let tmp = TempDir::new().unwrap();
+        let src_dir = tmp.path().join("src");
+        let dest_dir = tmp.path().join("dest");
+        fs::create_dir_all(&src_dir).unwrap();
+        let path = src_dir.join("abc.jsonl");
+        let torn = "{\"type\":\"user\",\"cwd\":\"/old\",\"message\":\"cu{\"type\":\"last-prompt\"}";
+        fs::write(
+            &path,
+            format!("{{\"type\":\"user\",\"cwd\":\"/old\"}}\n{torn}\n"),
+        )
+        .unwrap();
+
+        move_session(&path, &dest_dir, Path::new("/new")).unwrap();
+
+        let moved = fs::read_to_string(dest_dir.join("abc.jsonl")).unwrap();
+        assert_eq!(
+            moved,
+            format!("{{\"type\":\"user\",\"cwd\":\"/new\"}}\n{torn}\n")
+        );
+    }
+
     #[test]
     fn move_session_rejects_malformed_line_and_keeps_source() {
         let tmp = TempDir::new().unwrap();

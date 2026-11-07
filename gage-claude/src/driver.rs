@@ -44,7 +44,7 @@ use crate::session::{
     SESSION_RE, SessionInfo, delete_session, encode_project_dir, is_agent_tmp_slug, move_session,
     projects_dir,
 };
-use crate::session_reader::{ReadError, SessionReader};
+use crate::session_reader::SessionReader;
 use crate::skill::skill_command;
 use crate::tables::{EntryTable, MessageTable, SessionTable, ToolUseFileTable, ToolUseTable};
 
@@ -171,6 +171,7 @@ impl Driver for ClaudeDriver {
         // it; a session is re-added over time, so that content can join
         // later at no duplication cost (git shares identical blobs).
         let session_path = claude.session_path().to_path_buf();
+        check_decodes(&session_path)?;
         copy_file_into_sink(&session_path, "session.jsonl", sink)?;
         Ok(CONTENT_FORMAT.to_string())
     }
@@ -900,6 +901,16 @@ fn load_projects(root: &Path) -> io::Result<HashMap<String, PathBuf>> {
         .collect())
 }
 
+/// Every line of the transcript at `path` reads and decodes. A file
+/// with a line the codec does not recognize never enters a store,
+/// whatever the summary cache holds for it.
+fn check_decodes(path: &Path) -> Result<(), DriverError> {
+    for item in SessionReader::open(path)? {
+        item.map_err(|e| DriverError::Other(format!("{}: {e}", path.display())))?;
+    }
+    Ok(())
+}
+
 fn copy_file_into_sink(
     src: &Path,
     dest_key: &str,
@@ -1178,29 +1189,23 @@ impl StoredSession for ClaudeStoredSession {
     }
 
     /// One normalized row per parsed line of `session.jsonl`, through
-    /// the same derivation the native tables use. Blank lines,
-    /// unparseable lines, and lines without a type consume a line
-    /// number and yield no row, as they do for a native session.
+    /// the same derivation the native tables use. Blank lines and
+    /// lines without a type consume a line number and yield no row,
+    /// as they do for a native session; a line that does not read or
+    /// decode is an error naming the line.
     fn entries(&mut self) -> Box<dyn Iterator<Item = Result<Entry, DriverError>> + '_> {
         let reader = match self.source.open("session.jsonl") {
             Ok(r) => SessionReader::new(r),
             Err(e) => return Box::new(std::iter::once(Err(DriverError::Io(e)))),
         };
         let native_id = self.native_id.clone();
-        // Read failures pass through; a line that does not decode is
-        // reported and left out, as it is for a native session, and a
-        // typeless line yields no row
         Box::new(reader.filter_map(move |item| match item {
             Ok((line_num, decoded)) => {
                 let raw = decoded.to_string();
                 let value = serde_json::Value::from(decoded);
                 derive_entry(&native_id, line_num, &value, raw).map(Ok)
             }
-            Err(ReadError::Decode { line, error }) => {
-                tracing::warn!(session_id = %native_id, line, "skipping line that does not decode: {error}");
-                None
-            }
-            Err(ReadError::Io(e)) => Some(Err(DriverError::Io(e))),
+            Err(e) => Some(Err(DriverError::from(e))),
         }))
     }
 
@@ -1220,10 +1225,7 @@ impl StoredSession for ClaudeStoredSession {
                 Ok((line_num, decoded)) => {
                     collector.push(line_num, &serde_json::Value::from(decoded));
                 }
-                Err(ReadError::Decode { line, error }) => {
-                    tracing::warn!(session_id = %self.native_id, line, "skipping line that does not decode: {error}");
-                }
-                Err(ReadError::Io(e)) => failures.push(Err(DriverError::Io(e))),
+                Err(e) => failures.push(Err(DriverError::from(e))),
             }
         }
         Box::new(collector.finish().into_iter().map(Ok).chain(failures))
@@ -1801,6 +1803,64 @@ mod tests {
             format!("{{\"type\":\"a\"}}\n{{\"type\":\"c2\"}}\n{title}\n")
         );
         assert_eq!(sink.0["other.txt"], b"as stored");
+    }
+
+    /// A torn line in a stored session is copied byte for byte by a
+    /// derived write that leaves it alone, and `entry_values` yields
+    /// it as an invalid entry at its line.
+    #[test]
+    fn write_derived_copies_a_torn_line_byte_for_byte() {
+        let driver = ClaudeDriver::new();
+        let text =
+            "{\"type\":\"a\"}\n{\"type\":\"b\",\"x\":\"cu{\"type\":\"c\"}\n{\"type\":\"d\"}\n";
+        let mut stored = driver
+            .read_stored("s1".into(), CONTENT_FORMAT, Box::new(Transcript(text)))
+            .unwrap();
+        let types: Vec<(u32, String)> = stored
+            .entry_values()
+            .map(|r| r.unwrap())
+            .map(|e| {
+                (
+                    e.line,
+                    e.value.get("type").unwrap().as_str().unwrap().to_string(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            types,
+            [
+                (1, "a".into()),
+                (2, "$gage-invalid-entry".into()),
+                (3, "d".into())
+            ]
+        );
+        let mut sink = MemorySink::default();
+        stored
+            .write_derived(&Derivation::default(), &mut sink)
+            .unwrap();
+        assert_eq!(
+            String::from_utf8(sink.0["session.jsonl"].clone()).unwrap(),
+            text
+        );
+    }
+
+    /// The admission check passes a transcript with a torn line and
+    /// refuses one with a line the codec does not recognize, naming
+    /// the file and the line.
+    #[test]
+    fn check_decodes_admits_a_torn_line_and_refuses_an_unrecognized_one() {
+        let tmp = TempDir::new().unwrap();
+        let torn = tmp.path().join("torn.jsonl");
+        fs::write(
+            &torn,
+            "{\"type\":\"a\"}\n{\"type\":\"b\",\"x\":\"cu{\"type\":\"c\"}\n",
+        )
+        .unwrap();
+        check_decodes(&torn).unwrap();
+        let prose = tmp.path().join("prose.jsonl");
+        fs::write(&prose, "{\"type\":\"a\"}\n\nhello\n").unwrap();
+        let err = check_decodes(&prose).unwrap_err().to_string();
+        assert!(err.contains("prose.jsonl: line 3: "), "{err}");
     }
 
     #[test]

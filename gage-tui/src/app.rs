@@ -12,6 +12,7 @@ use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use gage_session::INVALID_ENTRY_TYPE;
 use gage_store::{ChangeKind, NoteValue};
 use ratatui::DefaultTerminal;
 use ratatui::Frame;
@@ -35,7 +36,7 @@ use crate::outline::{CollapseOutcome, Outline, RowKind};
 use crate::picker::{self, PickColumn, PickItem, Picker, PickerAction};
 use crate::session::{self, Backend};
 use crate::textarea::TextArea;
-use crate::{attachment, json, markdown, styles, tool};
+use crate::{attachment, invalid_entry, json, markdown, styles, tool};
 
 pub async fn run(
     terminal: &mut DefaultTerminal,
@@ -1264,9 +1265,10 @@ fn entry_hidden(doc: &Document, view: &ViewOptions) -> Vec<bool> {
 /// Whether an entry's outline label is admitted by the membership options.
 /// `all_entries` admits every label; otherwise the three message groups
 /// select their labels and everything else (meta, summary, system, and
-/// bookkeeping types) stays hidden.
+/// bookkeeping types) stays hidden. An invalid entry is always shown:
+/// it marks a native line the codec could not decode.
 fn entry_visible(label: &str, view: &ViewOptions) -> bool {
-    if view.all_entries {
+    if view.all_entries || label == INVALID_ENTRY_TYPE {
         return true;
     }
     match label {
@@ -1934,6 +1936,7 @@ fn draw_entry(frame: &mut Frame, state: &mut AppState, entry: &EntrySnap, area: 
             EntryBody::ToolCalls(calls) => tool::calls(calls),
             EntryBody::ToolResults(results) => tool::results(results),
             EntryBody::Attachment(attachment) => attachment::body(attachment),
+            EntryBody::InvalidEntry(invalid) => invalid_entry::body(invalid),
         };
         let panel = Paragraph::new(lines)
             .wrap(Wrap { trim: false })
