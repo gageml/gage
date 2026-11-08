@@ -19,7 +19,7 @@ use datafusion::arrow::array::{
     Array, Int64Array, ListArray, StringArray, TimestampMillisecondArray,
 };
 use gage_core::config::Config;
-use gage_core::path::shorten_home;
+use gage_core::path::{shorten_home, shorten_path_middle};
 use gage_core::uuid::short_uuid;
 use gage_query::ContextBuilder;
 use gage_registry::scanner::ScannerRegistry;
@@ -29,6 +29,7 @@ use gage_store::{
 };
 use tabled::{
     Table,
+    grid::{config::Position, records::RecordsMut},
     settings::{
         Alignment, Color, Style,
         object::{Columns, Object, Rows},
@@ -434,6 +435,8 @@ pub async fn list(args: AttachmentListArgs) -> Result<(), CliError> {
         .map(|s| s.to_string())
         .collect();
     let mut rows: Vec<Vec<String>> = Vec::new();
+    // The whole root of each row, for the refit after the width pass
+    let mut roots: Vec<String> = Vec::new();
     for batch in &batches {
         let ids = column::<StringArray>(batch, 0);
         let prefixes = column::<StringArray>(batch, 1);
@@ -441,33 +444,69 @@ pub async fn list(args: AttachmentListArgs) -> Result<(), CliError> {
         let targets = column::<ListArray>(batch, 3);
         let files = column::<Int64Array>(batch, 4);
         let sizes = column::<Int64Array>(batch, 5);
-        let roots = column::<StringArray>(batch, 6);
+        let root_col = column::<StringArray>(batch, 6);
         let modifieds = column::<TimestampMillisecondArray>(batch, 7);
         for i in 0..batch.num_rows() {
             let id = ids.value(i);
             let shown = if args.full_id { id } else { short_uuid(id) };
             let name = if names.is_null(i) { "" } else { names.value(i) };
+            let root = shorten_home(Path::new(root_col.value(i)));
             rows.push(vec![
                 styled_id(shown, prefixes.value(i), IdKind::Gage),
                 name.to_string(),
                 targets_cell(&targets.value(i)),
                 files.value(i).to_string(),
                 format_size(sizes.value(i)),
-                shorten_home(Path::new(roots.value(i))),
+                root.clone(),
                 format_elapsed_ms(modifieds.value(i)),
             ]);
+            roots.push(root);
         }
     }
     let shown = rows.len();
-    let table = Table::from_iter(std::iter::once(header).chain(rows))
+    let mut table = Table::from_iter(std::iter::once(header).chain(rows));
+    table
         .with(Style::rounded())
         .modify(Rows::first(), style::tty(Color::FG_BRIGHT_YELLOW))
         .modify(Columns::new(3..5), Alignment::right())
-        .modify(Columns::new(3..).not(Rows::first()), style::dim())
-        .to_string();
+        .modify(Columns::new(3..).not(Rows::first()), style::dim());
+    style::truncate_to(
+        &mut table,
+        style::stdout_width(),
+        style::IdAwarePriority::new(args.full_id),
+    );
+    refit_root_cells(&mut table, &roots, ROOT_COL);
     println!("{table}");
     args.limit.print_summary(shown, total, "attachment");
     Ok(())
+}
+
+/// Column index of the root cell in the listing
+const ROOT_COL: usize = 5;
+
+/// Rewrite each root cell in column `col` to its middle-cut form for
+/// the width the width pass gave the column, so the cut falls on path
+/// components rather than at the end. A table that fit the terminal has no stored
+/// widths and keeps its whole cells.
+fn refit_root_cells(table: &mut Table, roots: &[String], col: usize) {
+    let Some(width) = table
+        .get_dimension()
+        .get_widths()
+        .and_then(|w| w.get(col).copied())
+    else {
+        return;
+    };
+    let budgets: Vec<usize> = (0..roots.len())
+        .map(|i| {
+            let pos = Position::new(i + 1, col);
+            let padding = table.get_config().get_padding(pos);
+            width.saturating_sub(padding.left.size + padding.right.size)
+        })
+        .collect();
+    let records = table.get_records_mut();
+    for (i, (root, budget)) in roots.iter().zip(budgets).enumerate() {
+        records.set(Position::new(i + 1, col), shorten_path_middle(root, budget));
+    }
 }
 
 /// The targets as listings show them: none as blank, one as its
@@ -668,6 +707,36 @@ mod tests {
 
     use super::*;
     use crate::{Cli, Command};
+
+    /// A width pass cuts the root column, and the refit turns the
+    /// end cut into a component cut that keeps the leaf directory.
+    /// Without a width the root stays whole.
+    #[test]
+    fn root_cells_are_cut_on_path_components() {
+        let root = "~/.gage/tmp/publish/7kb6480ceg84xby1chvv1g06hd";
+        let header = vec!["Id".to_string(), "Name".to_string(), "Root".to_string()];
+        let row = vec![
+            "3s02kxet".to_string(),
+            "publish-def".to_string(),
+            root.to_string(),
+        ];
+        let roots = vec![root.to_string()];
+
+        let mut cut = Table::from_iter([header.clone(), row.clone()]);
+        cut.with(Style::rounded());
+        style::truncate_to(&mut cut, Some(60), style::IdAwarePriority::new(false));
+        refit_root_cells(&mut cut, &roots, 2);
+        let cut = cut.to_string();
+        assert!(cut.contains("~/…/7kb6480ceg84xby1chvv1g06hd"), "{cut}");
+        assert!(cut.lines().all(|l| console::measure_text_width(l) <= 60));
+
+        let mut whole = Table::from_iter([header, row]);
+        whole.with(Style::rounded());
+        style::truncate_to(&mut whole, None, style::IdAwarePriority::new(false));
+        refit_root_cells(&mut whole, &roots, 2);
+        let whole = whole.to_string();
+        assert!(whole.contains(root), "{whole}");
+    }
 
     fn add_args(argv: &[&str]) -> AttachmentAddArgs {
         let cli = Cli::try_parse_from([&["gage", "attachment", "add"], argv].concat()).unwrap();

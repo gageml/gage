@@ -554,7 +554,8 @@ pub async fn list(args: DatasetListArgs) -> Result<(), CliError> {
         }
     }
     let shown = rows.len();
-    let table = Table::from_iter(std::iter::once(header).chain(rows))
+    let mut table = Table::from_iter(std::iter::once(header).chain(rows));
+    table
         .with(Style::rounded())
         .modify(Rows::first(), style::tty(Color::FG_BRIGHT_YELLOW))
         .modify(Columns::new(1..4), Alignment::right())
@@ -563,8 +564,12 @@ pub async fn list(args: DatasetListArgs) -> Result<(), CliError> {
             style::tty(Color::FG_BRIGHT_CYAN),
         )
         .modify(Columns::new(1..4).not(Rows::first()), style::dim())
-        .modify(Columns::one(5).not(Rows::first()), style::dim())
-        .to_string();
+        .modify(Columns::one(5).not(Rows::first()), style::dim());
+    style::truncate_to(
+        &mut table,
+        style::stdout_width(),
+        style::IdAwarePriority::new(args.full_id),
+    );
     println!("{table}");
     args.limit.print_summary(shown, total, "dataset");
     Ok(())
