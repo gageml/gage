@@ -37,7 +37,7 @@ use gage_index::{LockMode, MessageRow, TextIndex};
 use gage_registry::driver::DriverRegistry;
 use gage_session::filter::{is_literal_membership, literal_members};
 use gage_session::progress;
-use gage_session::{MessageTextHit, SourceOptions};
+use gage_session::{MessageTextFilter, MessageTextHit, SourceOptions};
 use gage_store::Store;
 
 use crate::native::string_literal;
@@ -48,8 +48,12 @@ use crate::scope::SessionSet;
 /// through verbatim.
 pub const DEFAULT_LIMIT: usize = 100;
 
-/// The column a `WHERE` on the hits restricts the search by
+/// The hit columns a `WHERE` restricts the search by: the index's
+/// raw-term fields
 const SESSION_ID_COL: &str = "session_id";
+const TYPE_COL: &str = "type";
+const SUBTYPE_COL: &str = "subtype";
+const FILTER_COLS: [&str; 3] = [SESSION_ID_COL, TYPE_COL, SUBTYPE_COL];
 
 /// Argument-list display strings for `\df` in the repl
 pub const NATIVE_MESSAGE_TEXT_ARGS: &str = "source text, query text [, snippet_len integer]";
@@ -182,13 +186,13 @@ enum Backend {
 }
 
 impl Backend {
-    /// The hits for `query` in `sessions`, or in every session, through
+    /// The hits for `query` among the messages `filter` admits, through
     /// the source's driver or the store's index. Blocking: runs the
     /// reconcile and the search.
     fn search(
         &self,
         query: &str,
-        sessions: Option<&[String]>,
+        filter: &MessageTextFilter,
         limit: usize,
         snippet_len: usize,
     ) -> Result<Vec<MessageTextHit>> {
@@ -209,12 +213,12 @@ impl Backend {
                     .open_source(&options)
                     .map_err(|e| DataFusionError::Execution(e.to_string()))?;
                 opened
-                    .message_text(query, sessions, snippet_len, limit)
+                    .message_text(query, filter, snippet_len, limit)
                     .map_err(|e| DataFusionError::Execution(e.to_string()))
             }
             Backend::Store(index) => {
                 index.reconcile(LockMode::Try)?;
-                index.search(query, sessions, limit, snippet_len)
+                index.search(query, filter, limit, snippet_len)
             }
         }
     }
@@ -244,7 +248,7 @@ impl TableProvider for MessageTextTable {
         TableType::Base
     }
 
-    /// A filter that is literal membership on `session_id` alone is
+    /// A filter that is literal membership on one raw-term column is
     /// applied inside the search, so it is `Exact` and DataFusion
     /// drops its `Filter` node; a `LIMIT` above it then reaches the
     /// search. Anything else is evaluated on the hits after the cap.
@@ -254,10 +258,12 @@ impl TableProvider for MessageTextTable {
     ) -> Result<Vec<TableProviderFilterPushDown>> {
         Ok(filters
             .iter()
-            .map(|f| match is_literal_membership(f, SESSION_ID_COL) {
-                true => TableProviderFilterPushDown::Exact,
-                false => TableProviderFilterPushDown::Inexact,
-            })
+            .map(
+                |f| match FILTER_COLS.iter().any(|col| is_literal_membership(f, col)) {
+                    true => TableProviderFilterPushDown::Exact,
+                    false => TableProviderFilterPushDown::Inexact,
+                },
+            )
             .collect())
     }
 
@@ -272,12 +278,12 @@ impl TableProvider for MessageTextTable {
             Some(n) => (n, false),
             None => (DEFAULT_LIMIT, true),
         };
-        let sessions = session_restriction(filters);
+        let filter = message_filter(filters);
         let backend = self.backend.clone();
         let query = self.query.clone();
         let snippet_len = self.snippet_len;
         let hits = tokio::task::spawn_blocking(move || {
-            backend.search(&query, sessions.as_deref(), fetch, snippet_len)
+            backend.search(&query, &filter, fetch, snippet_len)
         })
         .await
         .map_err(|e| DataFusionError::Execution(format!("search task failed: {e}")))??;
@@ -293,13 +299,22 @@ impl TableProvider for MessageTextTable {
     }
 }
 
-/// The sessions `filters` admit, or `None` when no filter names a
-/// literal set for `session_id`. A row must satisfy every term, so
-/// the sets are intersected; an inexact filter contributes its
-/// `session_id` terms too, since a row outside them fails the whole
-/// conjunction.
-fn session_restriction(filters: &[Expr]) -> Option<Vec<String>> {
-    let mut sets = literal_members(filters, SESSION_ID_COL).into_iter();
+/// The messages `filters` admit, one set per raw-term column that a
+/// filter names a literal set for. A row must satisfy every term, so
+/// a column's sets are intersected; an inexact filter contributes its
+/// terms too, since a row outside them fails the whole conjunction.
+fn message_filter(filters: &[Expr]) -> MessageTextFilter {
+    MessageTextFilter {
+        sessions: column_restriction(filters, SESSION_ID_COL),
+        types: column_restriction(filters, TYPE_COL),
+        subtypes: column_restriction(filters, SUBTYPE_COL),
+    }
+}
+
+/// The values of `col` that `filters` admit, or `None` when no filter
+/// names a literal set for it.
+fn column_restriction(filters: &[Expr], col: &str) -> Option<Vec<String>> {
+    let mut sets = literal_members(filters, col).into_iter();
     let first: HashSet<String> = sets.next()?.into_iter().collect();
     let admitted = sets.fold(first, |acc, set| {
         let set: HashSet<String> = set.into_iter().collect();
@@ -511,17 +526,17 @@ impl StoreTextIndex {
         })
     }
 
-    /// The top `limit` hits for `query`, best match first. `sessions`
-    /// restricts the search to those session ids.
+    /// The top `limit` hits for `query` among the messages `filter`
+    /// admits, best match first.
     pub fn search(
         &self,
         query: &str,
-        sessions: Option<&[String]>,
+        filter: &MessageTextFilter,
         limit: usize,
         snippet_chars: usize,
     ) -> Result<Vec<MessageTextHit>> {
         self.open()?
-            .search(query, sessions, limit, snippet_chars)
+            .search(query, filter, limit, snippet_chars)
             .map_err(index_error)
     }
 }

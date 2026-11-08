@@ -94,8 +94,9 @@ best match first. url names the session across every source and store
 uses, so a row joins to message or to native_message(source) on (session_id,
 line). Matched terms in snippet are wrapped in «guillemets»; snippet_len caps
 its length, default 200. LIMIT n reaches the search; without one the cap is 100
-rows. A WHERE on session_id alone, as = or IN with literal ids, reaches the
-search too, so the cap counts hits in those sessions alone. The search
+rows. A WHERE term on session_id, type, or subtype alone, as = or IN with
+literal values, reaches the search too, so the cap counts admitted hits alone.
+The search
 reconciles its index first, so a message written since the last query is found.
 message_text is absent from a scan-scoped context.
 

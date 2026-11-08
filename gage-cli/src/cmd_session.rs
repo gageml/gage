@@ -96,8 +96,10 @@ pub enum SessionCommand {
     /// best match first. Bare terms match any of them; "a AND b",
     /// "+a", "-a", a quoted phrase, and a field term such as
     /// "type:assistant" narrow a search. --since searches only the
-    /// sessions modified within it. --all shows up to 1000 matches
-    /// per source
+    /// sessions modified within it; --user, --assistant, and --tool
+    /// search only messages of those kinds, and --user with
+    /// --assistant searches both. --all shows up to 1000 matches per
+    /// source
     Find(SessionFindArgs),
 }
 
@@ -260,6 +262,18 @@ pub struct SessionFindArgs {
     /// Search sessions modified within SINCE
     #[arg(long, value_parser = super::parse_duration)]
     pub since: Option<Duration>,
+
+    /// Search text typed by user
+    #[arg(short = 'U', long)]
+    pub user: bool,
+
+    /// Search text written by assistant
+    #[arg(short = 'A', long)]
+    pub assistant: bool,
+
+    /// Search tool calls and results
+    #[arg(short = 'T', long, conflicts_with_all = ["user", "assistant"])]
+    pub tool: bool,
 
     /// Sort hits by date, most recent first
     ///
@@ -1102,27 +1116,28 @@ pub async fn find(args: SessionFindArgs) -> Result<(), CliError> {
 
     // One query per corpus, run at once; each is ranked and capped on
     // its own, then the union is ranked and cut. With --since, each
-    // search is restricted to the corpus's sessions in the window, so
-    // the cap counts hits in those sessions alone; a corpus with none
-    // is not searched.
+    // search is restricted to the corpus's sessions in the window, and
+    // a kind option restricts it to messages of that kind, so the cap
+    // counts admitted hits alone; a corpus with no session in the
+    // window is not searched.
     let cutoff_ms = args.since.map(since_cutoff_ms);
+    let kind_predicates = kind_predicates(args.user, args.assistant, args.tool);
     let mut hits = progress::busy_async(FIND_LABEL, async {
         let mut tasks = JoinSet::new();
         for (order, corpus) in corpora.iter().enumerate() {
-            let sessions = match cutoff_ms {
-                Some(ms) => Some(
-                    corpus
-                        .sessions_since(&ctx, ms)
-                        .await
-                        .with_context(|| format!("gage session find: {}", corpus.describe()))?,
-                ),
-                None => None,
-            };
-            if sessions.as_ref().is_some_and(Vec::is_empty) {
-                continue;
+            let mut predicates = kind_predicates.clone();
+            if let Some(ms) = cutoff_ms {
+                let sessions = corpus
+                    .sessions_since(&ctx, ms)
+                    .await
+                    .with_context(|| format!("gage session find: {}", corpus.describe()))?;
+                if sessions.is_empty() {
+                    continue;
+                }
+                predicates.push(in_list_predicate("session_id", &sessions));
             }
             let ctx = ctx.clone();
-            let sql = corpus.sql(&args.query, sessions.as_deref(), fetch);
+            let sql = corpus.sql(&args.query, &predicates, fetch);
             let corpus = corpus.clone();
             tasks.spawn(async move {
                 let batches = run_query(&ctx, &sql).await;
@@ -1160,6 +1175,41 @@ pub async fn find(args: SessionFindArgs) -> Result<(), CliError> {
     Ok(())
 }
 
+/// The predicates on a hit's `type` and `subtype` that the kind
+/// options select: typed text for --user and --assistant, together
+/// or alone, and tool calls and results for --tool. No option leaves
+/// the kind unrestricted.
+fn kind_predicates(user: bool, assistant: bool, tool: bool) -> Vec<String> {
+    if tool {
+        return vec![in_list_predicate(
+            "subtype",
+            &["tool_use".to_string(), "tool_result".to_string()],
+        )];
+    }
+    let mut types = Vec::new();
+    if user {
+        types.push("user".to_string());
+    }
+    if assistant {
+        types.push("assistant".to_string());
+    }
+    if types.is_empty() {
+        return Vec::new();
+    }
+    vec![
+        in_list_predicate("type", &types),
+        in_list_predicate("subtype", &["text".to_string()]),
+    ]
+}
+
+/// `col IN (..)` over the distinct `values` as literals
+fn in_list_predicate(col: &str, values: &[String]) -> String {
+    format!(
+        "{col} IN ({})",
+        unique_literals(values.iter().map(|v| format!("'{}'", sql_str(v))))
+    )
+}
+
 /// One body of sessions a search covers
 #[derive(Clone)]
 enum Corpus {
@@ -1173,17 +1223,14 @@ impl Corpus {
     /// The hits of this corpus for `query`, each joined to its
     /// session row for the id's display forms, best match first. The
     /// search itself is capped at `fetch` inside the function call,
-    /// where the limit reaches the index. With `sessions`, the search
-    /// is restricted to those ids inside the same call, ahead of the
-    /// cap, so the cap counts hits in those sessions alone.
-    fn sql(&self, query: &str, sessions: Option<&[String]>, fetch: usize) -> String {
+    /// where the limit reaches the index. `predicates` on the hit's
+    /// raw-term columns go inside the same call, ahead of the cap, so
+    /// the cap counts admitted hits alone.
+    fn sql(&self, query: &str, predicates: &[String], fetch: usize) -> String {
         let query = sql_str(query);
-        let restrict = match sessions {
-            Some(ids) => format!(
-                " WHERE session_id IN ({})",
-                unique_literals(ids.iter().map(|id| format!("'{}'", sql_str(id))))
-            ),
-            None => String::new(),
+        let restrict = match predicates.is_empty() {
+            true => String::new(),
+            false => format!(" WHERE {}", predicates.join(" AND ")),
         };
         match self {
             Corpus::Native(spec) => {
@@ -2016,31 +2063,36 @@ mod tests {
 
     /// Prefixes that match no session fail as one list; a full set
     /// of matches resolves in argument order.
-    /// `--since` restricts the search inside the function call, ahead
-    /// of its `LIMIT`, so the cap counts hits in the window's sessions
-    /// alone; the ids are literals and the window is the listing's
-    /// column.
+    /// `--since` and the kind options restrict the search inside the
+    /// function call, ahead of its `LIMIT`, so the cap counts admitted
+    /// hits alone; the values are literals and the window is the
+    /// listing's column.
     #[test]
     fn find_sql_restricts_the_search_ahead_of_its_cap() {
         let ids = ["b".to_string(), "a'".to_string(), "b".to_string()];
-        let native = Corpus::Native("claude:/r".into()).sql("q", Some(&ids), 5);
+        let predicates = [
+            in_list_predicate("session_id", &ids),
+            in_list_predicate("type", &["user".to_string()]),
+        ];
+        let native = Corpus::Native("claude:/r".into()).sql("q", &predicates, 5);
         assert!(
             native.contains(
                 "FROM (SELECT * FROM native_message_text('claude:/r', 'q') \
-                 WHERE session_id IN ('a''', 'b') LIMIT 5) t"
+                 WHERE session_id IN ('a''', 'b') AND type IN ('user') LIMIT 5) t"
             ),
             "{native}"
         );
-        let stored = Corpus::Stored.sql("q", Some(&ids), 5);
+        let stored = Corpus::Stored.sql("q", &predicates, 5);
         assert!(
             stored.contains(
-                "FROM (SELECT * FROM message_text('q') WHERE session_id IN ('a''', 'b') LIMIT 5) t"
+                "FROM (SELECT * FROM message_text('q') \
+                 WHERE session_id IN ('a''', 'b') AND type IN ('user') LIMIT 5) t"
             ),
             "{stored}"
         );
         assert!(
             Corpus::Stored
-                .sql("q", None, 5)
+                .sql("q", &[], 5)
                 .contains("FROM (SELECT * FROM message_text('q') LIMIT 5) t")
         );
         assert_eq!(
@@ -2050,6 +2102,31 @@ mod tests {
         assert_eq!(
             Corpus::Stored.sessions_since_sql(1_000),
             "SELECT id FROM session WHERE modified >= to_timestamp_millis(1000)"
+        );
+    }
+
+    /// --user and --assistant select typed text of either or both
+    /// parties; --tool selects tool calls and results; no option
+    /// leaves the kind unrestricted.
+    #[test]
+    fn kind_options_select_type_and_subtype() {
+        let kinds = kind_predicates;
+        assert_eq!(kinds(false, false, false), Vec::<String>::new());
+        assert_eq!(
+            kinds(true, false, false),
+            ["type IN ('user')", "subtype IN ('text')"]
+        );
+        assert_eq!(
+            kinds(false, true, false),
+            ["type IN ('assistant')", "subtype IN ('text')"]
+        );
+        assert_eq!(
+            kinds(true, true, false),
+            ["type IN ('assistant', 'user')", "subtype IN ('text')"]
+        );
+        assert_eq!(
+            kinds(false, false, true),
+            ["subtype IN ('tool_result', 'tool_use')"]
         );
     }
 

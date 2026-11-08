@@ -28,8 +28,8 @@ use arrow::record_batch::RecordBatch;
 use fs4::FileExt;
 use gage_core::cache::{driver_corpus_dir, ensure_corpus_dir};
 use gage_index::{LockMode, MessageRow, TextIndex};
-use gage_session::MessageTextHit;
 use gage_session::progress;
+use gage_session::{MessageTextFilter, MessageTextHit};
 use serde::{Deserialize, Serialize};
 
 use super::Result;
@@ -199,19 +199,19 @@ impl IndexStore {
     }
 
     /// The top `limit` text-index hits for `query`, best match first,
-    /// with snippets of at most `snippet_chars` characters. `sessions`
-    /// restricts the search to those session ids. An index not yet
-    /// built matches nothing.
+    /// with snippets of at most `snippet_chars` characters. `filter`
+    /// restricts the messages searched. An index not yet built matches
+    /// nothing.
     pub fn search(
         &self,
         query: &str,
-        sessions: Option<&[String]>,
+        filter: &MessageTextFilter,
         limit: usize,
         snippet_chars: usize,
     ) -> Result<Vec<MessageTextHit>> {
         Ok(self
             .text_index()?
-            .search(query, sessions, limit, snippet_chars)?)
+            .search(query, filter, limit, snippet_chars)?)
     }
 
     fn lock_path(&self) -> PathBuf {

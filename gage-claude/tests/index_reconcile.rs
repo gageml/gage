@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use gage_claude::index::{IndexStore, LockMode};
+use gage_session::MessageTextFilter;
 
 /// The claude session fixtures
 fn fixture_root() -> PathBuf {
@@ -79,10 +80,12 @@ fn reconcile_lifecycle() {
     assert!(status.last_reconcile_ms.is_some());
 
     // The text index holds the corpus's messages, keyed by session URL
-    let hits = store.search("zanzibar", None, 10, 200).unwrap();
+    let hits = store
+        .search("zanzibar", &MessageTextFilter::new(), 10, 200)
+        .unwrap();
     assert!(hits.is_empty());
     let hits = store
-        .search("hello OR help OR read", None, 50, 200)
+        .search("hello OR help OR read", &MessageTextFilter::new(), 50, 200)
         .unwrap();
     assert!(!hits.is_empty(), "the fixture messages are indexed");
     assert!(
@@ -105,7 +108,9 @@ fn reconcile_lifecycle() {
     assert_eq!(outcome.indexed, 1);
     let summary = rich_summary(&store, root.path()).expect("summary refreshed after append");
     assert_eq!(summary.message_count, message_count + 1);
-    let hits = store.search("zanzibar", None, 10, 200).unwrap();
+    let hits = store
+        .search("zanzibar", &MessageTextFilter::new(), 10, 200)
+        .unwrap();
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].session_id, RICH_SESSION);
     assert!(
@@ -120,7 +125,12 @@ fn reconcile_lifecycle() {
     assert_eq!(outcome.removed, 1);
     assert!(rich_summary(&store, root.path()).is_none());
     assert_eq!(store.status().indexed, 3);
-    assert!(store.search("zanzibar", None, 10, 200).unwrap().is_empty());
+    assert!(
+        store
+            .search("zanzibar", &MessageTextFilter::new(), 10, 200)
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -128,7 +138,7 @@ fn rebuild_resets_artifacts() {
     let (store, root, cache) = store_with_tempdirs();
     store.reconcile(LockMode::Wait).unwrap();
     let before = store
-        .search("hello OR help OR read", None, 50, 200)
+        .search("hello OR help OR read", &MessageTextFilter::new(), 50, 200)
         .unwrap()
         .len();
     let outcome = store.rebuild().unwrap();
@@ -140,7 +150,7 @@ fn rebuild_resets_artifacts() {
     );
     assert_eq!(
         store
-            .search("hello OR help OR read", None, 50, 200)
+            .search("hello OR help OR read", &MessageTextFilter::new(), 50, 200)
             .unwrap()
             .len(),
         before

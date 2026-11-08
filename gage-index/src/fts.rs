@@ -25,7 +25,7 @@ use std::sync::{LazyLock, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use fs4::FileExt;
-use gage_session::MessageTextHit;
+use gage_session::{MessageTextFilter, MessageTextHit};
 use serde::{Deserialize, Serialize};
 use tantivy::collector::TopDocs;
 use tantivy::query::{BooleanQuery, BoostQuery, Occur, Query, QueryParser, TermSetQuery};
@@ -294,16 +294,15 @@ impl TextIndex {
         })
     }
 
-    /// The top `limit` hits for `query`, best match first, each with
-    /// a snippet of at most `snippet_chars` characters. With
-    /// `sessions`, only the documents of those sessions are matched:
-    /// the restriction is a term set on the `session_id` field, so the
-    /// text query's posting lists are intersected with it and the
-    /// documents of other sessions are never scored.
+    /// The top `limit` hits for `query` among the documents `filter`
+    /// admits, best match first, each with a snippet of at most
+    /// `snippet_chars` characters. Each set in the filter is a term
+    /// set on its field, so the text query's posting lists are
+    /// intersected with it and documents outside it are never scored.
     pub fn search(
         &self,
         query: &str,
-        sessions: Option<&[String]>,
+        filter: &MessageTextFilter,
         limit: usize,
         snippet_chars: usize,
     ) -> Result<Vec<MessageTextHit>> {
@@ -313,13 +312,13 @@ impl TextIndex {
         let text_query = parser
             .parse_query(query)
             .map_err(|e| Error::QueryParse(e.to_string()))?;
-        // The snippet marks the text query's terms alone; the session
-        // terms are on another field and would mark nothing.
+        // The snippet marks the text query's terms alone; the filter's
+        // terms are on other fields and would mark nothing.
         let mut snippets = SnippetGenerator::create(&searcher, &*text_query, self.fields.text)?;
         snippets.set_max_num_chars(snippet_chars);
-        let query = match sessions {
-            Some(ids) => self.restrict_to_sessions(text_query, ids),
-            None => text_query,
+        let query = match filter.is_empty() {
+            true => text_query,
+            false => self.restrict(text_query, filter),
         };
         let top = searcher.search(&query, &TopDocs::with_limit(limit.max(1)).order_by_score())?;
         let mut hits = Vec::with_capacity(top.len());
@@ -346,19 +345,24 @@ impl TextIndex {
         Ok(hits)
     }
 
-    /// `text_query` restricted to the documents of `ids`. The term set
-    /// scores a constant, which a zero boost removes, so the ranking
-    /// is the text query's alone.
-    fn restrict_to_sessions(&self, text_query: Box<dyn Query>, ids: &[String]) -> Box<dyn Query> {
-        let terms = ids
-            .iter()
-            .map(|id| Term::from_field_text(self.fields.session, id));
-        let set: Box<dyn Query> =
-            Box::new(BoostQuery::new(Box::new(TermSetQuery::new(terms)), 0.0));
-        Box::new(BooleanQuery::new(vec![
-            (Occur::Must, text_query),
-            (Occur::Must, set),
-        ]))
+    /// `text_query` restricted to the documents `filter` admits: one
+    /// required term set per given field. A term set scores a
+    /// constant, which a zero boost removes, so the ranking is the
+    /// text query's alone.
+    fn restrict(&self, text_query: Box<dyn Query>, filter: &MessageTextFilter) -> Box<dyn Query> {
+        let sets = [
+            (self.fields.session, &filter.sessions),
+            (self.fields.type_, &filter.types),
+            (self.fields.subtype, &filter.subtypes),
+        ];
+        let mut clauses: Vec<(Occur, Box<dyn Query>)> = vec![(Occur::Must, text_query)];
+        for (field, values) in sets {
+            let Some(values) = values else { continue };
+            let terms = values.iter().map(|v| Term::from_field_text(field, v));
+            let set = TermSetQuery::new(terms);
+            clauses.push((Occur::Must, Box::new(BoostQuery::new(Box::new(set), 0.0))));
+        }
+        Box::new(BooleanQuery::new(clauses))
     }
 }
 
@@ -597,7 +601,12 @@ mod tests {
             ("s2", 1, "the design rationale and decision matter"),
         ]);
         let hits = index
-            .search("design decision", None, 10, DEFAULT_SNIPPET_CHARS)
+            .search(
+                "design decision",
+                &MessageTextFilter::new(),
+                10,
+                DEFAULT_SNIPPET_CHARS,
+            )
             .unwrap();
         assert_eq!(hits.len(), 2);
         assert!(hits[0].score >= hits[1].score);
@@ -615,12 +624,22 @@ mod tests {
             ("s4", 1, "neither term present"),
         ]);
         let any = index
-            .search("alpha beta", None, 10, DEFAULT_SNIPPET_CHARS)
+            .search(
+                "alpha beta",
+                &MessageTextFilter::new(),
+                10,
+                DEFAULT_SNIPPET_CHARS,
+            )
             .unwrap();
         assert_eq!(any.len(), 3);
         assert_eq!(any[0].session_id, "s1");
         let both = index
-            .search("alpha AND beta", None, 10, DEFAULT_SNIPPET_CHARS)
+            .search(
+                "alpha AND beta",
+                &MessageTextFilter::new(),
+                10,
+                DEFAULT_SNIPPET_CHARS,
+            )
             .unwrap();
         assert_eq!(both.len(), 1);
     }
@@ -634,12 +653,20 @@ mod tests {
             ("s4", 1, "beta"),
         ]);
         let all = index
-            .search("alpha", None, 10, DEFAULT_SNIPPET_CHARS)
+            .search(
+                "alpha",
+                &MessageTextFilter::new(),
+                10,
+                DEFAULT_SNIPPET_CHARS,
+            )
             .unwrap();
         assert_eq!(all.len(), 3);
-        let set = ["s1".to_string(), "s3".to_string(), "s4".to_string()];
+        let filter = MessageTextFilter {
+            sessions: Some(vec!["s1".into(), "s3".into(), "s4".into()]),
+            ..MessageTextFilter::new()
+        };
         let some = index
-            .search("alpha", Some(&set), 10, DEFAULT_SNIPPET_CHARS)
+            .search("alpha", &filter, 10, DEFAULT_SNIPPET_CHARS)
             .unwrap();
         let ids: Vec<&str> = some.iter().map(|h| h.session_id.as_str()).collect();
         assert_eq!(ids, ["s3", "s1"]);
@@ -649,16 +676,86 @@ mod tests {
         };
         assert_eq!(scored(&some, "s1"), scored(&all, "s1"));
         assert_eq!(scored(&some, "s3"), scored(&all, "s3"));
+        let empty = MessageTextFilter {
+            sessions: Some(Vec::new()),
+            ..MessageTextFilter::new()
+        };
         let none = index
-            .search("alpha", Some(&[]), 10, DEFAULT_SNIPPET_CHARS)
+            .search("alpha", &empty, 10, DEFAULT_SNIPPET_CHARS)
             .unwrap();
         assert!(none.is_empty());
+    }
+
+    /// Every given set is required: a type set and a subtype set
+    /// together admit their product, and a session set narrows it.
+    #[test]
+    fn type_and_subtype_sets_restrict_the_search_together() {
+        let root = tempfile::tempdir().unwrap();
+        let mut index = TextIndex::open(&root.path().join("corpus"), "claude:/c").unwrap();
+        let mut writer = index.writer().unwrap();
+        let typed = |line: i64, type_: &str, subtype: &str| MessageRow {
+            line,
+            type_: Some(type_.into()),
+            subtype: Some(subtype.into()),
+            text: "alpha".into(),
+        };
+        writer
+            .replace_session(
+                "s1",
+                "claude:/c/s1",
+                "fp1",
+                [
+                    typed(1, "user", "text"),
+                    typed(2, "assistant", "text"),
+                    typed(3, "assistant", "tool_use"),
+                    typed(4, "user", "tool_result"),
+                ],
+            )
+            .unwrap();
+        writer
+            .replace_session("s2", "claude:/c/s2", "fp1", [typed(1, "user", "text")])
+            .unwrap();
+        writer.commit().unwrap();
+        let lines = |filter: &MessageTextFilter| {
+            let mut hits: Vec<(String, i64)> = index
+                .search("alpha", filter, 10, DEFAULT_SNIPPET_CHARS)
+                .unwrap()
+                .iter()
+                .map(|h| (h.session_id.clone(), h.line))
+                .collect();
+            hits.sort();
+            hits
+        };
+        let text = MessageTextFilter {
+            types: Some(vec!["user".into(), "assistant".into()]),
+            subtypes: Some(vec!["text".into()]),
+            ..MessageTextFilter::new()
+        };
+        assert_eq!(
+            lines(&text),
+            [("s1".into(), 1), ("s1".into(), 2), ("s2".into(), 1)]
+        );
+        let tool = MessageTextFilter {
+            subtypes: Some(vec!["tool_use".into(), "tool_result".into()]),
+            ..MessageTextFilter::new()
+        };
+        assert_eq!(lines(&tool), [("s1".into(), 3), ("s1".into(), 4)]);
+        let narrowed = MessageTextFilter {
+            sessions: Some(vec!["s2".into()]),
+            ..text
+        };
+        assert_eq!(lines(&narrowed), [("s2".into(), 1)]);
     }
 
     #[test]
     fn an_invalid_query_is_an_error() {
         let (index, _root) = index_with(&[("s1", 1, "x")]);
-        let err = index.search("\"unterminated", None, 10, DEFAULT_SNIPPET_CHARS);
+        let err = index.search(
+            "\"unterminated",
+            &MessageTextFilter::new(),
+            10,
+            DEFAULT_SNIPPET_CHARS,
+        );
         assert!(matches!(err, Err(Error::QueryParse(_))));
     }
 
@@ -667,7 +764,7 @@ mod tests {
         let docs: Vec<(&str, i64, &str)> = (0..20).map(|i| ("s1", i, "the term appears")).collect();
         let (index, _root) = index_with(&docs);
         let hits = index
-            .search("term", None, 5, DEFAULT_SNIPPET_CHARS)
+            .search("term", &MessageTextFilter::new(), 5, DEFAULT_SNIPPET_CHARS)
             .unwrap();
         assert_eq!(hits.len(), 5);
     }
@@ -680,14 +777,30 @@ mod tests {
             .replace_session("s1", "claude:/c/s1", "fp2", [row(1, "second version")])
             .unwrap();
         writer.commit().unwrap();
-        assert!(index.search("first", None, 10, 100).unwrap().is_empty());
-        assert_eq!(index.search("second", None, 10, 100).unwrap().len(), 1);
+        assert!(
+            index
+                .search("first", &MessageTextFilter::new(), 10, 100)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            index
+                .search("second", &MessageTextFilter::new(), 10, 100)
+                .unwrap()
+                .len(),
+            1
+        );
         assert_eq!(index.sessions()["s1"], "fp2");
 
         let mut writer = index.writer().unwrap();
         writer.remove_session("s1");
         writer.commit().unwrap();
-        assert!(index.search("second", None, 10, 100).unwrap().is_empty());
+        assert!(
+            index
+                .search("second", &MessageTextFilter::new(), 10, 100)
+                .unwrap()
+                .is_empty()
+        );
         assert!(index.sessions().is_empty());
     }
 
@@ -697,7 +810,13 @@ mod tests {
         drop(index);
         let reopened = TextIndex::open(&root.path().join("corpus"), "claude:/c").unwrap();
         assert_eq!(reopened.sessions()["s1"], "fp1");
-        assert_eq!(reopened.search("x", None, 10, 100).unwrap().len(), 1);
+        assert_eq!(
+            reopened
+                .search("x", &MessageTextFilter::new(), 10, 100)
+                .unwrap()
+                .len(),
+            1
+        );
         let manifest: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(reopened.dir().join(MANIFEST_FILE)).unwrap(),
         )
@@ -718,7 +837,12 @@ mod tests {
         .unwrap();
         let reopened = TextIndex::open(&root.path().join("corpus"), "claude:/c").unwrap();
         assert!(reopened.sessions().is_empty());
-        assert!(reopened.search("x", None, 10, 100).unwrap().is_empty());
+        assert!(
+            reopened
+                .search("x", &MessageTextFilter::new(), 10, 100)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

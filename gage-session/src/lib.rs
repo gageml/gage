@@ -417,15 +417,14 @@ pub trait Source: Send + Sync {
     }
 
     /// Search the text of the source's messages. `query` is a
-    /// full-text query; `sessions` restricts the search to those
-    /// session ids, and `None` searches every session; `limit` caps
-    /// the hits, and `snippet_chars` caps each hit's snippet. Hits
-    /// come back best match first. The default reports that the
-    /// source has no text index.
+    /// full-text query; `filter` restricts the messages searched;
+    /// `limit` caps the hits, and `snippet_chars` caps each hit's
+    /// snippet. Hits come back best match first. The default reports
+    /// that the source has no text index.
     fn message_text(
         &self,
         _query: &str,
-        _sessions: Option<&[String]>,
+        _filter: &MessageTextFilter,
         _snippet_chars: usize,
         _limit: usize,
     ) -> Result<Vec<MessageTextHit>, DriverError> {
@@ -437,6 +436,33 @@ pub trait Source: Send + Sync {
 
     /// Release the handle.
     fn close(self: Box<Self>) -> Result<(), DriverError>;
+}
+
+/// The messages a text search covers: one optional set of admitted
+/// values per raw-term field, every given set required. `None` leaves
+/// a field unrestricted; an empty set admits no message. The sets are
+/// applied inside the search, so a hit cap counts admitted messages
+/// alone.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MessageTextFilter {
+    /// Session ids, as the corpus names them
+    pub sessions: Option<Vec<String>>,
+    /// Message `type` values
+    pub types: Option<Vec<String>>,
+    /// Message `subtype` values
+    pub subtypes: Option<Vec<String>>,
+}
+
+impl MessageTextFilter {
+    /// The filter that admits every message.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Whether every field is unrestricted.
+    pub fn is_empty(&self) -> bool {
+        self.sessions.is_none() && self.types.is_none() && self.subtypes.is_none()
+    }
 }
 
 /// One hit of a message text search: the message, its session, and

@@ -25,8 +25,9 @@ use gage_session::{
     AgentSession, AgentSpec, AuthInfo, ContentSchema, ContentSink, ContentSource, DecodedEntry,
     Derivation, Driver, DriverError, DriverStatus, DriverTables, Entry, EntryCodec, EntryValue,
     Field, HarnessInfo, HarnessSession, InstallInfo, InstallReport, InstallUi, MaintenanceOutcome,
-    MaintenanceStatus, MessageTextHit, NativeLookupError, NativeSession, SessionAttrs,
-    SessionLiveError, SkillSession, Source, SourceOptions, StoredSession, ToolUse, split_scheme,
+    MaintenanceStatus, MessageTextFilter, MessageTextHit, NativeLookupError, NativeSession,
+    SessionAttrs, SessionLiveError, SkillSession, Source, SourceOptions, StoredSession, ToolUse,
+    split_scheme,
 };
 use serde::Deserialize;
 use serde_json::{Map, Value};
@@ -620,7 +621,7 @@ impl Source for ClaudeSource {
     fn message_text(
         &self,
         query: &str,
-        sessions: Option<&[String]>,
+        filter: &MessageTextFilter,
         snippet_chars: usize,
         limit: usize,
     ) -> Result<Vec<MessageTextHit>, DriverError> {
@@ -628,7 +629,7 @@ impl Source for ClaudeSource {
             .reconcile(LockMode::Try)
             .map_err(|e| DriverError::Other(e.to_string()))?;
         self.store
-            .search(query, sessions, limit, snippet_chars)
+            .search(query, filter, limit, snippet_chars)
             .map_err(|e| DriverError::Other(e.to_string()))
     }
 
@@ -1575,7 +1576,9 @@ mod tests {
             r#"{"type":"user","uuid":"u1","message":{"role":"user","content":"the quokka smiled"}}"#,
         );
         let source = ClaudeDriver::new().open_source(&options_for(root)).unwrap();
-        let hits = source.message_text("quokka", None, 200, 10).unwrap();
+        let hits = source
+            .message_text("quokka", &MessageTextFilter::new(), 200, 10)
+            .unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].session_id, id);
         assert_eq!(hits[0].url, source.session_url(id));
@@ -1584,11 +1587,13 @@ mod tests {
         assert!(hits[0].snippet.contains("«quokka»"));
         assert!(
             source
-                .message_text("wombat", None, 200, 10)
+                .message_text("wombat", &MessageTextFilter::new(), 200, 10)
                 .unwrap()
                 .is_empty()
         );
-        let err = source.message_text("\"open", None, 200, 10).unwrap_err();
+        let err = source
+            .message_text("\"open", &MessageTextFilter::new(), 200, 10)
+            .unwrap_err();
         assert!(
             err.to_string().contains("invalid text search query"),
             "{err}"

@@ -2406,6 +2406,26 @@ mod tests {
                 "the session set is applied by the search: {plan}"
             );
         }
+        // The type and subtype columns are raw terms too, so their
+        // literal sets reach the search alongside the session set
+        let typed_sql = format!(
+            "SELECT session_id FROM native_message_text('{spec}', 'quokka') \
+             WHERE session_id = '{weak}' AND type = 'user' AND subtype = 'text' LIMIT 1"
+        );
+        assert_eq!(strings(&ctx, &typed_sql).await, [weak]);
+        let plan = explain(&ctx, &typed_sql).await.physical;
+        assert!(!plan.contains("FilterExec"), "{plan}");
+        assert!(
+            strings(
+                &ctx,
+                &format!(
+                    "SELECT session_id FROM native_message_text('{spec}', 'quokka') \
+                     WHERE type = 'assistant'"
+                )
+            )
+            .await
+            .is_empty()
+        );
         // A filter the search cannot apply stays a filter step
         let plan = explain(
             &ctx,
