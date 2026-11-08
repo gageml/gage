@@ -365,12 +365,54 @@ fn narrow_bounds(expr: &Expr, col: &str, bounds: &mut TimeBounds) {
     }
 }
 
+/// Whether `expr` is nothing but literal membership on `col`: the
+/// shapes [`membership_set`] reads. Such a filter is fully stated by
+/// its set, so a scan that admits only those values has applied it
+/// exactly.
+pub fn is_literal_membership(expr: &Expr, col: &str) -> bool {
+    membership_set(expr, col).is_some()
+}
+
+/// The values `expr` admits for `col` when `expr` is literal
+/// membership on `col` alone: `col = 'v'`, `col IN ('v', ..)` with
+/// string literals, and `AND` / `OR` combinations of those, which
+/// intersect and unite the sides. `None` for any other shape. The
+/// planner rewrites a short `IN` list into an `OR` of equalities and
+/// a long `OR` into an `IN` list, so both read as one set.
+pub fn membership_set(expr: &Expr, col: &str) -> Option<Vec<String>> {
+    match expr {
+        Expr::BinaryExpr(b) if b.op == Operator::And => {
+            let left = membership_set(&b.left, col)?;
+            let right = membership_set(&b.right, col)?;
+            Some(left.into_iter().filter(|v| right.contains(v)).collect())
+        }
+        Expr::BinaryExpr(b) if b.op == Operator::Or => {
+            let mut values = membership_set(&b.left, col)?;
+            for v in membership_set(&b.right, col)? {
+                if !values.contains(&v) {
+                    values.push(v);
+                }
+            }
+            Some(values)
+        }
+        Expr::BinaryExpr(b) if b.op == Operator::Eq => literal_eq(&b.left, &b.right, col)
+            .or_else(|| literal_eq(&b.right, &b.left, col))
+            .map(|v| vec![v]),
+        Expr::InList(in_list) if !in_list.negated && is_column(&in_list.expr, col) => {
+            in_list.list.iter().map(utf8_literal).collect()
+        }
+        _ => None,
+    }
+}
+
 /// The literal values `filters` admit for `col`, one set per term,
 /// from the top level of the conjunction: `col = 'v'` admits `v`,
-/// and `col IN ('v', 'w')` admits either. A row must satisfy every
-/// term, so a walk skips a session none of whose recorded values for
-/// `col` lies in each set. A term under `OR`, a negation, or a
-/// non-literal operand admits everything and yields no set.
+/// `col IN ('v', 'w')` admits either, and an `OR` whose every side is
+/// literal membership on `col` admits their union. A row must satisfy
+/// every term, so a walk skips a session none of whose recorded
+/// values for `col` lies in each set. Any other term, such as a
+/// negation, a non-literal operand, or an `OR` with a side on another
+/// column, admits everything and yields no set.
 pub fn literal_members(filters: &[Expr], col: &str) -> Vec<Vec<String>> {
     let mut out = Vec::new();
     for f in filters {
@@ -385,20 +427,11 @@ fn collect_literal_members(expr: &Expr, col: &str, out: &mut Vec<Vec<String>>) {
             collect_literal_members(&b.left, col, out);
             collect_literal_members(&b.right, col, out);
         }
-        Expr::BinaryExpr(b) if b.op == Operator::Eq => {
-            if let Some(v) =
-                literal_eq(&b.left, &b.right, col).or_else(|| literal_eq(&b.right, &b.left, col))
-            {
-                out.push(vec![v]);
-            }
-        }
-        Expr::InList(in_list) if !in_list.negated && is_column(&in_list.expr, col) => {
-            let values: Option<Vec<String>> = in_list.list.iter().map(utf8_literal).collect();
-            if let Some(values) = values {
+        _ => {
+            if let Some(values) = membership_set(expr, col) {
                 out.push(values);
             }
         }
-        _ => {}
     }
 }
 
@@ -779,5 +812,85 @@ mod tests {
             ]
         );
         assert_eq!(literal_members(&filters, "type"), [["write"]]);
+    }
+
+    #[test]
+    fn literal_membership_is_a_conjunction_of_literal_equality_and_in_list() {
+        let member = |e: &Expr| is_literal_membership(e, "session_id");
+        assert!(member(&cmp(col("session_id"), Operator::Eq, lit_str("a"))));
+        assert!(member(&cmp(lit_str("a"), Operator::Eq, col("session_id"))));
+        assert!(member(
+            &col("session_id").in_list(vec![lit_str("a"), lit_str("b")], false)
+        ));
+        assert!(member(&cmp(
+            cmp(col("session_id"), Operator::Eq, lit_str("a")),
+            Operator::And,
+            col("session_id").in_list(vec![lit_str("a"), lit_str("b")], false),
+        )));
+        assert!(member(&cmp(
+            cmp(col("session_id"), Operator::Eq, lit_str("a")),
+            Operator::Or,
+            cmp(col("session_id"), Operator::Eq, lit_str("b")),
+        )));
+        assert!(!member(
+            &col("session_id").in_list(vec![lit_str("a")], true)
+        ));
+        assert!(!member(&cmp(
+            col("session_id"),
+            Operator::NotEq,
+            lit_str("a")
+        )));
+        assert!(!member(&cmp(col("line"), Operator::Eq, lit_str("a"))));
+        assert!(!member(&cmp(
+            cmp(col("session_id"), Operator::Eq, lit_str("a")),
+            Operator::Or,
+            cmp(col("type"), Operator::Eq, lit_str("user")),
+        )));
+        assert!(!member(&cmp(
+            cmp(col("session_id"), Operator::Eq, lit_str("a")),
+            Operator::And,
+            cmp(col("type"), Operator::Eq, lit_str("user")),
+        )));
+        assert!(!member(&cmp(col("session_id"), Operator::Eq, col("url"))));
+    }
+
+    #[test]
+    fn a_membership_set_unites_or_and_intersects_and() {
+        let set = |e: &Expr| membership_set(e, "session_id");
+        let eq = |v: &str| cmp(col("session_id"), Operator::Eq, lit_str(v));
+        assert_eq!(
+            set(&cmp(
+                eq("a"),
+                Operator::Or,
+                cmp(eq("b"), Operator::Or, eq("a"))
+            )),
+            Some(vec!["a".to_string(), "b".to_string()])
+        );
+        assert_eq!(
+            set(&cmp(
+                col("session_id").in_list(vec![lit_str("a"), lit_str("b")], false),
+                Operator::And,
+                cmp(eq("b"), Operator::Or, eq("c")),
+            )),
+            Some(vec!["b".to_string()])
+        );
+        assert_eq!(
+            literal_members(
+                &[cmp(
+                    cmp(eq("a"), Operator::Or, eq("b")),
+                    Operator::And,
+                    cmp(col("line"), Operator::Gt, ts(1)),
+                )],
+                "session_id"
+            ),
+            [["a", "b"]]
+        );
+        assert_eq!(
+            literal_members(
+                &[cmp(eq("a"), Operator::Or, col("session_id").is_null())],
+                "session_id"
+            ),
+            Vec::<Vec<String>>::new()
+        );
     }
 }

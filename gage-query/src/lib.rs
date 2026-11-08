@@ -2348,4 +2348,74 @@ mod tests {
             );
         }
     }
+
+    /// A literal `session_id` set on `message_text` or
+    /// `native_message_text` restricts the search itself, so a `LIMIT`
+    /// counts hits in those sessions alone: a session whose best match
+    /// ranks below every hit of a session outside the set is still
+    /// found. The set is applied in the scan, so the plan has no
+    /// filter step and the limit reaches the search.
+    #[tokio::test]
+    async fn message_text_restricts_the_search_to_literal_sessions() {
+        let (tmp, store) = open_store();
+        let claude_root = tempfile::tempdir().unwrap();
+        let strong = "aaaaaaaa-0000-0000-0000-000000000001";
+        let weak = "bbbbbbbb-0000-0000-0000-000000000002";
+        seed_text_session(
+            claude_root.path(),
+            strong,
+            &["quokka quokka quokka", "quokka quokka", "quokka"],
+        );
+        seed_text_session(claude_root.path(), weak, &["a quokka among other words"]);
+        let spec = format!("claude:{}", claude_root.path().display());
+        let registry = DriverRegistry::builtin();
+        let driver = registry.driver_for(&spec).unwrap();
+        let source = driver
+            .open_source(SourceOptions::new(&spec).cache_root(claude_root.path().join("cache")))
+            .unwrap();
+        let stored_weak = {
+            let store = store.lock().unwrap();
+            let sessions = SessionStore::from(&*store);
+            let mut native = source.open_native(strong).unwrap();
+            sessions.add(driver.as_ref(), native.as_mut()).unwrap();
+            let mut native = source.open_native(weak).unwrap();
+            sessions.add(driver.as_ref(), native.as_mut()).unwrap().id
+        };
+        let ctx = ContextBuilder::new(Some(Arc::clone(&store)))
+            .cache_root(tmp.path().join("cache"))
+            .build()
+            .await;
+
+        let unrestricted =
+            format!("SELECT session_id FROM native_message_text('{spec}', 'quokka') LIMIT 1");
+        assert_eq!(strings(&ctx, &unrestricted).await, [strong]);
+        let native_sql = format!(
+            "SELECT session_id FROM native_message_text('{spec}', 'quokka') \
+             WHERE session_id IN ('{weak}', 'cccccccc-0000-0000-0000-000000000003') LIMIT 1"
+        );
+        assert_eq!(strings(&ctx, &native_sql).await, [weak]);
+        let stored_sql = format!(
+            "SELECT session_id FROM message_text('quokka') \
+             WHERE session_id = '{stored_weak}' LIMIT 1"
+        );
+        assert_eq!(strings(&ctx, &stored_sql).await, [stored_weak.as_str()]);
+        for sql in [&native_sql, &stored_sql] {
+            let plan = explain(&ctx, sql).await.physical;
+            assert!(
+                !plan.contains("FilterExec"),
+                "the session set is applied by the search: {plan}"
+            );
+        }
+        // A filter the search cannot apply stays a filter step
+        let plan = explain(
+            &ctx,
+            &format!(
+                "SELECT session_id FROM native_message_text('{spec}', 'quokka') \
+                 WHERE session_id LIKE 'b%'"
+            ),
+        )
+        .await
+        .physical;
+        assert!(plan.contains("FilterExec"), "{plan}");
+    }
 }

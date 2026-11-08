@@ -417,12 +417,15 @@ pub trait Source: Send + Sync {
     }
 
     /// Search the text of the source's messages. `query` is a
-    /// full-text query; `limit` caps the hits, and `snippet_chars`
-    /// caps each hit's snippet. Hits come back best match first. The
-    /// default reports that the source has no text index.
+    /// full-text query; `sessions` restricts the search to those
+    /// session ids, and `None` searches every session; `limit` caps
+    /// the hits, and `snippet_chars` caps each hit's snippet. Hits
+    /// come back best match first. The default reports that the
+    /// source has no text index.
     fn message_text(
         &self,
         _query: &str,
+        _sessions: Option<&[String]>,
         _snippet_chars: usize,
         _limit: usize,
     ) -> Result<Vec<MessageTextHit>, DriverError> {

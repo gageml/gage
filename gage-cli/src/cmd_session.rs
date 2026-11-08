@@ -95,8 +95,9 @@ pub enum SessionCommand {
     /// and in the store with --stored, and lists the matching messages
     /// best match first. Bare terms match any of them; "a AND b",
     /// "+a", "-a", a quoted phrase, and a field term such as
-    /// "type:assistant" narrow a search. --all shows up to 1000
-    /// matches per source
+    /// "type:assistant" narrow a search. --since searches only the
+    /// sessions modified within it. --all shows up to 1000 matches
+    /// per source
     Find(SessionFindArgs),
 }
 
@@ -255,6 +256,10 @@ pub struct SessionFindArgs {
     /// Search stored sessions
     #[arg(id = "stored", short = 'S', long = "stored", display_order = 2)]
     pub stored: bool,
+
+    /// Search sessions modified within SINCE
+    #[arg(long, value_parser = super::parse_duration)]
+    pub since: Option<Duration>,
 
     /// Sort hits by date, most recent first
     ///
@@ -533,15 +538,7 @@ async fn query_sessions(
 fn build_where_clause(args: &SessionListArgs, listing: Listing, predicates: &[String]) -> String {
     let mut clauses: Vec<String> = predicates.to_vec();
     if let Some(d) = args.since {
-        let cutoff_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis()
-            .saturating_sub(d.as_millis()) as i64;
-        clauses.push(format!(
-            "{} >= to_timestamp_millis({cutoff_ms})",
-            listing.since_col()
-        ));
+        clauses.push(since_predicate(listing.since_col(), since_cutoff_ms(d)));
     }
     if args.empty {
         clauses.push("is_empty IS TRUE".to_string());
@@ -551,6 +548,22 @@ fn build_where_clause(args: &SessionListArgs, listing: Listing, predicates: &[St
     } else {
         format!(" WHERE {}", clauses.join(" AND "))
     }
+}
+
+/// The epoch millisecond `d` before now, the cutoff a `--since`
+/// window starts at
+fn since_cutoff_ms(d: Duration) -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .saturating_sub(d.as_millis()) as i64
+}
+
+/// The predicate admitting a row whose `col` is at or after
+/// `cutoff_ms`
+fn since_predicate(col: &str, cutoff_ms: i64) -> String {
+    format!("{col} >= to_timestamp_millis({cutoff_ms})")
 }
 
 struct Row {
@@ -1088,12 +1101,28 @@ pub async fn find(args: SessionFindArgs) -> Result<(), CliError> {
     let registry = source::driver_registry();
 
     // One query per corpus, run at once; each is ranked and capped on
-    // its own, then the union is ranked and cut.
+    // its own, then the union is ranked and cut. With --since, each
+    // search is restricted to the corpus's sessions in the window, so
+    // the cap counts hits in those sessions alone; a corpus with none
+    // is not searched.
+    let cutoff_ms = args.since.map(since_cutoff_ms);
     let mut hits = progress::busy_async(FIND_LABEL, async {
         let mut tasks = JoinSet::new();
         for (order, corpus) in corpora.iter().enumerate() {
+            let sessions = match cutoff_ms {
+                Some(ms) => Some(
+                    corpus
+                        .sessions_since(&ctx, ms)
+                        .await
+                        .with_context(|| format!("gage session find: {}", corpus.describe()))?,
+                ),
+                None => None,
+            };
+            if sessions.as_ref().is_some_and(Vec::is_empty) {
+                continue;
+            }
             let ctx = ctx.clone();
-            let sql = corpus.sql(&args.query, fetch);
+            let sql = corpus.sql(&args.query, sessions.as_deref(), fetch);
             let corpus = corpus.clone();
             tasks.spawn(async move {
                 let batches = run_query(&ctx, &sql).await;
@@ -1144,16 +1173,26 @@ impl Corpus {
     /// The hits of this corpus for `query`, each joined to its
     /// session row for the id's display forms, best match first. The
     /// search itself is capped at `fetch` inside the function call,
-    /// where the limit reaches the index.
-    fn sql(&self, query: &str, fetch: usize) -> String {
-        let query = query.replace('\'', "''");
+    /// where the limit reaches the index. With `sessions`, the search
+    /// is restricted to those ids inside the same call, ahead of the
+    /// cap, so the cap counts hits in those sessions alone.
+    fn sql(&self, query: &str, sessions: Option<&[String]>, fetch: usize) -> String {
+        let query = sql_str(query);
+        let restrict = match sessions {
+            Some(ids) => format!(
+                " WHERE session_id IN ({})",
+                unique_literals(ids.iter().map(|id| format!("'{}'", sql_str(id))))
+            ),
+            None => String::new(),
+        };
         match self {
             Corpus::Native(spec) => {
-                let spec = spec.replace('\'', "''");
+                let spec = sql_str(spec);
                 format!(
                     "SELECT t.session_id, s.id_display, s.id_prefix, t.line, t.type, t.snippet, \
                      t.score, '' AS driver \
-                     FROM (SELECT * FROM native_message_text('{spec}', '{query}') LIMIT {fetch}) t \
+                     FROM (SELECT * FROM native_message_text('{spec}', '{query}'){restrict} \
+                     LIMIT {fetch}) t \
                      JOIN native_session('{spec}') s ON s.id = t.session_id \
                      ORDER BY t.score DESC"
                 )
@@ -1161,9 +1200,42 @@ impl Corpus {
             Corpus::Stored => format!(
                 "SELECT t.session_id, s.id_display, s.id_prefix, t.line, t.type, t.snippet, \
                  t.score, s.driver \
-                 FROM (SELECT * FROM message_text('{query}') LIMIT {fetch}) t \
+                 FROM (SELECT * FROM message_text('{query}'){restrict} LIMIT {fetch}) t \
                  JOIN session s ON s.id = t.session_id \
                  ORDER BY t.score DESC"
+            ),
+        }
+    }
+
+    /// The ids of this corpus's sessions modified at or after
+    /// `cutoff_ms`: the column `gage session list --since` filters
+    /// on, the native mtime for a source and the store's `modified`
+    /// marker for the store.
+    async fn sessions_since(
+        &self,
+        ctx: &SessionContext,
+        cutoff_ms: i64,
+    ) -> anyhow::Result<Vec<String>> {
+        let sql = self.sessions_since_sql(cutoff_ms);
+        let batches = run_query(ctx, &sql).await?;
+        let mut ids = Vec::new();
+        for batch in &batches {
+            let col = column::<StringArray>(batch, 0);
+            ids.extend((0..batch.num_rows()).map(|i| col.value(i).to_string()));
+        }
+        Ok(ids)
+    }
+
+    fn sessions_since_sql(&self, cutoff_ms: i64) -> String {
+        match self {
+            Corpus::Native(spec) => format!(
+                "SELECT id FROM native_session('{}') WHERE {}",
+                sql_str(spec),
+                since_predicate("mtime", cutoff_ms)
+            ),
+            Corpus::Stored => format!(
+                "SELECT id FROM session WHERE {}",
+                since_predicate("modified", cutoff_ms)
             ),
         }
     }
@@ -1944,6 +2016,43 @@ mod tests {
 
     /// Prefixes that match no session fail as one list; a full set
     /// of matches resolves in argument order.
+    /// `--since` restricts the search inside the function call, ahead
+    /// of its `LIMIT`, so the cap counts hits in the window's sessions
+    /// alone; the ids are literals and the window is the listing's
+    /// column.
+    #[test]
+    fn find_sql_restricts_the_search_ahead_of_its_cap() {
+        let ids = ["b".to_string(), "a'".to_string(), "b".to_string()];
+        let native = Corpus::Native("claude:/r".into()).sql("q", Some(&ids), 5);
+        assert!(
+            native.contains(
+                "FROM (SELECT * FROM native_message_text('claude:/r', 'q') \
+                 WHERE session_id IN ('a''', 'b') LIMIT 5) t"
+            ),
+            "{native}"
+        );
+        let stored = Corpus::Stored.sql("q", Some(&ids), 5);
+        assert!(
+            stored.contains(
+                "FROM (SELECT * FROM message_text('q') WHERE session_id IN ('a''', 'b') LIMIT 5) t"
+            ),
+            "{stored}"
+        );
+        assert!(
+            Corpus::Stored
+                .sql("q", None, 5)
+                .contains("FROM (SELECT * FROM message_text('q') LIMIT 5) t")
+        );
+        assert_eq!(
+            Corpus::Native("claude:/r".into()).sessions_since_sql(1_000),
+            "SELECT id FROM native_session('claude:/r') WHERE mtime >= to_timestamp_millis(1000)"
+        );
+        assert_eq!(
+            Corpus::Stored.sessions_since_sql(1_000),
+            "SELECT id FROM session WHERE modified >= to_timestamp_millis(1000)"
+        );
+    }
+
     #[test]
     fn find_delete_ids_lists_every_unmatched_prefix_in_one_failure() {
         let find = |prefix: &str| match prefix {

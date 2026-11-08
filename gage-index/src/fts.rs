@@ -28,7 +28,7 @@ use fs4::FileExt;
 use gage_session::MessageTextHit;
 use serde::{Deserialize, Serialize};
 use tantivy::collector::TopDocs;
-use tantivy::query::QueryParser;
+use tantivy::query::{BooleanQuery, BoostQuery, Occur, Query, QueryParser, TermSetQuery};
 use tantivy::schema::{
     FAST, Field, IndexRecordOption, STORED, STRING, Schema, TextFieldIndexing, TextOptions,
     Value as _,
@@ -295,21 +295,32 @@ impl TextIndex {
     }
 
     /// The top `limit` hits for `query`, best match first, each with
-    /// a snippet of at most `snippet_chars` characters.
+    /// a snippet of at most `snippet_chars` characters. With
+    /// `sessions`, only the documents of those sessions are matched:
+    /// the restriction is a term set on the `session_id` field, so the
+    /// text query's posting lists are intersected with it and the
+    /// documents of other sessions are never scored.
     pub fn search(
         &self,
         query: &str,
+        sessions: Option<&[String]>,
         limit: usize,
         snippet_chars: usize,
     ) -> Result<Vec<MessageTextHit>> {
         let reader = self.index.reader()?;
         let searcher = reader.searcher();
         let parser = QueryParser::for_index(&self.index, vec![self.fields.text]);
-        let query = parser
+        let text_query = parser
             .parse_query(query)
             .map_err(|e| Error::QueryParse(e.to_string()))?;
-        let mut snippets = SnippetGenerator::create(&searcher, &*query, self.fields.text)?;
+        // The snippet marks the text query's terms alone; the session
+        // terms are on another field and would mark nothing.
+        let mut snippets = SnippetGenerator::create(&searcher, &*text_query, self.fields.text)?;
         snippets.set_max_num_chars(snippet_chars);
+        let query = match sessions {
+            Some(ids) => self.restrict_to_sessions(text_query, ids),
+            None => text_query,
+        };
         let top = searcher.search(&query, &TopDocs::with_limit(limit.max(1)).order_by_score())?;
         let mut hits = Vec::with_capacity(top.len());
         for (score, addr) in top {
@@ -333,6 +344,21 @@ impl TextIndex {
             });
         }
         Ok(hits)
+    }
+
+    /// `text_query` restricted to the documents of `ids`. The term set
+    /// scores a constant, which a zero boost removes, so the ranking
+    /// is the text query's alone.
+    fn restrict_to_sessions(&self, text_query: Box<dyn Query>, ids: &[String]) -> Box<dyn Query> {
+        let terms = ids
+            .iter()
+            .map(|id| Term::from_field_text(self.fields.session, id));
+        let set: Box<dyn Query> =
+            Box::new(BoostQuery::new(Box::new(TermSetQuery::new(terms)), 0.0));
+        Box::new(BooleanQuery::new(vec![
+            (Occur::Must, text_query),
+            (Occur::Must, set),
+        ]))
     }
 }
 
@@ -571,7 +597,7 @@ mod tests {
             ("s2", 1, "the design rationale and decision matter"),
         ]);
         let hits = index
-            .search("design decision", 10, DEFAULT_SNIPPET_CHARS)
+            .search("design decision", None, 10, DEFAULT_SNIPPET_CHARS)
             .unwrap();
         assert_eq!(hits.len(), 2);
         assert!(hits[0].score >= hits[1].score);
@@ -589,20 +615,50 @@ mod tests {
             ("s4", 1, "neither term present"),
         ]);
         let any = index
-            .search("alpha beta", 10, DEFAULT_SNIPPET_CHARS)
+            .search("alpha beta", None, 10, DEFAULT_SNIPPET_CHARS)
             .unwrap();
         assert_eq!(any.len(), 3);
         assert_eq!(any[0].session_id, "s1");
         let both = index
-            .search("alpha AND beta", 10, DEFAULT_SNIPPET_CHARS)
+            .search("alpha AND beta", None, 10, DEFAULT_SNIPPET_CHARS)
             .unwrap();
         assert_eq!(both.len(), 1);
     }
 
     #[test]
+    fn a_session_set_restricts_the_search_and_keeps_the_text_ranking() {
+        let (index, _root) = index_with(&[
+            ("s1", 1, "alpha"),
+            ("s2", 1, "alpha alpha alpha"),
+            ("s3", 1, "alpha alpha"),
+            ("s4", 1, "beta"),
+        ]);
+        let all = index
+            .search("alpha", None, 10, DEFAULT_SNIPPET_CHARS)
+            .unwrap();
+        assert_eq!(all.len(), 3);
+        let set = ["s1".to_string(), "s3".to_string(), "s4".to_string()];
+        let some = index
+            .search("alpha", Some(&set), 10, DEFAULT_SNIPPET_CHARS)
+            .unwrap();
+        let ids: Vec<&str> = some.iter().map(|h| h.session_id.as_str()).collect();
+        assert_eq!(ids, ["s3", "s1"]);
+        assert!(some.iter().all(|h| h.snippet.contains("«alpha»")));
+        let scored = |hits: &[MessageTextHit], id: &str| {
+            hits.iter().find(|h| h.session_id == id).unwrap().score
+        };
+        assert_eq!(scored(&some, "s1"), scored(&all, "s1"));
+        assert_eq!(scored(&some, "s3"), scored(&all, "s3"));
+        let none = index
+            .search("alpha", Some(&[]), 10, DEFAULT_SNIPPET_CHARS)
+            .unwrap();
+        assert!(none.is_empty());
+    }
+
+    #[test]
     fn an_invalid_query_is_an_error() {
         let (index, _root) = index_with(&[("s1", 1, "x")]);
-        let err = index.search("\"unterminated", 10, DEFAULT_SNIPPET_CHARS);
+        let err = index.search("\"unterminated", None, 10, DEFAULT_SNIPPET_CHARS);
         assert!(matches!(err, Err(Error::QueryParse(_))));
     }
 
@@ -610,7 +666,9 @@ mod tests {
     fn limit_caps_hits() {
         let docs: Vec<(&str, i64, &str)> = (0..20).map(|i| ("s1", i, "the term appears")).collect();
         let (index, _root) = index_with(&docs);
-        let hits = index.search("term", 5, DEFAULT_SNIPPET_CHARS).unwrap();
+        let hits = index
+            .search("term", None, 5, DEFAULT_SNIPPET_CHARS)
+            .unwrap();
         assert_eq!(hits.len(), 5);
     }
 
@@ -622,14 +680,14 @@ mod tests {
             .replace_session("s1", "claude:/c/s1", "fp2", [row(1, "second version")])
             .unwrap();
         writer.commit().unwrap();
-        assert!(index.search("first", 10, 100).unwrap().is_empty());
-        assert_eq!(index.search("second", 10, 100).unwrap().len(), 1);
+        assert!(index.search("first", None, 10, 100).unwrap().is_empty());
+        assert_eq!(index.search("second", None, 10, 100).unwrap().len(), 1);
         assert_eq!(index.sessions()["s1"], "fp2");
 
         let mut writer = index.writer().unwrap();
         writer.remove_session("s1");
         writer.commit().unwrap();
-        assert!(index.search("second", 10, 100).unwrap().is_empty());
+        assert!(index.search("second", None, 10, 100).unwrap().is_empty());
         assert!(index.sessions().is_empty());
     }
 
@@ -639,7 +697,7 @@ mod tests {
         drop(index);
         let reopened = TextIndex::open(&root.path().join("corpus"), "claude:/c").unwrap();
         assert_eq!(reopened.sessions()["s1"], "fp1");
-        assert_eq!(reopened.search("x", 10, 100).unwrap().len(), 1);
+        assert_eq!(reopened.search("x", None, 10, 100).unwrap().len(), 1);
         let manifest: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(reopened.dir().join(MANIFEST_FILE)).unwrap(),
         )
@@ -660,7 +718,7 @@ mod tests {
         .unwrap();
         let reopened = TextIndex::open(&root.path().join("corpus"), "claude:/c").unwrap();
         assert!(reopened.sessions().is_empty());
-        assert!(reopened.search("x", 10, 100).unwrap().is_empty());
+        assert!(reopened.search("x", None, 10, 100).unwrap().is_empty());
     }
 
     #[test]

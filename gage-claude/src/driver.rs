@@ -620,6 +620,7 @@ impl Source for ClaudeSource {
     fn message_text(
         &self,
         query: &str,
+        sessions: Option<&[String]>,
         snippet_chars: usize,
         limit: usize,
     ) -> Result<Vec<MessageTextHit>, DriverError> {
@@ -627,7 +628,7 @@ impl Source for ClaudeSource {
             .reconcile(LockMode::Try)
             .map_err(|e| DriverError::Other(e.to_string()))?;
         self.store
-            .search(query, limit, snippet_chars)
+            .search(query, sessions, limit, snippet_chars)
             .map_err(|e| DriverError::Other(e.to_string()))
     }
 
@@ -1574,15 +1575,20 @@ mod tests {
             r#"{"type":"user","uuid":"u1","message":{"role":"user","content":"the quokka smiled"}}"#,
         );
         let source = ClaudeDriver::new().open_source(&options_for(root)).unwrap();
-        let hits = source.message_text("quokka", 200, 10).unwrap();
+        let hits = source.message_text("quokka", None, 200, 10).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].session_id, id);
         assert_eq!(hits[0].url, source.session_url(id));
         assert_eq!(hits[0].line, 1);
         assert_eq!(hits[0].type_.as_deref(), Some("user"));
         assert!(hits[0].snippet.contains("«quokka»"));
-        assert!(source.message_text("wombat", 200, 10).unwrap().is_empty());
-        let err = source.message_text("\"open", 200, 10).unwrap_err();
+        assert!(
+            source
+                .message_text("wombat", None, 200, 10)
+                .unwrap()
+                .is_empty()
+        );
+        let err = source.message_text("\"open", None, 200, 10).unwrap_err();
         assert!(
             err.to_string().contains("invalid text search query"),
             "{err}"
