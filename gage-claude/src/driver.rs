@@ -28,6 +28,7 @@ use gage_session::{
     SessionLiveError, SkillSession, Source, SourceOptions, StoredSession, ToolUse, split_scheme,
 };
 use serde::Deserialize;
+use serde_json::{Map, Value};
 
 use crate::codec::codec;
 use crate::content_schema;
@@ -1054,13 +1055,24 @@ impl ClaudeNativeSession {
         root: &Path,
         store: &IndexStore,
     ) -> Result<Self, DriverError> {
+        // A transcript that does not derive is still a session: the
+        // walk listed it. Its attributes carry the error in place of
+        // the derived values and are cached like any other, so the
+        // file is read again only when it changes. A file that cannot
+        // be stat'd has no fingerprint to cache against and is the one
+        // failure that propagates.
         let attrs = match store.session_attrs(native_id, mtime) {
             Some(cached) => cached,
             None => {
-                let derived = derive_session(native_id, path)
-                    .map_err(|e| DriverError::Other(format!("{}: {e}", path.display())))?;
-                store.put_session_attrs(native_id, &derived.attrs)?;
-                derived.attrs
+                let attrs = match derive_session(native_id, path) {
+                    Ok(derived) => derived.attrs,
+                    Err(e) => {
+                        let fingerprint = Fingerprint::stat(path)?;
+                        ClaudeSessionAttrs::with_read_error(path, fingerprint, e)
+                    }
+                };
+                store.put_session_attrs(native_id, &attrs)?;
+                attrs
             }
         };
         Ok(Self {
@@ -1110,6 +1122,8 @@ impl NativeSession for ClaudeNativeSession {
     }
 }
 
+/// A session with a read error has no derived values: every derived
+/// accessor is `None`, and `extra_attrs` carries the error.
 impl SessionAttrs for ClaudeSessionAttrs {
     fn native_mtime(&self) -> SystemTime {
         SystemTime::UNIX_EPOCH + Duration::from_millis(self.native_mtime_ms.max(0) as u64)
@@ -1119,8 +1133,8 @@ impl SessionAttrs for ClaudeSessionAttrs {
         self.native_size
     }
 
-    fn is_empty(&self) -> bool {
-        self.is_empty
+    fn is_empty(&self) -> Option<bool> {
+        self.derived(|a| a.is_empty)
     }
 
     fn project_name(&self) -> Option<&str> {
@@ -1136,29 +1150,65 @@ impl SessionAttrs for ClaudeSessionAttrs {
     }
 
     fn message_count(&self) -> Option<u64> {
-        Some(self.message_count.max(0) as u64)
+        self.derived(|a| a.message_count.max(0) as u64)
     }
 
     fn line_count(&self) -> Option<u64> {
-        Some(self.line_count)
+        self.derived(|a| a.line_count)
     }
 
     fn input_tokens(&self) -> Option<u64> {
-        let total =
-            self.input_tokens + self.cache_read_input_tokens + self.cache_creation_input_tokens;
-        Some(total.max(0) as u64)
+        self.derived(|a| {
+            let total = a.input_tokens + a.cache_read_input_tokens + a.cache_creation_input_tokens;
+            total.max(0) as u64
+        })
     }
 
     fn output_tokens(&self) -> Option<u64> {
-        Some(self.output_tokens.max(0) as u64)
+        self.derived(|a| a.output_tokens.max(0) as u64)
     }
 
     fn cached_tokens(&self) -> Option<u64> {
-        Some(self.cache_read_input_tokens.max(0) as u64)
+        self.derived(|a| a.cache_read_input_tokens.max(0) as u64)
     }
 
     fn cost_usd(&self) -> Option<f64> {
         self.cost_usd
+    }
+
+    /// The token split the normalized totals fold together, the span
+    /// of entry timestamps, and the read error when there is one.
+    fn extra_attrs(&self) -> Map<String, Value> {
+        let mut extra = Map::new();
+        if let Some(error) = &self.read_error {
+            extra.insert("read_error".to_string(), Value::from(error.as_str()));
+            return extra;
+        }
+        extra.insert(
+            "cache_read_input_tokens".to_string(),
+            Value::from(self.cache_read_input_tokens),
+        );
+        extra.insert(
+            "cache_creation_input_tokens".to_string(),
+            Value::from(self.cache_creation_input_tokens),
+        );
+        if let Some(ms) = self.first_timestamp_ms {
+            extra.insert("first_timestamp_ms".to_string(), Value::from(ms));
+        }
+        if let Some(ms) = self.last_timestamp_ms {
+            extra.insert("last_timestamp_ms".to_string(), Value::from(ms));
+        }
+        extra
+    }
+}
+
+impl ClaudeSessionAttrs {
+    /// A derived value, or `None` when the session has a read error
+    fn derived<T>(&self, value: impl FnOnce(&Self) -> T) -> Option<T> {
+        match self.read_error {
+            Some(_) => None,
+            None => Some(value(self)),
+        }
     }
 }
 

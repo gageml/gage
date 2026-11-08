@@ -213,9 +213,7 @@ impl Backend {
             Kind::Stored { .. } => ("session_type", "created AS time", "driver"),
         };
         let sql = format!(
-            "SELECT title, project, {type_col}, \
-             json_extract(summary, '$.model') AS model, size, \
-             CAST(json_extract(summary, '$.message_count') AS BIGINT) AS message_count, \
+            "SELECT title, project, {type_col}, model, size, message_count, \
              {time_col}, {driver_col} \
              FROM {} WHERE id = '{}'",
             self.session_rel(),

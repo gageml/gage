@@ -52,9 +52,11 @@ scopes: what a scan-scoped context restricts
 The named tables are session, entry, message, tool_use, tool_use_file,
 session_change, note, note_doc, issue, issue_event, issue_evidence, scan and its
 link and log tables, dataset, attachment, and content_schema. session carries
-`title` and a `summary` JSON (model, counts, token totals, cost_usd), and
-`origin` the source URL; entry and message carry `raw`, tool_use carries
-`input_raw` and `result_raw`, each JSON in the driver's native shape.
+the derived attributes as typed columns (`title`, `model`, `message_count`,
+`line_count`, `is_empty`, the token totals, `cost_usd`), the same values with
+the driver's extra members in a `summary` JSON, and `origin` the source URL;
+entry and message carry `raw`, tool_use carries `input_raw` and `result_raw`,
+each JSON in the driver's native shape.
 
 Read a session by `session_id` ordered by `line`, taking `substr(text, 1, 800)`
 over full `text` or `raw` on wide rows.

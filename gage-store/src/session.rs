@@ -1152,6 +1152,7 @@ pub(crate) mod tests {
     use gage_session::{
         ContentSource, Driver as DriverTrait, DriverError, Source, SourceOptions, StoredSession,
     };
+    use serde_json::{Map, Value};
     use std::any::Any;
     use std::io::Cursor;
     use std::slice;
@@ -1171,6 +1172,8 @@ pub(crate) mod tests {
         /// `(input, output, cached)` when the fake reports usage
         pub(crate) tokens: Option<(u64, u64, u64)>,
         pub(crate) cost_usd: Option<f64>,
+        /// What the fake derived beyond the normalized view
+        pub(crate) extra: Map<String, Value>,
     }
 
     impl SessionAttrs for FakeAttrs {
@@ -1180,8 +1183,8 @@ pub(crate) mod tests {
         fn native_size(&self) -> u64 {
             self.size
         }
-        fn is_empty(&self) -> bool {
-            false
+        fn is_empty(&self) -> Option<bool> {
+            Some(false)
         }
         fn project_name(&self) -> Option<&str> {
             Some("proj")
@@ -1209,6 +1212,9 @@ pub(crate) mod tests {
         }
         fn cost_usd(&self) -> Option<f64> {
             self.cost_usd
+        }
+        fn extra_attrs(&self) -> Map<String, Value> {
+            self.extra.clone()
         }
     }
 
@@ -1295,6 +1301,7 @@ pub(crate) mod tests {
                 title: None,
                 tokens: None,
                 cost_usd: None,
+                extra: Map::new(),
             },
         }
     }
@@ -1326,6 +1333,30 @@ pub(crate) mod tests {
         let record = sessions.at_commit(&outcome.commit_sha).unwrap();
         assert_eq!(record.attrs.summary.input_tokens, None);
         assert_eq!(record.attrs.summary.cost_usd, None);
+    }
+
+    /// What a driver derives beyond the normalized view is written to
+    /// `attrs.summary` beside the normalized fields and read back into
+    /// `extra` without loss.
+    #[test]
+    fn add_keeps_the_drivers_extra_summary_members() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let sessions = SessionStore::from(&store);
+        let mut with = fake("s1", &[("session.jsonl", "{}\n")]);
+        with.summary
+            .extra
+            .insert("fake_note".to_string(), Value::from("kept"));
+        let outcome = sessions.add(&FakeDriver, &mut with).unwrap();
+        let record = sessions.at_commit(&outcome.commit_sha).unwrap();
+        assert_eq!(record.attrs.summary.extra["fake_note"], "kept");
+        assert_eq!(record.attrs.summary.is_empty, Some(false));
+        let ref_path = format!("refs/gage/1/object/{}", outcome.id);
+        let attrs = cat(&store, &format!("{ref_path}:attrs.json"));
+        assert!(
+            attrs.contains("\"summary\":{\"fake_note\":\"kept\",\"is_empty\":false}"),
+            "{attrs}"
+        );
     }
 
     fn cat(store: &Store, spec: &str) -> String {
@@ -1370,7 +1401,7 @@ pub(crate) mod tests {
         assert_eq!(record.attrs.project.as_deref(), Some("proj"));
         assert_eq!(record.attrs.native_size, 4);
         assert_eq!(record.attrs.native_mtime, 0);
-        assert!(!record.attrs.summary.is_empty);
+        assert_eq!(record.attrs.summary.is_empty, Some(false));
     }
 
     #[test]

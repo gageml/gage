@@ -1361,8 +1361,8 @@ mod tests {
         fn native_size(&self) -> u64 {
             0
         }
-        fn is_empty(&self) -> bool {
-            false
+        fn is_empty(&self) -> Option<bool> {
+            Some(false)
         }
         fn project_name(&self) -> Option<&str> {
             None

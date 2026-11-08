@@ -1060,10 +1060,10 @@ mod tests {
         assert!(err.to_string().contains("files_changed"), "{err}");
     }
 
-    /// `native_session` carries the driver's projection as the same
-    /// `summary` JSON the stored `session` table carries, so one
-    /// `json_extract` reads either; `title` and `is_empty` are typed
-    /// columns beside it.
+    /// `native_session` carries the driver's normalized attributes as
+    /// typed columns and again in the same `summary` JSON the stored
+    /// `session` table carries, with the driver's extra members beside
+    /// them.
     #[tokio::test]
     async fn native_session_carries_the_summary_json() {
         let claude_root = tempfile::tempdir().unwrap();
@@ -1103,8 +1103,40 @@ mod tests {
         )
         .await;
         assert_eq!(cols, ["Fix the parser|claude-x|2|2|4|1|false"]);
+        let typed = strings(
+            &ctx,
+            &format!(
+                "SELECT title || '|' || model || '|' || message_count || '|' || \
+                        line_count || '|' || input_tokens || '|' || cached_tokens || '|' || \
+                        is_empty || '|' || output_tokens || '|' || \
+                        coalesce(CAST(cost_usd AS VARCHAR), 'null') \
+                 FROM {from} WHERE id = '{id}'"
+            ),
+        )
+        .await;
         assert_eq!(
-            strings(&ctx, &format!("SELECT id FROM {from} WHERE is_empty")).await,
+            typed,
+            ["Fix the parser|claude-x|2|2|4|1|false|2|null"],
+            "the typed columns carry the same values as the summary JSON"
+        );
+        assert_eq!(
+            strings(
+                &ctx,
+                &format!(
+                    "SELECT json_extract(summary, '$.cache_read_input_tokens') \
+                     FROM {from} WHERE id = '{id}'"
+                )
+            )
+            .await,
+            ["1"],
+            "the driver's extra members ride in the summary"
+        );
+        assert_eq!(
+            strings(
+                &ctx,
+                &format!("SELECT id FROM {from} WHERE is_empty IS TRUE")
+            )
+            .await,
             [empty]
         );
         assert_eq!(
@@ -1115,10 +1147,149 @@ mod tests {
             .await,
             ["Fix the parser", "-"]
         );
-        assert!(
-            ctx.sql(&format!("SELECT model FROM {from}")).await.is_err(),
-            "the other flat summary columns are gone from native_session"
+    }
+
+    /// A file the walk lists is a session whether or not it reads. One
+    /// that does not decode is a row whose `summary` carries the error
+    /// and whose derived columns are null, so `--empty` never selects
+    /// it and a count of the source still includes it.
+    #[tokio::test]
+    async fn native_session_lists_an_unreadable_transcript_with_its_read_error() {
+        let claude_root = tempfile::tempdir().unwrap();
+        let dir = claude_root.path().join("projects").join("-w-proj");
+        std::fs::create_dir_all(&dir).unwrap();
+        let good = "eeeeeeee-0000-0000-0000-000000000001";
+        std::fs::write(
+            dir.join(format!("{good}.jsonl")),
+            concat!(
+                r#"{"type":"user","uuid":"u1","timestamp":"2025-01-01T00:00:00Z","message":{"role":"user","content":"hi"}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+        let bad = "eeeeeeee-0000-0000-0000-000000000002";
+        std::fs::write(
+            dir.join(format!("{bad}.jsonl")),
+            "this is not a transcript\n",
+        )
+        .unwrap();
+        let spec = format!("claude:{}", claude_root.path().display());
+        let ctx = ContextBuilder::new(None)
+            .cache_root(claude_root.path().join("cache"))
+            .build()
+            .await;
+        let from = format!("native_session('{spec}')");
+
+        assert_eq!(
+            strings(&ctx, &format!("SELECT COUNT(*) FROM {from}")).await,
+            ["2"]
         );
+        let row = strings(
+            &ctx,
+            &format!(
+                "SELECT project || '|' || coalesce(title, 'null') || '|' || \
+                        coalesce(CAST(is_empty AS VARCHAR), 'null') || '|' || \
+                        coalesce(CAST(message_count AS VARCHAR), 'null') || '|' || \
+                        json_extract(summary, '$.read_error') \
+                 FROM {from} WHERE id = '{bad}'"
+            ),
+        )
+        .await;
+        assert_eq!(row.len(), 1);
+        assert!(
+            row[0].starts_with("-w-proj|null|null|null|") && row[0].contains("does not decode"),
+            "{row:?}"
+        );
+        assert!(
+            strings(
+                &ctx,
+                &format!("SELECT id FROM {from} WHERE is_empty IS TRUE")
+            )
+            .await
+            .is_empty(),
+            "an unread session is not an empty one"
+        );
+        assert_eq!(
+            strings(
+                &ctx,
+                &format!(
+                    "SELECT id FROM {from} WHERE json_extract(summary, '$.read_error') IS NULL"
+                )
+            )
+            .await,
+            [good]
+        );
+    }
+
+    /// The session listing's SQL shape, columns only under `ORDER BY
+    /// mtime DESC LIMIT n`, hands the limit to the walk: the walk cuts
+    /// the source to n sessions by mtime before any file is parsed,
+    /// which the summary cache shows as n files written.
+    #[tokio::test]
+    async fn listing_limit_reaches_the_walk_before_any_session_is_parsed() {
+        use std::time::{Duration, UNIX_EPOCH};
+
+        let claude_root = tempfile::tempdir().unwrap();
+        let dir = claude_root.path().join("projects").join("-w-proj");
+        std::fs::create_dir_all(&dir).unwrap();
+        let line = r#"{"type":"user","uuid":"u1","timestamp":"2025-01-01T00:00:00Z","message":{"role":"user","content":"hi"}}"#;
+        let ids: Vec<String> = (1..=5)
+            .map(|n| format!("ffffffff-0000-0000-0000-00000000000{n}"))
+            .collect();
+        for (n, id) in ids.iter().enumerate() {
+            let path = dir.join(format!("{id}.jsonl"));
+            std::fs::write(&path, format!("{line}\n")).unwrap();
+            let file = std::fs::File::options().write(true).open(&path).unwrap();
+            file.set_modified(UNIX_EPOCH + Duration::from_secs(1_700_000_000 + n as u64 * 100))
+                .unwrap();
+        }
+        let cache_root = claude_root.path().join("cache");
+        let spec = format!("claude:{}", claude_root.path().display());
+        let ctx = ContextBuilder::new(None)
+            .cache_root(cache_root.clone())
+            .build()
+            .await;
+        let from = format!("native_session('{spec}')");
+
+        let listing = format!(
+            "SELECT id, id_display, id_prefix, project, title, '' AS session_type, model, size, \
+                    message_count, mtime AS time, '' AS driver \
+             FROM {from} ORDER BY mtime DESC LIMIT 2"
+        );
+        assert_eq!(
+            strings(&ctx, &listing).await,
+            [ids[4].clone(), ids[3].clone()]
+        );
+        let parsed = summary_cache_files(&cache_root);
+        assert_eq!(parsed, 2, "the walk opened only the limited sessions");
+
+        let plan = explain(&ctx, &listing).await;
+        assert!(
+            !plan.physical.contains("RepartitionExec") && !plan.physical.contains("SortExec"),
+            "a columns-only listing is neither repartitioned nor re-sorted: {}",
+            plan.physical
+        );
+    }
+
+    /// The number of session summaries the driver's cache under
+    /// `cache_root` holds: one file per parsed session, beside the
+    /// manifest and lock files
+    fn summary_cache_files(cache_root: &Path) -> usize {
+        fn walk(dir: &Path, out: &mut usize) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let entry = entry.unwrap();
+                if entry.file_type().unwrap().is_dir() {
+                    walk(&entry.path(), out);
+                } else if dir.file_name().is_some_and(|d| d == "summary")
+                    && entry.file_name().len() == 36
+                {
+                    *out += 1;
+                }
+            }
+        }
+        let mut n = 0;
+        walk(cache_root, &mut n);
+        n
     }
 
     #[tokio::test]

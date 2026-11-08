@@ -19,12 +19,14 @@ use std::time::SystemTime;
 
 use datafusion::datasource::TableProvider;
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 
 pub mod agent;
 pub mod codec;
 pub mod content_schema;
 pub mod filter;
 pub mod status;
+pub mod summary_columns;
 pub mod system_col;
 pub mod text_block;
 pub mod tool_use;
@@ -38,6 +40,7 @@ pub use content_schema::{
     ContentField, ContentSchema, content_schema_batch, content_schema_schema,
 };
 pub use status::{AuthInfo, DriverStatus, Field, HarnessInfo, InstallInfo};
+pub use summary_columns::{SummaryArrays, SummaryColumns};
 pub use system_col::{SYSTEM_META_KEY, is_system, system};
 pub use text_block::{
     DescriptorError, SpanHit, TextDescriptor, TextValue, TypedSet, TypedValues, ValueHit,
@@ -530,9 +533,12 @@ pub struct Derivation {
     pub appended: Vec<EntryValue>,
 }
 
-/// The attributes of a native session. An implementation decides how
-/// and when it reads them; for the optional ones, `None` means the
-/// harness has no such fact, never that the value was not computed.
+/// The attributes of a native session: the normalized view every
+/// driver provides, and the columns of the `session` and
+/// `native_session` tables. An implementation decides how and when it
+/// reads them; for the optional ones, `None` means the harness has no
+/// such fact, or that the session could not be read and the driver
+/// reports the failure in [`SessionAttrs::extra_attrs`].
 pub trait SessionAttrs {
     /// When the native artifact was last touched at its source: the
     /// file mtime for a file, the closest equivalent otherwise
@@ -540,7 +546,7 @@ pub trait SessionAttrs {
     /// The size in bytes of the native artifact
     fn native_size(&self) -> u64;
     /// The session has no entry with content
-    fn is_empty(&self) -> bool;
+    fn is_empty(&self) -> Option<bool>;
     fn project_name(&self) -> Option<&str>;
     fn title(&self) -> Option<&str>;
     fn model(&self) -> Option<&str>;
@@ -577,12 +583,24 @@ pub trait SessionAttrs {
     fn cost_usd(&self) -> Option<f64> {
         None
     }
+
+    /// What the driver derived beyond the normalized view, as JSON
+    /// object members. The members join the `summary` JSON beside the
+    /// normalized fields and are the driver's to name. A driver that
+    /// could not read the session reports the failure here as
+    /// `read_error`. The default is that the driver adds nothing.
+    fn extra_attrs(&self) -> Map<String, Value> {
+        Map::new()
+    }
 }
 
 /// The driver's projection of a session: the [`SessionAttrs`] values
-/// a session table carries in its `summary` JSON column, and the
+/// a session table carries as typed columns and again in its `summary`
+/// JSON column, plus whatever else the driver put there, and the
 /// value the store writes as `attrs.summary`. Only the driver can
-/// compute these; a table or the store copies them verbatim.
+/// compute these; a table or the store copies them verbatim. The JSON
+/// round-trips without loss: the named fields deserialize into their
+/// fields and every other member lands in `extra`.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
 pub struct SummaryAttrs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -591,8 +609,10 @@ pub struct SummaryAttrs {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message_count: Option<u64>,
-    /// The session has no entry with content
-    pub is_empty: bool,
+    /// The session has no entry with content; absent when the session
+    /// could not be read
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_empty: Option<bool>,
     /// The number of lines in the native content, when the driver
     /// reports it
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -607,6 +627,10 @@ pub struct SummaryAttrs {
     pub cached_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_usd: Option<f64>,
+    /// The members of the JSON object that are not named fields: the
+    /// driver's [`SessionAttrs::extra_attrs`]
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
 }
 
 impl SummaryAttrs {
@@ -622,6 +646,7 @@ impl SummaryAttrs {
             output_tokens: attrs.output_tokens(),
             cached_tokens: attrs.cached_tokens(),
             cost_usd: attrs.cost_usd(),
+            extra: attrs.extra_attrs(),
         }
     }
 
@@ -799,6 +824,30 @@ impl From<DriverError> for NativeLookupError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The summary JSON round-trips without loss: the named fields
+    /// load into their fields, every other member lands in `extra`,
+    /// and serializing writes both back. An absent `is_empty` stays
+    /// absent.
+    #[test]
+    fn summary_attrs_round_trip_keeps_unknown_members() {
+        let text =
+            r#"{"title":"Fix","is_empty":false,"cache_read_input_tokens":7,"read_error":"bad"}"#;
+        let attrs: SummaryAttrs = serde_json::from_str(text).unwrap();
+        assert_eq!(attrs.title.as_deref(), Some("Fix"));
+        assert_eq!(attrs.is_empty, Some(false));
+        assert_eq!(attrs.extra["cache_read_input_tokens"], 7);
+        assert_eq!(attrs.extra["read_error"], "bad");
+        let back: serde_json::Value = serde_json::from_str(&attrs.to_json().unwrap()).unwrap();
+        assert_eq!(
+            back,
+            serde_json::from_str::<serde_json::Value>(text).unwrap()
+        );
+
+        let failed: SummaryAttrs = serde_json::from_str(r#"{"read_error":"bad"}"#).unwrap();
+        assert_eq!(failed.is_empty, None);
+        assert_eq!(failed.to_json().unwrap(), r#"{"read_error":"bad"}"#);
+    }
 
     #[test]
     fn source_options_hide_agents_unless_asked() {

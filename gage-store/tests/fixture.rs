@@ -72,8 +72,8 @@ impl SessionAttrs for FakeSession {
     fn native_size(&self) -> u64 {
         self.content.len() as u64
     }
-    fn is_empty(&self) -> bool {
-        false
+    fn is_empty(&self) -> Option<bool> {
+        Some(false)
     }
     fn project_name(&self) -> Option<&str> {
         Some("fixture-project")

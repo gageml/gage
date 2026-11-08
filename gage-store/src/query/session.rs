@@ -42,7 +42,7 @@ use futures::stream;
 use gage_core::style::IdHighlighter;
 use gage_core::uuid::short_uuid;
 use gage_session::filter::{self, IdFilter};
-use gage_session::{SummaryAttrs, system};
+use gage_session::{SummaryColumns, system};
 
 use super::batch::readable;
 use crate::{
@@ -60,7 +60,15 @@ const ATTRS_COLS: &[&str] = &[
     "content_format",
     "size",
     "origin",
+    "model",
+    "message_count",
+    "line_count",
+    "input_tokens",
+    "output_tokens",
+    "cached_tokens",
+    "cost_usd",
     "summary",
+    "is_empty",
 ];
 
 /// The commit's `modified` marker: when the store wrote the version
@@ -101,10 +109,22 @@ fn stored_session_schema() -> SchemaRef {
         Field::new("size", DataType::Int64, false),
         // The session this one was made from, as a URL
         Field::new("origin", DataType::Utf8, false),
+        // The normalized attributes the driver derived at add time,
+        // each also carried in `summary`
+        Field::new("model", DataType::Utf8, true),
+        Field::new("message_count", DataType::Int64, true),
+        Field::new("line_count", DataType::Int64, true),
+        Field::new("input_tokens", DataType::Int64, true),
+        Field::new("output_tokens", DataType::Int64, true),
+        Field::new("cached_tokens", DataType::Int64, true),
+        Field::new("cost_usd", DataType::Float64, true),
         // The driver's projection of the session, as a JSON object:
-        // title, model, message_count, is_empty, line_count, the token
-        // totals, and cost_usd when the driver reports them
+        // the normalized attributes and whatever else the driver
+        // derived, as `attrs.summary` holds it
         Field::new("summary", DataType::Utf8, true),
+        // Derived flags
+        // The session has no entry with content
+        Field::new("is_empty", DataType::Boolean, true),
         // System
         // Short display form of the Gage id
         system(Field::new("id_display", DataType::Utf8, false)),
@@ -397,7 +417,7 @@ impl StoredSessionExec {
         let needs_attrs = self.projection_needs_attrs();
         let len = tips.len() + externals.len();
         let mut ids = StringBuilder::with_capacity(len, len * 26);
-        let mut titles = StringBuilder::new();
+        let mut derived = SummaryColumns::with_capacity(len);
         let mut id_displays = StringBuilder::with_capacity(len, len * 8);
         let mut id_prefixes = StringBuilder::with_capacity(len, len * 4);
         let mut locators = StringBuilder::with_capacity(len, len * 44);
@@ -408,7 +428,6 @@ impl StoredSessionExec {
         let mut content_formats = StringBuilder::new();
         let mut sizes = Int64Builder::with_capacity(len);
         let mut origins = StringBuilder::new();
-        let mut summaries = StringBuilder::new();
         let mut projects = StringBuilder::new();
 
         for tip in &tips {
@@ -436,24 +455,24 @@ impl StoredSessionExec {
             createds.append_value(marker(tip, "created", tip.created_ms)?);
 
             let Some(record) = record else {
-                titles.append_null();
+                derived.append(None).map_err(summary_encode)?;
                 session_types.append_value("");
                 drivers.append_value("");
                 content_formats.append_value("");
                 sizes.append_value(0);
                 origins.append_value("");
-                summaries.append_null();
                 projects.append_null();
                 continue;
             };
             let attrs = &record.attrs;
-            titles.append_option(attrs.summary.title.as_deref());
+            derived
+                .append(Some(&attrs.summary))
+                .map_err(summary_encode)?;
             session_types.append_value(&attrs.session_type);
             drivers.append_value(&attrs.driver);
             content_formats.append_value(&attrs.content_format);
             sizes.append_value(attrs.size as i64);
             origins.append_value(&attrs.origin);
-            summaries.append_value(summary_json(&attrs.summary)?);
             projects.append_option(attrs.project.as_deref());
         }
 
@@ -471,21 +490,23 @@ impl StoredSessionExec {
             locators.append_value(r.dir.display().to_string());
             modifieds.append_value(r.attrs_modified_ms);
             createds.append_value(r.attrs_modified_ms);
-            titles.append_option(r.attrs.summary.title.as_deref());
+            derived
+                .append(Some(&r.attrs.summary))
+                .map_err(summary_encode)?;
             session_types.append_value(&r.attrs.session_type);
             drivers.append_value(&r.attrs.driver);
             content_formats.append_value(&r.attrs.content_format);
             sizes.append_value(r.attrs.size as i64);
             origins.append_value(&r.attrs.origin);
-            summaries.append_value(summary_json(&r.attrs.summary)?);
             projects.append_option(r.attrs.project.as_deref());
         }
 
+        let derived = derived.finish();
         let batch = RecordBatch::try_new(
             self.full_schema.clone(),
             vec![
                 Arc::new(ids.finish()),
-                Arc::new(titles.finish()),
+                derived.title,
                 Arc::new(projects.finish()),
                 Arc::new(modifieds.finish().with_timezone("UTC")),
                 Arc::new(createds.finish().with_timezone("UTC")),
@@ -494,7 +515,15 @@ impl StoredSessionExec {
                 Arc::new(content_formats.finish()),
                 Arc::new(sizes.finish()),
                 Arc::new(origins.finish()),
-                Arc::new(summaries.finish()),
+                derived.model,
+                derived.message_count,
+                derived.line_count,
+                derived.input_tokens,
+                derived.output_tokens,
+                derived.cached_tokens,
+                derived.cost_usd,
+                derived.summary,
+                derived.is_empty,
                 Arc::new(id_displays.finish()),
                 Arc::new(id_prefixes.finish()),
                 Arc::new(locators.finish()),
@@ -522,12 +551,8 @@ fn external(e: StoreError) -> DataFusionError {
     DataFusionError::External(Box::new(e))
 }
 
-/// The driver's session summary as a JSON object string, the value the
-/// `summary` column carries.
-fn summary_json(summary: &SummaryAttrs) -> Result<String> {
-    summary
-        .to_json()
-        .map_err(|e| external(StoreError::Parse(format!("session summary encode: {e}"))))
+fn summary_encode(e: serde_json::Error) -> DataFusionError {
+    external(StoreError::Parse(format!("session summary encode: {e}")))
 }
 
 /// The value of a required marker of `tip`, or an error naming the
@@ -626,7 +651,7 @@ impl ExecutionPlan for StoredSessionExec {
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use datafusion::arrow::array::{Array, StringArray};
+    use datafusion::arrow::array::{Array, BooleanArray, Float64Array, Int64Array, StringArray};
     use datafusion::prelude::SessionContext;
 
     use gage_core::uuid::new_uuid;
@@ -687,8 +712,9 @@ mod tests {
 
     /// The `summary` column carries the driver's projection as a JSON
     /// object, with the token totals and cost present only where the
-    /// driver reported them. `title` is a typed column beside it and
-    /// stays in the JSON.
+    /// driver reported them. The normalized attributes are typed
+    /// columns beside it with the same values, null where the JSON has
+    /// no member.
     #[tokio::test]
     async fn session_table_projects_summary_json() {
         let tmp = tempfile::tempdir().unwrap();
@@ -740,6 +766,45 @@ mod tests {
         let without: serde_json::Value = serde_json::from_str(summary.value(1)).unwrap();
         assert!(without.get("input_tokens").is_none());
         assert!(without.get("cost_usd").is_none());
+
+        let batches = ctx
+            .sql(
+                "SELECT input_tokens, output_tokens, cached_tokens, cost_usd, is_empty, model \
+                 FROM session ORDER BY origin",
+            )
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        let batch = batches.first().unwrap();
+        let ints = |i: usize| {
+            batch
+                .column(i)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+        };
+        assert_eq!(ints(0).value(0), 1200);
+        assert_eq!(ints(1).value(0), 300);
+        assert_eq!(ints(2).value(0), 1000);
+        let costs = batch
+            .column(3)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        assert_eq!(costs.value(0), 0.5);
+        let empties = batch
+            .column(4)
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .unwrap();
+        assert!(!empties.value(0));
+        for i in 0..3 {
+            assert!(ints(i).is_null(1), "s2 reports no usage");
+        }
+        assert!(costs.is_null(1));
+        assert!(batch.column(5).is_null(0), "the fake names no model");
     }
 
     async fn ids(ctx: &SessionContext, sql: &str) -> Vec<String> {

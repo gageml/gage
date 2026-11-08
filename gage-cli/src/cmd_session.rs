@@ -481,12 +481,13 @@ impl Listing {
 /// Run one SQL query for the shown rows and a second for the total
 /// count under the same filter. The count is needed for the summary
 /// line; DataFusion's `LIMIT` truncates the shown rows and does not
-/// report a total. Both bindings select the same column list and
-/// read `title`, `model`, and `message_count` from their `summary`
-/// JSON; the native binding has no type or driver and fills them
-/// with an empty literal; its time column is `mtime` where the
-/// store's is `created`; and rows order and `--since` filter on
-/// `mtime` where the store's do on `modified`.
+/// report a total. Both bindings select the same column list; the
+/// native binding has no type or driver and fills them with an empty
+/// literal; its time column is `mtime` where the store's is
+/// `created`; and rows order and `--since` filter on `mtime` where
+/// the store's do on `modified`. The list names columns only: a
+/// function in the projection makes DataFusion repartition the scan,
+/// which keeps the limit from reaching the walk.
 async fn query_sessions(
     ctx: &SessionContext,
     args: &SessionListArgs,
@@ -506,9 +507,7 @@ async fn query_sessions(
     let order_clause = listing.order_clause();
     let sql = format!(
         "SELECT id, id_display, id_prefix, project, \
-         title, {type_col}, \
-         json_extract(summary, '$.model') AS model, size, \
-         CAST(json_extract(summary, '$.message_count') AS BIGINT) AS message_count, \
+         title, {type_col}, model, size, message_count, \
          {time_col}, {driver_col} \
          FROM {from}{where_clause} \
          ORDER BY {order_clause}{limit_clause}",
@@ -540,7 +539,7 @@ fn build_where_clause(args: &SessionListArgs, listing: Listing, predicates: &[St
         ));
     }
     if args.empty {
-        clauses.push("is_empty".to_string());
+        clauses.push("is_empty IS TRUE".to_string());
     }
     if clauses.is_empty() {
         String::new()
@@ -1526,7 +1525,7 @@ async fn delete_dialog(
         spinner.start("Looking for empty sessions");
         let targets = delete_targets(
             &ctx,
-            &format!("SELECT id, title FROM {from} WHERE is_empty"),
+            &format!("SELECT id, title FROM {from} WHERE is_empty IS TRUE"),
         )
         .await
         .map_err(|e| DialogError::Other(e.into()))?;

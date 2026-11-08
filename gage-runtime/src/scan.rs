@@ -564,8 +564,7 @@ pub(crate) async fn members(
     newest_first: bool,
 ) -> Result<Vec<Session>, VmError> {
     let sql = format!(
-        "SELECT id, locator, CAST(json_extract(summary, '$.line_count') AS BIGINT) AS line_count \
-         FROM session{}",
+        "SELECT id, locator, line_count FROM session{}",
         session_order(newest_first)
     );
     let batches = run(df_ctx, &sql).await?;
@@ -820,8 +819,7 @@ fn sessions_native(sessions: Ref<SessionsQuery>) -> SessionsNative {
 /// members this machine's driver owns, read in one statement.
 async fn fetch_sessions_native(q: SessionsNative) -> Result<Vec<Value>, VmError> {
     let sql = format!(
-        "SELECT id, locator, CAST(json_extract(summary, '$.line_count') AS BIGINT) AS line_count, \
-                driver, origin, project FROM session{}",
+        "SELECT id, locator, line_count, driver, origin, project FROM session{}",
         session_order(q.newest_first)
     );
     let batches = run(&dataset_query().await?, &sql).await?;

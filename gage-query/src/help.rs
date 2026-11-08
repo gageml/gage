@@ -70,12 +70,13 @@ native_tool_use(source), and native_tool_use_file(source) read the source
 directly. The argument is required: '' names the default source, 'claude:' the
 default Claude Code source, 'claude:/path' a projects directory.
 
-native_session returns (id, title, project, mtime, content_format, size,
+native_session returns (id, title, project, mtime, content_format, size, model,
+message_count, line_count, input_tokens, output_tokens, cached_tokens, cost_usd,
 summary, is_empty): mtime and size are the session file's, where the stored
-session table has created, modified, and the stored content size; summary is the
-same JSON object the stored table carries; is_empty is summary.is_empty as a
-typed column. The other four return their stored tables' columns and key on the
-native UUID: id in native_session, session_id in the rest.
+session table has created, modified, and the stored content size; the derived
+columns and summary are the same as the stored table's. The other four return
+their stored tables' columns and key on the native UUID: id in native_session,
+session_id in the rest.
 
 A stored session's origin ends in its native UUID, so
 SELECT id FROM session WHERE origin LIKE '%/3fefde6c%' tells whether a native
@@ -165,10 +166,14 @@ SELECT sum(out) AS output_tokens FROM
     HelpTopic {
         topic: "summary",
         short: "the summary JSON fields and token totals",
-        full: r#"The summary JSON on session and on native_session's result holds title, model,
-message_count, line_count, is_empty, the token totals, and cost_usd. title is
-also a typed column on both. Read a field with json_extract(summary, '$.model')
-and CAST a number for arithmetic. The token totals count each API response once:
+        full: r#"The derived attributes of a session are typed columns on session and on
+native_session's result: title, model, message_count, line_count, is_empty,
+input_tokens, output_tokens, cached_tokens, and cost_usd. Each is NULL when the
+driver has no such fact or the session could not be read. The summary JSON
+column carries the same values again, with whatever else the driver derived;
+read a driver field with json_extract(summary, '$.cache_read_input_tokens'). A
+session that could not be read has NULL in every derived column and a summary of
+{"read_error": "<why>"}. The token totals count each API response once:
 input_tokens is every prompt token sent, cached or not; output_tokens every
 token generated, reasoning included; cached_tokens the part of input served from
 cache. cost_usd is the harness's reported figure, absent when it reports none.

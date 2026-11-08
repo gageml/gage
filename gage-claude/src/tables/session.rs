@@ -3,11 +3,9 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
-use crate::index::{ClaudeSessionAttrs, IndexStore};
+use crate::index::IndexStore;
 use async_trait::async_trait;
-use datafusion::arrow::array::{
-    BooleanBuilder, Int64Builder, StringBuilder, TimestampMillisecondBuilder,
-};
+use datafusion::arrow::array::{Int64Builder, StringBuilder, TimestampMillisecondBuilder};
 use datafusion::arrow::compute::SortOptions;
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use datafusion::arrow::record_batch::RecordBatch;
@@ -28,7 +26,7 @@ use datafusion::physical_plan::{
 };
 use datafusion::prelude::*;
 use futures::stream;
-use gage_session::SummaryAttrs;
+use gage_session::{SummaryAttrs, SummaryColumns};
 
 use super::cache::SessionCache;
 use super::walk::{SummaryPrune, WALK_COLS, walk_sessions};
@@ -38,11 +36,23 @@ use gage_core::uuid::short_uuid;
 use gage_session::filter;
 use gage_session::system;
 
-/// Columns whose value comes from parsing the session JSONL. Every
-/// other column is filled from the directory walk. A projection that
-/// touches none of these — `SELECT COUNT(*)`, `SELECT id FROM session
-/// WHERE ...` — can skip per-row derivation entirely.
-const SUMMARY_COLS: &[&str] = &["title", "summary", "is_empty"];
+/// Columns whose value comes from parsing the session JSONL: the
+/// normalized attributes and the `summary` JSON that carries them.
+/// Every other column is filled from the directory walk. A projection
+/// that touches none of these — `SELECT COUNT(*)`, `SELECT id FROM
+/// session WHERE ...` — can skip per-row derivation entirely.
+const SUMMARY_COLS: &[&str] = &[
+    "title",
+    "model",
+    "message_count",
+    "line_count",
+    "input_tokens",
+    "output_tokens",
+    "cached_tokens",
+    "cost_usd",
+    "summary",
+    "is_empty",
+];
 
 fn session_schema() -> SchemaRef {
     // Column order is shared with the store's `session` table:
@@ -70,14 +80,26 @@ fn session_schema() -> SchemaRef {
         // Content
         // The byte size of the session file
         Field::new("size", DataType::Int64, false),
+        // The normalized attributes the driver derives, each also
+        // carried in `summary`. Null when the session could not be
+        // read.
+        Field::new("model", DataType::Utf8, true),
+        Field::new("message_count", DataType::Int64, true),
+        Field::new("line_count", DataType::Int64, true),
+        Field::new("input_tokens", DataType::Int64, true),
+        Field::new("output_tokens", DataType::Int64, true),
+        Field::new("cached_tokens", DataType::Int64, true),
+        Field::new("cost_usd", DataType::Float64, true),
         // The driver's projection of the session, as a JSON object:
-        // title, model, message_count, is_empty, line_count, the token
-        // totals, and cost_usd. Null when the session could not be read.
+        // the normalized attributes and whatever else the driver
+        // derived. A session that could not be read carries only
+        // `read_error`.
         Field::new("summary", DataType::Utf8, true),
         // Derived flags
-        // `summary.is_empty` as a typed column, the predicate of
-        // `gage session delete --empty`
-        Field::new("is_empty", DataType::Boolean, false),
+        // The session has no entry with content; the predicate of
+        // `gage session delete --empty`. Null when the session could
+        // not be read.
+        Field::new("is_empty", DataType::Boolean, true),
         // System
         // The driver's short display form of `id`
         system(Field::new("id_display", DataType::Utf8, false)),
@@ -346,14 +368,7 @@ impl SessionExec {
         let mut mtimes = TimestampMillisecondBuilder::with_capacity(len);
         let mut sizes = Int64Builder::with_capacity(len);
         let mut content_formats = StringBuilder::with_capacity(len, len * CONTENT_FORMAT.len());
-        let mut titles = StringBuilder::new();
-        let mut summaries = StringBuilder::new();
-        let mut is_empty = BooleanBuilder::with_capacity(len);
-
-        let default_summary = ClaudeSessionAttrs {
-            is_empty: true,
-            ..Default::default()
-        };
+        let mut derived = SummaryColumns::with_capacity(len);
 
         for s in &sessions {
             ids.append_value(&s.id);
@@ -377,43 +392,45 @@ impl SessionExec {
 
             // The native session is the authority on a session's
             // attributes; the table is one consumer of it. A summary
-            // not needed or not readable leaves the `summary` column
-            // null and the derived columns at their defaults.
-            let attrs = if !needs_summary {
+            // not needed, or a file the driver could not stat, leaves
+            // every derived column null. A transcript the driver could
+            // not read is a row like any other: its summary carries
+            // `read_error` and its derived columns are null.
+            let summary = if !needs_summary {
                 None
             } else {
                 match ClaudeNativeSession::open(&s.id, &s.src, s.mtime, &root, &self.store) {
-                    Ok(session) => Some(session.claude_attrs().clone()),
+                    Ok(session) => Some(SummaryAttrs::from_attrs(session.claude_attrs())),
                     Err(e) => {
                         tracing::warn!(session_id = %s.id, "session summary unavailable: {e}");
                         None
                     }
                 }
             };
-            match &attrs {
-                Some(attrs) => summaries.append_value(
-                    SummaryAttrs::from_attrs(attrs)
-                        .to_json()
-                        .map_err(|e| DataFusionError::External(Box::new(e)))?,
-                ),
-                None => summaries.append_null(),
-            }
-            titles.append_option(attrs.as_ref().and_then(|a| a.title.as_deref()));
-            let attrs = attrs.as_ref().unwrap_or(&default_summary);
-            is_empty.append_value(attrs.is_empty);
+            derived
+                .append(summary.as_ref())
+                .map_err(|e| DataFusionError::External(Box::new(e)))?;
         }
 
+        let derived = derived.finish();
         let batch = RecordBatch::try_new(
             self.full_schema.clone(),
             vec![
                 Arc::new(ids.finish()),
-                Arc::new(titles.finish()),
+                derived.title,
                 Arc::new(projects.finish()),
                 Arc::new(mtimes.finish().with_timezone("UTC")),
                 Arc::new(content_formats.finish()),
                 Arc::new(sizes.finish()),
-                Arc::new(summaries.finish()),
-                Arc::new(is_empty.finish()),
+                derived.model,
+                derived.message_count,
+                derived.line_count,
+                derived.input_tokens,
+                derived.output_tokens,
+                derived.cached_tokens,
+                derived.cost_usd,
+                derived.summary,
+                derived.is_empty,
                 Arc::new(id_displays.finish()),
                 Arc::new(id_prefixes.finish()),
                 Arc::new(paths.finish()),

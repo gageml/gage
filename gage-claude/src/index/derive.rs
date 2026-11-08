@@ -6,6 +6,7 @@
 //! here; the in-memory cache in `gage-query` holds the results.
 
 use std::collections::HashSet;
+use std::fmt;
 use std::path::Path;
 use std::sync::{Arc, LazyLock};
 use std::time::UNIX_EPOCH;
@@ -140,6 +141,40 @@ pub struct ClaudeSessionAttrs {
     /// `tool_use_file` rows without the call. The walk prunes on it.
     #[serde(default)]
     pub files: Vec<ToolUseFile>,
+    /// Why the transcript could not be derived, when it could not. A
+    /// session with a read error has none of the derived values; the
+    /// walk still lists it.
+    #[serde(default)]
+    pub read_error: Option<String>,
+}
+
+impl ClaudeSessionAttrs {
+    /// The attributes of a transcript that failed to derive: the facts
+    /// the walk supplies and the error, cached against `fingerprint`
+    /// like a derived session so the file is read again only when it
+    /// changes.
+    pub fn with_read_error(
+        path: &Path,
+        fingerprint: Fingerprint,
+        error: impl fmt::Display,
+    ) -> Self {
+        Self {
+            native_mtime_ms: fingerprint.mtime_ms,
+            native_size: fingerprint.size,
+            project: project_of(path),
+            read_error: Some(error.to_string()),
+            ..Default::default()
+        }
+    }
+}
+
+/// The project slug of a transcript: the name of the directory
+/// holding it.
+fn project_of(path: &Path) -> String {
+    path.parent()
+        .and_then(|p| p.file_name())
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 pub struct DerivedSession {
@@ -442,12 +477,12 @@ pub fn is_message_row(entry: &serde_json::Value) -> bool {
 /// re-derives — staleness is self-healing, never wrong rows.
 pub fn derive_session(session_id: &str, path: &Path) -> Result<DerivedSession> {
     let fingerprint = Fingerprint::stat(path)?;
-    let project = path
-        .parent()
-        .and_then(|p| p.file_name())
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    derive_session_from(session_id, SessionReader::open(path)?, fingerprint, project)
+    derive_session_from(
+        session_id,
+        SessionReader::open(path)?,
+        fingerprint,
+        project_of(path),
+    )
 }
 
 /// Derive the rows and aggregates of the transcript `reader` yields.
