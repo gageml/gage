@@ -4,7 +4,6 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
 use clap::Args;
-use cliclack as cli;
 use gage_core::cache::{DRIVER_DIR, QUERY_DIR, STORE_DIR, read_corpus};
 use gage_core::config::default_cache_root;
 use gage_index::LockMode;
@@ -23,6 +22,7 @@ use tabled::{
 use crate::dialog;
 use crate::error::CliError;
 use crate::human::format_size;
+use crate::progress;
 use crate::source;
 use crate::style;
 
@@ -89,20 +89,12 @@ pub async fn run(args: IndexArgs) -> Result<(), CliError> {
     }
 
     let rebuild = args.rebuild;
-    let bar = cli::progress_bar(0);
-    bar.start("Building index");
-    let bar_for_task = bar.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        source.reconcile(rebuild, &mut |done, total| {
-            if done == 0 {
-                bar_for_task.set_length(total as u64);
-            }
-            bar_for_task.set_position(done as u64);
-        })
-    })
+    let result = progress::busy_async(
+        "Checking index",
+        tokio::task::spawn_blocking(move || source.reconcile(rebuild)),
+    )
     .await
     .unwrap();
-    bar.clear();
 
     let outcome = result.context("gage index")?;
     println!(
@@ -130,25 +122,18 @@ async fn run_stored(args: IndexArgs) -> Result<(), CliError> {
     }
 
     let rebuild = args.rebuild;
-    let bar = cli::progress_bar(0);
-    bar.start("Building index");
-    let bar_for_task = bar.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        let mut on_progress = |done: usize, total: usize| {
-            if done == 0 {
-                bar_for_task.set_length(total as u64);
+    let result = progress::busy_async(
+        "Checking index",
+        tokio::task::spawn_blocking(move || {
+            if rebuild {
+                index.rebuild()
+            } else {
+                index.reconcile(LockMode::Wait)
             }
-            bar_for_task.set_position(done as u64);
-        };
-        if rebuild {
-            index.rebuild(&mut on_progress)
-        } else {
-            index.reconcile(LockMode::Wait, &mut on_progress)
-        }
-    })
+        }),
+    )
     .await
     .unwrap();
-    bar.clear();
 
     let outcome: StoreTextOutcome = result.context("gage index")?;
     println!(

@@ -45,6 +45,8 @@ mod cmd_backup;
 mod cmd_blame;
 mod cmd_config;
 mod cmd_dataset;
+#[cfg(debug_assertions)]
+mod cmd_dev;
 mod cmd_fetch;
 mod cmd_index;
 mod cmd_init;
@@ -69,6 +71,7 @@ mod json;
 mod limit;
 mod markdown;
 mod model_prompt;
+mod progress;
 mod scanner_attach;
 mod scanner_spec;
 mod session_filter;
@@ -256,30 +259,41 @@ enum Command {
 
     /// Start MCP server
     Mcp,
+
+    /// Commands for developing Gage
+    ///
+    /// Commands for developing Gage. Present in debug builds only; a
+    /// release build has no dev command
+    #[cfg(debug_assertions)]
+    Dev {
+        #[command(subcommand)]
+        command: cmd_dev::DevCommand,
+    },
 }
 
 fn parse_duration(s: &str) -> Result<Duration, DurationError> {
     humantime::parse_duration(s)
 }
 
-// TODO: re-enable MultiProgress tracing writer with AtomicBool flag
-// for commands that use progress bars
-//
-// static MP: OnceLock<MultiProgress> = OnceLock::new();
-//
-// pub fn multi_progress() -> &'static MultiProgress {
-//     MP.get().expect("logging not initialized")
-// }
-
+/// The log layer and the progress indicator. Log lines go through the
+/// indicator so they land above its row; progress spans go to the
+/// indicator alone.
 fn init_logging() {
-    use tracing_subscriber::EnvFilter;
+    use tracing_subscriber::filter::{FilterExt, filter_fn};
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+    use tracing_subscriber::{EnvFilter, Layer, fmt};
 
     let filter = EnvFilter::try_from_env("GAGE_LOG").unwrap_or_else(|_| EnvFilter::new("warn"));
-
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_writer(std::io::stderr)
+    let stderr = fmt::layer()
+        .with_writer(progress::LogWriter)
         .without_time()
+        .with_filter(filter.and(filter_fn(|meta| {
+            meta.target() != gage_session::progress::TARGET
+        })));
+    tracing_subscriber::registry()
+        .with(stderr)
+        .with(progress::layer())
         .init();
 }
 
@@ -387,6 +401,8 @@ async fn main() -> ExitCode {
             Command::Query(args) => cmd_query::main(args).await,
             Command::Blame(args) => cmd_blame::run(args).await,
             Command::Index(args) => cmd_index::run(args).await,
+            #[cfg(debug_assertions)]
+            Command::Dev { command } => cmd_dev::run(command),
             Command::Push(args) => cmd_push::main(args).await,
             Command::Fetch(args) => cmd_fetch::main(args),
             Command::Backup(args) => cmd_backup::main(args).await,

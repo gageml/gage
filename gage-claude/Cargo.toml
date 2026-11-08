@@ -28,6 +28,7 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+gage-session = { path = "../gage-session", features = ["test-util"] }
 jsonschema = { version = "0.58", default-features = false }
 tempfile = { workspace = true }
 

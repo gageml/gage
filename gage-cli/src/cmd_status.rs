@@ -13,7 +13,6 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
 use clap::Args;
-use cliclack as cli;
 use console::style;
 use datafusion::prelude::SessionContext;
 
@@ -26,6 +25,7 @@ use gage_store::Store;
 use crate::cmd_note::count_rows;
 use crate::error::CliError;
 use crate::human::format_size;
+use crate::progress;
 use crate::source::driver_registry;
 
 #[derive(Args)]
@@ -36,11 +36,8 @@ pub struct StatusArgs {
 }
 
 pub async fn run(args: StatusArgs) -> Result<(), CliError> {
-    let spinner = cli::spinner();
-    spinner.start("Reading status");
-    let report = report(args).await;
-    spinner.clear();
-    print!("{}", report?);
+    let report = progress::busy_async("Reading status", report(args)).await?;
+    print!("{report}");
     Ok(())
 }
 

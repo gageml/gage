@@ -34,6 +34,7 @@ use gage_core::cache::{STORE_SCHEME, ensure_corpus_dir, store_corpus_dir};
 use gage_core::config::default_cache_root;
 use gage_index::{LockMode, MessageRow, TextIndex};
 use gage_registry::driver::DriverRegistry;
+use gage_session::progress;
 use gage_session::{MessageTextHit, SourceOptions};
 use gage_store::Store;
 
@@ -200,7 +201,7 @@ impl Backend {
                     .map_err(|e| DataFusionError::Execution(e.to_string()))
             }
             Backend::Store(index) => {
-                index.reconcile(LockMode::Try, &mut |_, _| {})?;
+                index.reconcile(LockMode::Try)?;
                 index.search(query, limit, snippet_len)
             }
         }
@@ -363,14 +364,10 @@ impl StoreTextIndex {
         TextIndex::open(&self.corpus_dir, &self.source_url()).map_err(index_error)
     }
 
-    /// Bring the index up to date with the store's live tips.
-    /// `on_progress(done, total)` reports the sessions to index or
-    /// drop: once with `done == 0`, then after each one.
-    pub fn reconcile(
-        &self,
-        mode: LockMode,
-        on_progress: &mut dyn FnMut(usize, usize),
-    ) -> Result<StoreTextOutcome> {
+    /// Bring the index up to date with the store's live tips. The
+    /// sessions to index or drop are reported as
+    /// [`progress::index_text`].
+    pub fn reconcile(&self, mode: LockMode) -> Result<StoreTextOutcome> {
         let start = std::time::Instant::now();
         let mut text = self.open()?;
         let Some(_guard) = text.lock(mode).map_err(index_error)? else {
@@ -391,9 +388,8 @@ impl StoreTextIndex {
             .filter(|id| !live.contains(id.as_str()))
             .cloned()
             .collect();
-        let total = dirty.len() + removed.len();
+        let span = progress::index_text(dirty.len() + removed.len());
         let mut done = 0;
-        on_progress(done, total);
         let mut outcome = StoreTextOutcome {
             discovered: tips.len(),
             ..Default::default()
@@ -416,13 +412,13 @@ impl StoreTextIndex {
                 .map_err(index_error)?;
             outcome.indexed += 1;
             done += 1;
-            on_progress(done, total);
+            progress::advance(&span, done);
         }
         for id in &removed {
             writer.remove_session(id);
             outcome.removed += 1;
             done += 1;
-            on_progress(done, total);
+            progress::advance(&span, done);
         }
         writer.commit().map_err(index_error)?;
         outcome.elapsed_ms = start.elapsed().as_millis() as u64;
@@ -430,9 +426,9 @@ impl StoreTextIndex {
     }
 
     /// Discard the index and build it again.
-    pub fn rebuild(&self, on_progress: &mut dyn FnMut(usize, usize)) -> Result<StoreTextOutcome> {
+    pub fn rebuild(&self) -> Result<StoreTextOutcome> {
         TextIndex::remove(&self.corpus_dir)?;
-        self.reconcile(LockMode::Wait, on_progress)
+        self.reconcile(LockMode::Wait)
     }
 
     /// The standing of the index against the store. Read-only: takes

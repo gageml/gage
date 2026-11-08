@@ -30,6 +30,10 @@ pub const PROGRESS_TEMPLATE: &str =
 /// Line-style fill and remainder characters of the progress bar
 pub const PROGRESS_CHARS: &str = "▬▬";
 
+/// The indicator row's template once its bar shows: after the
+/// spinner and label, a short dim bar and the count.
+pub const INDICATOR_TEMPLATE: &str = "{msg} {bar:12.white.dim/bright.black} {pos}/{len}";
+
 /// Returns `c` when colors are enabled for stdout, else an empty `Color`.
 /// Wrap every `tabled::settings::Color` used in listing tables so table
 /// styling honors the same TTY gate as `console::style`, avoiding the

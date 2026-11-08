@@ -3,7 +3,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
-use crate::index::IndexStore;
+use crate::index::{ClaudeSessionAttrs, IndexStore};
 use async_trait::async_trait;
 use datafusion::arrow::array::{Int64Builder, StringBuilder, TimestampMillisecondBuilder};
 use datafusion::arrow::compute::SortOptions;
@@ -26,6 +26,7 @@ use datafusion::physical_plan::{
 };
 use datafusion::prelude::*;
 use futures::stream;
+use gage_session::progress;
 use gage_session::{SummaryAttrs, SummaryColumns};
 
 use super::cache::SessionCache;
@@ -370,7 +371,22 @@ impl SessionExec {
         let mut content_formats = StringBuilder::with_capacity(len, len * CONTENT_FORMAT.len());
         let mut derived = SummaryColumns::with_capacity(len);
 
-        for s in &sessions {
+        // The cached summaries, read once here; the sessions without
+        // one are derived in the loop and reported as progress.
+        let cached: Vec<Option<ClaudeSessionAttrs>> = sessions
+            .iter()
+            .map(|s| {
+                needs_summary
+                    .then(|| self.store.session_attrs(&s.id, s.mtime))
+                    .flatten()
+            })
+            .collect();
+        let span = progress::read_sessions(
+            cached.iter().filter(|c| c.is_none()).count() * usize::from(needs_summary),
+        );
+        let mut read = 0;
+
+        for (s, cached) in sessions.iter().zip(cached) {
             ids.append_value(&s.id);
             id_displays.append_value(short_uuid(&s.id));
             let prefix_len = outcome
@@ -396,14 +412,20 @@ impl SessionExec {
             // every derived column null. A transcript the driver could
             // not read is a row like any other: its summary carries
             // `read_error` and its derived columns are null.
-            let summary = if !needs_summary {
-                None
-            } else {
-                match ClaudeNativeSession::open(&s.id, &s.src, s.mtime, &root, &self.store) {
-                    Ok(session) => Some(SummaryAttrs::from_attrs(session.claude_attrs())),
-                    Err(e) => {
-                        tracing::warn!(session_id = %s.id, "session summary unavailable: {e}");
-                        None
+            let summary = match cached {
+                Some(attrs) => Some(SummaryAttrs::from_attrs(&attrs)),
+                None if !needs_summary => None,
+                None => {
+                    let opened =
+                        ClaudeNativeSession::open(&s.id, &s.src, s.mtime, &root, &self.store);
+                    read += 1;
+                    progress::advance(&span, read);
+                    match opened {
+                        Ok(session) => Some(SummaryAttrs::from_attrs(session.claude_attrs())),
+                        Err(e) => {
+                            tracing::warn!(session_id = %s.id, "session summary unavailable: {e}");
+                            None
+                        }
                     }
                 }
             };

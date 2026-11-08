@@ -29,7 +29,7 @@ pub use derive::{
     is_message_row,
 };
 pub use gage_index::LockMode;
-pub use reconcile::{IndexStore, ReconcileEvent, ReconcileOutcome, Status};
+pub use reconcile::{IndexStore, ReconcileOutcome, Status};
 pub use tool_use::ToolUseCollector;
 
 #[derive(Debug)]

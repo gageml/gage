@@ -14,6 +14,12 @@ regex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true, features = ["raw_value"] }
 serde_json_path = "0.7"
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", optional = true }
+
+[features]
+# Exposes `progress::recorder` for tests of progress-reporting code
+test-util = ["dep:tracing-subscriber"]
 
 [lints]
 workspace = true

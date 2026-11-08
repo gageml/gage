@@ -8,7 +8,6 @@ use std::sync::{Arc, Mutex};
 use anyhow::Context;
 use chrono::{DateTime, Utc};
 use clap::Args;
-use cliclack as cli;
 use datafusion::arrow::array::{Array, Int64Array, StringArray, TimestampMillisecondArray};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::prelude::SessionContext;
@@ -20,6 +19,7 @@ use gage_core::style::{IdHighlighter, IdKind};
 use gage_core::uuid::short_uuid;
 
 use crate::error::CliError;
+use crate::progress;
 use crate::source::{self, SOURCE_HELP};
 
 #[derive(Args)]
@@ -49,11 +49,7 @@ pub struct BlameArgs {
 }
 
 pub async fn run(args: BlameArgs) -> Result<(), CliError> {
-    let spinner = cli::spinner();
-    spinner.start("Working");
-    let blamed = blame(&args).await;
-    spinner.clear();
-    let blamed = blamed?;
+    let blamed = progress::busy_async("Working", blame(&args)).await?;
     if args.json {
         PrintFormat::Json
             .print_batches(&blamed.batches)

@@ -55,6 +55,7 @@ use crate::dialog::{self, DialogError, DialogResult};
 use crate::error::CliError;
 use crate::human::{count, format_elapsed_ms};
 use crate::model_prompt;
+use crate::progress;
 use crate::session_filter::{
     FILTER_ARG_NAMES, SessionFilterArgs, SessionLine, SessionSelect, SessionSelectError,
     native_session_lines, preview_sessions, select_sessions, stored_session_lines,
@@ -1503,13 +1504,12 @@ async fn refresh_dialog(
             ),
         )?;
         dialog::confirm(!confirm, true)?;
-        let spinner = cli::spinner();
-        spinner.start("Refreshing session");
-        let refreshed = publisher
-            .edit(&pending.id, author, new_title, redactions)
-            .await;
-        spinner.clear();
-        let refreshed = refreshed.map_err(|e| DialogError::Failed(e.to_string()))?;
+        let refreshed = progress::busy_async(
+            "Refreshing session",
+            publisher.edit(&pending.id, author, new_title, redactions),
+        )
+        .await
+        .map_err(|e| DialogError::Failed(e.to_string()))?;
         for (position, literal) in &refreshed.unmatched {
             cli::log::warning(format!("Redaction {position} matches nothing: {literal:?}"))?;
         }

@@ -20,6 +20,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime};
 
 use gage_core::config::{default_cache_root, plugin_marketplace_dir};
+use gage_session::progress;
 use gage_session::{
     AgentSession, AgentSpec, AuthInfo, ContentSchema, ContentSink, ContentSource, DecodedEntry,
     Derivation, Driver, DriverError, DriverStatus, DriverTables, Entry, EntryCodec, EntryValue,
@@ -34,8 +35,8 @@ use crate::codec::codec;
 use crate::content_schema;
 use crate::home::ClaudeHome;
 use crate::index::{
-    ClaudeSessionAttrs, Fingerprint, IndexStore, LockMode, ReconcileEvent, ToolUseCollector,
-    derive_entry, derive_session, derive_session_from,
+    ClaudeSessionAttrs, Fingerprint, IndexStore, LockMode, ToolUseCollector, derive_entry,
+    derive_session, derive_session_from,
 };
 use crate::model::resolve_model;
 use crate::plugin;
@@ -560,18 +561,13 @@ impl Source for ClaudeSource {
         })
     }
 
-    fn warm_summaries(
-        &self,
-        limit: usize,
-        on_progress: &mut dyn FnMut(usize, usize),
-    ) -> Result<(), DriverError> {
+    fn warm_summaries(&self, limit: usize) -> Result<(), DriverError> {
         let newest = self.store.session_list().limit(limit).build();
         let uncached: Vec<&SessionInfo> = newest
             .iter()
             .filter(|s| self.store.session_attrs(&s.id, s.mtime).is_none())
             .collect();
-        let total = uncached.len();
-        on_progress(0, total);
+        let span = progress::read_sessions(uncached.len());
         for (done, s) in uncached.iter().enumerate() {
             // Opening derives the summary and writes it to the cache.
             // A session that cannot be read is skipped here and
@@ -581,7 +577,7 @@ impl Source for ClaudeSource {
                 Ok(_) => {}
                 Err(e) => tracing::warn!(session_id = %s.id, "session summary unavailable: {e}"),
             }
-            on_progress(done + 1, total);
+            progress::advance(&span, done + 1);
         }
         Ok(())
     }
@@ -589,28 +585,11 @@ impl Source for ClaudeSource {
     /// The reconcile pass over the summary cache: every session the
     /// cache does not hold at its current fingerprint is derived, and
     /// the cache of every session gone from disk is removed.
-    fn reconcile(
-        &self,
-        rebuild: bool,
-        on_progress: &mut dyn FnMut(usize, usize),
-    ) -> Result<MaintenanceOutcome, DriverError> {
-        let mut total = 0;
-        let mut done = 0;
-        let mut on_event = |event: ReconcileEvent| match event {
-            ReconcileEvent::Start { total: n } => {
-                total = n as usize;
-                on_progress(0, total);
-            }
-            ReconcileEvent::Advance => {
-                done += 1;
-                on_progress(done, total);
-            }
-        };
+    fn reconcile(&self, rebuild: bool) -> Result<MaintenanceOutcome, DriverError> {
         let outcome = if rebuild {
-            self.store.rebuild_with_progress(&mut on_event)
+            self.store.rebuild()
         } else {
-            self.store
-                .reconcile_with_progress(LockMode::Wait, &mut on_event)
+            self.store.reconcile(LockMode::Wait)
         }
         .map_err(|e| DriverError::Other(e.to_string()))?;
         Ok(MaintenanceOutcome {
@@ -1387,8 +1366,10 @@ fn is_entry(value: &EntryValue) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use gage_session::progress::recorder;
     use tempfile::TempDir;
+
+    use super::*;
 
     #[test]
     fn delete_native_removes_session_and_sidecar() {
@@ -1546,17 +1527,12 @@ mod tests {
         );
         let source = ClaudeDriver::new().open_source(&options_for(root)).unwrap();
 
-        let mut reported = Vec::new();
-        source
-            .warm_summaries(10, &mut |done, total| reported.push((done, total)))
-            .unwrap();
-        assert_eq!(reported, [(0, 2), (1, 2), (2, 2)]);
+        let reported = recorder::record(|| source.warm_summaries(10).unwrap());
+        let work = progress::READ_SESSIONS;
+        assert_eq!(reported, [(work, 0, 2), (work, 1, 2), (work, 2, 2)]);
 
-        let mut reported = Vec::new();
-        source
-            .warm_summaries(10, &mut |done, total| reported.push((done, total)))
-            .unwrap();
-        assert_eq!(reported, [(0, 0)]);
+        let reported = recorder::record(|| source.warm_summaries(10).unwrap());
+        assert_eq!(reported, []);
     }
 
     #[test]

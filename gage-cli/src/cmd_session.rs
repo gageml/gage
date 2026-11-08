@@ -41,6 +41,7 @@ use crate::cmd_tag::TAG_HELP;
 use crate::dialog::{self, DialogError, DialogResult};
 use crate::error::CliError;
 use crate::human::{count, format_elapsed_ms};
+use crate::progress;
 use crate::session_filter::{
     FILTER_ARG_NAMES, SessionFilterArgs, SessionLine, SessionSelect, SessionSelectError,
     native_session_lines, preview_sessions, resolve_project_in, select_sessions, sql_str,
@@ -335,12 +336,13 @@ async fn list_native(source: Option<String>, args: SessionListArgs) -> Result<()
     // source handle.
     let ctx = ContextBuilder::new(None).build().await;
     let from = format!("native_session('{}')", sql_str(&spec));
-    let predicates = project_predicates(&ctx, &from, args.project.as_deref())
-        .await
-        .context("gage session list")?;
-    let (rows, total) = query_sessions(&ctx, &args, Listing::Native, &from, &predicates)
-        .await
-        .context("gage session list")?;
+    let (rows, total) = progress::busy_async(LIST_LABEL, async {
+        let predicates = project_predicates(&ctx, &from, args.project.as_deref()).await?;
+        let listed = query_sessions(&ctx, &args, Listing::Native, &from, &predicates).await?;
+        anyhow::Ok(listed)
+    })
+    .await
+    .context("gage session list")?;
     if total > 0 {
         let drivers: Vec<Arc<dyn Driver>> = vec![driver.clone(); rows.len()];
         render_table(&rows, &drivers, Listing::Native, args.full_id);
@@ -361,12 +363,13 @@ async fn list_stored(args: SessionListArgs) -> Result<(), CliError> {
     let ctx = ContextBuilder::new(Some(Arc::new(Mutex::new(store))))
         .build()
         .await;
-    let predicates = project_predicates(&ctx, "session", args.project.as_deref())
-        .await
-        .context("gage session list")?;
-    let (rows, total) = query_sessions(&ctx, &args, Listing::Stored, "session", &predicates)
-        .await
-        .context("gage session list")?;
+    let (rows, total) = progress::busy_async(LIST_LABEL, async {
+        let predicates = project_predicates(&ctx, "session", args.project.as_deref()).await?;
+        let listed = query_sessions(&ctx, &args, Listing::Stored, "session", &predicates).await?;
+        anyhow::Ok(listed)
+    })
+    .await
+    .context("gage session list")?;
     if total > 0 {
         let registry = source::driver_registry();
         let drivers = stored_drivers(&registry, &rows).context("gage session list")?;
@@ -393,15 +396,14 @@ async fn list_dataset(args: SessionListArgs) -> Result<(), CliError> {
     let store = Arc::new(Mutex::new(store));
     let ctx = ContextBuilder::new(Some(store)).build().await;
     let from = "session JOIN dataset_session m ON m.session_id = session.id";
-    let mut predicates = vec![format!("m.dataset_id = '{}'", dataset.id)];
-    predicates.extend(
-        project_predicates(&ctx, "session", args.project.as_deref())
-            .await
-            .context("gage session list")?,
-    );
-    let (rows, total) = query_sessions(&ctx, &args, Listing::Dataset, from, &predicates)
-        .await
-        .context("gage session list")?;
+    let (rows, total) = progress::busy_async(LIST_LABEL, async {
+        let mut predicates = vec![format!("m.dataset_id = '{}'", dataset.id)];
+        predicates.extend(project_predicates(&ctx, "session", args.project.as_deref()).await?);
+        let listed = query_sessions(&ctx, &args, Listing::Dataset, from, &predicates).await?;
+        anyhow::Ok(listed)
+    })
+    .await
+    .context("gage session list")?;
     if total == 0 {
         println!("No sessions found");
         return Ok(());
@@ -412,6 +414,9 @@ async fn list_dataset(args: SessionListArgs) -> Result<(), CliError> {
     args.limit.print_summary(rows.len(), total, "session");
     Ok(())
 }
+
+/// The indicator label while a listing's queries run
+const LIST_LABEL: &str = "Reading sessions";
 
 /// The `project` predicate for a `--project` value, or none without
 /// one. The value resolves against the projects `from` records the way
@@ -753,6 +758,9 @@ pub async fn add(
     dialog::run_async("Add sessions", || add_dialog(source, stored, args)).await
 }
 
+/// The indicator label while an add resolves its selection
+const SELECT_LABEL: &str = "Selecting sessions";
+
 /// The selection is one positional session ID with no filter flags
 fn selects_one_session(args: &SessionAddArgs) -> bool {
     args.sessions.len() == 1 && args.filter.is_empty()
@@ -793,10 +801,12 @@ async fn add_dialog(
     let mut view = AddView::new();
     let placed_ids = match dataset_id.as_deref() {
         Some(dataset_id) if stored => {
-            let selected =
-                select_sessions(SessionSelect::Stored(&store), &args.sessions, &args.filter)
-                    .await
-                    .map_err(SessionSelectError::into_dialog_error)?;
+            let selected = progress::busy_async(
+                SELECT_LABEL,
+                select_sessions(SessionSelect::Stored(&store), &args.sessions, &args.filter),
+            )
+            .await
+            .map_err(SessionSelectError::into_dialog_error)?;
             if selected.is_empty() {
                 return Err(DialogError::Failed(
                     "No sessions matched the selection".to_string(),
@@ -819,10 +829,13 @@ async fn add_dialog(
             let registry = source::driver_registry();
             let (driver, spec) = source::resolve_source(&registry, source.as_deref())
                 .map_err(DialogError::Failed)?;
-            let selected = select_sessions(
-                SessionSelect::Native(source.as_deref()),
-                &args.sessions,
-                &args.filter,
+            let selected = progress::busy_async(
+                SELECT_LABEL,
+                select_sessions(
+                    SessionSelect::Native(source.as_deref()),
+                    &args.sessions,
+                    &args.filter,
+                ),
             )
             .await
             .map_err(SessionSelectError::into_dialog_error)?;
@@ -1049,6 +1062,9 @@ fn add_native(
     Ok(placed)
 }
 
+/// The indicator label while a search runs
+const FIND_LABEL: &str = "Searching sessions";
+
 /// Matches per corpus when every match is wanted. A search ranks its
 /// hits, so a cap this size leaves nothing a reader would scroll to.
 const FIND_ALL_LIMIT: usize = 1000;
@@ -1073,23 +1089,27 @@ pub async fn find(args: SessionFindArgs) -> Result<(), CliError> {
 
     // One query per corpus, run at once; each is ranked and capped on
     // its own, then the union is ranked and cut.
-    let mut tasks = JoinSet::new();
-    for (order, corpus) in corpora.iter().enumerate() {
-        let ctx = ctx.clone();
-        let sql = corpus.sql(&args.query, fetch);
-        let corpus = corpus.clone();
-        tasks.spawn(async move {
-            let batches = run_query(&ctx, &sql).await;
-            (order, corpus, batches)
-        });
-    }
-    let mut hits: Vec<Hit> = Vec::new();
-    while let Some(joined) = tasks.join_next().await {
-        let (order, corpus, batches) = joined.context("gage session find")?;
-        let batches =
-            batches.with_context(|| format!("gage session find: {}", corpus.describe()))?;
-        hits.extend(hits_from_batches(&batches, order, &corpus, &registry)?);
-    }
+    let mut hits = progress::busy_async(FIND_LABEL, async {
+        let mut tasks = JoinSet::new();
+        for (order, corpus) in corpora.iter().enumerate() {
+            let ctx = ctx.clone();
+            let sql = corpus.sql(&args.query, fetch);
+            let corpus = corpus.clone();
+            tasks.spawn(async move {
+                let batches = run_query(&ctx, &sql).await;
+                (order, corpus, batches)
+            });
+        }
+        let mut hits: Vec<Hit> = Vec::new();
+        while let Some(joined) = tasks.join_next().await {
+            let (order, corpus, batches) = joined.context("gage session find")?;
+            let batches =
+                batches.with_context(|| format!("gage session find: {}", corpus.describe()))?;
+            hits.extend(hits_from_batches(&batches, order, &corpus, &registry)?);
+        }
+        Ok::<Vec<Hit>, CliError>(hits)
+    })
+    .await?;
     hits.sort_by(|a, b| {
         b.score
             .total_cmp(&a.score)
@@ -1102,7 +1122,7 @@ pub async fn find(args: SessionFindArgs) -> Result<(), CliError> {
         println!("No matches found");
         return Ok(());
     }
-    attach_timestamps(&ctx, &corpora, &mut hits).await?;
+    progress::busy_async(FIND_LABEL, attach_timestamps(&ctx, &corpora, &mut hits)).await?;
     if args.by_date {
         sort_hits_by_date(&mut hits);
     }
@@ -1521,25 +1541,26 @@ async fn delete_dialog(
     let from = format!("native_session('{}')", spec.replace('\'', "''"));
 
     let targets = if args.empty {
-        let spinner = cli::spinner();
-        spinner.start("Looking for empty sessions");
-        let targets = delete_targets(
-            &ctx,
-            &format!("SELECT id, title FROM {from} WHERE is_empty IS TRUE"),
+        progress::busy_async(
+            "Looking for empty sessions",
+            delete_targets(
+                &ctx,
+                &format!("SELECT id, title FROM {from} WHERE is_empty IS TRUE"),
+            ),
         )
         .await
-        .map_err(|e| DialogError::Other(e.into()))?;
-        spinner.clear();
-        targets
+        .map_err(|e| DialogError::Other(e.into()))?
     } else {
-        let ids = find_delete_ids(&args.ids, |prefix| source.find_native(prefix))?;
+        let ids = progress::busy(RESOLVE_LABEL, || {
+            find_delete_ids(&args.ids, |prefix| source.find_native(prefix))
+        })?;
         let in_list = ids
             .iter()
             .map(|id| format!("'{}'", id.replace('\'', "''")))
             .collect::<Vec<_>>()
             .join(", ");
         let sql = format!("SELECT id, title FROM {from} WHERE id IN ({in_list})");
-        delete_targets(&ctx, &sql)
+        progress::busy_async(RESOLVE_LABEL, delete_targets(&ctx, &sql))
             .await
             .map_err(|e| DialogError::Other(e.into()))?
     };
@@ -1564,6 +1585,9 @@ async fn delete_dialog(
     }
     Ok(format!("Deleted {}", count(deleted, "session")).into())
 }
+
+/// The indicator label while a delete resolves its session arguments
+const RESOLVE_LABEL: &str = "Resolving sessions";
 
 pub fn move_(source: Option<String>, stored: bool, args: SessionMoveArgs) -> Result<(), CliError> {
     if stored {
@@ -1701,14 +1725,18 @@ pub async fn view_pending(session: Option<&str>, view: &ViewOptionArgs) -> Resul
     let command = "gage publish view";
     let (prefix, line, options) = view_target(command, "gage publish query", session, view)?;
     let result = async {
-        let store = Store::open(&gage_store::store_path())?;
-        let staging = Staging::from(&store);
-        let id = match prefix {
-            Some(prefix) => Some(staging.get(prefix)?.id),
-            None => None,
-        };
-        let sessions = staging.external()?;
-        let backend = Backend::pending(Arc::new(Mutex::new(store)), sessions).await;
+        let (backend, id) = progress::busy_async(OPEN_LABEL, async {
+            let store = Store::open(&gage_store::store_path())?;
+            let staging = Staging::from(&store);
+            let id = match prefix {
+                Some(prefix) => Some(staging.get(prefix)?.id),
+                None => None,
+            };
+            let sessions = staging.external()?;
+            let backend = Backend::pending(Arc::new(Mutex::new(store)), sessions).await;
+            Ok::<_, Box<dyn Error>>((backend, id))
+        })
+        .await?;
         session_view::run(backend, id.as_deref(), line, options).await
     }
     .await;
@@ -1764,12 +1792,16 @@ async fn view_stored(
     line: Option<u32>,
     options: ViewOptions,
 ) -> Result<(), Box<dyn Error>> {
-    let store = Store::open(&gage_store::store_path())?;
-    let id = match prefix {
-        Some(prefix) => Some(SessionStore::from(&store).get(prefix)?.id),
-        None => None,
-    };
-    let backend = Backend::stored(store).await;
+    let (backend, id) = progress::busy_async(OPEN_LABEL, async {
+        let store = Store::open(&gage_store::store_path())?;
+        let id = match prefix {
+            Some(prefix) => Some(SessionStore::from(&store).get(prefix)?.id),
+            None => None,
+        };
+        let backend = Backend::stored(store).await;
+        Ok::<_, Box<dyn Error>>((backend, id))
+    })
+    .await?;
     session_view::run(backend, id.as_deref(), line, options).await
 }
 
@@ -1781,39 +1813,28 @@ async fn view_native(
 ) -> Result<(), Box<dyn Error>> {
     let registry = source::driver_registry();
     let (driver, spec) = source::resolve_source(&registry, source)?;
-    let opened = driver.open_source(&SourceOptions::new(&spec))?;
-    let id = match prefix {
-        Some(prefix) => Some(opened.find_native(prefix)?),
-        None => {
-            warm_picker_sessions(opened.as_ref())?;
-            None
-        }
-    };
-    opened.close()?;
-    let backend = Backend::native(&spec).open().await?;
+    let (backend, id) = progress::busy_async(OPEN_LABEL, async {
+        let opened = driver.open_source(&SourceOptions::new(&spec))?;
+        let id = match prefix {
+            Some(prefix) => Some(opened.find_native(prefix)?),
+            None => {
+                // The picker's first page is prepared here, while the
+                // indicator still has the terminal; the TUI takes it
+                // next.
+                opened.warm_summaries(picker_page_size())?;
+                None
+            }
+        };
+        opened.close()?;
+        let backend = Backend::native(&spec).open().await?;
+        Ok::<_, Box<dyn Error>>((backend, id))
+    })
+    .await?;
     session_view::run(backend, id.as_deref(), line, options).await
 }
 
-/// Prepare the picker's sessions before the TUI takes the terminal,
-/// behind a progress bar when any of them need reading.
-fn warm_picker_sessions(source: &dyn Source) -> Result<(), Box<dyn Error>> {
-    let mut bar: Option<cli::ProgressBar> = None;
-    source.warm_summaries(picker_page_size(), &mut |done, total| {
-        if total == 0 {
-            return;
-        }
-        let bar = bar.get_or_insert_with(|| {
-            let bar = cli::progress_bar(total as u64);
-            bar.start("Reading sessions");
-            bar
-        });
-        bar.set_position(done as u64);
-    })?;
-    if let Some(bar) = bar {
-        bar.clear();
-    }
-    Ok(())
-}
+/// The indicator label while a view opens its sessions
+const OPEN_LABEL: &str = "Opening sessions";
 
 #[cfg(test)]
 mod tests {

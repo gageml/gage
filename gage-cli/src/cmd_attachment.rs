@@ -41,6 +41,7 @@ use crate::cmd_session::{column, run_query};
 use crate::dialog::{self, DialogError, DialogResult};
 use crate::error::CliError;
 use crate::human::{count, format_elapsed_ms, format_size};
+use crate::progress;
 use crate::scanner_attach::{self, describe};
 use crate::scanner_spec;
 use crate::source;
@@ -282,11 +283,8 @@ async fn add_dialog(args: &AttachmentAddArgs, store: &Store) -> Result<DialogRes
         includes: &args.includes,
         excludes: &args.exclude,
     };
-    let spinner = cli::spinner();
-    spinner.start("Reading files");
-    let added = attachments.add(&spec);
-    spinner.clear();
-    let added = added.map_err(|e| DialogError::Failed(e.to_string()))?;
+    let added = progress::busy("Reading files", || attachments.add(&spec))
+        .map_err(|e| DialogError::Failed(e.to_string()))?;
     let files = count(added.file_count as usize, "file");
     let shown = scanner_attach::describe_shown(
         args.name.as_deref(),

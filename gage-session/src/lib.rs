@@ -25,6 +25,7 @@ pub mod agent;
 pub mod codec;
 pub mod content_schema;
 pub mod filter;
+pub mod progress;
 pub mod status;
 pub mod summary_columns;
 pub mod system_col;
@@ -360,29 +361,19 @@ pub trait Source: Send + Sync {
 
     /// Prepare the newest `limit` sessions for a listing read, so a
     /// later `session` table query over them returns without parsing
-    /// session content. `on_progress(done, total)` reports the
-    /// sessions that need preparing: once with `done == 0`, then after
-    /// each one. The default prepares nothing, for drivers whose
-    /// listing rows are cheap to read.
-    fn warm_summaries(
-        &self,
-        _limit: usize,
-        _on_progress: &mut dyn FnMut(usize, usize),
-    ) -> Result<(), DriverError> {
+    /// session content. The sessions that need preparing are reported
+    /// as [`progress::read_sessions`]. The default prepares nothing,
+    /// for drivers whose listing rows are cheap to read.
+    fn warm_summaries(&self, _limit: usize) -> Result<(), DriverError> {
         Ok(())
     }
 
     /// Bring this source's own state up to date with the sessions it
     /// holds, so later reads return without parsing: prepare what is
     /// missing or stale, drop what is gone. `rebuild` discards the
-    /// state first. `on_progress(done, total)` reports as
-    /// [`warm_summaries`](Self::warm_summaries) does. The default
-    /// maintains nothing.
-    fn reconcile(
-        &self,
-        _rebuild: bool,
-        _on_progress: &mut dyn FnMut(usize, usize),
-    ) -> Result<MaintenanceOutcome, DriverError> {
+    /// state first. The work is reported as [`progress::index_text`].
+    /// The default maintains nothing.
+    fn reconcile(&self, _rebuild: bool) -> Result<MaintenanceOutcome, DriverError> {
         Ok(MaintenanceOutcome::default())
     }
 

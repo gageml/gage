@@ -29,6 +29,7 @@ use fs4::FileExt;
 use gage_core::cache::{driver_corpus_dir, ensure_corpus_dir};
 use gage_index::{LockMode, MessageRow, TextIndex};
 use gage_session::MessageTextHit;
+use gage_session::progress;
 use serde::{Deserialize, Serialize};
 
 use super::Result;
@@ -52,15 +53,6 @@ pub struct ReconcileOutcome {
     pub removed: usize,
     /// Wall-clock duration of the reconcile pass, in milliseconds.
     pub elapsed_ms: u64,
-}
-
-/// Progress signal. `Start` fires once after the diff with the
-/// unit-of-work count (sessions to reindex or remove); `Advance` fires
-/// after each unit completes.
-#[derive(Debug, Clone, Copy)]
-pub enum ReconcileEvent {
-    Start { total: u64 },
-    Advance,
 }
 
 #[derive(Debug, Clone)]
@@ -271,36 +263,21 @@ impl IndexStore {
     }
 
     /// Run the reconcile pass: diff the corpus against the cache,
-    /// re-derive changed sessions, garbage-collect removed ones.
+    /// re-derive changed sessions, garbage-collect removed ones. The
+    /// sessions to re-derive or remove are reported as
+    /// [`progress::index_text`].
     pub fn reconcile(&self, mode: LockMode) -> Result<ReconcileOutcome> {
-        self.reconcile_with_progress(mode, |_| {})
-    }
-
-    /// As `reconcile`, but with a per-event progress callback.
-    pub fn reconcile_with_progress(
-        &self,
-        mode: LockMode,
-        mut on_event: impl FnMut(ReconcileEvent),
-    ) -> Result<ReconcileOutcome> {
-        self.locked(mode, |store| store.reconcile_locked(&mut on_event))
+        self.locked(mode, |store| store.reconcile_locked())
     }
 
     /// Delete the summary cache and the text index and rebuild both
     /// from scratch.
     pub fn rebuild(&self) -> Result<ReconcileOutcome> {
-        self.rebuild_with_progress(|_| {})
-    }
-
-    /// As `rebuild`, but with a per-event progress callback.
-    pub fn rebuild_with_progress(
-        &self,
-        mut on_event: impl FnMut(ReconcileEvent),
-    ) -> Result<ReconcileOutcome> {
         self.locked(LockMode::Wait, |store| {
             write_manifest(&store.manifest_path(), &Manifest::empty(&store.root))?;
             summary_cache::remove_all(&store.summary_dir)?;
             TextIndex::remove(&store.corpus_dir)?;
-            store.reconcile_locked(&mut on_event)
+            store.reconcile_locked()
         })
     }
 
@@ -350,10 +327,7 @@ impl IndexStore {
         result
     }
 
-    fn reconcile_locked(
-        &self,
-        on_event: &mut dyn FnMut(ReconcileEvent),
-    ) -> Result<ReconcileOutcome> {
+    fn reconcile_locked(&self) -> Result<ReconcileOutcome> {
         let start = std::time::Instant::now();
 
         // 1. Walk: (mtime, size) per session, no file reads.
@@ -418,9 +392,8 @@ impl IndexStore {
             ..Default::default()
         };
 
-        on_event(ReconcileEvent::Start {
-            total: (dirty.len() + removed.len()) as u64,
-        });
+        let span = progress::index_text(dirty.len() + removed.len());
+        let mut done = 0;
 
         // 3. Re-derive changed sessions: parse the JSONL once, persist
         // the summary cache for the `session` table fast path, and
@@ -432,13 +405,15 @@ impl IndexStore {
                 Ok(d) => d,
                 Err(e) => {
                     tracing::warn!(session_id = %id, "skipping unreadable session: {e}");
-                    on_event(ReconcileEvent::Advance);
+                    done += 1;
+                    progress::advance(&span, done);
                     continue;
                 }
             };
             if let Err(e) = summary_cache::write(&self.summary_dir, id, &derived.attrs) {
                 tracing::warn!(session_id = %id, "failed to write summary cache: {e}");
-                on_event(ReconcileEvent::Advance);
+                done += 1;
+                progress::advance(&span, done);
                 continue;
             }
             manifest.sessions.insert(id.clone(), *fp);
@@ -449,12 +424,14 @@ impl IndexStore {
                 message_rows_of(&derived.batch),
             ) {
                 tracing::warn!(session_id = %id, "failed to index message text: {e}");
-                on_event(ReconcileEvent::Advance);
+                done += 1;
+                progress::advance(&span, done);
                 continue;
             }
             outcome.indexed += 1;
             tracing::info!(session_id = %id, "indexed session");
-            on_event(ReconcileEvent::Advance);
+            done += 1;
+            progress::advance(&span, done);
         }
 
         // 4. Garbage collection: summary cache files and text documents
@@ -466,7 +443,8 @@ impl IndexStore {
             }
             writer.remove_session(id);
             outcome.removed += 1;
-            on_event(ReconcileEvent::Advance);
+            done += 1;
+            progress::advance(&span, done);
         }
 
         // 5. Commit the text index, then write the manifest.
