@@ -503,19 +503,16 @@ pub fn show(args: AttachmentShowArgs) -> Result<(), CliError> {
         ("id", record.id.clone()),
         ("name", record.attrs.name.clone().unwrap_or_default()),
         ("key", record.attrs.key.clone().unwrap_or_default()),
-        ("targets", record.attrs.targets.join(" ")),
+        ("targets", record.attrs.targets.join("\n")),
         ("root", shorten_home(&record.attrs.root)),
-        ("includes", record.attrs.includes.join(" ")),
-        ("excludes", record.attrs.excludes.join(" ")),
+        ("includes", record.attrs.includes.join("\n")),
+        ("excludes", record.attrs.excludes.join("\n")),
         ("files", record.attrs.file_count.to_string()),
         ("size", format_size(record.attrs.size as i64)),
         ("created", iso(record.created_ms)),
         ("modified", iso(record.modified_ms)),
     ];
-    let label_width = attrs.iter().map(|(k, _)| k.len()).max().unwrap_or(0);
-    for (label, value) in &attrs {
-        println!("{label:<label_width$}  {value}");
-    }
+    println!("{}", attrs_table(&attrs));
     if files.is_empty() {
         return Ok(());
     }
@@ -532,6 +529,15 @@ pub fn show(args: AttachmentShowArgs) -> Result<(), CliError> {
         .to_string();
     println!("{table}");
     Ok(())
+}
+
+/// The attribute table of `show`: one `label | value` row per
+/// attribute, in the form `dataset show` and `note show` use.
+fn attrs_table(attrs: &[(&str, String)]) -> String {
+    Table::from_iter(attrs.iter().map(|(k, v)| [k.to_string(), v.clone()]))
+        .with(Style::rounded())
+        .modify(Columns::first(), style::tty(Color::FG_BRIGHT_YELLOW))
+        .to_string()
 }
 
 pub fn remove(args: AttachmentRemoveArgs) -> Result<(), CliError> {
@@ -694,5 +700,27 @@ mod tests {
         assert_eq!(add_key(&args, root).as_deref(), Some("cfg/main"));
         let args = add_args(&["settings.json"]);
         assert_eq!(add_key(&args, root), None);
+    }
+
+    /// The attributes of `show` render as a bordered two-column table
+    /// with no header row, one row per attribute in the given order.
+    /// A list value joined with newlines takes one line per entry.
+    #[test]
+    fn show_attrs_render_as_a_two_column_table() {
+        console::set_colors_enabled(false);
+        let attrs = [
+            ("id", "abc123".to_string()),
+            ("targets", ["session:a", "session:b"].join("\n")),
+            ("files", "2".to_string()),
+        ];
+        let table = attrs_table(&attrs);
+        let lines: Vec<&str> = table.lines().collect();
+        assert_eq!(lines.len(), 7, "{table}");
+        assert!(lines[0].starts_with('╭'), "{table}");
+        assert_eq!(lines[1], "│ id      │ abc123    │");
+        assert_eq!(lines[3], "│ targets │ session:a │");
+        assert_eq!(lines[4], "│         │ session:b │");
+        assert_eq!(lines[5], "│ files   │ 2         │");
+        assert!(lines[6].starts_with('╰'), "{table}");
     }
 }
