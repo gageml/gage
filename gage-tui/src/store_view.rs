@@ -612,7 +612,7 @@ fn draw(frame: &mut Frame, state: &mut ViewState) {
     draw_footer(frame, footer, state);
 }
 
-/// One row of view labels styled as footer hints, each followed by
+/// One row of view labels styled as footer hints, each preceded by
 /// its key, two spaces apart. The active view's label is reversed
 /// with one space of padding inside the block and shows no key.
 fn draw_views(frame: &mut Frame, area: Rect, state: &ViewState) {
@@ -628,12 +628,12 @@ fn draw_views(frame: &mut Frame, area: Rect, state: &ViewState) {
             ));
         } else {
             spans.push(Span::styled(
-                format!("{} ", view.label()),
-                styles::Panel::view_tab(false),
-            ));
-            spans.push(Span::styled(
                 view.key().to_string(),
                 styles::Panel::footer_key(),
+            ));
+            spans.push(Span::styled(
+                format!(" {}", view.label()),
+                styles::Panel::view_tab(false),
             ));
         }
     }
@@ -1274,7 +1274,7 @@ mod tests {
 
         terminal.draw(|f| draw(f, &mut state)).unwrap();
         let text = screen(&terminal);
-        assert!(text.contains("  Objects   Tags t  Deleted d"), "{text}");
+        assert!(text.contains("  Objects   t Tags  d Deleted"), "{text}");
         assert!(text.contains("Objects (1)"), "{text}");
         assert!(
             text.contains(&format!("▶ note {}", short_uuid(&note_id))),
@@ -1287,12 +1287,13 @@ mod tests {
         handle_key(&mut state, KeyEvent::from(KeyCode::Char('t')));
         terminal.draw(|f| draw(f, &mut state)).unwrap();
         let text = screen(&terminal);
-        assert!(text.contains(" Objects o   Tags   Deleted d"), "{text}");
+        assert!(text.contains(" o Objects   Tags   d Deleted"), "{text}");
         assert!(text.contains("Tags (0)"), "{text}");
         assert!(text.contains("No tags in this store."), "{text}");
         handle_key(&mut state, KeyEvent::from(KeyCode::Char('d')));
         terminal.draw(|f| draw(f, &mut state)).unwrap();
         let text = screen(&terminal);
+        assert!(text.contains(" o Objects  t Tags   Deleted "), "{text}");
         assert!(text.contains("No deleted objects in this store."), "{text}");
         handle_key(&mut state, KeyEvent::from(KeyCode::Char('o')));
         assert_eq!(state.table.selected_index(), Some(0));
