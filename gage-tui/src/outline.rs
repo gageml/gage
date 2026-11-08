@@ -8,7 +8,12 @@ use std::collections::HashSet;
 
 pub struct Outline {
     session_expanded: bool,
+    /// Ids of the attachments whose file rows are shown
+    attachment_expanded: HashSet<String>,
     entry_expanded: HashSet<usize>,
+    /// The attachments that target the session, in order. Rendered as
+    /// children of the session row before its notes.
+    attachments: Vec<AttachmentFiles>,
     /// Ordered note ids attached to the session itself (no line target).
     /// Rendered as children of the session row.
     session_note_ids: Vec<String>,
@@ -28,6 +33,21 @@ pub struct Outline {
     visible: Vec<Row>,
 }
 
+/// An attachment's rows: its id and its file paths in tree order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AttachmentFiles {
+    pub id: String,
+    pub paths: Vec<String>,
+}
+
+/// The rows with children that are open.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Expansion {
+    pub session: bool,
+    pub attachments: HashSet<String>,
+    pub entries: HashSet<usize>,
+}
+
 pub struct Row {
     pub level: usize,
     pub has_children: bool,
@@ -38,6 +58,15 @@ pub struct Row {
 #[derive(Clone)]
 pub enum RowKind {
     Session,
+    /// A store attachment that targets the session, under the session row
+    Attachment {
+        attachment_id: String,
+    },
+    /// One file of an attachment, under its attachment row
+    AttachmentFile {
+        attachment_id: String,
+        path: String,
+    },
     Entry {
         index: usize,
     },
@@ -60,6 +89,7 @@ pub enum CollapseOutcome {
 
 impl Outline {
     pub fn new(
+        attachments: Vec<AttachmentFiles>,
         session_note_ids: Vec<String>,
         entry_note_ids: Vec<Vec<String>>,
         entry_hidden: Vec<bool>,
@@ -68,7 +98,9 @@ impl Outline {
     ) -> Self {
         let mut o = Self {
             session_expanded: false,
+            attachment_expanded: HashSet::new(),
             entry_expanded: HashSet::new(),
+            attachments,
             session_note_ids,
             entry_note_ids,
             entry_hidden,
@@ -143,17 +175,22 @@ impl Outline {
         CollapseOutcome::None
     }
 
-    /// Replace the entry/note projection in place. Preserves expansion state
-    /// (session + per-entry) so a reload doesn't collapse the tree. Entry
-    /// indices that no longer exist drop out of the expanded set.
+    /// Replace the attachment/entry/note projection in place. Preserves
+    /// expansion state (session, per-attachment, per-entry) so a reload
+    /// doesn't collapse the tree. Attachment ids and entry indices that
+    /// no longer exist drop out of the expanded sets.
     pub fn reload(
         &mut self,
+        attachments: Vec<AttachmentFiles>,
         session_note_ids: Vec<String>,
         entry_note_ids: Vec<Vec<String>>,
         entry_hidden: Vec<bool>,
         dropped_anchors: Vec<usize>,
     ) {
+        self.attachment_expanded
+            .retain(|id| attachments.iter().any(|a| &a.id == id));
         self.entry_expanded.retain(|i| *i < entry_note_ids.len());
+        self.attachments = attachments;
         self.session_note_ids = session_note_ids;
         self.entry_note_ids = entry_note_ids;
         self.entry_hidden = entry_hidden;
@@ -161,17 +198,25 @@ impl Outline {
         self.rebuild();
     }
 
-    /// Snapshot of the expansion state (session + per-entry), for hosts
-    /// that restore a previously viewed session's tree shape.
-    pub fn expansion(&self) -> (bool, HashSet<usize>) {
-        (self.session_expanded, self.entry_expanded.clone())
+    /// Snapshot of the expansion state, for hosts that restore a
+    /// previously viewed session's tree shape.
+    pub fn expansion(&self) -> Expansion {
+        Expansion {
+            session: self.session_expanded,
+            attachments: self.attachment_expanded.clone(),
+            entries: self.entry_expanded.clone(),
+        }
     }
 
-    /// Replace the expansion state and rebuild. Entry indices beyond the
-    /// current projection drop out, as in [`Outline::reload`].
-    pub fn set_expansion(&mut self, session_expanded: bool, entry_expanded: HashSet<usize>) {
-        self.session_expanded = session_expanded;
-        self.entry_expanded = entry_expanded;
+    /// Replace the expansion state and rebuild. Attachment ids and entry
+    /// indices beyond the current projection drop out, as in
+    /// [`Outline::reload`].
+    pub fn set_expansion(&mut self, expansion: Expansion) {
+        self.session_expanded = expansion.session;
+        self.attachment_expanded = expansion.attachments;
+        self.entry_expanded = expansion.entries;
+        self.attachment_expanded
+            .retain(|id| self.attachments.iter().any(|a| &a.id == id));
         self.entry_expanded
             .retain(|i| *i < self.entry_note_ids.len());
         self.rebuild();
@@ -227,6 +272,13 @@ impl Outline {
             RowKind::Session => {
                 self.session_expanded = expanded;
             }
+            RowKind::Attachment { attachment_id } => {
+                if expanded {
+                    self.attachment_expanded.insert(attachment_id.clone());
+                } else {
+                    self.attachment_expanded.remove(attachment_id);
+                }
+            }
             RowKind::Entry { index } => {
                 let index = *index;
                 if expanded {
@@ -235,7 +287,9 @@ impl Outline {
                     self.entry_expanded.remove(&index);
                 }
             }
-            RowKind::Note { .. } | RowKind::Dropped { .. } => return,
+            RowKind::AttachmentFile { .. } | RowKind::Note { .. } | RowKind::Dropped { .. } => {
+                return;
+            }
         }
         self.rebuild();
     }
@@ -258,7 +312,8 @@ impl Outline {
     fn rebuild(&mut self) {
         let entry_count = self.entry_note_ids.len();
         let mut rows = Vec::with_capacity(1 + entry_count);
-        let session_has_children = !self.session_note_ids.is_empty();
+        let session_has_children =
+            !self.attachments.is_empty() || !self.session_note_ids.is_empty();
         let session_expanded = session_has_children && self.session_expanded;
         rows.push(Row {
             level: 1,
@@ -267,6 +322,31 @@ impl Outline {
             kind: RowKind::Session,
         });
         if session_expanded {
+            for attachment in &self.attachments {
+                let has_children = !attachment.paths.is_empty();
+                let expanded = has_children && self.attachment_expanded.contains(&attachment.id);
+                rows.push(Row {
+                    level: 2,
+                    has_children,
+                    expanded,
+                    kind: RowKind::Attachment {
+                        attachment_id: attachment.id.clone(),
+                    },
+                });
+                if expanded {
+                    for path in &attachment.paths {
+                        rows.push(Row {
+                            level: 3,
+                            has_children: false,
+                            expanded: false,
+                            kind: RowKind::AttachmentFile {
+                                attachment_id: attachment.id.clone(),
+                                path: path.clone(),
+                            },
+                        });
+                    }
+                }
+            }
             for id in &self.session_note_ids {
                 rows.push(Row {
                     level: 2,
@@ -345,7 +425,7 @@ mod tests {
     fn filter_hides_marked_entries() {
         let notes = vec![Vec::new(), Vec::new(), Vec::new()];
         let hidden = vec![false, true, false];
-        let o = Outline::new(Vec::new(), notes, hidden, Vec::new(), false);
+        let o = Outline::new(Vec::new(), Vec::new(), notes, hidden, Vec::new(), false);
         assert_eq!(entry_indices(&o), [0, 2]);
     }
 
@@ -353,7 +433,7 @@ mod tests {
     fn set_hidden_revises_the_filter() {
         let notes = vec![Vec::new(), Vec::new()];
         let hidden = vec![true, true];
-        let mut o = Outline::new(Vec::new(), notes, hidden, Vec::new(), false);
+        let mut o = Outline::new(Vec::new(), Vec::new(), notes, hidden, Vec::new(), false);
         assert_eq!(entry_indices(&o), [] as [usize; 0]);
         o.set_hidden(vec![false, false]);
         assert_eq!(entry_indices(&o), [0, 1]);
@@ -363,7 +443,12 @@ mod tests {
     fn expansion_round_trips() {
         let notes = vec![vec!["n1".to_string()], vec!["n2".to_string()]];
         let hidden = vec![false, false];
+        let attachments = vec![AttachmentFiles {
+            id: "a1".to_string(),
+            paths: vec!["f".to_string()],
+        }];
         let mut o = Outline::new(
+            attachments.clone(),
             vec!["s1".to_string()],
             notes.clone(),
             hidden.clone(),
@@ -371,25 +456,153 @@ mod tests {
             false,
         );
         let session_row = 0;
-        let entry1_row = 2;
         o.toggle(session_row);
+        let attachment_row = 1;
+        o.toggle(attachment_row);
+        let entry1_row = 4;
         o.toggle(entry1_row);
-        let (session_expanded, entry_expanded) = o.expansion();
+        let expansion = o.expansion();
 
-        let mut fresh = Outline::new(vec!["s1".to_string()], notes, hidden, Vec::new(), false);
-        fresh.set_expansion(session_expanded, entry_expanded);
+        let mut fresh = Outline::new(
+            attachments,
+            vec!["s1".to_string()],
+            notes,
+            hidden,
+            Vec::new(),
+            false,
+        );
+        fresh.set_expansion(expansion);
         let expanded: Vec<bool> = fresh.rows().iter().map(|r| r.expanded).collect();
-        // session (expanded), s1, entry 0 (expanded), n1, entry 1
-        assert_eq!(expanded, [true, false, true, false, false]);
+        // session (expanded), a1 (expanded), f, s1, entry 0 (expanded),
+        // n1, entry 1
+        assert_eq!(expanded, [true, true, false, false, true, false, false]);
     }
 
     #[test]
     fn set_expansion_drops_stale_entries() {
         let notes = vec![vec!["n1".to_string()]];
-        let mut o = Outline::new(Vec::new(), notes, vec![false], Vec::new(), false);
-        o.set_expansion(false, HashSet::from([0, 5]));
-        let (_, entry_expanded) = o.expansion();
-        assert_eq!(entry_expanded, HashSet::from([0]));
+        let mut o = Outline::new(
+            Vec::new(),
+            Vec::new(),
+            notes,
+            vec![false],
+            Vec::new(),
+            false,
+        );
+        o.set_expansion(Expansion {
+            session: false,
+            attachments: HashSet::from(["gone".to_string()]),
+            entries: HashSet::from([0, 5]),
+        });
+        let expansion = o.expansion();
+        assert_eq!(expansion.entries, HashSet::from([0]));
+        assert!(expansion.attachments.is_empty());
+    }
+
+    /// The session row's children are its attachments, each opening
+    /// to its files, then its notes. A reload keeps an attachment open
+    /// while it remains and forgets one that is gone.
+    #[test]
+    fn attachments_precede_session_notes_and_open_to_their_files() {
+        let attachments = vec![
+            AttachmentFiles {
+                id: "a1".to_string(),
+                paths: vec!["settings.json".to_string(), "skills/x.md".to_string()],
+            },
+            AttachmentFiles {
+                id: "a2".to_string(),
+                paths: Vec::new(),
+            },
+        ];
+        let mut o = Outline::new(
+            attachments,
+            vec!["s1".to_string()],
+            vec![Vec::new()],
+            vec![false],
+            Vec::new(),
+            false,
+        );
+        assert_eq!(kinds(&o), ["session", "entry 0"]);
+        assert!(o.rows()[0].has_children);
+        o.toggle(0);
+        assert_eq!(
+            kinds(&o),
+            [
+                "session",
+                "attachment a1",
+                "attachment a2",
+                "note",
+                "entry 0"
+            ]
+        );
+        assert!(!o.toggle(2), "an attachment without files has no children");
+        o.toggle(1);
+        assert_eq!(
+            kinds(&o),
+            [
+                "session",
+                "attachment a1",
+                "file a1 settings.json",
+                "file a1 skills/x.md",
+                "attachment a2",
+                "note",
+                "entry 0",
+            ]
+        );
+        let levels: Vec<usize> = o.rows().iter().map(|r| r.level).collect();
+        assert_eq!(levels, [1, 2, 3, 3, 2, 2, 1]);
+        assert!(matches!(o.collapse(2), CollapseOutcome::SelectParent(1)));
+
+        o.reload(
+            vec![AttachmentFiles {
+                id: "a1".to_string(),
+                paths: vec!["settings.json".to_string()],
+            }],
+            Vec::new(),
+            vec![Vec::new()],
+            vec![false],
+            Vec::new(),
+        );
+        assert_eq!(
+            kinds(&o),
+            [
+                "session",
+                "attachment a1",
+                "file a1 settings.json",
+                "entry 0"
+            ]
+        );
+        assert_eq!(o.expansion().attachments, HashSet::from(["a1".to_string()]));
+
+        o.reload(
+            Vec::new(),
+            Vec::new(),
+            vec![Vec::new()],
+            vec![false],
+            Vec::new(),
+        );
+        assert_eq!(kinds(&o), ["session", "entry 0"]);
+        assert!(!o.rows()[0].has_children);
+        assert!(o.expansion().attachments.is_empty());
+    }
+
+    fn kinds(o: &Outline) -> Vec<String> {
+        o.rows()
+            .iter()
+            .map(|r| match &r.kind {
+                RowKind::Session => "session".to_string(),
+                RowKind::Attachment { attachment_id } => format!("attachment {attachment_id}"),
+                RowKind::AttachmentFile {
+                    attachment_id,
+                    path,
+                } => {
+                    format!("file {attachment_id} {path}")
+                }
+                RowKind::Entry { index } => format!("entry {index}"),
+                RowKind::Note { .. } => "note".to_string(),
+                RowKind::Dropped { index } => format!("dropped {index}"),
+            })
+            .collect()
     }
 
     /// A dropped run's row sits before its anchor entry, after the
@@ -397,20 +610,16 @@ mod tests {
     /// A run anchored to a hidden entry still shows in its place.
     #[test]
     fn dropped_runs_sit_before_their_anchor_entries() {
-        let kinds = |o: &Outline| -> Vec<String> {
-            o.rows()
-                .iter()
-                .map(|r| match r.kind {
-                    RowKind::Session => "session".to_string(),
-                    RowKind::Entry { index } => format!("entry {index}"),
-                    RowKind::Note { .. } => "note".to_string(),
-                    RowKind::Dropped { index } => format!("dropped {index}"),
-                })
-                .collect()
-        };
         let notes = vec![Vec::new(), Vec::new(), Vec::new()];
         let hidden = vec![false, true, false];
-        let mut o = Outline::new(Vec::new(), notes, hidden, vec![0, 1, 1, 3], false);
+        let mut o = Outline::new(
+            Vec::new(),
+            Vec::new(),
+            notes,
+            hidden,
+            vec![0, 1, 1, 3],
+            false,
+        );
         assert_eq!(kinds(&o), ["session", "entry 0", "entry 2"]);
         o.set_dropped_shown(true);
         assert_eq!(
@@ -434,7 +643,7 @@ mod tests {
     fn noted_entry_survives_filter() {
         let notes = vec![vec!["n1".to_string()], Vec::new()];
         let hidden = vec![true, true];
-        let o = Outline::new(Vec::new(), notes, hidden, Vec::new(), false);
+        let o = Outline::new(Vec::new(), Vec::new(), notes, hidden, Vec::new(), false);
         assert_eq!(entry_indices(&o), [0]);
     }
 }

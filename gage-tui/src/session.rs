@@ -4,8 +4,8 @@
 //! over the store. Session and entry rows come from the context's
 //! `session` and `entry` relations in either case; the native
 //! relations are the `native_session(src)` and `native_entry(src)`
-//! table functions. Notes target stored sessions, so only the store
-//! backend reads or writes them.
+//! table functions. Notes and attachments target stored sessions, so
+//! only the store backend reads them.
 
 use std::collections::HashMap;
 use std::error::Error;
@@ -13,8 +13,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use datafusion::arrow::array::{
-    Array, BooleanArray, Int64Array, RecordBatch, StringArray, TimestampMillisecondArray,
-    UInt64Array,
+    Array, ArrayRef, BooleanArray, Int64Array, ListArray, RecordBatch, StringArray,
+    TimestampMillisecondArray, UInt64Array,
 };
 use datafusion::arrow::json::ArrayWriter;
 use datafusion::prelude::SessionContext;
@@ -31,7 +31,10 @@ use gage_store::{
 use ratatui::crossterm::terminal;
 use serde_json::Value;
 
-use crate::doc::{Document, Entry, Note, Redaction, Session, SessionAttrs, ToolUse};
+use crate::doc::{
+    AttachmentFile, Document, Entry, Note, Redaction, Session, SessionAttachment, SessionAttrs,
+    ToolUse,
+};
 use crate::format;
 
 #[derive(Clone)]
@@ -157,14 +160,18 @@ impl Backend {
         let tool_uses = self.load_tool_uses(session_id).await?;
         // A native session is never a publish, and its context has no
         // `session_change` relation. A pending publish has redactions, and
-        // its context has no `note` relation.
-        let (notes, redactions) = match self.kind {
-            Kind::Native { .. } => (Vec::new(), Vec::new()),
-            Kind::Stored { pending: true, .. } => {
-                (Vec::new(), self.load_redactions(session_id).await?)
-            }
+        // its context has no `note` relation. Only a stored session is
+        // an object an attachment targets.
+        let (notes, attachments, redactions) = match self.kind {
+            Kind::Native { .. } => (Vec::new(), Vec::new(), Vec::new()),
+            Kind::Stored { pending: true, .. } => (
+                Vec::new(),
+                Vec::new(),
+                self.load_redactions(session_id).await?,
+            ),
             Kind::Stored { pending: false, .. } => (
                 self.load_notes(session_id).await?,
+                self.load_attachments(session_id).await?,
                 self.load_redactions(session_id).await?,
             ),
         };
@@ -174,6 +181,7 @@ impl Backend {
             turns,
             tool_uses,
             notes,
+            attachments,
             redactions,
         })
     }
@@ -507,6 +515,93 @@ impl Backend {
         Ok(notes)
     }
 
+    /// The attachments whose targets include the session, oldest
+    /// first, each with its files.
+    async fn load_attachments(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<SessionAttachment>, Box<dyn Error>> {
+        let sql = format!(
+            "SELECT id, name, key, targets, root, file_count, size, created, modified \
+             FROM attachment WHERE array_has(targets, 'session:{}') ORDER BY created",
+            sql_str(session_id)
+        );
+        let batches = self.ctx.sql(&sql).await?.collect().await?;
+        let mut attachments = Vec::new();
+        for batch in &batches {
+            let ids = column::<StringArray>(batch, 0);
+            let names = column::<StringArray>(batch, 1);
+            let keys = column::<StringArray>(batch, 2);
+            let targets = column::<ListArray>(batch, 3);
+            let roots = column::<StringArray>(batch, 4);
+            let file_counts = column::<Int64Array>(batch, 5);
+            let sizes = column::<Int64Array>(batch, 6);
+            let createds = column::<TimestampMillisecondArray>(batch, 7);
+            let modifieds = column::<TimestampMillisecondArray>(batch, 8);
+            for i in 0..batch.num_rows() {
+                attachments.push(SessionAttachment {
+                    id: ids.value(i).to_string(),
+                    name: optional_string(names, i),
+                    key: optional_string(keys, i),
+                    targets: list_strings(&targets.value(i)),
+                    root: PathBuf::from(roots.value(i)),
+                    file_count: file_counts.value(i),
+                    size: sizes.value(i),
+                    created_ms: timestamp_or_zero(createds, i),
+                    modified_ms: timestamp_or_zero(modifieds, i),
+                    files: Vec::new(),
+                });
+            }
+        }
+        let ids: Vec<&str> = attachments.iter().map(|a| a.id.as_str()).collect();
+        let mut files = self.load_attachment_files(&ids).await?;
+        for attachment in &mut attachments {
+            attachment.files = files.remove(&attachment.id).unwrap_or_default();
+        }
+        Ok(attachments)
+    }
+
+    /// The files of the attachments `ids`, keyed by attachment id, in
+    /// tree order. One query serves every attachment because the
+    /// `attachment_file` table reads every attachment's bytes on each
+    /// query.
+    async fn load_attachment_files(
+        &self,
+        ids: &[&str],
+    ) -> Result<HashMap<String, Vec<AttachmentFile>>, Box<dyn Error>> {
+        let mut files: HashMap<String, Vec<AttachmentFile>> = HashMap::new();
+        if ids.is_empty() {
+            return Ok(files);
+        }
+        let list = ids
+            .iter()
+            .map(|id| format!("'{}'", sql_str(id)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT attachment_id, path, size, text FROM attachment_file \
+             WHERE attachment_id IN ({list})"
+        );
+        let batches = self.ctx.sql(&sql).await?.collect().await?;
+        for batch in &batches {
+            let attachment_ids = column::<StringArray>(batch, 0);
+            let paths = column::<StringArray>(batch, 1);
+            let sizes = column::<Int64Array>(batch, 2);
+            let texts = column::<StringArray>(batch, 3);
+            for i in 0..batch.num_rows() {
+                files
+                    .entry(attachment_ids.value(i).to_string())
+                    .or_default()
+                    .push(AttachmentFile {
+                        path: paths.value(i).to_string(),
+                        size: sizes.value(i),
+                        text: optional_string(texts, i),
+                    });
+            }
+        }
+        Ok(files)
+    }
+
     /// One page of recent sessions, newest first, for the session-open
     /// picker: `limit` rows starting `offset` rows in.
     pub async fn list_recent(
@@ -796,6 +891,21 @@ fn column<T: 'static>(batch: &RecordBatch, idx: usize) -> &T {
         .expect("column type matches the session, entry, or note schema")
 }
 
+fn optional_string(col: &StringArray, i: usize) -> Option<String> {
+    col.is_valid(i).then(|| col.value(i).to_string())
+}
+
+/// The strings of one list cell.
+fn list_strings(cell: &ArrayRef) -> Vec<String> {
+    let strings = cell
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .expect("attachment targets hold strings");
+    (0..strings.len())
+        .map(|i| strings.value(i).to_string())
+        .collect()
+}
+
 fn string_or_empty(col: &StringArray, i: usize) -> String {
     if col.is_valid(i) {
         col.value(i).to_string()
@@ -819,7 +929,9 @@ pub(crate) mod tests {
 
     use gage_core::uuid::new_uuid;
     use gage_session::SourceOptions;
-    use gage_store::{SessionAttrsRecord, SessionDirLayout, SessionStore};
+    use gage_store::{
+        AttachmentSpec, AttachmentStore, SessionAttrsRecord, SessionDirLayout, SessionStore,
+    };
     use tempfile::TempDir;
 
     use super::*;
@@ -1069,6 +1181,62 @@ pub(crate) mod tests {
         assert_eq!(recent[0].id, f.session_id);
     }
 
+    /// The stored backend loads the attachments whose targets include
+    /// the session, each with its files and their text, and leaves out
+    /// an attachment that targets nothing. A file whose bytes are not
+    /// UTF-8 has no text.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stored_backend_loads_the_attachments_that_target_the_session() {
+        let f = fixture();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("settings.json"), "{\"a\": 1}").unwrap();
+        std::fs::write(root.path().join("blob.bin"), [0xff, 0xfe, 0x00]).unwrap();
+        let includes = vec!["settings.json".to_string(), "blob.bin".to_string()];
+        let attachments = AttachmentStore::from(&f.store);
+        let target = format!("session:{}", f.session_id);
+        let targeted = attachments
+            .add(&AttachmentSpec {
+                name: Some("cfg"),
+                key: None,
+                targets: std::slice::from_ref(&target),
+                root: root.path(),
+                includes: &includes,
+                excludes: &[],
+            })
+            .unwrap();
+        attachments
+            .add(&AttachmentSpec {
+                name: Some("other"),
+                key: None,
+                targets: &[],
+                root: root.path(),
+                includes: &includes,
+                excludes: &[],
+            })
+            .unwrap();
+
+        let backend = Backend::stored(f.store).await;
+        let doc = backend.load(&f.session_id).await.unwrap();
+        assert_eq!(doc.attachments.len(), 1);
+        let attachment = &doc.attachments[0];
+        assert_eq!(attachment.id, targeted.id);
+        assert_eq!(attachment.name.as_deref(), Some("cfg"));
+        assert_eq!(attachment.key, None);
+        assert_eq!(attachment.targets, [target]);
+        assert_eq!(attachment.root, root.path());
+        assert_eq!(attachment.file_count, 2);
+        assert_eq!(attachment.size, 11);
+        assert!(attachment.created_ms > 0);
+        let paths: Vec<&str> = attachment.files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, ["blob.bin", "settings.json"]);
+        let settings = attachment.file("settings.json").unwrap();
+        assert_eq!(settings.size, 8);
+        assert_eq!(settings.text.as_deref(), Some("{\"a\": 1}"));
+        let blob = attachment.file("blob.bin").unwrap();
+        assert_eq!(blob.size, 3);
+        assert_eq!(blob.text, None);
+    }
+
     /// The native backend reads the same session by native id, with
     /// no notes and the note writes refused.
     #[tokio::test]
@@ -1091,6 +1259,7 @@ pub(crate) mod tests {
         assert_eq!(doc.session.value["id"], f.native_id);
         assert!(doc.session.value.get("path").is_none());
         assert!(doc.notes.is_empty());
+        assert!(doc.attachments.is_empty());
         // The native relation has no type, so the driver's name
         // stands in its place, and the time is the file's mtime
         let attrs = &doc.session.attrs;

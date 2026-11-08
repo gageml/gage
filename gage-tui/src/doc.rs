@@ -5,6 +5,8 @@
 //! plus a `yaml()` serializer. The two follow the same pattern so the body
 //! pane renders them through the same highlighter path.
 
+use std::path::PathBuf;
+
 use gage_session::INVALID_ENTRY_TYPE;
 use gage_store::{ChangeKind, NoteValue};
 use serde_json::Value;
@@ -20,6 +22,8 @@ pub struct Document {
     /// yields them, which is the order of the calls in the session
     pub tool_uses: Vec<ToolUse>,
     pub notes: Vec<Note>,
+    /// The store attachments that target the session, oldest first
+    pub attachments: Vec<SessionAttachment>,
     /// The records of a published session's `changes.json`, in
     /// original line order; empty for a session that is not a publish
     pub redactions: Vec<Redaction>,
@@ -151,6 +155,10 @@ impl Document {
 
     pub fn note(&self, id: &str) -> Option<&Note> {
         self.notes.iter().find(|n| n.id == id)
+    }
+
+    pub fn attachment(&self, id: &str) -> Option<&SessionAttachment> {
+        self.attachments.iter().find(|a| a.id == id)
     }
 
     /// Notes anchored at a specific line. A range target anchors at
@@ -300,6 +308,43 @@ pub struct Attachment {
     /// for a bookkeeping row the harness never sent and for a row
     /// written before the harness recorded `rendered`
     pub rendered: Vec<String>,
+}
+
+/// A store attachment that targets the document's session, as the
+/// viewer shows it under the session row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionAttachment {
+    pub id: String,
+    pub name: Option<String>,
+    pub key: Option<String>,
+    /// Gage URLs of the objects the files are about
+    pub targets: Vec<String>,
+    /// The directory the files were selected under, on the machine
+    /// that added them
+    pub root: PathBuf,
+    pub file_count: i64,
+    /// Total bytes across the files
+    pub size: i64,
+    pub created_ms: i64,
+    pub modified_ms: i64,
+    /// The files in tree order
+    pub files: Vec<AttachmentFile>,
+}
+
+impl SessionAttachment {
+    pub fn file(&self, path: &str) -> Option<&AttachmentFile> {
+        self.files.iter().find(|f| f.path == path)
+    }
+}
+
+/// One file of a session attachment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttachmentFile {
+    /// The path relative to the attachment's root, `/`-separated
+    pub path: String,
+    pub size: i64,
+    /// The content as UTF-8 text; `None` when the bytes are not UTF-8
+    pub text: Option<String>,
 }
 
 /// One row of the `tool_use` table, as the viewer shows it.
@@ -480,6 +525,7 @@ mod tests {
             turns: Vec::new(),
             tool_uses: Vec::new(),
             notes: Vec::new(),
+            attachments: Vec::new(),
             redactions: vec![
                 redaction(ChangeKind::Text, 1, None),
                 redaction(ChangeKind::Entry, 2, Some(3)),

@@ -7,7 +7,6 @@
 //! the parent at a terminus). `[`/`]` are deliberately unbound so a host
 //! embedding the view can step between sessions with them.
 
-use std::collections::HashSet;
 use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -32,11 +31,11 @@ use crate::doc::{Document, Dropped, EntryBody, Note, Redaction, SessionAttrs};
 use crate::hint;
 use crate::input::spawn_input_thread;
 use crate::options::ViewOptions;
-use crate::outline::{CollapseOutcome, Outline, RowKind};
+use crate::outline::{AttachmentFiles, CollapseOutcome, Expansion, Outline, RowKind};
 use crate::picker::{self, PickColumn, PickItem, Picker, PickerAction};
 use crate::session::{self, Backend};
 use crate::textarea::TextArea;
-use crate::{attachment, invalid_entry, json, markdown, styles, tool};
+use crate::{attachment, invalid_entry, json, markdown, session_attachment, styles, tool};
 
 pub async fn run(
     terminal: &mut DefaultTerminal,
@@ -597,8 +596,7 @@ pub(crate) struct SavedUi {
     offset: usize,
     body_scroll: u16,
     focus_body: bool,
-    session_expanded: bool,
-    entry_expanded: HashSet<usize>,
+    expansion: Expansion,
     view: ViewOptions,
 }
 
@@ -713,6 +711,7 @@ impl AppState {
     ) -> Self {
         let (session_note_ids, entry_note_ids) = note_projection(&doc);
         let outline = Outline::new(
+            attachment_projection(&doc),
             session_note_ids,
             entry_note_ids,
             entry_hidden(&doc, options),
@@ -755,7 +754,6 @@ impl AppState {
     }
 
     pub(crate) fn save_ui(&self) -> SavedUi {
-        let (session_expanded, entry_expanded) = self.outline.expansion();
         SavedUi {
             selected: self
                 .list_state
@@ -765,8 +763,7 @@ impl AppState {
             offset: self.list_state.offset(),
             body_scroll: self.body_scroll,
             focus_body: self.focus == Focus::Body,
-            session_expanded,
-            entry_expanded,
+            expansion: self.outline.expansion(),
             view: self.view.clone(),
         }
     }
@@ -776,8 +773,7 @@ impl AppState {
     /// is gone (e.g. its note was deleted between views), selection
     /// falls back to the top and the saved body position is dropped.
     pub(crate) fn restore_ui(&mut self, saved: &SavedUi) {
-        self.outline
-            .set_expansion(saved.session_expanded, saved.entry_expanded.clone());
+        self.outline.set_expansion(saved.expansion.clone());
         let found = saved.selected.as_ref().and_then(|kind| {
             self.outline
                 .rows()
@@ -964,13 +960,19 @@ impl AppState {
             }),
         }
         .map_err(|e| io::Error::other(e.to_string()))?;
+        let attachments = attachment_projection(&doc);
         let (session_note_ids, entry_note_ids) = note_projection(&doc);
         let hidden = entry_hidden(&doc, &self.view);
         let anchors = dropped_anchors(&doc);
         self.doc = doc;
         let pane_row = self.selected_pane_row();
-        self.outline
-            .reload(session_note_ids, entry_note_ids, hidden, anchors);
+        self.outline.reload(
+            attachments,
+            session_note_ids,
+            entry_note_ids,
+            hidden,
+            anchors,
+        );
         let new_sel = prior
             .and_then(|kind| {
                 self.outline
@@ -1092,12 +1094,18 @@ impl AppState {
     /// Swap in a different session's document, resetting the UI to the
     /// top of the new session.
     fn replace_doc(&mut self, doc: Document) {
+        let attachments = attachment_projection(&doc);
         let (session_note_ids, entry_note_ids) = note_projection(&doc);
         let hidden = entry_hidden(&doc, &self.view);
         let anchors = dropped_anchors(&doc);
         self.doc = doc;
-        self.outline
-            .reload(session_note_ids, entry_note_ids, hidden, anchors);
+        self.outline.reload(
+            attachments,
+            session_note_ids,
+            entry_note_ids,
+            hidden,
+            anchors,
+        );
         self.list_state.select(Some(0));
         *self.list_state.offset_mut() = 0;
         self.body_scroll = 0;
@@ -1138,17 +1146,27 @@ impl AppState {
         match &row.kind {
             RowKind::Entry { index } => Some(*index),
             RowKind::Note { entry_index, .. } => *entry_index,
-            RowKind::Session | RowKind::Dropped { .. } => None,
+            RowKind::Session
+            | RowKind::Attachment { .. }
+            | RowKind::AttachmentFile { .. }
+            | RowKind::Dropped { .. } => None,
         }
     }
 
-    /// Whether the selected row is a run of dropped lines, which has
-    /// no entry a note could target.
-    fn selected_dropped(&self) -> bool {
+    /// Whether the selected row is one no note targets: a run of
+    /// dropped lines, an attachment, or an attachment file.
+    fn selected_takes_no_note(&self) -> bool {
         self.list_state
             .selected()
             .and_then(|i| self.outline.row(i))
-            .is_some_and(|r| matches!(r.kind, RowKind::Dropped { .. }))
+            .is_some_and(|r| {
+                matches!(
+                    r.kind,
+                    RowKind::Dropped { .. }
+                        | RowKind::Attachment { .. }
+                        | RowKind::AttachmentFile { .. }
+                )
+            })
     }
 
     fn selected_note(&self) -> Option<&Note> {
@@ -1164,7 +1182,7 @@ impl AppState {
     }
 
     fn begin_add_note(&mut self) {
-        if self.list_state.selected().is_none() || self.selected_dropped() {
+        if self.list_state.selected().is_none() || self.selected_takes_no_note() {
             return;
         }
         let entry_index = self.selected_entry_index();
@@ -1246,6 +1264,19 @@ fn nearest_prev_entry(outline: &Outline, target: usize) -> Option<usize> {
 fn same_row(a: &RowKind, b: &RowKind) -> bool {
     match (a, b) {
         (RowKind::Session, RowKind::Session) => true,
+        (RowKind::Attachment { attachment_id: a }, RowKind::Attachment { attachment_id: b }) => {
+            a == b
+        }
+        (
+            RowKind::AttachmentFile {
+                attachment_id: a,
+                path: a_path,
+            },
+            RowKind::AttachmentFile {
+                attachment_id: b,
+                path: b_path,
+            },
+        ) => a == b && a_path == b_path,
         (RowKind::Entry { index: a }, RowKind::Entry { index: b }) => a == b,
         (RowKind::Note { note_id: a, .. }, RowKind::Note { note_id: b, .. }) => a == b,
         (RowKind::Dropped { index: a }, RowKind::Dropped { index: b }) => a == b,
@@ -1298,6 +1329,18 @@ fn note_projection(doc: &Document) -> (Vec<String>, Vec<Vec<String>>) {
         })
         .collect();
     (session, entries)
+}
+
+/// Outline projection of the document's attachments: each id with its
+/// file paths.
+fn attachment_projection(doc: &Document) -> Vec<AttachmentFiles> {
+    doc.attachments
+        .iter()
+        .map(|a| AttachmentFiles {
+            id: a.id.clone(),
+            paths: a.files.iter().map(|f| f.path.clone()).collect(),
+        })
+        .collect()
 }
 
 /// The entry index each run of dropped lines precedes, for the
@@ -1616,6 +1659,8 @@ fn row_to_item(
             prefix,
             Span::styled("<Session>", styles::Text::accent()),
         ]),
+        RowKind::Attachment { .. } => Line::from(vec![prefix, Span::raw("attachment")]),
+        RowKind::AttachmentFile { path, .. } => Line::from(vec![prefix, Span::raw(path.clone())]),
         RowKind::Entry { index } => {
             let kind = doc
                 .entries
@@ -1727,6 +1772,29 @@ fn draw_body(frame: &mut Frame, state: &mut AppState, area: Rect) {
                 None => draw_placeholder(frame, "(missing entry)", inner),
             }
         }
+        Some(RowKind::Attachment { attachment_id }) => match state.doc.attachment(&attachment_id) {
+            Some(a) => {
+                let lines = session_attachment::body(a);
+                draw_lines(frame, state, lines, inner);
+            }
+            None => draw_placeholder(frame, "(missing attachment)", inner),
+        },
+        Some(RowKind::AttachmentFile {
+            attachment_id,
+            path,
+        }) => {
+            match state
+                .doc
+                .attachment(&attachment_id)
+                .and_then(|a| a.file(&path))
+            {
+                Some(file) => {
+                    let lines = session_attachment::file_body(file);
+                    draw_lines(frame, state, lines, inner);
+                }
+                None => draw_placeholder(frame, "(missing file)", inner),
+            }
+        }
         Some(RowKind::Note { note_id, .. }) => match state.doc.note(&note_id) {
             Some(note) => draw_note(frame, note, inner),
             None => draw_placeholder(frame, "(missing note)", inner),
@@ -1744,6 +1812,8 @@ fn draw_body(frame: &mut Frame, state: &mut AppState, area: Rect) {
 fn body_title(doc: &Document, kind: Option<&RowKind>) -> String {
     match kind {
         Some(RowKind::Session) => doc.session.id.clone(),
+        Some(RowKind::Attachment { .. }) => format!("{} • attachment", doc.session.id),
+        Some(RowKind::AttachmentFile { path, .. }) => format!("{} • {path}", doc.session.id),
         Some(RowKind::Entry { index }) => entry_header(doc, *index),
         Some(RowKind::Note {
             entry_index,
@@ -1994,6 +2064,11 @@ fn session_lines(attrs: &SessionAttrs) -> Vec<Line<'static>> {
     lines
 }
 
+/// Lines as one wrapped, scrollable section.
+fn draw_lines(frame: &mut Frame, state: &mut AppState, lines: Vec<Line<'static>>, area: Rect) {
+    draw_session(frame, state, lines, None, area);
+}
+
 /// The root row: the session's attributes, then its row as a source
 /// banner and fitted rows when the source view option is on.
 fn draw_session(
@@ -2209,12 +2284,14 @@ fn scrollbar(active: bool) -> Scrollbar<'static> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::crossterm::event::KeyEvent;
 
     use super::*;
-    use crate::doc::{Entry, Session, ToolUse};
+    use crate::doc::{AttachmentFile, Entry, Session, SessionAttachment, ToolUse};
     use crate::session::tests::fixture;
 
     /// The rendered screen as one string, rows joined by newlines
@@ -2297,6 +2374,8 @@ mod tests {
             .iter()
             .map(|r| match &r.kind {
                 RowKind::Session => "<Session>".to_string(),
+                RowKind::Attachment { attachment_id } => format!("attachment {attachment_id}"),
+                RowKind::AttachmentFile { path, .. } => format!("file {path}"),
                 RowKind::Entry { index } => format!("entry {index}"),
                 RowKind::Note { note_id, .. } => {
                     format!("note {}", state.doc.note(note_id).unwrap().text())
@@ -2321,6 +2400,7 @@ mod tests {
             turns: Vec::new(),
             tool_uses: Vec::new(),
             notes: Vec::new(),
+            attachments: Vec::new(),
             redactions: Vec::new(),
         };
         let mut state = AppState::new(doc, &ViewOptions::default(), DocSource::Backend, false);
@@ -2583,6 +2663,7 @@ mod tests {
             turns: Vec::new(),
             tool_uses: Vec::new(),
             notes: Vec::new(),
+            attachments: Vec::new(),
             redactions: Vec::new(),
         }
     }
@@ -2613,6 +2694,102 @@ mod tests {
             assert!(text.contains(expected), "line {line}:\n{text}");
             assert!(!text.contains("--- source ---"), "line {line}:\n{text}");
         }
+    }
+
+    /// A session attachment is a child of the session row labelled
+    /// `attachment`, before the session's notes. Its body is its
+    /// attributes as caption/value rows, then its files with their
+    /// sizes in a column. It opens to a row per file whose body is the
+    /// file's text, or a placeholder when the bytes are not UTF-8. The
+    /// note key opens no dialog on either row.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn session_attachment_rows_render_their_attributes_and_files() {
+        let f = fixture();
+        let backend = Backend::stored(f.store).await;
+        backend
+            .add_note(&f.session_id, None, "comment", "whole".into(), "user:t")
+            .unwrap();
+        let mut doc = backend.load(&f.session_id).await.unwrap();
+        doc.attachments.push(SessionAttachment {
+            id: "a1".into(),
+            name: Some("cfg".into()),
+            key: None,
+            targets: vec!["session:s1".into()],
+            root: PathBuf::from("/w/cfg"),
+            file_count: 2,
+            size: 11,
+            created_ms: 0,
+            modified_ms: 0,
+            files: vec![
+                AttachmentFile {
+                    path: "settings.json".into(),
+                    size: 8,
+                    text: Some("{\"a\": 1}".into()),
+                },
+                AttachmentFile {
+                    path: "x.bin".into(),
+                    size: 3,
+                    text: None,
+                },
+            ],
+        });
+        let mut state = AppState::new(doc, &ViewOptions::default(), DocSource::Backend, true);
+        assert_eq!(outline_labels(&state), ["<Session>", "entry 0", "entry 1"]);
+        state.outline.toggle(0);
+        assert_eq!(
+            outline_labels(&state),
+            [
+                "<Session>",
+                "attachment a1",
+                "note whole",
+                "entry 0",
+                "entry 1"
+            ]
+        );
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+
+        state.list_state.select(Some(1));
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let text = screen(&terminal);
+        assert!(text.contains("• attachment"), "{text}");
+        assert!(text.contains("Id        a1"), "{text}");
+        assert!(text.contains("Name      cfg"), "{text}");
+        assert!(!text.contains("Key"), "{text}");
+        assert!(text.contains("Targets   session:s1"), "{text}");
+        assert!(text.contains("Root      /w/cfg"), "{text}");
+        assert!(text.contains("Files     2"), "{text}");
+        assert!(text.contains("Size      11 B"), "{text}");
+        assert!(text.contains("settings.json  8 B"), "{text}");
+        assert!(text.contains("x.bin          3 B"), "{text}");
+        press(&mut state, &backend, KeyCode::Char('n'));
+        assert!(matches!(state.dialog, Dialog::None));
+
+        state.outline.toggle(1);
+        assert_eq!(
+            outline_labels(&state),
+            [
+                "<Session>",
+                "attachment a1",
+                "file settings.json",
+                "file x.bin",
+                "note whole",
+                "entry 0",
+                "entry 1",
+            ]
+        );
+        state.list_state.select(Some(2));
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let text = screen(&terminal);
+        assert!(text.contains("• settings.json"), "{text}");
+        assert!(text.contains("{\"a\": 1}"), "{text}");
+        press(&mut state, &backend, KeyCode::Char('n'));
+        assert!(matches!(state.dialog, Dialog::None));
+
+        state.list_state.select(Some(3));
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let text = screen(&terminal);
+        assert!(text.contains("• x.bin"), "{text}");
+        assert!(text.contains("(binary file)"), "{text}");
     }
 
     /// An attachment row's body opens with its type, and its subtype

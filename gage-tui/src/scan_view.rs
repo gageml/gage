@@ -3803,6 +3803,7 @@ mod tests {
             turns: Vec::new(),
             tool_uses: Vec::new(),
             notes: Vec::new(),
+            attachments: Vec::new(),
             redactions: Vec::new(),
         };
         let view = app::AppState::new(doc, &ViewOptions::default(), app::DocSource::Backend, false);
