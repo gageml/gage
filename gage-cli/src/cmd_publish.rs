@@ -113,7 +113,7 @@ pub struct PublishRunArgs {
         short,
         long,
         value_name = "FILTER",
-        long_help = format!("Filter to apply (repeatable)\n\n{FILTER_HELP}")
+        long_help = format!("Filter to apply (repeatable)\n\n{FILTER_HELP} {FILTER_PROMPT_HELP}")
     )]
     filter: Vec<String>,
 
@@ -298,7 +298,9 @@ pub struct InitArgs {
         short,
         long,
         value_name = "FILTER",
-        long_help = format!("Filter to apply (repeatable)\n\n{FILTER_HELP}")
+        long_help = format!(
+            "Filter to apply (repeatable)\n\n{FILTER_HELP} A group or filter is required."
+        )
     )]
     filter: Vec<String>,
 
@@ -343,8 +345,12 @@ session is linked to each share after it is written.";
 /// is.
 const FILTER_HELP: &str = "A filter name; see --list-filters. A trailing #{..} overrides filter \
 params, as pii#{ prompt: \"Watch for hosts.\" }. A filter given here is added to those --group \
-selects and replaces a selected filter of the same name. With neither --group nor --filter, a \
-prompt offers every filter with none selected; --yes needs a group or filter.";
+selects and replaces a selected filter of the same name.";
+
+/// The sentence the top-level run adds to `FILTER_HELP`: its prompt
+/// when no group or filter is given, which `init` does not have.
+const FILTER_PROMPT_HELP: &str = "With neither --group nor --filter, a prompt offers every \
+filter with none selected; --yes needs a group or filter.";
 
 #[derive(Args)]
 pub struct ViewArgs {
@@ -949,7 +955,9 @@ fn origin_cell(origin: &str, highlighter: &IdHighlighter) -> String {
 /// Stage a publish per selected session after confirmation. The
 /// sessions, groups, and filters are resolved before the dialog opens,
 /// so a bad argument fails without a prompt, and a native session is
-/// added to the store only after the user confirms.
+/// added to the store only after the user confirms. The dialog
+/// previews and confirms; it prompts for nothing, so a run without a
+/// group or filter fails.
 async fn init(args: InitArgs) -> Result<(), CliError> {
     let fail = |e: String| CliError::message(format!("gage publish init: {e}"));
     if args.list_filters {
@@ -1013,7 +1021,7 @@ async fn init(args: InitArgs) -> Result<(), CliError> {
     };
     dialog::run_async(title, || async {
         originals.preview()?;
-        let selection = select_filters(registry, &config.filters, &args.group, &specs, !args.yes)?;
+        let selection = select_filters(registry, &config.filters, &args.group, &specs, false)?;
         let filters: Vec<FilterEntry> = selection
             .filters
             .iter()
@@ -1236,7 +1244,7 @@ fn filters_for_share(
 ) -> Result<Vec<String>, CliError> {
     let record = ShareStore::from(store)
         .get(share)
-        .map_err(|e| CliError::message(format!("{command}: --for {share}: {e}")))?;
+        .map_err(|e| CliError::message(format!("{command}: --for-share {share}: {e}")))?;
     let specs = record.attrs.filter_specs().map_err(|e| {
         CliError::message(format!("{command}: share {}: {e}", short_uuid(&record.id)))
     })?;
@@ -2564,6 +2572,21 @@ mod tests {
         assert_eq!(row("secret")[2], "public, trusted");
         assert_eq!(row("harness")[2], "reading");
         assert_eq!(row("pii")[2], "public");
+    }
+
+    /// `init` settles filters without a prompt: with neither a group
+    /// nor a filter, the selection fails naming the requirement instead
+    /// of opening the multiselect the top-level run offers.
+    #[test]
+    fn init_without_a_group_or_filter_fails_instead_of_prompting() {
+        let registry = registry();
+        let config = FilterConfig::default();
+        match select_filters(&registry, &config, &[], &[], false) {
+            Err(DialogError::Failed(msg)) => {
+                assert_eq!(msg, "A filter or group is required; see --list-filters");
+            }
+            _ => panic!("expected the missing-filter failure"),
+        }
     }
 
     /// An init stages what the groups select in listing order, then

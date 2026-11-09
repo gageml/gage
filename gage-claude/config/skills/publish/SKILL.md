@@ -38,8 +38,8 @@ ways:
 
 1. Identify sessions to publish
 2. Understand the audience and intended use of each published session
-3. Run `gage publish init <SESSION>` for each session with an initial set of
-   options
+3. Run `gage publish init -y <SESSION>` for each session with an initial set
+   of options
 4. Redact text for each session
 5. Assign a new title to each session if applicable
 6. Review the session before publishing to confirm the user goals are met
@@ -91,8 +91,8 @@ share's description, filters, and members.
 When the user wants published sessions in a share, or the skill arguments
 include `--share <SHARE>`:
 
-- Run `gage publish init --for <SHARE> <SESSION>` so the share's filters
-  are selected. `--filter` and `--group` add to them.
+- Run `gage publish init -y --for-share <SHARE> <SESSION>` so the share's
+  filters are selected. `--filter` and `--group` add to them.
 - Pass `--share <SHARE>` to `gage publish apply` for each session. Apply checks
   the definition against the share's filters before writing, then adds the
   published session to the share. `--share` is repeatable.
