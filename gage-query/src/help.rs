@@ -246,11 +246,11 @@ err first: SELECT text FROM scan_log WHERE scan_id = '<SCAN_ID>' AND name = 'err
         topic: "links",
         short: "the commit-bearing link tables",
         full: r#"note_target_link, issue_evidence_link, scan_note_link, scan_issue_link,
-scan_dataset_link, dataset_session_link, and dataset_attachment_link are the
-forms of the link tables that carry the commit of each end (note_commit,
-issue_commit, session_commit, and so on). Use them only when a specific commit
-matters; the short forms (note_target, issue_evidence, and the rest) join on
-ids."#,
+scan_dataset_link, dataset_session_link, dataset_attachment_link, and
+share_session_link are the forms of the link tables that carry the commit of
+each end (note_commit, issue_commit, session_commit, and so on). Use them only
+when a specific commit matters; the short forms (note_target, issue_evidence,
+share_session, and the rest) join on ids."#,
     },
     HelpTopic {
         topic: "system_cols",

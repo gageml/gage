@@ -12,6 +12,7 @@
 //! | `scan_issue_link`      | `scan/issues.link`                         |
 //! | `note_target_link`     | `note/target.link`                         |
 //! | `issue_evidence_link`  | `issue/evidence.link`                      |
+//! | `share_session_link`   | `share/sessions.link`                      |
 //!
 //! `dataset_session_link` lists every dataset at its tip and at every
 //! commit a scan links, so a scan's members are found by joining on
@@ -29,7 +30,7 @@ use gage_session::system;
 
 use super::batch::{BatchSource, BatchTable, external};
 use crate::object::Object;
-use crate::{DatasetStore, IssueStore, NoteStore, ScanStore, Store, url};
+use crate::{DatasetStore, IssueStore, NoteStore, ScanStore, ShareStore, Store, url};
 
 const SESSIONS_LINK: &str = "sessions.link";
 const ATTACHMENTS_LINK: &str = "attachments.link";
@@ -50,10 +51,11 @@ pub enum LinkKind {
     ScanIssue,
     NoteTarget,
     IssueEvidence,
+    ShareSession,
 }
 
 impl LinkKind {
-    pub const ALL: [LinkKind; 7] = [
+    pub const ALL: [LinkKind; 8] = [
         LinkKind::DatasetSession,
         LinkKind::DatasetAttachment,
         LinkKind::ScanDataset,
@@ -61,6 +63,7 @@ impl LinkKind {
         LinkKind::ScanIssue,
         LinkKind::NoteTarget,
         LinkKind::IssueEvidence,
+        LinkKind::ShareSession,
     ];
 
     /// The table name.
@@ -73,6 +76,7 @@ impl LinkKind {
             LinkKind::ScanIssue => "scan_issue_link",
             LinkKind::NoteTarget => "note_target_link",
             LinkKind::IssueEvidence => "issue_evidence_link",
+            LinkKind::ShareSession => "share_session_link",
         }
     }
 
@@ -129,6 +133,13 @@ impl LinkKind {
                 utf8("note_id", false),
                 commit("note_commit", false),
             ],
+            LinkKind::ShareSession => vec![
+                utf8("share_id", false),
+                commit("share_commit", false),
+                Field::new("session_num", DataType::Int64, false),
+                utf8("session_id", false),
+                commit("session_commit", false),
+            ],
         }))
     }
 }
@@ -157,6 +168,7 @@ impl BatchSource for Source {
             LinkKind::ScanIssue => scan_issue(store),
             LinkKind::NoteTarget => note_target(store),
             LinkKind::IssueEvidence => issue_evidence(store),
+            LinkKind::ShareSession => share_session(store),
         }
     }
 }
@@ -251,6 +263,37 @@ fn dataset_attachment(store: &Store) -> Result<RecordBatch> {
             Arc::new(attachment_nums.finish()),
             Arc::new(attachment_ids.finish()),
             Arc::new(attachment_commits.finish()),
+        ],
+    )?)
+}
+
+/// Every share at its tip; nothing pins a share commit the way a scan
+/// pins a dataset.
+fn share_session(store: &Store) -> Result<RecordBatch> {
+    let mut share_ids = StringBuilder::new();
+    let mut share_commits = StringBuilder::new();
+    let mut session_nums = Int64Builder::new();
+    let mut session_ids = StringBuilder::new();
+    let mut session_commits = StringBuilder::new();
+    for tip in ShareStore::from(store).query().tips().map_err(external)? {
+        let share = store.read_object(&tip.sha).map_err(external)?;
+        for (idx, sha) in linked(&share, SESSIONS_LINK).iter().enumerate() {
+            let session = store.read_header(sha).map_err(external)?;
+            share_ids.append_value(&share.header.id);
+            share_commits.append_value(&tip.sha);
+            session_nums.append_value(idx as i64 + 1);
+            session_ids.append_value(session.id);
+            session_commits.append_value(sha);
+        }
+    }
+    Ok(RecordBatch::try_new(
+        LinkKind::ShareSession.schema(),
+        vec![
+            Arc::new(share_ids.finish()),
+            Arc::new(share_commits.finish()),
+            Arc::new(session_nums.finish()),
+            Arc::new(session_ids.finish()),
+            Arc::new(session_commits.finish()),
         ],
     )?)
 }

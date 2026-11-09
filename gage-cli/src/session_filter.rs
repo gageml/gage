@@ -620,6 +620,7 @@ mod tests {
                 title: title.map(String::from),
                 ..SummaryAttrs::default()
             },
+            publish: None,
         }
     }
 

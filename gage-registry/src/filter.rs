@@ -84,6 +84,10 @@ pub struct FilterTaskDef {
 pub struct FilterDef {
     pub name: String,
     pub description: String,
+    /// The semver `FILTER.version`, as declared; empty when the
+    /// declaration has none. A publish records it beside the filter's
+    /// name, and a share's version requirement is checked against it.
+    pub version: String,
     /// Group memberships declared via `FILTER.groups`; `-g --group`
     /// selects by any group name
     pub groups: Vec<String>,
@@ -345,6 +349,7 @@ fn parse_filter(source: &str, embed_key: &str, path: &Path) -> Result<FilterDef,
         .map_err(ParseError::Syntax)?;
     let mut name = None;
     let mut description = None;
+    let mut version = String::new();
     let mut groups: Vec<String> = Vec::new();
     let mut tasks_obj: Option<&ast::ExprObject> = None;
     let mut problems: Vec<Problem> = Vec::new();
@@ -374,6 +379,7 @@ fn parse_filter(source: &str, embed_key: &str, path: &Path) -> Result<FilterDef,
                             .map(|l| l.trim().to_string())
                     })
                 }
+                Some("version") => version = expr_str(source, expr).unwrap_or_default(),
                 Some("groups") => groups = expr_str_vec(source, expr),
                 Some("tasks") => match expr {
                     ast::Expr::Object(obj) => tasks_obj = Some(obj),
@@ -395,6 +401,7 @@ fn parse_filter(source: &str, embed_key: &str, path: &Path) -> Result<FilterDef,
     Ok(FilterDef {
         name,
         description: description.unwrap_or_default(),
+        version,
         groups,
         tasks,
         problems,
@@ -464,6 +471,7 @@ use gage::publish;
 pub const FILTER = #{
     name: "demo",
     description: "Remove demo content",
+    version: "1.2.0",
     groups: ["public", "trusted"],
     params: #{ prompt: #{ value: "", description: "Additional instructions" }, n: 2 },
     tasks: #{ "demo-task": #{}, other: #{ call: "run_other" } },
@@ -473,6 +481,7 @@ pub const FILTER = #{
         assert!(def.problems.is_empty(), "{:?}", def.problems);
         assert_eq!(def.name, "demo");
         assert_eq!(def.description, "Remove demo content");
+        assert_eq!(def.version, "1.2.0");
         assert_eq!(def.groups, ["public", "trusted"]);
         assert_eq!(def.tasks["demo-task"].call, "demo_task");
         assert_eq!(def.tasks["other"].call, "run_other");

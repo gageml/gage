@@ -2,6 +2,7 @@ use gage::{filter::{Entry, Reason, Span, Value}, publish};
 
 pub const FILTER = #{
     name: "harness",
+    version: "1.0.0",
     description: "Remove harness specific content",
     groups: ["reading"],
     tasks: #{ context: #{}, records: #{} },

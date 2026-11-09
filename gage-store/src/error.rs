@@ -109,6 +109,12 @@ pub enum StoreError {
     PathNotFound(String),
     /// A pattern matched more than one path where one is required
     PathAmbiguous { pattern: String, count: usize },
+    /// A share filter spec entry the grammar rejects: the entry and
+    /// the reason
+    FilterSpec(String),
+    /// A session a share refuses: not published, or published without
+    /// a filter the share requires
+    ShareMembership { session: String, reason: String },
 }
 
 impl fmt::Display for StoreError {
@@ -250,6 +256,14 @@ impl fmt::Display for StoreError {
             StoreError::PathAmbiguous { pattern, count } => {
                 write!(f, "{pattern} matches {count} paths; name one")
             }
+            StoreError::FilterSpec(detail) => write!(
+                f,
+                "invalid filter spec {detail}; an entry is a filter name followed by \
+                 optional version comparators separated by spaces"
+            ),
+            StoreError::ShareMembership { session, reason } => {
+                write!(f, "session {session} cannot join share: {reason}")
+            }
         }
     }
 }
@@ -297,7 +311,9 @@ impl std::error::Error for StoreError {
             | StoreError::RemoteNotFound(_)
             | StoreError::ListPattern(_)
             | StoreError::PathNotFound(_)
-            | StoreError::PathAmbiguous { .. } => None,
+            | StoreError::PathAmbiguous { .. }
+            | StoreError::FilterSpec(_)
+            | StoreError::ShareMembership { .. } => None,
         }
     }
 }

@@ -29,6 +29,7 @@ use crate::dataset::{DatasetMembers, DatasetStore};
 use crate::index::{ObjectQuery, Order, SelectedTip};
 use crate::object::{EditOutcome, Object, ObjectTree, object_ref, require_type};
 use crate::scan::import_opaque_tree;
+use crate::share::{ShareMembers, ShareStore};
 use crate::writer::{TreeInput, is_dot_git, mktree, write_blob_stream};
 use crate::{Store, StoreError};
 
@@ -93,6 +94,30 @@ pub struct SessionAttrsRecord {
     pub project: Option<String>,
     /// The driver's projection of the session, written at add time.
     pub summary: SummaryAttrs,
+    /// What established a published session. Absent on a session
+    /// added from a native source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publish: Option<PublishAttrs>,
+}
+
+/// The record a publish leaves in the derived session's `attrs.json`.
+/// A share reads it to decide membership.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct PublishAttrs {
+    /// The filters the publish applied, each at the version its
+    /// definition declared.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub filters: Vec<PublishFilter>,
+}
+
+/// One filter a publish applied.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct PublishFilter {
+    pub name: String,
+    /// The filter definition's semver `version`. Absent when the
+    /// definition declared none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
 }
 
 impl SessionAttrsRecord {
@@ -147,6 +172,9 @@ pub struct SessionRemoveOutcome {
     /// The datasets that held any of the sessions, each with the
     /// members unlinked from it.
     pub datasets: Vec<DatasetMembers>,
+    /// The shares that held any of the sessions, each with the members
+    /// unlinked from it.
+    pub shares: Vec<ShareMembers>,
 }
 
 /// A stored session presented for reading, resolved to its commit.
@@ -237,6 +265,7 @@ impl<'a> SessionStore<'a> {
             size,
             project: project.clone(),
             summary: summary.clone(),
+            publish: None,
         };
 
         let current = match self.store.rev_parse(&object_ref(&id))? {
@@ -381,12 +410,12 @@ impl<'a> SessionStore<'a> {
     }
 
     /// Remove stored sessions. Every id or prefix is resolved to a live
-    /// session before anything is written. Each dataset that currently
-    /// holds any of the sessions is edited once to unlink all of them,
-    /// then each session's ref gets a parentless tombstone commit. The
-    /// native sessions in their sources are not touched. A failure
-    /// after the dataset edits leaves the sessions live and unlinked,
-    /// which `add` with a dataset repairs.
+    /// session before anything is written. Each dataset and share that
+    /// currently holds any of the sessions is edited once to unlink all
+    /// of them, then each session's ref gets a parentless tombstone
+    /// commit. The native sessions in their sources are not touched. A
+    /// failure after the container edits leaves the sessions live and
+    /// unlinked, which `add` with a dataset repairs.
     pub fn remove(&self, ids_or_prefixes: &[String]) -> Result<SessionRemoveOutcome, StoreError> {
         let mut sessions: Vec<SessionRecord> = Vec::with_capacity(ids_or_prefixes.len());
         for id_or_prefix in ids_or_prefixes {
@@ -402,6 +431,11 @@ impl<'a> SessionStore<'a> {
         for members in &held {
             datasets.sessions_unlink(&members.dataset_id, &members.session_ids)?;
         }
+        let shares = ShareStore::from(self.store);
+        let shared = shares.containing(&ids)?;
+        for members in &shared {
+            shares.unlink(&members.share_id, &members.session_ids)?;
+        }
 
         for record in &sessions {
             self.tombstone(record)?;
@@ -409,11 +443,12 @@ impl<'a> SessionStore<'a> {
         Ok(SessionRemoveOutcome {
             sessions,
             datasets: held,
+            shares: shared,
         })
     }
 
     /// Write a parentless tombstone over `record`'s current commit.
-    /// Datasets holding the session are not edited.
+    /// Datasets and shares holding the session are not edited.
     pub(crate) fn tombstone(&self, record: &SessionRecord) -> Result<(), StoreError> {
         let object = self.store.read_object(&record.commit_sha)?;
         let message = format!(
@@ -1131,6 +1166,7 @@ pub(crate) mod tests {
             size: 0,
             project: None,
             summary: SummaryAttrs::default(),
+            publish: None,
         }
     }
 

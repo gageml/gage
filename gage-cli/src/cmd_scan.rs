@@ -54,10 +54,10 @@ use tracing_subscriber::field::RecordFields;
 use tracing_subscriber::fmt::FormatFields;
 use tracing_subscriber::fmt::format::Writer;
 
-use crate::cmd_dataset::{self, AddView};
+use crate::cmd_dataset::{self, AddView, link_stored};
 use crate::cmd_issue::event_label;
 use crate::cmd_note::{count_rows, target_cell, value_cell};
-use crate::cmd_session::{column, link_stored, run_query};
+use crate::cmd_session::{column, run_query};
 use crate::cmd_tag::TAG_HELP;
 use crate::dialog::{self, DialogError};
 use crate::error::CliError;

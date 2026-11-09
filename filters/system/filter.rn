@@ -2,6 +2,7 @@ use gage::{Template, filter::{Literal, Reason, Value}, params, publish};
 
 pub const FILTER = #{
     name: "system",
+    version: "1.0.0",
     description: "Removes paths, hosts, OS details and other system details",
     groups: ["public"],
     params: #{ prompt: #{ value: "", description: "Additional instructions" } },

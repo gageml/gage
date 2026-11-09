@@ -38,7 +38,7 @@ pub const INDEX_SCHEMA_VERSION: u32 = 5;
 /// the lists are bound to. A test compares it to the live lists, so a
 /// list change fails until both this line and the version move.
 #[cfg(test)]
-pub(crate) const INDEXED_ATTRS_SNAPSHOT: &str = "attachment=name,key;dataset=;issue=name,status,key;note=name,work_id;scan=;session=summary.model";
+pub(crate) const INDEXED_ATTRS_SNAPSHOT: &str = "attachment=name,key;dataset=;issue=name,status,key;note=name,work_id;scan=;session=summary.model;share=";
 
 const SCHEMA: &str = "
 CREATE TABLE meta (schema_version INTEGER NOT NULL);

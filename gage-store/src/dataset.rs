@@ -23,6 +23,7 @@ use crate::content::GitContentSource;
 use crate::index::{ObjectQuery, Order, SelectedTip};
 use crate::object::{EditOutcome, Object, ObjectTree, require_type};
 use crate::session::{SessionAddOutcome, SessionOutcome, SessionRecord, SessionStore};
+use crate::share::ShareStore;
 use crate::{Store, StoreError};
 
 pub const OBJECT_TYPE: &str = "gage::dataset";
@@ -155,7 +156,8 @@ pub struct DatasetDeleted {
     pub dataset: String,
     /// Member sessions tombstoned, in member order
     pub removed: Vec<String>,
-    /// Member sessions kept because another live dataset holds them
+    /// Member sessions kept because another live dataset or share
+    /// holds them
     pub kept: Vec<String>,
 }
 
@@ -302,21 +304,28 @@ impl DatasetStore<'_> {
     }
 
     /// Delete a dataset and the member sessions no other live dataset
-    /// holds. A member held elsewhere is kept and reported. A member
-    /// removed since the dataset linked it is skipped. The sessions go
-    /// first, so a failure among them leaves the dataset in place.
+    /// or share holds. A member held elsewhere is kept and reported. A
+    /// member removed since the dataset linked it is skipped. The
+    /// sessions go first, so a failure among them leaves the dataset
+    /// in place.
     pub fn delete_cascade(&self, id_or_prefix: &str) -> Result<DatasetDeleted, StoreError> {
         let object = self.current(id_or_prefix)?;
         let mut member_ids: Vec<String> = Vec::new();
         for sha in members(&object) {
             member_ids.push(self.store.read_header(&sha)?.id);
         }
-        let held_elsewhere: Vec<String> = self
+        let mut held_elsewhere: Vec<String> = self
             .containing(&member_ids)?
             .into_iter()
             .filter(|m| m.dataset_id != object.header.id)
             .flat_map(|m| m.session_ids)
             .collect();
+        held_elsewhere.extend(
+            ShareStore::from(self.store)
+                .containing(&member_ids)?
+                .into_iter()
+                .flat_map(|m| m.session_ids),
+        );
 
         let mut deleted = DatasetDeleted {
             dataset: object.header.id.clone(),

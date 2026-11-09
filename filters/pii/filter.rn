@@ -2,6 +2,7 @@ use gage::{Template, filter::{Literal, Reason, Value}, params, publish};
 
 pub const FILTER = #{
     name: "pii",
+    version: "1.0.0",
     description: "Remove personally identifiable information",
     groups: ["public"],
     params: #{ prompt: #{ value: "", description: "Additional instructions" } },

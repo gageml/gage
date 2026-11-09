@@ -12,6 +12,7 @@ gage-session = { path = "../gage-session" }
 async-trait = { workspace = true }
 datafusion = { workspace = true }
 futures = { workspace = true }
+semver = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 rusqlite = { version = "0.37", features = ["bundled"] }

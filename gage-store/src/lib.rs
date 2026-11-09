@@ -31,7 +31,7 @@
 //!   reconcile that keeps it current, and the query core. Type modules
 //!   opt attributes in through `INDEXED_ATTRS`.
 //! - [`sqlite_index`] --- the SQLite implementation of the index.
-//! - `note`, `issue`, `dataset`, `session`, `attachment`, `scan` --- object types: each supplies its
+//! - `note`, `issue`, `dataset`, `session`, `attachment`, `scan`, `share` --- object types: each supplies its
 //!   `attrs.json` shape, its content files, its decoder, and its typed
 //!   store.
 //! - [`refs`] --- the ref layout: every ref lives under
@@ -59,6 +59,7 @@ mod remote;
 mod scan;
 pub mod scan_dir;
 mod session;
+mod share;
 mod sqlite_index;
 mod store;
 mod tag;
@@ -104,7 +105,7 @@ pub use query::{
     attachment_file_table, attachment_table, dataset_table, issue_event_table, issue_report_fn,
     issue_table, link_table, note_doc_rows, note_doc_schema, object_key_table, related_issue_fn,
     scan_log_table, scan_scope_tables, scan_table, scan_task_agent_table, scan_task_table,
-    scan_watermark_table, tag_table,
+    scan_watermark_table, share_table, tag_table,
 };
 pub use refs::{GENERATION, KEY_REFS, OBJECT_REFS, ROOT as REFS_ROOT, TAG_REFS};
 pub use remote::{
@@ -118,9 +119,14 @@ pub use scan::{
 pub use scan_dir::ScanDirLayout;
 pub use session::{
     ChangeKind, ChangeRecord, ExternalSession, ExternalSessionRecord, OBJECT_TYPE as SESSION_TYPE,
-    SessionAddOutcome, SessionAttrsRecord, SessionDirLayout, SessionOutcome, SessionQuery,
-    SessionRecord, SessionRemoveOutcome, SessionStore, format_changes, parse_changes,
-    session_object_id,
+    PublishAttrs, PublishFilter, SessionAddOutcome, SessionAttrsRecord, SessionDirLayout,
+    SessionOutcome, SessionQuery, SessionRecord, SessionRemoveOutcome, SessionStore,
+    format_changes, parse_changes, session_object_id,
+};
+pub use share::{
+    FilterSpec, OBJECT_TYPE as SHARE_TYPE, ShareAttrs, ShareDeleted, ShareEditOutcome,
+    ShareLinkOutcome, ShareMembers, ShareQuery, ShareRecord, ShareStore, ShareUnlinkOutcome,
+    parse_filter_specs,
 };
 pub use sqlite_index::INDEX_SCHEMA_VERSION;
 pub use store::{OBJECTS_FILE, Store, index_path, locate};

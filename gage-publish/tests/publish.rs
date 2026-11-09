@@ -14,7 +14,10 @@ use gage_publish::{
 use gage_registry::driver::DriverRegistry;
 use gage_registry::filter::FilterRegistry;
 use gage_session::SourceOptions;
-use gage_store::{ChangeKind, ChangeRecord, SessionRecord, SessionStore, Store, parse_changes};
+use gage_store::{
+    ChangeKind, ChangeRecord, PublishAttrs, PublishFilter, SessionRecord, SessionStore, Store,
+    parse_changes,
+};
 use serde_json::Value;
 
 const SESSION: &str = concat!(
@@ -1420,6 +1423,23 @@ async fn apply_commits_the_derived_session_and_clears_the_staging() {
         Some("-home-garrett-proj")
     );
     assert_eq!(published.attrs.project, None);
+    // The filters the publish applied, at the versions the shipped
+    // definitions declare, for a share to check
+    assert_eq!(
+        published.attrs.publish,
+        Some(PublishAttrs {
+            filters: vec![
+                PublishFilter {
+                    name: "pii".into(),
+                    version: Some("1.0.0".into()),
+                },
+                PublishFilter {
+                    name: "secret".into(),
+                    version: Some("1.0.0".into()),
+                },
+            ],
+        })
+    );
     assert_eq!(sessions.iter().unwrap().count(), 2);
     let mut text = String::new();
     sessions

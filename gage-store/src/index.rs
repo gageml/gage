@@ -31,7 +31,7 @@ use crate::git::{git_in, run};
 use crate::key::KeyRefUpdate;
 use crate::object::{LinkFile, Object, object_ref, object_version};
 use crate::sqlite_index::INDEX_SCHEMA_VERSION;
-use crate::{Store, StoreError, attachment, dataset, issue, note, scan, session};
+use crate::{Store, StoreError, attachment, dataset, issue, note, scan, session, share};
 
 /// Indexed attribute paths for an object type, or empty when the type
 /// declares none.
@@ -43,6 +43,7 @@ pub(crate) fn indexed_attrs(object_type: &str) -> &'static [&'static str] {
         session::OBJECT_TYPE => session::INDEXED_ATTRS,
         attachment::OBJECT_TYPE => attachment::INDEXED_ATTRS,
         scan::OBJECT_TYPE => scan::INDEXED_ATTRS,
+        share::OBJECT_TYPE => share::INDEXED_ATTRS,
         _ => &[],
     }
 }
@@ -1187,6 +1188,7 @@ mod tests {
             ("note", note::INDEXED_ATTRS),
             ("scan", scan::INDEXED_ATTRS),
             ("session", session::INDEXED_ATTRS),
+            ("share", share::INDEXED_ATTRS),
         ]
         .iter()
         .map(|(type_name, attrs)| format!("{type_name}={}", attrs.join(",")))

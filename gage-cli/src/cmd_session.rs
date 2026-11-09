@@ -62,19 +62,12 @@ pub enum SessionCommand {
     /// it when its content changed.
     Add(SessionAddArgs),
 
-    /// Remove sessions from store or from a dataset
+    /// Delete native sessions, or stored sessions with --stored
     ///
-    /// Without --dataset, each session is unlinked from every dataset
-    /// that holds it, then marked removed in the store. With
-    /// --dataset, each session is unlinked from that dataset only and
-    /// stays in the store. The native session in its source is never
-    /// affected.
-    Remove(SessionRemoveArgs),
-
-    /// Delete native sessions
-    ///
-    /// Removes each session's files from the selected source. Stored
-    /// sessions are not affected.
+    /// Removes each session's files from the selected source. With
+    /// --stored, each session is unlinked from every dataset and
+    /// share that holds it, then marked removed in the store; the
+    /// native session in its source is not affected.
     Delete(SessionDeleteArgs),
 
     /// Move a native session to another project
@@ -148,8 +141,7 @@ pub struct SessionAddArgs {
     /// Add sessions to dataset (ID or prefix)
     ///
     /// Dataset ID (or prefix). Native sessions are added to the store
-    /// and linked in one step; with --stored, sessions already in the
-    /// store are linked
+    /// and linked in one step
     #[arg(short, long, value_name = "DATASET")]
     pub dataset: Option<String>,
 
@@ -166,8 +158,7 @@ pub struct SessionAddArgs {
         value_name = "NAME",
         long_help = format!(
             "Tag added session\n\nApplies when one session is given. The tag names the \
-             stored session, whether it is added from a source or linked with --stored.\n\n\
-             {TAG_HELP}"
+             stored session.\n\n{TAG_HELP}"
         )
     )]
     pub tag: Option<String>,
@@ -175,24 +166,6 @@ pub struct SessionAddArgs {
     /// Move tag if it exists
     #[arg(long, requires = "tag")]
     pub force_tag: bool,
-
-    /// Skip confirmation prompt
-    #[arg(short, long)]
-    pub yes: bool,
-}
-
-#[derive(Args)]
-#[command(next_display_order = 3)]
-pub struct SessionRemoveArgs {
-    /// Stored sessions to remove (ID or prefix)
-    #[arg(required = true)]
-    pub ids: Vec<String>,
-
-    /// Remove sessions from dataset only (ID or prefix)
-    ///
-    /// Dataset ID (or prefix). The sessions stay in the store
-    #[arg(short, long, value_name = "DATASET")]
-    pub dataset: Option<String>,
 
     /// Skip confirmation prompt
     #[arg(short, long)]
@@ -298,6 +271,8 @@ pub struct SessionDeleteArgs {
     pub ids: Vec<String>,
 
     /// Delete empty sessions
+    ///
+    /// Applies to native sessions
     #[arg(long)]
     pub empty: bool,
 
@@ -772,9 +747,10 @@ pub async fn add(
     stored: bool,
     args: SessionAddArgs,
 ) -> Result<(), CliError> {
-    if stored && args.dataset.is_none() {
+    if stored {
         return Err(CliError::message(
-            "gage session add: --stored applies only with --dataset; sessions are added from a source",
+            "gage session add: --stored does not apply; sessions are added from a source. \
+             Use gage dataset link to add stored sessions to a dataset",
         ));
     }
     if args.tag.is_some() && !selects_one_session(&args) {
@@ -782,7 +758,7 @@ pub async fn add(
             "gage session add: --tag applies to a single session; give one session ID and no selection flags",
         ));
     }
-    dialog::run_async("Add sessions", || add_dialog(source, stored, args)).await
+    dialog::run_async("Add sessions", || add_dialog(source, args)).await
 }
 
 /// The indicator label while an add resolves its selection
@@ -795,7 +771,6 @@ fn selects_one_session(args: &SessionAddArgs) -> bool {
 
 async fn add_dialog(
     source: Option<String>,
-    stored: bool,
     args: SessionAddArgs,
 ) -> Result<dialog::DialogResult, DialogError> {
     let store =
@@ -826,70 +801,41 @@ async fn add_dialog(
             })?;
     }
     let mut view = AddView::new();
-    let placed_ids = match dataset_id.as_deref() {
-        Some(dataset_id) if stored => {
-            let selected = progress::busy_async(
-                SELECT_LABEL,
-                select_sessions(SessionSelect::Stored(&store), &args.sessions, &args.filter),
-            )
-            .await
-            .map_err(SessionSelectError::into_dialog_error)?;
-            if selected.is_empty() {
-                return Err(DialogError::Failed(
-                    "No sessions matched the selection".to_string(),
-                ));
-            }
-            let sessions = SessionStore::from(&store);
-            let records = selected
-                .iter()
-                .map(|id| sessions.get(id))
-                .collect::<Result<Vec<SessionRecord>, _>>()
-                .map_err(|e| DialogError::Failed(e.to_string()))?;
-            dialog::step_value("Dataset", short_uuid(dataset_id))?;
-            let lines: Vec<SessionLine> = records.iter().map(SessionLine::from).collect();
-            preview_sessions(&lines, IdKind::Gage, args.tag.as_deref())?;
-            dialog::confirm(args.yes, true)?;
-            link_stored(&store, dataset_id, &records, &mut |e| view.on(e))?;
-            records.into_iter().map(|r| r.id).collect()
-        }
-        _ => {
-            let registry = source::driver_registry();
-            let (driver, spec) = source::resolve_source(&registry, source.as_deref())
-                .map_err(DialogError::Failed)?;
-            let selected = progress::busy_async(
-                SELECT_LABEL,
-                select_sessions(
-                    SessionSelect::Native(source.as_deref()),
-                    &args.sessions,
-                    &args.filter,
-                ),
-            )
-            .await
-            .map_err(SessionSelectError::into_dialog_error)?;
-            if selected.is_empty() {
-                return Err(DialogError::Failed(
-                    "No sessions matched the selection".to_string(),
-                ));
-            }
-            dialog::step_value("Source", source::describe_source(driver.as_ref(), &spec))?;
-            if let Some(id) = &dataset_id {
-                dialog::step_value("Dataset", short_uuid(id))?;
-            }
-            let lines = native_session_lines(source.as_deref(), &selected)
-                .await
-                .map_err(|e| DialogError::Failed(format!("{e}")))?;
-            preview_sessions(&lines, IdKind::Native, args.tag.as_deref())?;
-            dialog::confirm(args.yes, true)?;
-            add_native(
-                &store,
-                source,
-                dataset_id.as_deref(),
-                &selected,
-                max_bytes,
-                &mut |e| view.on(e),
-            )?
-        }
-    };
+    let registry = source::driver_registry();
+    let (driver, spec) =
+        source::resolve_source(&registry, source.as_deref()).map_err(DialogError::Failed)?;
+    let selected = progress::busy_async(
+        SELECT_LABEL,
+        select_sessions(
+            SessionSelect::Native(source.as_deref()),
+            &args.sessions,
+            &args.filter,
+        ),
+    )
+    .await
+    .map_err(SessionSelectError::into_dialog_error)?;
+    if selected.is_empty() {
+        return Err(DialogError::Failed(
+            "No sessions matched the selection".to_string(),
+        ));
+    }
+    dialog::step_value("Source", source::describe_source(driver.as_ref(), &spec))?;
+    if let Some(id) = &dataset_id {
+        dialog::step_value("Dataset", short_uuid(id))?;
+    }
+    let lines = native_session_lines(source.as_deref(), &selected)
+        .await
+        .map_err(|e| DialogError::Failed(format!("{e}")))?;
+    preview_sessions(&lines, IdKind::Native, args.tag.as_deref())?;
+    dialog::confirm(args.yes, true)?;
+    let placed_ids = add_native(
+        &store,
+        source,
+        dataset_id.as_deref(),
+        &selected,
+        max_bytes,
+        &mut |e| view.on(e),
+    )?;
     let done = view.done().to_string();
     view.finish()?;
     if let Some(name) = &args.tag {
@@ -910,12 +856,7 @@ async fn add_dialog(
             None => cli::log::info(format!("Tagged session {} as {name}", short_uuid(id)))?,
         }
     }
-    let outro = if stored {
-        done
-    } else {
-        add_outro(&store, &placed_ids, dataset_id.as_deref(), &done)
-    };
-    Ok(outro.into())
+    Ok(add_outro(&store, &placed_ids, dataset_id.as_deref(), &done).into())
 }
 
 /// The outro of a native add. One placed session names its new stored
@@ -966,33 +907,6 @@ pub(crate) async fn add_all(
     let done = view.done().to_string();
     view.finish()?;
     Ok(format!("{done} from {source}"))
-}
-
-/// Link sessions already in the store as members of `dataset_id`,
-/// reporting each to `on_event`.
-pub(crate) fn link_stored(
-    store: &Store,
-    dataset_id: &str,
-    records: &[SessionRecord],
-    on_event: &mut dyn FnMut(AddEvent<'_>),
-) -> Result<(), DialogError> {
-    let ids: Vec<String> = records.iter().map(|r| r.id.clone()).collect();
-    let outcomes = DatasetStore::from(store)
-        .sessions_link(dataset_id, &ids)
-        .map_err(|e| DialogError::Failed(format!("{e}")))?;
-    for (outcome, record) in outcomes.iter().zip(records) {
-        on_event(AddEvent::Added {
-            outcome: outcome.outcome,
-            id: &outcome.id,
-            native_id: record.attrs.native_id(),
-            dataset: Some(dataset_id),
-        });
-    }
-    on_event(AddEvent::Done {
-        placed: outcomes.len(),
-        dataset: Some(dataset_id),
-    });
-    Ok(())
 }
 
 /// Add native sessions from `source` to the store and, when
@@ -1520,20 +1434,23 @@ fn emphasize_matches(snippet: &str) -> String {
     out
 }
 
-pub fn remove(
-    source: Option<String>,
-    stored: bool,
-    args: SessionRemoveArgs,
-) -> Result<(), CliError> {
-    if source.is_some() {
+/// `gage session delete --stored`: remove stored sessions. Each
+/// dataset and share that holds any of them is edited once to unlink
+/// them, then each session is marked removed. The native sessions in
+/// their sources are not touched.
+fn delete_stored(args: SessionDeleteArgs) -> Result<(), CliError> {
+    if args.empty {
         return Err(CliError::message(
-            "gage session remove: --source does not apply; sessions are removed from the store",
+            "gage session delete: --empty applies to native sessions, not with --stored",
         ));
     }
-    if stored {
-        eprintln!("warning: --stored is redundant; sessions are removed from the store");
+    if args.ids.is_empty() {
+        return Err(CliError::message(
+            "gage session delete: provide session IDs\n\n\
+            Use 'gage session list --stored' to show sessions",
+        ));
     }
-    let store = Store::open(&gage_store::store_path()).context("gage session remove")?;
+    let store = Store::open(&gage_store::store_path()).context("gage session delete")?;
     let sessions = SessionStore::from(&store);
 
     // Resolve every argument before writing anything, so one bad
@@ -1548,7 +1465,7 @@ pub fn remove(
                 }
             }
             Err(e) => {
-                eprintln!("gage session remove: {e}");
+                eprintln!("gage session delete: {e}");
                 errors += 1;
             }
         }
@@ -1556,62 +1473,42 @@ pub fn remove(
     if errors > 0 {
         return Err(CliError::exit(1));
     }
-    let dataset_id = match args.dataset.as_deref() {
-        Some(prefix) => Some(
-            DatasetStore::from(&store)
-                .resolve_id(prefix)
-                .with_context(|| format!("gage session remove: --dataset {prefix}"))?,
-        ),
-        None => None,
-    };
 
-    dialog::run("Remove sessions", || {
+    dialog::run("Delete stored sessions", || {
         let lines: Vec<SessionLine> = records.iter().map(SessionLine::from).collect();
         preview_sessions(&lines, IdKind::Gage, None)?;
-        if let Some(id) = &dataset_id {
-            dialog::step_value("Dataset", short_uuid(id))?;
-        }
+        cli::log::remark("Native sessions in their sources are not affected")?;
+        dialog::confirm_irreversible(args.yes)?;
 
-        cli::log::remark(match &dataset_id {
-            Some(_) => "Sessions stay in the store",
-            None => "Native sessions are unaffected",
-        })?;
-        dialog::confirm(args.yes, false)?;
-
-        // Every argument resolved above, so the single commit below
-        // takes the whole set or nothing
         let ids: Vec<String> = records.iter().map(|r| r.id.clone()).collect();
-        match &dataset_id {
-            Some(dataset_id) => {
-                let outcomes = DatasetStore::from(&store)
-                    .sessions_unlink(dataset_id, &ids)
-                    .map_err(|e| DialogError::Failed(e.to_string()))?;
-                Ok(format!(
-                    "Removed {} from dataset {}",
-                    count(outcomes.len(), "session"),
-                    short_uuid(dataset_id)
-                )
-                .into())
-            }
-            None => {
-                let outcome = sessions
-                    .remove(&ids)
-                    .map_err(|e| DialogError::Failed(e.to_string()))?;
-                if !outcome.datasets.is_empty() {
-                    dialog::step_list(
-                        "Datasets",
-                        outcome.datasets.iter().map(|m| {
-                            format!(
-                                "{} ({} removed)",
-                                short_uuid(&m.dataset_id),
-                                count(m.session_ids.len(), "session")
-                            )
-                        }),
-                    )?;
-                }
-                Ok(format!("Removed {}", count(outcome.sessions.len(), "session")).into())
-            }
+        let outcome = sessions
+            .remove(&ids)
+            .map_err(|e| DialogError::Failed(e.to_string()))?;
+        if !outcome.datasets.is_empty() {
+            dialog::step_list(
+                "Datasets",
+                outcome.datasets.iter().map(|m| {
+                    format!(
+                        "{} ({} removed)",
+                        short_uuid(&m.dataset_id),
+                        count(m.session_ids.len(), "session")
+                    )
+                }),
+            )?;
         }
+        if !outcome.shares.is_empty() {
+            dialog::step_list(
+                "Shares",
+                outcome.shares.iter().map(|m| {
+                    format!(
+                        "{} ({} removed)",
+                        short_uuid(&m.share_id),
+                        count(m.session_ids.len(), "session")
+                    )
+                }),
+            )?;
+        }
+        Ok(format!("Deleted {}", count(outcome.sessions.len(), "session")).into())
     })
 }
 
@@ -1621,9 +1518,13 @@ pub async fn delete(
     args: SessionDeleteArgs,
 ) -> Result<(), CliError> {
     if stored {
-        return Err(CliError::message(
-            "gage session delete: --stored does not apply; sessions are deleted from a source",
-        ));
+        if source.is_some() {
+            return Err(CliError::message(
+                "gage session delete: --source does not apply with --stored; sessions are \
+                 deleted from the store",
+            ));
+        }
+        return delete_stored(args);
     }
     if args.ids.is_empty() && !args.empty {
         return Err(CliError::message(

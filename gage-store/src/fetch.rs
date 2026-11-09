@@ -17,8 +17,8 @@
 //! A divergence, two live commits of one object neither of which
 //! descends from the other, is merged per type where the type allows
 //! it: an issue unions its change entries and keeps the one status
-//! that moved; a dataset merges membership as a set against the
-//! common ancestor; a session takes the longer content when one is a
+//! that moved; a dataset or share merges membership as a set against
+//! the common ancestor; a session takes the longer content when one is a
 //! byte prefix of the other. Every merge is one new local commit whose
 //! `first-parent` is the remote's commit, so the next push is a
 //! fast-forward. What cannot merge is a conflict: reported, the local
@@ -35,6 +35,7 @@ use crate::object::{Object, ObjectTree};
 use crate::refs::{OBJECT_REFS, TAG_REFS};
 use crate::remote::FetchSource;
 use crate::session::OBJECT_TYPE as SESSION_TYPE;
+use crate::share::{OBJECT_TYPE as SHARE_TYPE, SESSIONS_LINK as SHARE_SESSIONS_LINK};
 use crate::{Store, StoreError};
 
 /// Which side a resolution keeps.
@@ -76,8 +77,8 @@ pub enum Conflict {
     /// Both sides changed an object the type merges as a whole, or no
     /// common ancestor exists
     Object,
-    /// A dataset member linked at two commits where neither descends
-    /// from the other
+    /// A dataset or share member linked at two commits where neither
+    /// descends from the other
     Member { id: String },
     /// A tag naming different objects on each side
     Tag,
@@ -307,8 +308,13 @@ impl Store {
         if let Some(side) = choose {
             return self.resolve_whole(local, remote, side, &message("resolve"));
         }
-        if object_type == DATASET_TYPE {
-            return match self.merge_dataset(local, remote, base)? {
+        let member_links: Option<&[&str]> = match object_type {
+            DATASET_TYPE => Some(&[SESSIONS_LINK, ATTACHMENTS_LINK]),
+            SHARE_TYPE => Some(&[SHARE_SESSIONS_LINK]),
+            _ => None,
+        };
+        if let Some(links) = member_links {
+            return match self.merge_members(local, remote, base, links)? {
                 Ok(tree) => {
                     self.edit_onto(remote, &tree, &message("merge"), &local.commit_sha)?;
                     Ok(Outcome::Merged)
@@ -354,17 +360,28 @@ impl Store {
     /// member linked at two commits takes the descendant; neither
     /// descending is `Err(Some(member id))`; no ancestor is
     /// `Err(None)`.
-    fn merge_dataset(
+    /// Merge two versions of a membership object as a set per link
+    /// file in `links`, against the common ancestor: a member one side
+    /// removed stays removed, a member either side added is kept, and
+    /// a member both sides hold takes the newer of its two commits. The
+    /// attrs are the remote's, the merge commit's first parent.
+    /// `Err(None)` is no common ancestor; `Err(Some(id))` is a member
+    /// linked at two commits where neither descends from the other.
+    fn merge_members(
         &self,
         local: &Object,
         remote: &Object,
         base: Option<&Object>,
+        links: &[&str],
     ) -> Result<Result<ObjectTree, Option<String>>, StoreError> {
         let Some(base) = base else {
             return Ok(Err(None));
         };
-        let mut tree = ObjectTree::default();
-        for link in [SESSIONS_LINK, ATTACHMENTS_LINK] {
+        let mut tree = ObjectTree {
+            attrs: remote.tree.attrs.clone(),
+            ..ObjectTree::default()
+        };
+        for &link in links {
             let base_members = self.members(base, link)?;
             let local_members = self.members(local, link)?;
             let remote_members = self.members(remote, link)?;
@@ -596,7 +613,7 @@ mod tests {
     use crate::refs::object_ref;
     use crate::remote::{RemoteStore, Repository};
     use crate::test_support::open_store;
-    use crate::{DatasetStore, TagStore};
+    use crate::{DatasetStore, ShareAttrs, ShareStore, TagStore};
 
     fn note(store: &Store, name: &str) -> String {
         NoteStore::from(store)
@@ -909,15 +926,48 @@ mod tests {
         assert_eq!(members, [n2, n3]);
     }
 
-    /// Rewrite a dataset's `sessions.link` to the tips of `ids`.
-    fn link(store: &Store, ds: &str, ids: &[&str]) {
-        let current = store.read_object(&tip(store, ds)).unwrap();
-        let mut tree = ObjectTree::default();
+    /// Rewrite a dataset's or share's `sessions.link` to the tips of
+    /// `ids`, keeping its attrs.
+    fn link(store: &Store, container: &str, ids: &[&str]) {
+        let current = store.read_object(&tip(store, container)).unwrap();
+        let mut tree = ObjectTree {
+            attrs: current.tree.attrs.clone(),
+            ..ObjectTree::default()
+        };
         tree.links.insert(
             SESSIONS_LINK.to_string(),
             ids.iter().map(|id| tip(store, id)).collect(),
         );
-        store.edit(&current, &tree, "dataset edit").unwrap();
+        store.edit(&current, &tree, "container edit").unwrap();
+    }
+
+    #[test]
+    fn divergent_shares_merge_membership_as_a_set_and_keep_attrs() {
+        let (_dir, a, b) = pair();
+        let n1 = note(&a, "n1");
+        let n2 = note(&a, "n2");
+        let n3 = note(&a, "n3");
+        let attrs = ShareAttrs {
+            description: Some("Work.".into()),
+            filters: vec!["secret".into()],
+        };
+        let share = ShareStore::from(&a).create(&attrs, &[]).unwrap();
+        fetch(&b, "a", None);
+        // Notes stand in for members through the generic link writer,
+        // which the set merge does not care about
+        link(&a, &share, &[&n1, &n2]);
+        fetch(&b, "a", None);
+        link(&a, &share, &[&n1, &n2, &n3]);
+        link(&b, &share, &[&n2]);
+        let report = fetch(&b, "a", None);
+        assert_eq!(outcome(&report, &share), &Outcome::Merged);
+        let merged = b.read_object(&tip(&b, &share)).unwrap();
+        let members: Vec<String> = merged.tree.links[SESSIONS_LINK]
+            .iter()
+            .map(|sha| b.read_header(sha).unwrap().id)
+            .collect();
+        assert_eq!(members, [n2, n3]);
+        assert_eq!(ShareStore::from(&b).get(&share).unwrap().attrs, attrs);
     }
 
     #[test]

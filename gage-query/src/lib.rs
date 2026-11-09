@@ -20,7 +20,9 @@
 //! object and `issue_event` one row per change entry across them.
 //! `scan` is one row per live scan object, `scan_task` one row per
 //! task of those scans, `scan_task_agent` one row per agent a task
-//! ran, and `scan_log` one row per log a scan wrote.
+//! ran, and `scan_log` one row per log a scan wrote. `dataset` and
+//! `share` are one row per live container object, with `dataset_session`
+//! and `share_session` their memberships.
 //!
 //! Native session data is reached through driver-provided functions,
 //! present on every context: `native_session`, `native_message`,
@@ -70,7 +72,7 @@ use gage_store::{
     attachment_file_table, attachment_table, dataset_table, issue_event_table, issue_report_fn,
     issue_table, link_table, note_doc_rows, note_doc_schema, object_key_table, related_issue_fn,
     scan_log_table, scan_scope_tables, scan_table, scan_task_agent_table, scan_task_table,
-    scan_watermark_table, tag_table,
+    scan_watermark_table, share_table, tag_table,
 };
 
 use crate::age::age_udf;
@@ -236,6 +238,7 @@ impl ContextBuilder {
             ),
             ("note", Arc::new(StoredNoteTable::new(Arc::clone(&store)))),
             ("dataset", dataset_table(Arc::clone(&store))),
+            ("share", share_table(Arc::clone(&store))),
             ("attachment", attachment_table(Arc::clone(&store))),
             ("attachment_file", attachment_file_table(Arc::clone(&store))),
             ("scan", scan_table(Arc::clone(&store))),
@@ -490,6 +493,11 @@ const VIEWS: &[(&str, &str)] = &[
          FROM dataset_attachment_link l JOIN dataset d ON l.dataset_commit = d.commit",
     ),
     (
+        "share_session",
+        "SELECT l.share_id, l.session_num, l.session_id \
+         FROM share_session_link l JOIN share s ON l.share_commit = s.commit",
+    ),
+    (
         "scan_session",
         "SELECT s.scan_id, m.session_num, m.session_id \
          FROM scan_dataset_link s \
@@ -646,8 +654,8 @@ mod tests {
     use gage_session::SourceOptions;
     use gage_store::{
         DatasetStore, IssueInput, IssueStatus, IssueStore, NoteInput, NoteStore, NoteValue,
-        ScanStore, SessionAttrsRecord, SessionDirLayout, SessionSpec, SessionStore, StatusReason,
-        Store, TagStore,
+        PublishAttrs, PublishFilter, ScanStore, SessionAttrsRecord, SessionDirLayout, SessionSpec,
+        SessionStore, ShareAttrs, ShareStore, StatusReason, Store, TagStore,
     };
     use tempfile::TempDir;
 
@@ -1797,6 +1805,113 @@ mod tests {
         .await;
         assert!(tables.is_empty(), "{tables:?}");
         assert!(user.sql("SELECT commit FROM dataset").await.is_err());
+    }
+
+    /// `share` lists each share with its description and filter spec,
+    /// `share_session_link` carries the share and member commits,
+    /// `share_session` joins on ids at the share's current commit, and
+    /// a user-facing context hides the link table and the commit.
+    #[tokio::test]
+    async fn share_tables_list_members_and_hide_commits() {
+        let (tmp, store) = open_store();
+        let claude_root = tempfile::tempdir().unwrap();
+        let native_id = "11111111-2222-3333-4444-666666666666";
+        let project_dir = claude_root.path().join("projects").join("-w-proj");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        std::fs::write(
+            project_dir.join(format!("{native_id}.jsonl")),
+            concat!(
+                r#"{"type":"user","uuid":"u1","timestamp":"2025-01-01T00:00:00Z","message":{"role":"user","content":"hello"}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        let spec = format!("claude:{}", claude_root.path().display());
+        let registry = DriverRegistry::builtin();
+        let driver = registry.driver_for(&spec).unwrap();
+        let source = driver
+            .open_source(SourceOptions::new(&spec).cache_root(claude_root.path().join("cache")))
+            .unwrap();
+        let mut native = source.open_native(native_id).unwrap();
+        let (share_id, share_commit, published_id) = {
+            let store = store.lock().unwrap();
+            let sessions = SessionStore::from(&*store);
+            let outcome = sessions.add(driver.as_ref(), native.as_mut()).unwrap();
+            let original = sessions.at_commit(&outcome.commit_sha).unwrap();
+            let published_id = new_uuid();
+            let dir = write_session_dir(
+                tmp.path(),
+                &published_id,
+                &SessionAttrsRecord {
+                    origin: format!("session:{}@{}", original.id, original.commit_sha),
+                    publish: Some(PublishAttrs {
+                        filters: vec![PublishFilter {
+                            name: "secret".into(),
+                            version: Some("1.3.0".into()),
+                        }],
+                    }),
+                    ..original.attrs
+                },
+                "[]\n",
+                &[("session.jsonl", "{}\n")],
+            );
+            sessions.create_from_dir(&dir).unwrap();
+            let shares = ShareStore::from(&*store);
+            let share_id = shares
+                .create(
+                    &ShareAttrs {
+                        description: Some("Work.".into()),
+                        filters: vec!["secret >=1.2".into()],
+                    },
+                    slice::from_ref(&published_id),
+                )
+                .unwrap();
+            let share_commit = shares.get(&share_id).unwrap().commit_sha;
+            (share_id, share_commit, published_id)
+        };
+
+        let ctx = ContextBuilder::new(Arc::clone(&store).into()).build().await;
+        assert_eq!(
+            strings(&ctx, "SELECT description || ' | ' || filters FROM share").await,
+            ["Work. | secret >=1.2"]
+        );
+        assert_eq!(
+            strings(&ctx, "SELECT share_commit FROM share_session_link").await,
+            slice::from_ref(&share_commit)
+        );
+        assert_eq!(
+            strings(
+                &ctx,
+                &format!(
+                    "SELECT session_id FROM share_session WHERE share_id = '{share_id}' AND session_num = 1"
+                )
+            )
+            .await,
+            slice::from_ref(&published_id)
+        );
+        assert_eq!(
+            strings(&ctx, "SELECT commit FROM share").await,
+            [share_commit]
+        );
+
+        let user = ContextBuilder::new(Some(store))
+            .skip_system_cols()
+            .build()
+            .await;
+        assert_eq!(
+            strings(
+                &user,
+                &format!("SELECT session_id FROM share_session WHERE share_id = '{share_id}'")
+            )
+            .await,
+            [published_id]
+        );
+        assert!(user.sql("SELECT commit FROM share").await.is_err());
+        assert!(
+            user.sql("SELECT share_id FROM share_session_link")
+                .await
+                .is_err()
+        );
     }
 
     /// `tag` pairs each tag name with the id of the object it names,

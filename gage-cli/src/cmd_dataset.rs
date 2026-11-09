@@ -11,8 +11,8 @@ use gage_core::uuid::short_uuid;
 use gage_query::ContextBuilder;
 use gage_session::SourceOptions;
 use gage_store::{
-    AddStep, DATASET_TYPE, DatasetOrigin, DatasetSessionAddOutcome, DatasetStore, SessionOutcome,
-    Store, StoreError, TagStore,
+    ATTACHMENT_TYPE, AddStep, DATASET_TYPE, DatasetOrigin, DatasetSessionAddOutcome, DatasetStore,
+    SESSION_TYPE, SessionOutcome, SessionRecord, Store, StoreError, TagStore,
 };
 use tabled::{
     Table,
@@ -64,6 +64,45 @@ pub enum DatasetCommand {
     /// Member sessions and scan runs that used a dataset are kept
     /// unless --sessions is given.
     Delete(DatasetDeleteArgs),
+
+    /// Add stored sessions and attachments to a dataset
+    ///
+    /// Each object is already in store. A session takes a member slot;
+    /// an object already a member advances to its current commit.
+    Link(DatasetLinkArgs),
+
+    /// Remove sessions and attachments from a dataset
+    ///
+    /// Objects stay in store.
+    Unlink(DatasetUnlinkArgs),
+}
+
+#[derive(Args)]
+pub struct DatasetLinkArgs {
+    /// Dataset to add objects to (tag, ID, or prefix)
+    pub dataset: String,
+
+    /// Sessions and attachments to add (tag, ID, or prefix)
+    #[arg(required = true, value_name = "OBJECT")]
+    pub objects: Vec<String>,
+
+    /// Skip confirmation prompt
+    #[arg(short, long)]
+    pub yes: bool,
+}
+
+#[derive(Args)]
+pub struct DatasetUnlinkArgs {
+    /// Dataset to remove objects from (tag, ID, or prefix)
+    pub dataset: String,
+
+    /// Sessions and attachments to remove (tag, ID, or prefix)
+    #[arg(required = true, value_name = "OBJECT")]
+    pub objects: Vec<String>,
+
+    /// Skip confirmation prompt
+    #[arg(short, long)]
+    pub yes: bool,
 }
 
 #[derive(Args)]
@@ -722,6 +761,154 @@ pub fn delete(args: DatasetDeleteArgs) -> Result<(), CliError> {
         }
         Ok(outro.into())
     })
+}
+
+pub fn link(args: DatasetLinkArgs) -> Result<(), CliError> {
+    let command = "gage dataset link";
+    let store = open_store(command)?;
+    let datasets = DatasetStore::from(&store);
+    let dataset_id = datasets
+        .resolve_id(&args.dataset)
+        .with_context(|| format!("{command}: {}", args.dataset))?;
+    let members = resolve_members(command, &store, &args.objects)?;
+    dialog::run("Link to dataset", || {
+        dialog::step_value("Dataset", short_uuid(&dataset_id))?;
+        members.steps()?;
+        dialog::confirm(args.yes, true)?;
+        let mut placed = 0;
+        if !members.sessions.is_empty() {
+            placed += datasets
+                .sessions_link(&dataset_id, &members.sessions)
+                .map_err(|e| DialogError::Failed(e.to_string()))?
+                .len();
+        }
+        if !members.attachments.is_empty() {
+            placed += datasets
+                .attachments_link(&dataset_id, &members.attachments)
+                .map_err(|e| DialogError::Failed(e.to_string()))?
+                .len();
+        }
+        Ok(format!(
+            "Added {} to dataset {}",
+            count(placed, "object"),
+            short_uuid(&dataset_id)
+        )
+        .into())
+    })
+}
+
+pub fn unlink(args: DatasetUnlinkArgs) -> Result<(), CliError> {
+    let command = "gage dataset unlink";
+    let store = open_store(command)?;
+    let datasets = DatasetStore::from(&store);
+    let dataset_id = datasets
+        .resolve_id(&args.dataset)
+        .with_context(|| format!("{command}: {}", args.dataset))?;
+    let members = resolve_members(command, &store, &args.objects)?;
+    dialog::run("Unlink from dataset", || {
+        dialog::step_value("Dataset", short_uuid(&dataset_id))?;
+        members.steps()?;
+        cli::log::remark("Objects stay in the store")?;
+        dialog::confirm(args.yes, false)?;
+        let mut removed = 0;
+        if !members.sessions.is_empty() {
+            removed += datasets
+                .sessions_unlink(&dataset_id, &members.sessions)
+                .map_err(|e| DialogError::Failed(e.to_string()))?
+                .len();
+        }
+        if !members.attachments.is_empty() {
+            removed += datasets
+                .attachments_unlink(&dataset_id, &members.attachments)
+                .map_err(|e| DialogError::Failed(e.to_string()))?
+                .len();
+        }
+        Ok(format!(
+            "Removed {} from dataset {}",
+            count(removed, "object"),
+            short_uuid(&dataset_id)
+        )
+        .into())
+    })
+}
+
+/// The objects a link or unlink names, sorted by type. Every argument
+/// resolves before anything is written, and a type a dataset does not
+/// hold is an error naming it.
+struct Members {
+    sessions: Vec<String>,
+    attachments: Vec<String>,
+}
+
+impl Members {
+    fn steps(&self) -> io::Result<()> {
+        if !self.sessions.is_empty() {
+            dialog::step_list(
+                "Sessions",
+                self.sessions.iter().map(|id| short_uuid(id).to_string()),
+            )?;
+        }
+        if !self.attachments.is_empty() {
+            dialog::step_list(
+                "Attachments",
+                self.attachments.iter().map(|id| short_uuid(id).to_string()),
+            )?;
+        }
+        Ok(())
+    }
+}
+
+fn resolve_members(command: &str, store: &Store, objects: &[String]) -> Result<Members, CliError> {
+    let mut members = Members {
+        sessions: Vec::new(),
+        attachments: Vec::new(),
+    };
+    for arg in objects {
+        let found = store
+            .resolve_in(arg, None)
+            .with_context(|| format!("{command}: {arg}"))?;
+        let list = match found.object_type.as_str() {
+            SESSION_TYPE => &mut members.sessions,
+            ATTACHMENT_TYPE => &mut members.attachments,
+            other => {
+                return Err(CliError::message(format!(
+                    "{command}: {arg} is a {}; a dataset holds sessions and attachments",
+                    other.strip_prefix("gage::").unwrap_or(other)
+                )));
+            }
+        };
+        if !list.contains(&found.id) {
+            list.push(found.id);
+        }
+    }
+    Ok(members)
+}
+
+/// Link sessions already in the store as members of `dataset_id`,
+/// reporting each to `on_event`.
+pub(crate) fn link_stored(
+    store: &Store,
+    dataset_id: &str,
+    records: &[SessionRecord],
+    on_event: &mut dyn FnMut(AddEvent<'_>),
+) -> Result<(), DialogError> {
+    let ids: Vec<String> = records.iter().map(|r| r.id.clone()).collect();
+    let outcomes = DatasetStore::from(store)
+        .sessions_link(dataset_id, &ids)
+        .map_err(|e| DialogError::Failed(format!("{e}")))?;
+    for (outcome, record) in outcomes.iter().zip(records) {
+        on_event(AddEvent::Added {
+            outcome: outcome.outcome,
+            id: &outcome.id,
+            native_id: record.attrs.native_id(),
+            dataset: Some(dataset_id),
+        });
+    }
+    on_event(AddEvent::Done {
+        placed: outcomes.len(),
+        dataset: Some(dataset_id),
+    });
+    Ok(())
 }
 
 /// Open the default store, or `command: <error>`

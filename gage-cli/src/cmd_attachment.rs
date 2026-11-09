@@ -14,7 +14,6 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
 use clap::{Args, Subcommand};
-use cliclack as cli;
 use datafusion::arrow::array::{
     Array, Int64Array, ListArray, StringArray, TimestampMillisecondArray,
 };
@@ -62,8 +61,7 @@ pub enum AttachmentCommand {
     /// any new targets added to it; a named add without --key is
     /// keyed by its name and
     /// selection, and an unnamed add without --key always creates a
-    /// new attachment. With --stored, an attachment already in the
-    /// store is added to a dataset without reading the file system.
+    /// new attachment.
     Add(AttachmentAddArgs),
 
     /// List attachments
@@ -72,13 +70,11 @@ pub enum AttachmentCommand {
     /// Show an attachment and its files
     Show(AttachmentShowArgs),
 
-    /// Remove attachments from store or from a dataset
+    /// Delete attachments from store
     ///
-    /// Without --dataset, each attachment is removed from every
-    /// dataset that holds it, then marked removed in the store. With
-    /// --dataset, each attachment is removed from that dataset only
-    /// and stays in the store.
-    Remove(AttachmentRemoveArgs),
+    /// Each attachment is removed from every dataset that holds it,
+    /// then marked removed in the store.
+    Delete(AttachmentDeleteArgs),
 }
 
 #[derive(Args)]
@@ -86,7 +82,7 @@ pub struct AttachmentAddArgs {
     /// Files to include (glob)
     ///
     /// At least one is required; `**/*` selects every file
-    #[arg(required_unless_present_any = ["stored", "scanners"], value_name = "INCLUDE")]
+    #[arg(required_unless_present_any = ["scanners"], value_name = "INCLUDE")]
     pub includes: Vec<String>,
 
     /// Where to select files from (default current directory)
@@ -98,19 +94,6 @@ pub struct AttachmentAddArgs {
     /// Files to exclude (glob; repeatable)
     #[arg(short, long, value_name = "PATTERN")]
     pub exclude: Vec<String>,
-
-    /// Add stored attachment (name, ID, or prefix)
-    ///
-    /// Attachment name, ID, or ID prefix. Takes the attachment from
-    /// the store instead of the file system. Requires --dataset
-    #[arg(
-        short = 'S',
-        long,
-        value_name = "ATTACHMENT",
-        requires = "dataset",
-        conflicts_with_all = ["includes", "name", "key", "root", "exclude", "targets", "scanners"]
-    )]
-    pub stored: Option<String>,
 
     /// Attach scanner inputs (name or path; repeatable)
     ///
@@ -183,16 +166,10 @@ pub struct AttachmentShowArgs {
 }
 
 #[derive(Args)]
-pub struct AttachmentRemoveArgs {
-    /// Attachments to remove (name, ID, or prefix)
+pub struct AttachmentDeleteArgs {
+    /// Attachments to delete (name, ID, or prefix)
     #[arg(required = true)]
     pub attachments: Vec<String>,
-
-    /// Remove attachments from dataset only (ID or prefix)
-    ///
-    /// Dataset ID (or prefix). The attachments stay in the store
-    #[arg(short, long, value_name = "DATASET")]
-    pub dataset: Option<String>,
 
     /// Skip confirmation prompt
     #[arg(short, long)]
@@ -213,34 +190,6 @@ async fn add_dialog(args: &AttachmentAddArgs, store: &Store) -> Result<DialogRes
             .as_deref()
             .expect("clap requires --dataset with --scanner");
         return add_from_scanners(store, dataset, &args.scanners, args.yes).await;
-    }
-
-    if let Some(stored) = args.stored.as_deref() {
-        let record = resolve(&attachments, stored).map_err(DialogError::Failed)?;
-        let dataset = args
-            .dataset
-            .as_deref()
-            .expect("clap requires --dataset with --stored");
-        let dataset_id = DatasetStore::from(store)
-            .resolve_id(dataset)
-            .map_err(|e| DialogError::Failed(format!("--dataset {dataset}: {e}")))?;
-        let shown = describe(record.attrs.name.as_deref(), &record.id);
-        dialog::step_value("Attachment", &shown)?;
-        dialog::step_value("Dataset", short_uuid(&dataset_id))?;
-        dialog::confirm(args.yes, true)?;
-        let (dataset_id, linked) =
-            link_to_dataset(store, &dataset_id, &record.id).map_err(DialogError::Failed)?;
-        let verb = match linked {
-            AttachmentLinkOutcome::Linked => "Added",
-            AttachmentLinkOutcome::Updated => "Updated",
-            AttachmentLinkOutcome::Unchanged => "Unchanged",
-        };
-        return Ok(format!(
-            "{verb} attachment {} to dataset {}",
-            describe(record.attrs.name.as_deref(), &record.id),
-            short_uuid(&dataset_id)
-        )
-        .into());
     }
 
     let root = args.root.clone().unwrap_or_else(|| PathBuf::from("."));
@@ -577,8 +526,8 @@ fn attrs_table(attrs: &[(&str, String)]) -> String {
         .to_string()
 }
 
-pub fn remove(args: AttachmentRemoveArgs) -> Result<(), CliError> {
-    let store = open_store("gage attachment remove")?;
+pub fn delete(args: AttachmentDeleteArgs) -> Result<(), CliError> {
+    let store = open_store("gage attachment delete")?;
     let attachments = AttachmentStore::from(&store);
 
     // Resolve every argument before writing anything, so one bad
@@ -593,7 +542,7 @@ pub fn remove(args: AttachmentRemoveArgs) -> Result<(), CliError> {
                 }
             }
             Err(e) => {
-                eprintln!("gage attachment remove: {e}");
+                eprintln!("gage attachment delete: {e}");
                 errors += 1;
             }
         }
@@ -601,65 +550,35 @@ pub fn remove(args: AttachmentRemoveArgs) -> Result<(), CliError> {
     if errors > 0 {
         return Err(CliError::exit(1));
     }
-    let dataset_id = match args.dataset.as_deref() {
-        Some(prefix) => Some(
-            DatasetStore::from(&store)
-                .resolve_id(prefix)
-                .with_context(|| format!("gage attachment remove: --dataset {prefix}"))?,
-        ),
-        None => None,
-    };
 
-    dialog::run("Remove attachments", || {
+    dialog::run("Delete attachments", || {
         dialog::step_list(
             "Attachments",
             records
                 .iter()
                 .map(|r| describe(r.attrs.name.as_deref(), &r.id)),
         )?;
-        if let Some(id) = &dataset_id {
-            dialog::step_value("Dataset", short_uuid(id))?;
-        }
-
-        if dataset_id.is_some() {
-            cli::log::remark("Attachments stay in the store")?;
-        }
-        dialog::confirm(args.yes, false)?;
+        dialog::confirm_irreversible(args.yes)?;
 
         // Every argument resolved above, so the single commit below
         // takes the whole set or nothing
         let ids: Vec<String> = records.iter().map(|r| r.id.clone()).collect();
-        match &dataset_id {
-            Some(dataset_id) => {
-                let outcomes = DatasetStore::from(&store)
-                    .attachments_unlink(dataset_id, &ids)
-                    .map_err(|e| DialogError::Failed(e.to_string()))?;
-                Ok(format!(
-                    "Removed {} from dataset {}",
-                    count(outcomes.len(), "attachment"),
-                    short_uuid(dataset_id)
-                )
-                .into())
-            }
-            None => {
-                let outcome = attachments
-                    .remove(&ids)
-                    .map_err(|e| DialogError::Failed(e.to_string()))?;
-                if !outcome.datasets.is_empty() {
-                    dialog::step_list(
-                        "Datasets",
-                        outcome.datasets.iter().map(|held| {
-                            format!(
-                                "{} ({} removed)",
-                                short_uuid(&held.dataset_id),
-                                count(held.attachment_ids.len(), "attachment")
-                            )
-                        }),
-                    )?;
-                }
-                Ok(format!("Removed {}", count(outcome.attachments.len(), "attachment")).into())
-            }
+        let outcome = attachments
+            .remove(&ids)
+            .map_err(|e| DialogError::Failed(e.to_string()))?;
+        if !outcome.datasets.is_empty() {
+            dialog::step_list(
+                "Datasets",
+                outcome.datasets.iter().map(|held| {
+                    format!(
+                        "{} ({} removed)",
+                        short_uuid(&held.dataset_id),
+                        count(held.attachment_ids.len(), "attachment")
+                    )
+                }),
+            )?;
         }
+        Ok(format!("Deleted {}", count(outcome.attachments.len(), "attachment")).into())
     })
 }
 

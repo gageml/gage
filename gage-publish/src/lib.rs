@@ -29,8 +29,8 @@ use gage_registry::driver::DriverRegistry;
 use gage_registry::filter::FilterRegistry;
 use gage_session::{Driver, DriverError, EntryCodec, EntryValue, StoredSession};
 use gage_store::{
-    DirContentSource, SessionAttrsRecord, SessionDirLayout, SessionRecord, SessionStore, Store,
-    StoreError,
+    DirContentSource, PublishAttrs, PublishFilter, SessionAttrsRecord, SessionDirLayout,
+    SessionRecord, SessionStore, Store, StoreError,
 };
 
 pub use definition::{
@@ -385,7 +385,30 @@ impl<'a> Publisher<'a> {
     pub async fn apply(&self, id: &str, force: bool) -> Result<String, PublishError> {
         let definition = self.definition(id)?;
         self.verify(id, force).await?;
+        self.staging
+            .set_publish(id, &self.publish_attrs(&definition))?;
         self.staging.apply(id, Some(&definition))
+    }
+
+    /// The record the published session carries of `definition`'s
+    /// filters: each name with the version its registry definition
+    /// declares, none when the declaration has no version or the
+    /// filter is not in the registry.
+    pub fn publish_attrs(&self, definition: &PublishDefinition) -> PublishAttrs {
+        PublishAttrs {
+            filters: definition
+                .filters
+                .iter()
+                .map(|f| PublishFilter {
+                    name: f.name.clone(),
+                    version: self
+                        .filters
+                        .get_def(&f.name)
+                        .map(|def| def.version.clone())
+                        .filter(|v| !v.is_empty()),
+                })
+                .collect(),
+        }
     }
 
     /// The definition of the pending publish `id`, as the file holds

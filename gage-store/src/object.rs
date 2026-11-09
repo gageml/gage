@@ -37,7 +37,7 @@ use crate::refs::OBJECT_REFS;
 pub(crate) use crate::refs::object_ref;
 use crate::url;
 use crate::writer::{TreeInput, commit_tree, mktree, write_blob};
-use crate::{Store, StoreError, TagStore, attachment, dataset, issue, note, scan, session};
+use crate::{Store, StoreError, TagStore, attachment, dataset, issue, note, scan, session, share};
 
 /// Size of the short-prefix set; see [`Store::resolve_in`].
 pub const SHORT_PREFIX_SET_SIZE: usize = 10_000;
@@ -969,6 +969,7 @@ pub(crate) fn object_version(object_type: &str) -> Option<&'static str> {
         session::OBJECT_TYPE => Some(session::OBJECT_VERSION),
         attachment::OBJECT_TYPE => Some(attachment::OBJECT_VERSION),
         scan::OBJECT_TYPE => Some(scan::OBJECT_VERSION),
+        share::OBJECT_TYPE => Some(share::OBJECT_VERSION),
         _ => None,
     }
 }

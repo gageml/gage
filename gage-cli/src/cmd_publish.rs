@@ -18,6 +18,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::slice;
 use std::sync::Arc;
 
 use clap::{Args, Subcommand};
@@ -35,7 +36,8 @@ use gage_registry::scanner::split_scanner_spec;
 use gage_session::{Driver, NativeSession, SkillMode, SkillSession, SourceOptions};
 use gage_store::url::parse_session_origin;
 use gage_store::{
-    ExternalSessionRecord, SESSION_TYPE, SessionRecord, SessionStore, Store, StoreError, TagStore,
+    ExternalSessionRecord, SESSION_TYPE, SessionRecord, SessionStore, ShareStore, Store,
+    StoreError, TagStore,
 };
 use tabled::{
     Table,
@@ -53,6 +55,7 @@ use crate::cmd_session::{self, ViewOptionArgs};
 use crate::cmd_tag::TAG_HELP;
 use crate::dialog::{self, DialogError, DialogResult};
 use crate::error::CliError;
+use crate::filter_prompt::prompt_filter_multiselect;
 use crate::human::{count, format_elapsed_ms};
 use crate::model_prompt;
 use crate::progress;
@@ -126,6 +129,17 @@ pub struct PublishRunArgs {
     /// Read from a file as @PATH.
     #[arg(short = 'N', long, value_name = "TEXT")]
     notes: Option<String>,
+
+    /// Add to share (tag, ID, or prefix; repeatable)
+    #[arg(
+        long,
+        value_name = "SHARE",
+        long_help = format!(
+            "Add to share (tag, ID, or prefix; repeatable)\n\n{SHARE_HELP} \
+             Passed to gage publish apply for each session."
+        )
+    )]
+    share: Vec<String>,
 
     /// Model for session
     ///
@@ -288,6 +302,15 @@ pub struct InitArgs {
     )]
     filter: Vec<String>,
 
+    /// Prepare session for a share (tag, ID, or prefix)
+    ///
+    /// Every filter share lists is selected at version share requires;
+    /// a filter whose definition does not satisfy that version is an
+    /// error. --filter adds to selection, and naming a selected filter
+    /// again changes nothing
+    #[arg(long = "for-share", value_name = "SHARE")]
+    for_share: Option<String>,
+
     /// Segment to add (repeatable)
     ///
     /// A segment starts without lines and drops nothing until
@@ -309,6 +332,12 @@ pub struct InitArgs {
     #[arg(long, exclusive = true)]
     list_filters: bool,
 }
+
+/// The paragraph `--share` options share on what adding to a share
+/// means.
+const SHARE_HELP: &str = "A share holds published sessions. Each named share's filter \
+requirements are checked against publish definition before anything is written, and published \
+session is linked to each share after it is written.";
 
 /// The paragraph `--filter` options share on what a filter argument
 /// is.
@@ -462,6 +491,16 @@ pub struct ApplyArgs {
     #[arg(value_name = "SESSION")]
     session: String,
 
+    /// Add session to share (tag, ID, or prefix; repeatable)
+    #[arg(
+        long,
+        value_name = "SHARE",
+        long_help = format!(
+            "Add session to share (tag, ID, or prefix; repeatable)\n\n{SHARE_HELP}"
+        )
+    )]
+    share: Vec<String>,
+
     /// Tag published session
     #[arg(
         short,
@@ -475,7 +514,7 @@ pub struct ApplyArgs {
     #[arg(long, requires = "tag")]
     force_tag: bool,
 
-    /// Publish session even when definition changed nothing in it
+    /// Publish session even when definition changed nothing
     #[arg(long)]
     force: bool,
 
@@ -537,9 +576,13 @@ async fn publish_sessions(args: PublishRunArgs) -> Result<(), CliError> {
         None => None,
     };
     let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
+    let shares = resolve_shares("gage publish", &store, &args.share)?;
 
     let mut setup: Option<PublishSetup> = None;
     dialog::run_async("Publish sessions", || async {
+        if !shares.is_empty() {
+            dialog::step_list("Shares", shares.iter().map(|s| short_uuid(s).to_string()))?;
+        }
         let ids = if selects_sessions(&args) {
             preview_selection(&args, &store).await?
         } else {
@@ -612,7 +655,8 @@ struct InitInputs<'a> {
 }
 
 /// The skill's arguments: the `gage publish init` options that spell
-/// the settled inputs, then the selected session ids. The source
+/// the settled inputs, the `--share` options the skill passes to
+/// `gage publish apply`, then the selected session ids. The source
 /// comes first, so the ids read against it; a session selection is
 /// already resolved to ids, so no selection option is passed.
 fn skill_args(args: &PublishRunArgs, inputs: &InitInputs<'_>, ids: &[String]) -> Vec<String> {
@@ -633,6 +677,9 @@ fn skill_args(args: &PublishRunArgs, inputs: &InitInputs<'_>, ids: &[String]) ->
     }
     if let Some(notes) = inputs.notes {
         out.extend(["--notes".to_string(), notes.to_string()]);
+    }
+    for share in &args.share {
+        out.extend(["--share".to_string(), share.clone()]);
     }
     out.extend(ids.iter().cloned());
     out
@@ -667,7 +714,7 @@ fn select_filters<'a>(
                 "A filter or group is required; see --list-filters".to_string(),
             ));
         }
-        let names = prompt_filter_multiselect(registry)?;
+        let names = prompt_filter_multiselect(registry, true)?;
         if names.is_empty() {
             return Err(DialogError::Failed("No filters selected".to_string()));
         }
@@ -732,27 +779,6 @@ fn selected_filters<'a>(
         }
     }
     Ok(filters)
-}
-
-/// Multi-select over every filter with none selected. The hint shown
-/// for each item is the first line of the filter's description.
-fn prompt_filter_multiselect(registry: &FilterRegistry) -> Result<Vec<String>, DialogError> {
-    let defs = registry.list();
-    let mut prompt = cli::multiselect("Filters");
-    for (i, def) in defs.iter().enumerate() {
-        let hint = def.description.lines().next().unwrap_or("").to_string();
-        prompt = prompt.item(i, def.name.clone(), hint);
-    }
-    let indices: Vec<usize> = prompt.interact()?;
-    Ok(indices
-        .into_iter()
-        .map(|i| {
-            defs.get(i)
-                .expect("selected index points into defs")
-                .name
-                .clone()
-        })
-        .collect())
 }
 
 /// The notes prompt; `None` when nothing was entered.
@@ -936,7 +962,18 @@ async fn init(args: InitArgs) -> Result<(), CliError> {
     let registry = publisher.filters();
     let config = Config::load_user().map_err(|e| fail(format!("reading config: {e}")))?;
     check_groups("gage publish init", registry, &args.group)?;
-    let specs = resolve_filter_specs("gage publish init", registry, &args.filter)?;
+    let mut filter_args = args.filter.clone();
+    if let Some(share) = &args.for_share {
+        for name in filters_for_share("gage publish init", &store, registry, share)? {
+            let named = filter_args
+                .iter()
+                .any(|spec| split_scanner_spec(spec).0 == name);
+            if !named {
+                filter_args.push(name);
+            }
+        }
+    }
+    let specs = resolve_filter_specs("gage publish init", registry, &filter_args)?;
     let segments = args
         .segment
         .iter()
@@ -1185,6 +1222,65 @@ fn resolve_filter_specs<'a>(
         out.push(ResolvedSpec { def, params, spec });
     }
     Ok(out)
+}
+
+/// The filter names a share requires, for `--for`: each entry
+/// of the share's spec, after checking that the registry has the
+/// filter and that its declared version satisfies the share's
+/// requirement.
+fn filters_for_share(
+    command: &str,
+    store: &Store,
+    registry: &FilterRegistry,
+    share: &str,
+) -> Result<Vec<String>, CliError> {
+    let record = ShareStore::from(store)
+        .get(share)
+        .map_err(|e| CliError::message(format!("{command}: --for {share}: {e}")))?;
+    let specs = record.attrs.filter_specs().map_err(|e| {
+        CliError::message(format!("{command}: share {}: {e}", short_uuid(&record.id)))
+    })?;
+    let mut names = Vec::with_capacity(specs.len());
+    for spec in specs {
+        let Some(def) = registry.get_def(&spec.name) else {
+            return Err(CliError::message(format!(
+                "{command}: share {} requires filter {:?}, which is not a known filter",
+                short_uuid(&record.id),
+                spec.name
+            )));
+        };
+        let version = Some(def.version.as_str()).filter(|v| !v.is_empty());
+        if !spec.accepts(version) {
+            return Err(CliError::message(format!(
+                "{command}: share {} requires {spec}; filter {} is at version {}",
+                short_uuid(&record.id),
+                spec.name,
+                version.unwrap_or("none")
+            )));
+        }
+        names.push(spec.name);
+    }
+    Ok(names)
+}
+
+/// Resolve every `--share` value to a share id before anything runs,
+/// so one bad argument leaves nothing half done.
+fn resolve_shares(
+    command: &str,
+    store: &Store,
+    shares: &[String],
+) -> Result<Vec<String>, CliError> {
+    let share_store = ShareStore::from(store);
+    let mut ids = Vec::with_capacity(shares.len());
+    for share in shares {
+        let id = share_store
+            .resolve_id(share)
+            .map_err(|e| CliError::message(format!("{command}: --share {share}: {e}")))?;
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    Ok(ids)
 }
 
 /// Every group in `groups` is one some filter lists. A group outside
@@ -1648,6 +1744,16 @@ async fn apply(args: ApplyArgs) -> Result<(), CliError> {
                 e => fail(e.to_string()),
             })?;
     }
+    // Every share admits the publish as defined, before anything is
+    // written; a refusal names the session and the rule it fails
+    let share_ids = resolve_shares("gage publish apply", &store, &args.share)?;
+    let shares = ShareStore::from(&store);
+    let publish_attrs = publisher.publish_attrs(&definition);
+    for share in &share_ids {
+        shares
+            .accepts(share, &pending.id, &publish_attrs)
+            .map_err(|e| fail(e.to_string()))?;
+    }
     let instances: usize = publisher
         .instances(&pending.id)
         .await
@@ -1671,11 +1777,27 @@ async fn apply(args: ApplyArgs) -> Result<(), CliError> {
         if let Some(name) = &args.tag {
             dialog::step_value("Tag", name)?;
         }
+        if !share_ids.is_empty() {
+            dialog::step_list(
+                "Shares",
+                share_ids.iter().map(|s| short_uuid(s).to_string()),
+            )?;
+        }
         dialog::confirm(args.yes, true)?;
         publisher
             .apply(&pending.id, args.force)
             .await
             .map_err(|e| DialogError::Failed(e.to_string()))?;
+        for share in &share_ids {
+            shares
+                .link(share, slice::from_ref(&pending.id))
+                .map_err(|e| DialogError::Failed(e.to_string()))?;
+            cli::log::info(format!(
+                "Added session {} to share {}",
+                short_uuid(&pending.id),
+                short_uuid(share)
+            ))?;
+        }
         if let Some(name) = &args.tag {
             let added = tags
                 .add(name, &pending.id, args.force_tag)
@@ -2335,6 +2457,7 @@ mod tests {
                     title: title.map(String::from),
                     ..SummaryAttrs::default()
                 },
+                publish: None,
             },
             dir: PathBuf::from("/tmp/publish").join(id),
             attrs_modified_ms: modified_ms,

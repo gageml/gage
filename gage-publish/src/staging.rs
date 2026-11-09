@@ -19,9 +19,9 @@ use std::path::{Path, PathBuf};
 use gage_core::config::gage_home;
 use gage_core::uuid::{is_id, new_uuid};
 use gage_store::{
-    AttachmentSpec, AttachmentStore, ExternalSession, ExternalSessionRecord, IdMatch, SESSION_TYPE,
-    SessionAttrsRecord, SessionDirLayout, SessionRecord, SessionStore, Store, StoreError,
-    format_changes,
+    AttachmentSpec, AttachmentStore, ExternalSession, ExternalSessionRecord, IdMatch, PublishAttrs,
+    SESSION_TYPE, SessionAttrsRecord, SessionDirLayout, SessionRecord, SessionStore, Store,
+    StoreError, format_changes,
 };
 
 use crate::PublishError;
@@ -171,6 +171,7 @@ impl<'a> Staging<'a> {
             size,
             project: None,
             summary: original.attrs.summary.clone(),
+            publish: None,
         };
         let value = serde_json::to_value(&attrs)?;
         let mut attrs_bytes = serde_json::to_vec(&value)?;
@@ -286,6 +287,25 @@ impl<'a> Staging<'a> {
         let commit_sha = outcome?;
         self.remove_staging(id)?;
         Ok(commit_sha)
+    }
+
+    /// Record `publish` in the staged session's `attrs.json`: what the
+    /// publish applied, written when the definition is final.
+    pub fn set_publish(&self, id: &str, publish: &PublishAttrs) -> Result<(), PublishError> {
+        let session = self.layout(id).session();
+        let text = match fs::read_to_string(session.attrs_file()) {
+            Ok(text) => text,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                return Err(StoreError::ObjectNotFound(id.to_string()).into());
+            }
+            Err(e) => return Err(e.into()),
+        };
+        let mut attrs: SessionAttrsRecord = serde_json::from_str(&text)?;
+        attrs.publish = Some(publish.clone());
+        let mut bytes = serde_json::to_vec(&serde_json::to_value(&attrs)?)?;
+        bytes.push(b'\n');
+        fs::write(session.attrs_file(), bytes)?;
+        Ok(())
     }
 
     /// The commit of an apply: the session, then the attachment of

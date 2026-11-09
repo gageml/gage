@@ -31,6 +31,7 @@ ways:
 
 - `origin` attribute is in the form `session:<ID>`
 - `project` attribute is absent
+- `publish` attribute records the filters applied, each with its version
 - `changes.json` file records changes from original
 
 ## Publish overview
@@ -79,6 +80,25 @@ filter's params are overridden in place, as
 
 There is no default group. Ask the user which groups or filters apply when they
 have not said.
+
+### Shares
+
+A share is a set of published sessions to push to others. It names the filters
+every member must have been published with, each with an optional version
+requirement. `gage share list` lists shares; `gage share show <SHARE>` shows a
+share's description, filters, and members.
+
+When the user wants published sessions in a share, or the skill arguments
+include `--share <SHARE>`:
+
+- Run `gage publish init --for <SHARE> <SESSION>` so the share's filters
+  are selected. `--filter` and `--group` add to them.
+- Pass `--share <SHARE>` to `gage publish apply` for each session. Apply checks
+  the definition against the share's filters before writing, then adds the
+  published session to the share. `--share` is repeatable.
+
+`--share` is not an option of `gage publish init`. A share that refuses a
+session names the filter it requires; add that filter and apply again.
 
 ## Publish interface
 
@@ -163,5 +183,6 @@ When the user approves the session apply it.
 ## Apply the staged session
 
 Use `gage publish apply -y <SESSION>` to add the staged publish session to the
-store. This finalized the publish operation and removed the session from the
-pending list.
+store. This finalizes the publish operation and removes the session from the
+pending list. With `--share <SHARE>`, the published session is also added to the
+share.

@@ -1,6 +1,6 @@
 //! The generation 1 store fixture: a bundle of one store holding one
-//! object of every type, written once by a pinned build and read by
-//! every later one. The write side of the format is pinned by the
+//! object of every type, written when a type is added and read by
+//! every later build. The write side of the format is pinned by the
 //! layout snapshot tests in each type module; this test pins the read
 //! side against data the current build did not write.
 //!
@@ -27,8 +27,9 @@ use gage_session::{
 };
 use gage_store::{
     AttachmentSpec, AttachmentStore, DatasetOrigin, DatasetStore, IssueInput, IssueStatus,
-    IssueStore, KeyStore, NoteInput, NoteStore, NoteValue, ScanStore, SessionStore, Store,
-    TagStore, TaskStatus, default_attachment_key,
+    IssueStore, KeyStore, NoteInput, NoteStore, NoteValue, PublishAttrs, PublishFilter, ScanStore,
+    SessionAttrsRecord, SessionDirLayout, SessionStore, ShareAttrs, ShareStore, Store, TagStore,
+    TaskStatus, default_attachment_key,
 };
 
 const BUNDLE: &str = "tests/fixtures/generation-1.bundle";
@@ -36,6 +37,8 @@ const SESSION_CONTENT: &str = "{\"type\":\"user\",\"message\":\"hello\"}\n";
 /// The fixture scan's id, in the shape `ScanStore::create_from_dir`
 /// asserts on.
 const FIXTURE_SCAN_ID: &str = "0000000000000000f1xt5can01";
+/// The fixture's published session, derived from the native one.
+const FIXTURE_PUBLISHED_ID: &str = "0000000000000000f1xtp8b001";
 
 fn bundle_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(BUNDLE)
@@ -265,6 +268,42 @@ fn write_generation_1_fixture() {
     );
     ScanStore::from(&store).create_from_dir(&scan_dir).unwrap();
 
+    let original = SessionStore::from(&store)
+        .at_commit(&session.commit_sha)
+        .unwrap();
+    let published_dir = tmp.path().join(FIXTURE_PUBLISHED_ID);
+    let layout = SessionDirLayout::new(&published_dir);
+    let attrs = SessionAttrsRecord {
+        origin: format!("session:{}@{}", session.id, session.commit_sha),
+        native_mtime: 0,
+        native_size: 0,
+        publish: Some(PublishAttrs {
+            filters: vec![PublishFilter {
+                name: "secret".into(),
+                version: Some("1.0.0".into()),
+            }],
+        }),
+        ..original.attrs
+    };
+    write(
+        &layout.attrs_file(),
+        &serde_json::to_string(&attrs).unwrap(),
+    );
+    write(&layout.changes_file(), "[]\n");
+    write(&layout.files_dir().join("session.jsonl"), SESSION_CONTENT);
+    SessionStore::from(&store)
+        .create_from_dir(&published_dir)
+        .unwrap();
+    ShareStore::from(&store)
+        .create(
+            &ShareAttrs {
+                description: Some("Fixture share.".into()),
+                filters: vec!["secret >=1".into()],
+            },
+            &[FIXTURE_PUBLISHED_ID.to_string()],
+        )
+        .unwrap();
+
     TagStore::from(&store)
         .add("fixture-tag", &note_id, false)
         .unwrap();
@@ -330,8 +369,11 @@ fn reads_the_generation_1_fixture() {
         .unwrap()
         .map(|r| r.unwrap())
         .collect();
-    assert_eq!(session_ids.len(), 1);
-    let session = &session_ids[0];
+    assert_eq!(session_ids.len(), 2);
+    let session = session_ids
+        .iter()
+        .find(|s| s.id != FIXTURE_PUBLISHED_ID)
+        .unwrap();
     assert_eq!(session.attrs.native_id(), "fixture-1");
     assert_eq!(session.attrs.content_format, "fake-lines 1");
     assert_eq!(session.attrs.driver, "fake 0.1");
@@ -418,6 +460,35 @@ fn reads_the_generation_1_fixture() {
     assert_eq!(scan.content.watermarks.len(), 1);
     assert_eq!(scan.content.watermarks[0].oid, session.id);
     assert_eq!(scan.content.watermarks[0].work_id, "fixture:run:1");
+
+    let published = sessions.get(FIXTURE_PUBLISHED_ID).unwrap();
+    assert_eq!(
+        published.attrs.origin,
+        format!("session:{}@{}", session.id, session.commit_sha)
+    );
+    assert_eq!(
+        published.attrs.publish,
+        Some(PublishAttrs {
+            filters: vec![PublishFilter {
+                name: "secret".into(),
+                version: Some("1.0.0".into()),
+            }],
+        })
+    );
+    let shares = ShareStore::from(&store);
+    let share_list: Vec<_> = shares.iter().unwrap().map(|r| r.unwrap()).collect();
+    assert_eq!(share_list.len(), 1);
+    let share = &share_list[0];
+    assert_eq!(
+        share.attrs,
+        ShareAttrs {
+            description: Some("Fixture share.".into()),
+            filters: vec!["secret >=1".into()],
+        }
+    );
+    let members = shares.sessions(&share.id).unwrap();
+    assert_eq!(members.len(), 1);
+    assert_eq!(members[0].id, FIXTURE_PUBLISHED_ID);
     assert_eq!(scan.content.watermarks[0].version, session.commit_sha);
     assert_eq!(scan.content.watermarks[0].mark, 1);
     assert_eq!(scan.content.logs, ["out"]);

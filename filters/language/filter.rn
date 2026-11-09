@@ -2,6 +2,7 @@ use gage::publish;
 
 pub const FILTER = #{
     name: "language",
+    version: "1.0.0",
     description: "Remove profanity and other language unfit for a shared record",
     groups: ["public", "trusted"],
     tasks: #{ language: #{} },

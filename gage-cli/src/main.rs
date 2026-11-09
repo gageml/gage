@@ -59,11 +59,13 @@ mod cmd_remote;
 mod cmd_resolve;
 mod cmd_scan;
 mod cmd_session;
+mod cmd_share;
 mod cmd_status;
 mod cmd_store;
 mod cmd_tag;
 mod dialog;
 mod error;
+mod filter_prompt;
 #[cfg(test)]
 mod help_lint;
 mod human;
@@ -166,6 +168,15 @@ enum Command {
     Dataset {
         #[command(subcommand)]
         command: cmd_dataset::DatasetCommand,
+    },
+
+    /// Manage shares
+    ///
+    /// A share is a set of published sessions to push to others,
+    /// with the filters every member was published with.
+    Share {
+        #[command(subcommand)]
+        command: cmd_share::ShareCommand,
     },
 
     /// Manage attachments
@@ -360,9 +371,6 @@ async fn main() -> ExitCode {
                 cmd_session::SessionCommand::Add(args) => {
                     cmd_session::add(source, stored, args).await
                 }
-                cmd_session::SessionCommand::Remove(args) => {
-                    cmd_session::remove(source, stored, args)
-                }
                 cmd_session::SessionCommand::Delete(args) => {
                     cmd_session::delete(source, stored, args).await
                 }
@@ -379,12 +387,23 @@ async fn main() -> ExitCode {
                 cmd_dataset::DatasetCommand::List(args) => cmd_dataset::list(args).await,
                 cmd_dataset::DatasetCommand::Show(args) => cmd_dataset::show(args).await,
                 cmd_dataset::DatasetCommand::Delete(args) => cmd_dataset::delete(args),
+                cmd_dataset::DatasetCommand::Link(args) => cmd_dataset::link(args),
+                cmd_dataset::DatasetCommand::Unlink(args) => cmd_dataset::unlink(args),
+            },
+            Command::Share { command } => match command {
+                cmd_share::ShareCommand::Add(args) => cmd_share::add(args),
+                cmd_share::ShareCommand::List(args) => cmd_share::list(args).await,
+                cmd_share::ShareCommand::Show(args) => cmd_share::show(args),
+                cmd_share::ShareCommand::Edit(args) => cmd_share::edit(args),
+                cmd_share::ShareCommand::Delete(args) => cmd_share::delete(args),
+                cmd_share::ShareCommand::Link(args) => cmd_share::link(args),
+                cmd_share::ShareCommand::Unlink(args) => cmd_share::unlink(args),
             },
             Command::Attachment { command } => match command {
                 cmd_attachment::AttachmentCommand::Add(args) => cmd_attachment::add(args).await,
                 cmd_attachment::AttachmentCommand::List(args) => cmd_attachment::list(args).await,
                 cmd_attachment::AttachmentCommand::Show(args) => cmd_attachment::show(args),
-                cmd_attachment::AttachmentCommand::Remove(args) => cmd_attachment::remove(args),
+                cmd_attachment::AttachmentCommand::Delete(args) => cmd_attachment::delete(args),
             },
             Command::Issue { command } => match command {
                 cmd_issue::IssueCommand::List(args) => cmd_issue::list(args).await,
