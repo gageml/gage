@@ -22,7 +22,8 @@ use gage_registry::driver::DriverRegistry;
 use gage_session::{Driver, NativeLookupError, SessionLiveError, Source, SourceOptions};
 use gage_store::url::LineSelection;
 use gage_store::{
-    DatasetStore, SESSION_TYPE, SessionRecord, SessionStore, Store, StoreError, TagStore,
+    DatasetStore, SESSION_TYPE, SessionOutcome, SessionRecord, SessionStore, Store, StoreError,
+    TagStore,
 };
 use gage_tui::session::{Backend, picker_page_size};
 use gage_tui::{ViewOptions, session_view};
@@ -36,7 +37,7 @@ use tabled::{
 };
 use tokio::task::JoinSet;
 
-use crate::cmd_dataset::{AddEvent, AddView, add_native_to_dataset};
+use crate::cmd_dataset::{AddCounts, AddEvent, AddView, add_native_to_dataset};
 use crate::cmd_tag::TAG_HELP;
 use crate::dialog::{self, DialogError, DialogResult};
 use crate::error::CliError;
@@ -828,7 +829,7 @@ async fn add_dialog(
         .map_err(|e| DialogError::Failed(format!("{e}")))?;
     preview_sessions(&lines, IdKind::Native, args.tag.as_deref())?;
     dialog::confirm(args.yes, true)?;
-    let placed_ids = add_native(
+    let placed = add_native(
         &store,
         source,
         dataset_id.as_deref(),
@@ -841,9 +842,10 @@ async fn add_dialog(
     if let Some(name) = &args.tag {
         // The selection check in `add` admits one session, and an
         // interrupted add of one session fails before this point
-        let id = placed_ids
+        let id = &placed
             .first()
-            .expect("a tagged add should place one session");
+            .expect("a tagged add should place one session")
+            .id;
         let added = tags
             .add(name, id, args.force_tag)
             .map_err(|e| DialogError::Failed(e.to_string()))?;
@@ -856,20 +858,36 @@ async fn add_dialog(
             None => cli::log::info(format!("Tagged session {} as {name}", short_uuid(id)))?,
         }
     }
-    Ok(add_outro(&store, &placed_ids, dataset_id.as_deref(), &done).into())
+    Ok(add_outro(&store, &placed, dataset_id.as_deref(), &done).into())
 }
 
-/// The outro of a native add. One placed session names its new stored
-/// id, since the caller has no other way to learn it; any other count
-/// keeps the closing line of the add.
-fn add_outro(store: &Store, placed_ids: &[String], dataset_id: Option<&str>, done: &str) -> String {
-    let [id] = placed_ids else {
+/// A session an add placed: its stored id and what the add did to it.
+struct PlacedSession {
+    id: String,
+    outcome: SessionOutcome,
+}
+
+/// The outro of a native add. One placed session names its stored id
+/// and outcome, since the caller has no other way to learn the id; any
+/// other count keeps the closing line of the add.
+fn add_outro(
+    store: &Store,
+    placed: &[PlacedSession],
+    dataset_id: Option<&str>,
+    done: &str,
+) -> String {
+    let [session] = placed else {
         return done.to_string();
     };
-    let shown = style::outro_id(store, SESSION_TYPE, id);
-    match dataset_id {
-        Some(dataset) => format!("Added session {shown} to dataset {}", short_uuid(dataset)),
-        None => format!("Added session {shown} to the store"),
+    let shown = style::outro_id(store, SESSION_TYPE, &session.id);
+    let place = match dataset_id {
+        Some(dataset) => format!("dataset {}", short_uuid(dataset)),
+        None => "the store".to_string(),
+    };
+    match session.outcome {
+        SessionOutcome::Added => format!("Added session {shown} to {place}"),
+        SessionOutcome::Updated => format!("Updated session {shown} in {place}"),
+        SessionOutcome::Unchanged => format!("Session {shown} is unchanged in {place}"),
     }
 }
 
@@ -906,15 +924,15 @@ pub(crate) async fn add_all(
     )?;
     let done = view.done().to_string();
     view.finish()?;
-    Ok(format!("{done} from {source}"))
+    Ok(format!("{source}: {done}"))
 }
 
 /// Add native sessions from `source` to the store and, when
 /// `dataset_id` is given, link them as members in the same operation,
 /// reporting each to `on_event`. `selected` holds native ids resolved
 /// by the shared session picker; they are re-checked against the
-/// opened source before anything is written. Returns the stored id of
-/// each placed session, in `selected` order.
+/// opened source before anything is written. Returns each placed
+/// session, in `selected` order.
 fn add_native(
     store: &Store,
     source: Option<String>,
@@ -922,7 +940,7 @@ fn add_native(
     selected: &[String],
     max_bytes: Option<u64>,
     on_event: &mut dyn FnMut(AddEvent<'_>),
-) -> Result<Vec<String>, DialogError> {
+) -> Result<Vec<PlacedSession>, DialogError> {
     if let Some(dataset_id) = dataset_id {
         let outcomes = add_native_to_dataset(
             store,
@@ -933,7 +951,13 @@ fn add_native(
             on_event,
         )
         .map_err(DialogError::Failed)?;
-        return Ok(outcomes.into_iter().map(|o| o.id).collect());
+        return Ok(outcomes
+            .into_iter()
+            .map(|o| PlacedSession {
+                id: o.id,
+                outcome: o.outcome,
+            })
+            .collect());
     }
     let registry = source::driver_registry();
     let (driver, spec) =
@@ -962,7 +986,7 @@ fn add_native(
         None => SessionStore::from(store),
     };
     let total = ids.len();
-    let mut placed: Vec<String> = Vec::with_capacity(total);
+    let mut placed: Vec<PlacedSession> = Vec::with_capacity(total);
     for id in &ids {
         if dialog::interrupted() {
             break;
@@ -983,10 +1007,13 @@ fn add_native(
             native_id: id,
             dataset: None,
         });
-        placed.push(outcome.id);
+        placed.push(PlacedSession {
+            id: outcome.id,
+            outcome: outcome.outcome,
+        });
     }
     on_event(AddEvent::Done {
-        placed: placed.len(),
+        counts: AddCounts::from_outcomes(placed.iter().map(|p| p.outcome)),
         dataset: None,
     });
     opened
@@ -1931,34 +1958,70 @@ mod tests {
         assert!(err.contains("no sessions for project 'nope'"), "{err}");
     }
 
-    /// One placed native session names its stored id; a dataset add
-    /// names the dataset; more than one keeps the closing line. The
-    /// color flag is process-wide, so the id's styling is stripped
-    /// rather than disabled.
+    /// One placed native session names its stored id and its outcome;
+    /// a dataset add names the dataset; more than one keeps the
+    /// closing line. The color flag is process-wide, so the id's
+    /// styling is stripped rather than disabled.
     #[test]
-    fn add_outro_names_the_one_new_session_id() {
+    fn add_outro_names_the_one_session_id_and_outcome() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("store.git");
         gage_store::init(&path).unwrap();
         let store = Store::open_with_cache_root(&path, &tmp.path().join("cache")).unwrap();
-        let one = ["01k2h4t9aaaabbbbccccddddee".to_string()];
-        let two = [one[0].clone(), "01k2h4t9ffffbbbbccccddddee".to_string()];
+        let placed = |outcome| PlacedSession {
+            id: "01k2h4t9aaaabbbbccccddddee".to_string(),
+            outcome,
+        };
+        let dataset = Some("7zzzzzzzzzzzzzzzzzzzzzzzzz");
+        let outro = |placed: &[PlacedSession], dataset, done| {
+            console::strip_ansi_codes(&add_outro(&store, placed, dataset, done)).into_owned()
+        };
         assert_eq!(
-            console::strip_ansi_codes(&add_outro(&store, &one, None, "Added 1 session")),
+            outro(&[placed(SessionOutcome::Added)], None, "Added 1 session"),
             "Added session 01k2h4t9 to the store"
         );
         assert_eq!(
-            console::strip_ansi_codes(&add_outro(
-                &store,
-                &one,
-                Some("7zzzzzzzzzzzzzzzzzzzzzzzzz"),
+            outro(
+                &[placed(SessionOutcome::Updated)],
+                None,
+                "Updated 1 session"
+            ),
+            "Updated session 01k2h4t9 in the store"
+        );
+        assert_eq!(
+            outro(
+                &[placed(SessionOutcome::Unchanged)],
+                None,
+                "1 session unchanged"
+            ),
+            "Session 01k2h4t9 is unchanged in the store"
+        );
+        assert_eq!(
+            outro(
+                &[placed(SessionOutcome::Added)],
+                dataset,
                 "Added 1 session to dataset 7zzzzzzz"
-            )),
+            ),
             "Added session 01k2h4t9 to dataset 7zzzzzzz"
         );
         assert_eq!(
-            add_outro(&store, &two, None, "Added 2 sessions"),
-            "Added 2 sessions"
+            outro(
+                &[placed(SessionOutcome::Unchanged)],
+                dataset,
+                "1 session unchanged in dataset 7zzzzzzz"
+            ),
+            "Session 01k2h4t9 is unchanged in dataset 7zzzzzzz"
+        );
+        let two = [
+            placed(SessionOutcome::Added),
+            PlacedSession {
+                id: "01k2h4t9ffffbbbbccccddddee".to_string(),
+                outcome: SessionOutcome::Updated,
+            },
+        ];
+        assert_eq!(
+            outro(&two, None, "Added 1 session, updated 1"),
+            "Added 1 session, updated 1"
         );
     }
 

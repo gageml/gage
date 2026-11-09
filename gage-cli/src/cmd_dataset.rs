@@ -297,8 +297,9 @@ pub fn refresh(args: DatasetRefreshArgs) -> Result<(), CliError> {
             &mut |e| view.on(e),
         )
         .map_err(DialogError::Failed)?;
-        let placed = view.finish()?;
-        Ok(format!("Refreshed dataset {shown} ({})", count(placed, "session")).into())
+        let done = view.done().to_string();
+        view.finish()?;
+        Ok(done.into())
     })
 }
 
@@ -376,7 +377,7 @@ impl AddView {
     /// as a step when no bar showed them
     pub(crate) fn finish(self) -> io::Result<usize> {
         if !self.progress {
-            dialog::step_list("Sessions", self.lines)?;
+            dialog::step_list("Outcome", self.lines)?;
         }
         Ok(self.placed)
     }
@@ -400,12 +401,74 @@ pub(crate) enum AddEvent<'a> {
         native_id: &'a str,
         dataset: Option<&'a str>,
     },
-    /// Every session is placed. `placed` counts them all, whether
-    /// written anew, updated, or unchanged.
+    /// Every session is placed, counted by outcome
     Done {
-        placed: usize,
+        counts: AddCounts,
         dataset: Option<&'a str>,
     },
+}
+
+/// The sessions of an add, counted by outcome.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AddCounts {
+    pub(crate) added: usize,
+    pub(crate) updated: usize,
+    pub(crate) unchanged: usize,
+}
+
+impl AddCounts {
+    pub(crate) fn from_outcomes(outcomes: impl IntoIterator<Item = SessionOutcome>) -> Self {
+        let mut counts = Self::default();
+        for outcome in outcomes {
+            match outcome {
+                SessionOutcome::Added => counts.added += 1,
+                SessionOutcome::Updated => counts.updated += 1,
+                SessionOutcome::Unchanged => counts.unchanged += 1,
+            }
+        }
+        counts
+    }
+
+    /// The closing line: the leading nonzero count in the order added,
+    /// updated, unchanged, carrying the dataset when there is one, then
+    /// each remaining nonzero count as a short clause.
+    fn fmt_line(&self, f: &mut fmt::Formatter<'_>, dataset: Option<&str>) -> fmt::Result {
+        let place = |preposition: &str| match dataset {
+            Some(dataset) => format!(" {preposition} dataset {}", short_uuid(dataset)),
+            None => String::new(),
+        };
+        let mut rest: Vec<String> = Vec::new();
+        if self.added > 0 {
+            write!(f, "Added {}{}", count(self.added, "session"), place("to"))?;
+            if self.updated > 0 {
+                rest.push(format!("updated {}", self.updated));
+            }
+            if self.unchanged > 0 {
+                rest.push(format!("{} unchanged", self.unchanged));
+            }
+        } else if self.updated > 0 {
+            write!(
+                f,
+                "Updated {}{}",
+                count(self.updated, "session"),
+                place("in")
+            )?;
+            if self.unchanged > 0 {
+                rest.push(format!("{} unchanged", self.unchanged));
+            }
+        } else {
+            write!(
+                f,
+                "{} unchanged{}",
+                count(self.unchanged, "session"),
+                place("in")
+            )?;
+        }
+        for clause in rest {
+            write!(f, ", {clause}")?;
+        }
+        Ok(())
+    }
 }
 
 impl fmt::Display for AddEvent<'_> {
@@ -420,10 +483,10 @@ impl fmt::Display for AddEvent<'_> {
                 native_id,
                 dataset,
             } => {
-                let verb = match outcome {
-                    SessionOutcome::Added => "Added",
-                    SessionOutcome::Updated => "Updated",
-                    SessionOutcome::Unchanged => "Unchanged",
+                let (verb, preposition) = match outcome {
+                    SessionOutcome::Added => ("Added", "to"),
+                    SessionOutcome::Updated => ("Updated", "in"),
+                    SessionOutcome::Unchanged => ("Unchanged", "in"),
                 };
                 write!(
                     f,
@@ -432,18 +495,13 @@ impl fmt::Display for AddEvent<'_> {
                     short_uuid(native_id)
                 )?;
                 match dataset {
-                    Some(dataset) => write!(f, " to dataset {}", short_uuid(dataset)),
+                    Some(dataset) => {
+                        write!(f, " {preposition} dataset {}", short_uuid(dataset))
+                    }
                     None => Ok(()),
                 }
             }
-            AddEvent::Done { placed, dataset } => {
-                let noun = if *placed == 1 { "session" } else { "sessions" };
-                write!(f, "Added {placed} {noun}")?;
-                match dataset {
-                    Some(dataset) => write!(f, " to dataset {}", short_uuid(dataset)),
-                    None => Ok(()),
-                }
-            }
+            AddEvent::Done { counts, dataset } => counts.fmt_line(f, *dataset),
         }
     }
 }
@@ -521,7 +579,7 @@ pub(crate) fn add_native_to_dataset(
         .map_err(|e| e.to_string())?;
     let placed = outcomes.len();
     on_event(AddEvent::Done {
-        placed,
+        counts: AddCounts::from_outcomes(outcomes.iter().map(|o| o.outcome)),
         dataset: Some(dataset_id),
     });
 
@@ -905,7 +963,7 @@ pub(crate) fn link_stored(
         });
     }
     on_event(AddEvent::Done {
-        placed: outcomes.len(),
+        counts: AddCounts::from_outcomes(outcomes.iter().map(|o| o.outcome)),
         dataset: Some(dataset_id),
     });
     Ok(())
@@ -915,4 +973,82 @@ pub(crate) fn link_stored(
 fn open_store(command: &str) -> Result<Store, CliError> {
     let store = Store::open(&gage_store::store_path()).context(command.to_string())?;
     Ok(store)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A session's line names the outcome, and the dataset preposition
+    /// follows the verb: a session is added to a dataset and updated or
+    /// unchanged in it.
+    #[test]
+    fn added_line_names_the_outcome() {
+        let line = |outcome, dataset| {
+            AddEvent::Added {
+                outcome,
+                id: "01k2h4t9aaaabbbbccccddddee",
+                native_id: "fb064932-0000-0000-0000-000000000000",
+                dataset,
+            }
+            .to_string()
+        };
+        let dataset = Some("7zzzzzzzzzzzzzzzzzzzzzzzzz");
+        assert_eq!(
+            line(SessionOutcome::Added, None),
+            "Added session 01k2h4t9 (native fb064932)"
+        );
+        assert_eq!(
+            line(SessionOutcome::Added, dataset),
+            "Added session 01k2h4t9 (native fb064932) to dataset 7zzzzzzz"
+        );
+        assert_eq!(
+            line(SessionOutcome::Updated, dataset),
+            "Updated session 01k2h4t9 (native fb064932) in dataset 7zzzzzzz"
+        );
+        assert_eq!(
+            line(SessionOutcome::Unchanged, dataset),
+            "Unchanged session 01k2h4t9 (native fb064932) in dataset 7zzzzzzz"
+        );
+    }
+
+    /// The closing line leads with the first nonzero count in the
+    /// order added, updated, unchanged, attaches the dataset to that
+    /// clause, and appends each remaining nonzero count.
+    #[test]
+    fn done_line_counts_each_outcome() {
+        let line = |outcomes: &[SessionOutcome], dataset| {
+            AddEvent::Done {
+                counts: AddCounts::from_outcomes(outcomes.iter().copied()),
+                dataset,
+            }
+            .to_string()
+        };
+        let dataset = Some("7zzzzzzzzzzzzzzzzzzzzzzzzz");
+        use SessionOutcome::{Added, Unchanged, Updated};
+        assert_eq!(line(&[Added], None), "Added 1 session");
+        assert_eq!(line(&[Added, Added], None), "Added 2 sessions");
+        assert_eq!(line(&[Updated, Updated], None), "Updated 2 sessions");
+        assert_eq!(line(&[Unchanged], None), "1 session unchanged");
+        assert_eq!(
+            line(&[Added, Added, Added, Updated, Unchanged, Unchanged], None),
+            "Added 3 sessions, updated 1, 2 unchanged"
+        );
+        assert_eq!(
+            line(&[Updated, Unchanged, Unchanged], None),
+            "Updated 1 session, 2 unchanged"
+        );
+        assert_eq!(
+            line(&[Added, Updated], dataset),
+            "Added 1 session to dataset 7zzzzzzz, updated 1"
+        );
+        assert_eq!(
+            line(&[Updated, Unchanged], dataset),
+            "Updated 1 session in dataset 7zzzzzzz, 1 unchanged"
+        );
+        assert_eq!(
+            line(&[Unchanged, Unchanged], dataset),
+            "2 sessions unchanged in dataset 7zzzzzzz"
+        );
+    }
 }
