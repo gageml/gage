@@ -393,7 +393,7 @@ mod tests {
     use crate::writer::{TreeInput, mktree, write_blob};
     use gage_session::{
         ContentSink, ContentSource, Driver, DriverError, NativeSession, SessionAttrs, Source,
-        SourceOptions, StoredSession,
+        SourceOptions, StoredSession, WrittenContent,
     };
     use serde_json::json;
     use std::any::Any;
@@ -813,10 +813,13 @@ mod tests {
             &self,
             _session: &mut dyn NativeSession,
             sink: &mut dyn ContentSink,
-        ) -> Result<String, DriverError> {
+        ) -> Result<WrittenContent, DriverError> {
             let mut w = sink.create("session.jsonl").map_err(DriverError::Io)?;
             w.write_all(b"{}").map_err(DriverError::Io)?;
-            Ok("fake-lines 1".to_string())
+            Ok(WrittenContent::new(
+                "fake-lines 1".to_string(),
+                Box::new(FakeAttrs),
+            ))
         }
         fn read_stored(
             &self,

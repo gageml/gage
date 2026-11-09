@@ -23,7 +23,7 @@ use std::time::SystemTime;
 
 use gage_session::{
     ContentSink, ContentSource, Driver, DriverError, NativeSession, SessionAttrs, Source,
-    SourceOptions, StoredSession,
+    SourceOptions, StoredSession, WrittenContent,
 };
 use gage_store::{
     AttachmentSpec, AttachmentStore, DatasetOrigin, DatasetStore, IssueInput, IssueStatus,
@@ -64,6 +64,7 @@ fn write(path: &Path, content: &str) {
     fs::write(path, content).unwrap();
 }
 
+#[derive(Clone)]
 struct FakeSession {
     content: String,
 }
@@ -135,7 +136,7 @@ impl Driver for FakeDriver {
         &self,
         session: &mut dyn NativeSession,
         sink: &mut dyn ContentSink,
-    ) -> Result<String, DriverError> {
+    ) -> Result<WrittenContent, DriverError> {
         let fake = session
             .as_any()
             .downcast_ref::<FakeSession>()
@@ -143,7 +144,10 @@ impl Driver for FakeDriver {
         let mut w = sink.create("session.jsonl").map_err(DriverError::Io)?;
         w.write_all(fake.content.as_bytes())
             .map_err(DriverError::Io)?;
-        Ok("fake-lines 1".to_string())
+        Ok(WrittenContent::new(
+            "fake-lines 1".to_string(),
+            Box::new(fake.clone()),
+        ))
     }
     fn read_stored(
         &self,

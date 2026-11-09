@@ -1193,7 +1193,7 @@ mod tests {
 
     use gage_session::{
         ContentSink, ContentSource, Driver, DriverError, NativeSession, SessionAttrs, Source,
-        SourceOptions, StoredSession,
+        SourceOptions, StoredSession, WrittenContent,
     };
 
     use super::*;
@@ -1421,7 +1421,7 @@ mod tests {
             &self,
             session: &mut dyn NativeSession,
             sink: &mut dyn ContentSink,
-        ) -> Result<String, DriverError> {
+        ) -> Result<WrittenContent, DriverError> {
             let fake = session
                 .as_any()
                 .downcast_ref::<FakeSession>()
@@ -1429,7 +1429,10 @@ mod tests {
             let mut w = sink.create("session.jsonl").map_err(DriverError::Io)?;
             w.write_all(fake.content.as_bytes())
                 .map_err(DriverError::Io)?;
-            Ok("fake-lines 1".to_string())
+            Ok(WrittenContent::new(
+                "fake-lines 1".to_string(),
+                Box::new(FakeAttrs),
+            ))
         }
         fn read_stored(
             &self,

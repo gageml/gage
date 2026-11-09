@@ -7,7 +7,7 @@ use std::time::SystemTime;
 
 use gage_session::{
     ContentSink, ContentSource, Driver, DriverError, NativeSession, SessionAttrs, Source,
-    SourceOptions, StoredSession,
+    SourceOptions, StoredSession, WrittenContent,
 };
 use rand::rngs::StdRng;
 use rand::{Rng, RngCore, SeedableRng};
@@ -130,6 +130,7 @@ pub struct SyntheticSession {
     attrs: SyntheticAttrs,
 }
 
+#[derive(Clone)]
 struct SyntheticAttrs {
     size: u64,
 }
@@ -228,7 +229,7 @@ impl Driver for SyntheticDriver {
         &self,
         session: &mut dyn NativeSession,
         sink: &mut dyn ContentSink,
-    ) -> Result<String, DriverError> {
+    ) -> Result<WrittenContent, DriverError> {
         let synth = session
             .as_any()
             .downcast_ref::<SyntheticSession>()
@@ -237,7 +238,10 @@ impl Driver for SyntheticDriver {
             let mut w = sink.create(path).map_err(DriverError::Io)?;
             w.write_all(bytes).map_err(DriverError::Io)?;
         }
-        Ok(SYNTHETIC_CONTENT_FORMAT.to_string())
+        Ok(WrittenContent::new(
+            SYNTHETIC_CONTENT_FORMAT.to_string(),
+            Box::new(synth.attrs.clone()),
+        ))
     }
 
     fn read_stored(

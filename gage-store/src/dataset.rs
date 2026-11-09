@@ -1029,6 +1029,7 @@ mod tests {
     use crate::{NoteInput, NoteStore, NoteValue};
     use gage_session::{
         ContentSink, DriverError, SessionAttrs, Source, SourceOptions, StoredSession,
+        WrittenContent,
     };
     use std::any::Any;
     use std::io::{Cursor, Write as _};
@@ -1042,6 +1043,7 @@ mod tests {
         attrs: FakeAttrs,
     }
 
+    #[derive(Clone)]
     struct FakeAttrs {
         size: u64,
     }
@@ -1117,7 +1119,7 @@ mod tests {
             &self,
             session: &mut dyn NativeSession,
             sink: &mut dyn ContentSink,
-        ) -> Result<String, DriverError> {
+        ) -> Result<WrittenContent, DriverError> {
             let fake = session
                 .as_any()
                 .downcast_ref::<FakeSession>()
@@ -1126,7 +1128,10 @@ mod tests {
                 let mut w = sink.create(path).map_err(DriverError::Io)?;
                 w.write_all(content.as_bytes()).map_err(DriverError::Io)?;
             }
-            Ok("fake-lines 1".to_string())
+            Ok(WrittenContent::new(
+                "fake-lines 1".to_string(),
+                Box::new(fake.attrs.clone()),
+            ))
         }
         fn read_stored(
             &self,

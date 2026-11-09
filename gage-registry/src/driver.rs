@@ -114,7 +114,7 @@ mod tests {
     use super::*;
     use gage_session::{
         ContentSink, ContentSource, DriverError, NativeSession, Source, SourceOptions,
-        StoredSession,
+        StoredSession, WrittenContent,
     };
 
     struct Fake(&'static str, &'static [&'static str]);
@@ -139,7 +139,7 @@ mod tests {
             &self,
             _session: &mut dyn NativeSession,
             _sink: &mut dyn ContentSink,
-        ) -> Result<String, DriverError> {
+        ) -> Result<WrittenContent, DriverError> {
             Err(DriverError::Other("not used".into()))
         }
         fn read_stored(

@@ -13,6 +13,7 @@
 //! construction, commit parents, and edits are the generic object
 //! model's job; see [`crate::object`].
 
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::io::{self, Write};
@@ -74,11 +75,11 @@ pub struct SessionAttrsRecord {
     /// derived origin is `session:<id>@<commit>`.
     pub origin: String,
     /// UNIX time millis: when the native artifact was last touched at
-    /// its source, as the driver reported it. With `native_size`, the
-    /// change-detection fingerprint `add` reads.
+    /// its source, as the driver reported it. A recorded fact; `add`
+    /// does not read it.
     pub native_mtime: i64,
     /// The size in bytes of the native artifact, as the driver
-    /// reported it. The other half of the `add` fingerprint. Not the
+    /// reported it. A recorded fact; `add` does not read it. Not the
     /// stored content size; see `size`.
     pub native_size: u64,
     /// Harness family, e.g. `"claude"`. A category with no version.
@@ -235,9 +236,14 @@ impl<'a> SessionStore<'a> {
 
     /// Write `session`'s content as a session object. `driver` drives
     /// the serialization through [`Driver::write_native`]; the
-    /// returned string is stored as the session's `content_format`.
-    /// Idempotent when the native session's files and attrs are
-    /// unchanged.
+    /// returned `content_format` is stored as the session's
+    /// `content_format`, and the attributes it derived from the bytes
+    /// written are the session's attrs. The content is always written
+    /// through the sink: its tree SHA is the identity the decision
+    /// rests on. Content equal to the live object's, written by the
+    /// same driver version in the same format, is unchanged. Content
+    /// that differs is written when the driver orders it at or after
+    /// the stored state, and left alone when it orders it before.
     pub fn add(
         &self,
         driver: &dyn Driver,
@@ -249,24 +255,9 @@ impl<'a> SessionStore<'a> {
             .origin
             .clone()
             .unwrap_or_else(|| session.source().to_string());
-        let native_mtime = system_time_ms(session.attrs().native_mtime());
-        let native_size = session.attrs().native_size();
-        let project = session.attrs().project_name().map(String::from);
         let id = session_object_id(driver.name(), &native_id);
         let session_type = session.session_type().to_string();
-        let summary = SummaryAttrs::from_attrs(session.attrs());
-        let attrs = |content_format: String, size: u64| SessionAttrsRecord {
-            driver: format!("{} {}", driver.name(), driver.version()),
-            origin: origin.clone(),
-            native_mtime,
-            native_size,
-            session_type: session_type.clone(),
-            content_format,
-            size,
-            project: project.clone(),
-            summary: summary.clone(),
-            publish: None,
-        };
+        let driver_stamp = format!("{} {}", driver.name(), driver.version());
 
         let current = match self.store.rev_parse(&object_ref(&id))? {
             None => None,
@@ -277,31 +268,9 @@ impl<'a> SessionStore<'a> {
             }
         };
 
-        // A native file with the same mtime and size as the one the
-        // live object was written from holds the same bytes, so an
-        // attrs match means the content match that `edit` would find
-        // after reading and hashing the whole transcript. A re-add of
-        // 1,600 unchanged sessions read 1.3 GB to learn nothing.
-        if let Some(current) = &current
-            && !current.header.is_tombstone()
-        {
-            let stored = decode_attrs(current)?;
-            // `size` is a deterministic function of the content, which
-            // the fingerprint already detects a change in, and it is
-            // not known until the content is written. Borrow the
-            // stored value so it never forces a false difference.
-            if stored == attrs(stored.content_format.clone(), stored.size) {
-                return Ok(SessionAddOutcome {
-                    id,
-                    commit_sha: current.commit_sha.clone(),
-                    outcome: SessionOutcome::Unchanged,
-                });
-            }
-        }
-
         let mut sink = GitContentSink::new(path.to_path_buf(), self.max_session_bytes);
-        let content_format = match driver.write_native(session, &mut sink) {
-            Ok(cf) => cf,
+        let written = match driver.write_native(session, &mut sink) {
+            Ok(written) => written,
             // A size-cap abort surfaces through the sink, not as the
             // driver's own error, so report it as such.
             Err(e) => {
@@ -313,7 +282,53 @@ impl<'a> SessionStore<'a> {
         let size = sink.total_bytes;
         let file_entries = sink.into_entries()?;
         let files_tree_sha = build_files_tree(path, file_entries)?;
-        let attrs = attrs(content_format, size);
+
+        // The live object, with whether it holds these same bytes
+        let live = current
+            .as_ref()
+            .filter(|c| !c.header.is_tombstone())
+            .map(|c| (c, c.tree.subtrees.get(FILES_TREE) == Some(&files_tree_sha)));
+        let unchanged = |current: &Object| SessionAddOutcome {
+            id: id.clone(),
+            commit_sha: current.commit_sha.clone(),
+            outcome: SessionOutcome::Unchanged,
+        };
+        let stored = match live {
+            Some((current, same_content)) => {
+                let stored = decode_attrs(current)?;
+                // Same bytes are rewritten only when the driver or the
+                // format that derived their attrs changed.
+                if same_content
+                    && stored.driver == driver_stamp
+                    && stored.content_format == written.content_format
+                {
+                    return Ok(unchanged(current));
+                }
+                Some((current, same_content, stored))
+            }
+            None => None,
+        };
+
+        let derived = (written.attrs)().map_err(|e| StoreError::Parse(format!("driver: {e}")))?;
+        let summary = SummaryAttrs::from_attrs(derived.as_ref());
+        if let Some((current, false, stored)) = &stored
+            && driver.native_order(&summary, &stored.summary) == Ordering::Less
+        {
+            return Ok(unchanged(current));
+        }
+
+        let attrs = SessionAttrsRecord {
+            driver: driver_stamp,
+            origin,
+            native_mtime: system_time_ms(derived.native_mtime()),
+            native_size: derived.native_size(),
+            session_type,
+            content_format: written.content_format,
+            size,
+            project: derived.project_name().map(String::from),
+            summary,
+            publish: None,
+        };
 
         let mut tree = ObjectTree {
             attrs: Some(
@@ -1187,12 +1202,13 @@ pub(crate) mod tests {
     }
     use gage_session::{
         ContentSource, Driver as DriverTrait, DriverError, Source, SourceOptions, StoredSession,
+        WrittenContent,
     };
     use serde_json::{Map, Value};
     use std::any::Any;
     use std::io::Cursor;
     use std::slice;
-    use std::time::SystemTime;
+    use std::time::{Duration, SystemTime};
 
     /// A native session with fixed content, for exercising the writer.
     pub(crate) struct FakeSession {
@@ -1202,8 +1218,11 @@ pub(crate) mod tests {
         pub(crate) summary: FakeAttrs,
     }
 
+    #[derive(Clone)]
     pub(crate) struct FakeAttrs {
         size: u64,
+        pub(crate) mtime: SystemTime,
+        pub(crate) line_count: Option<u64>,
         pub(crate) title: Option<String>,
         /// `(input, output, cached)` when the fake reports usage
         pub(crate) tokens: Option<(u64, u64, u64)>,
@@ -1214,7 +1233,7 @@ pub(crate) mod tests {
 
     impl SessionAttrs for FakeAttrs {
         fn native_mtime(&self) -> SystemTime {
-            SystemTime::UNIX_EPOCH
+            self.mtime
         }
         fn native_size(&self) -> u64 {
             self.size
@@ -1235,7 +1254,7 @@ pub(crate) mod tests {
             None
         }
         fn line_count(&self) -> Option<u64> {
-            None
+            self.line_count
         }
         fn input_tokens(&self) -> Option<u64> {
             self.tokens.map(|t| t.0)
@@ -1277,8 +1296,25 @@ pub(crate) mod tests {
     }
 
     /// A driver whose `write_native` iterates the fake session's
-    /// in-memory files into the sink.
+    /// in-memory files into the sink, and whose ordering is by line
+    /// count, as a driver of an append-only transcript orders.
     pub(crate) struct FakeDriver;
+
+    /// Write `fake`'s files into `sink` and report its attrs.
+    fn write_fake(
+        fake: &FakeSession,
+        sink: &mut dyn ContentSink,
+    ) -> Result<WrittenContent, DriverError> {
+        for (path, bytes) in &fake.files {
+            let mut w = sink.create(path).map_err(DriverError::Io)?;
+            let mut cursor = Cursor::new(bytes.clone());
+            std::io::copy(&mut cursor, &mut w).map_err(DriverError::Io)?;
+        }
+        Ok(WrittenContent::new(
+            "fake-lines 1".to_string(),
+            Box::new(fake.summary.clone()),
+        ))
+    }
 
     impl DriverTrait for FakeDriver {
         fn name(&self) -> &'static str {
@@ -1300,17 +1336,12 @@ pub(crate) mod tests {
             &self,
             session: &mut dyn NativeSession,
             sink: &mut dyn ContentSink,
-        ) -> Result<String, DriverError> {
+        ) -> Result<WrittenContent, DriverError> {
             let fake = session
                 .as_any()
                 .downcast_ref::<FakeSession>()
                 .ok_or_else(|| DriverError::Other("not a FakeSession".into()))?;
-            for (path, bytes) in &fake.files {
-                let mut w = sink.create(path).map_err(DriverError::Io)?;
-                let mut cursor = Cursor::new(bytes.clone());
-                std::io::copy(&mut cursor, &mut w).map_err(DriverError::Io)?;
-            }
-            Ok("fake-lines 1".to_string())
+            write_fake(fake, sink)
         }
         fn read_stored(
             &self,
@@ -1319,6 +1350,48 @@ pub(crate) mod tests {
             _source: Box<dyn ContentSource>,
         ) -> Result<Box<dyn StoredSession>, DriverError> {
             Err(DriverError::Other("read_stored not used in tests".into()))
+        }
+        fn native_order(&self, native: &SummaryAttrs, stored: &SummaryAttrs) -> Ordering {
+            match (native.line_count, stored.line_count) {
+                (Some(native), Some(stored)) => native.cmp(&stored),
+                _ => Ordering::Greater,
+            }
+        }
+    }
+
+    /// `FakeDriver` at another version.
+    struct VersionedDriver(&'static str);
+
+    impl DriverTrait for VersionedDriver {
+        fn name(&self) -> &'static str {
+            FakeDriver.name()
+        }
+        fn version(&self) -> &'static str {
+            self.0
+        }
+        fn schemes(&self) -> &'static [&'static str] {
+            FakeDriver.schemes()
+        }
+        fn open_source(&self, options: &SourceOptions) -> Result<Box<dyn Source>, DriverError> {
+            FakeDriver.open_source(options)
+        }
+        fn split_session_url(&self, session_url: &str) -> Result<(String, String), DriverError> {
+            FakeDriver.split_session_url(session_url)
+        }
+        fn write_native(
+            &self,
+            session: &mut dyn NativeSession,
+            sink: &mut dyn ContentSink,
+        ) -> Result<WrittenContent, DriverError> {
+            FakeDriver.write_native(session, sink)
+        }
+        fn read_stored(
+            &self,
+            native_id: String,
+            content_format: &str,
+            source: Box<dyn ContentSource>,
+        ) -> Result<Box<dyn StoredSession>, DriverError> {
+            FakeDriver.read_stored(native_id, content_format, source)
         }
     }
 
@@ -1334,12 +1407,26 @@ pub(crate) mod tests {
             files: entries,
             summary: FakeAttrs {
                 size,
+                mtime: SystemTime::UNIX_EPOCH,
+                line_count: None,
                 title: None,
                 tokens: None,
                 cost_usd: None,
                 extra: Map::new(),
             },
         }
+    }
+
+    /// `fake` with the line count a driver would derive from its
+    /// content
+    fn fake_lines(id: &str, content: &str) -> FakeSession {
+        let mut session = fake(id, &[("session.jsonl", content)]);
+        session.summary.line_count = Some(content.lines().count() as u64);
+        session
+    }
+
+    fn files_tree_sha(store: &Store, commit: &str) -> String {
+        store.read_object(commit).unwrap().tree.subtrees[FILES_TREE].clone()
     }
 
     /// A session whose driver reports usage, written and read back:
@@ -1493,7 +1580,7 @@ pub(crate) mod tests {
             &self,
             _session: &mut dyn NativeSession,
             _sink: &mut dyn ContentSink,
-        ) -> Result<String, DriverError> {
+        ) -> Result<WrittenContent, DriverError> {
             Err(DriverError::Other("content was read".into()))
         }
         fn read_stored(
@@ -1506,8 +1593,10 @@ pub(crate) mod tests {
         }
     }
 
+    /// A `write_native` that fails fails the add, and the object's
+    /// ref still names the commit it had.
     #[test]
-    fn re_add_with_matching_attrs_skips_content_read() {
+    fn a_failing_write_fails_the_add_without_a_commit() {
         let tmp = tempfile::tempdir().unwrap();
         let (store, _fsck) = open_store(tmp.path());
         let sessions = SessionStore::from(&store);
@@ -1515,15 +1604,6 @@ pub(crate) mod tests {
         let first = sessions
             .add(&FakeDriver, &mut fake("s1", &[("session.jsonl", "{}\n")]))
             .unwrap();
-        let again = sessions
-            .add(
-                &UnreadableDriver,
-                &mut fake("s1", &[("session.jsonl", "{}\n")]),
-            )
-            .unwrap();
-        assert_eq!(again.outcome, SessionOutcome::Unchanged);
-        assert_eq!(again.commit_sha, first.commit_sha);
-
         let err = sessions
             .add(
                 &UnreadableDriver,
@@ -1531,6 +1611,86 @@ pub(crate) mod tests {
             )
             .unwrap_err();
         assert!(err.to_string().contains("content was read"), "{err}");
+        assert_eq!(
+            store.rev_parse(&object_ref(&first.id)).unwrap().unwrap(),
+            first.commit_sha
+        );
+    }
+
+    /// The decision rests on the content's tree SHA alone: the same
+    /// bytes under another mtime are unchanged.
+    #[test]
+    fn re_add_of_the_same_bytes_is_unchanged_whatever_the_mtime() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let sessions = SessionStore::from(&store);
+
+        let first = sessions
+            .add(&FakeDriver, &mut fake_lines("s1", "{}\n"))
+            .unwrap();
+        let mut touched = fake_lines("s1", "{}\n");
+        touched.summary.mtime = SystemTime::UNIX_EPOCH + Duration::from_secs(86_400);
+        let again = sessions.add(&FakeDriver, &mut touched).unwrap();
+        assert_eq!(again.outcome, SessionOutcome::Unchanged);
+        assert_eq!(again.commit_sha, first.commit_sha);
+    }
+
+    /// Content the driver orders before the stored state is an older
+    /// copy and leaves the store as it is; content it orders equal,
+    /// a session modified without growing, is written.
+    #[test]
+    fn differing_content_is_written_unless_the_driver_orders_it_older() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let sessions = SessionStore::from(&store);
+
+        let three = sessions
+            .add(&FakeDriver, &mut fake_lines("s1", "{}\n{}\n{}\n"))
+            .unwrap();
+        let older = sessions
+            .add(&FakeDriver, &mut fake_lines("s1", "{}\n"))
+            .unwrap();
+        assert_eq!(older.outcome, SessionOutcome::Unchanged);
+        assert_eq!(older.commit_sha, three.commit_sha);
+
+        let modified = sessions
+            .add(&FakeDriver, &mut fake_lines("s1", "{}\n{\"a\":1}\n{}\n"))
+            .unwrap();
+        assert_eq!(modified.outcome, SessionOutcome::Updated);
+        assert_ne!(modified.commit_sha, three.commit_sha);
+        assert_eq!(
+            cat(&store, &format!("{}:first-parent", modified.commit_sha)),
+            format!("{}\n", three.commit_sha)
+        );
+    }
+
+    /// A driver version change alone rewrites the attrs and keeps the
+    /// content tree; the same version writes nothing.
+    #[test]
+    fn a_driver_version_change_rewrites_attrs_and_keeps_the_content() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let sessions = SessionStore::from(&store);
+
+        let first = sessions
+            .add(&FakeDriver, &mut fake_lines("s1", "{}\n"))
+            .unwrap();
+        let bumped = sessions
+            .add(&VersionedDriver("0.2"), &mut fake_lines("s1", "{}\n"))
+            .unwrap();
+        assert_eq!(bumped.outcome, SessionOutcome::Updated);
+        assert_ne!(bumped.commit_sha, first.commit_sha);
+        assert_eq!(
+            files_tree_sha(&store, &bumped.commit_sha),
+            files_tree_sha(&store, &first.commit_sha)
+        );
+        assert_eq!(sessions.get(&first.id).unwrap().attrs.driver, "fake 0.2");
+
+        let same = sessions
+            .add(&VersionedDriver("0.2"), &mut fake_lines("s1", "{}\n"))
+            .unwrap();
+        assert_eq!(same.outcome, SessionOutcome::Unchanged);
+        assert_eq!(same.commit_sha, bumped.commit_sha);
     }
 
     #[test]

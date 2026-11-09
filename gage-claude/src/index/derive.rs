@@ -170,7 +170,7 @@ impl ClaudeSessionAttrs {
 
 /// The project slug of a transcript: the name of the directory
 /// holding it.
-fn project_of(path: &Path) -> String {
+pub fn project_of(path: &Path) -> String {
     path.parent()
         .and_then(|p| p.file_name())
         .map(|n| n.to_string_lossy().into_owned())

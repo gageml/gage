@@ -9,6 +9,7 @@
 //! driver may also run an agent on its harness; see [`agent`].
 
 use std::any::Any;
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
@@ -123,15 +124,29 @@ pub trait Driver: Send + Sync {
     /// driver's grammar is an error.
     fn split_session_url(&self, session_url: &str) -> Result<(String, String), DriverError>;
 
-    /// Serialize `session` into the store through `sink`. The returned
-    /// string is the `content_format` value the store persists on the
-    /// session object; it is opaque to the store and is handed back to
-    /// [`Driver::read_stored`] verbatim when the session is read.
+    /// Serialize `session` into the store through `sink`, and report
+    /// the attributes of the content written, derived from the bytes
+    /// the sink received and not from an earlier read of the session.
+    /// The returned `content_format` is the value the store persists
+    /// on the session object; it is opaque to the store and is handed
+    /// back to [`Driver::read_stored`] verbatim when the session is
+    /// read.
     fn write_native(
         &self,
         session: &mut dyn NativeSession,
         sink: &mut dyn ContentSink,
-    ) -> Result<String, DriverError>;
+    ) -> Result<WrittenContent, DriverError>;
+
+    /// Which of a native session and the stored session of the same
+    /// id is the later state, judged from their summaries. The store
+    /// asks when their content differs. `Greater` is a native session
+    /// that supersedes the stored one; `Less` is an older copy, which
+    /// the store leaves alone; `Equal` is a session modified without
+    /// growing, which the store writes as the native state. The
+    /// default is `Greater`: the native artifact is the current one.
+    fn native_order(&self, _native: &SummaryAttrs, _stored: &SummaryAttrs) -> Ordering {
+        Ordering::Greater
+    }
 
     /// Present a stored session for reading.
     fn read_stored(
@@ -716,6 +731,44 @@ pub struct Message {
 pub trait ContentSource: Send + Sync {
     fn paths(&self) -> io::Result<Vec<String>>;
     fn open(&self, path: &str) -> io::Result<Box<dyn Read + Send>>;
+}
+
+/// What [`Driver::write_native`] wrote: the content format of the
+/// bytes, and the attributes of those bytes, derived when the store
+/// asks for them. The store asks only for a session it writes, so a
+/// session whose content the store already holds costs no derive.
+pub struct WrittenContent {
+    pub content_format: String,
+    pub attrs: DeriveAttrs,
+}
+
+/// Derives the attributes of written content from the bytes written.
+pub type DeriveAttrs = Box<dyn FnOnce() -> Result<Box<dyn SessionAttrs>, DriverError>>;
+
+impl WrittenContent {
+    /// Written content whose attributes are already in hand.
+    pub fn new(content_format: impl Into<String>, attrs: Box<dyn SessionAttrs>) -> Self {
+        Self::with_derive(content_format, move || Ok(attrs))
+    }
+
+    /// Written content whose attributes `derive` produces on request.
+    pub fn with_derive(
+        content_format: impl Into<String>,
+        derive: impl FnOnce() -> Result<Box<dyn SessionAttrs>, DriverError> + 'static,
+    ) -> Self {
+        Self {
+            content_format: content_format.into(),
+            attrs: Box::new(derive),
+        }
+    }
+}
+
+impl fmt::Debug for WrittenContent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("WrittenContent")
+            .field("content_format", &self.content_format)
+            .finish_non_exhaustive()
+    }
 }
 
 /// A write-only sink for the byte tree a native session serializes

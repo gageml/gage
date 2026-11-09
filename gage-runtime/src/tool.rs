@@ -1184,7 +1184,7 @@ fn render(v: &Value) -> Result<JsonValue, String> {
 mod tests {
     use gage_session::{
         ContentSink, ContentSource, Driver, DriverError, NativeSession, Source, SourceOptions,
-        StoredSession,
+        StoredSession, WrittenContent,
     };
     use rune::runtime::Vm;
     use rune::sync::Arc as RuneArc;
@@ -1218,7 +1218,7 @@ mod tests {
             &self,
             _session: &mut dyn NativeSession,
             _sink: &mut dyn ContentSink,
-        ) -> Result<String, DriverError> {
+        ) -> Result<WrittenContent, DriverError> {
             Err(DriverError::Other("not used".into()))
         }
         fn read_stored(

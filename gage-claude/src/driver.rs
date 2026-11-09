@@ -11,8 +11,10 @@
 //! the resolved root, so the same file read through any spelling of
 //! its source records the same `native_source`.
 
+use std::cell::OnceCell;
+use std::cmp::Ordering;
 use std::collections::HashMap;
-use std::fs::{self, File};
+use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Child;
@@ -26,8 +28,8 @@ use gage_session::{
     Derivation, Driver, DriverError, DriverStatus, DriverTables, Entry, EntryCodec, EntryValue,
     Field, HarnessInfo, HarnessSession, InstallInfo, InstallReport, InstallUi, MaintenanceOutcome,
     MaintenanceStatus, MessageTextFilter, MessageTextHit, NativeLookupError, NativeSession,
-    SessionAttrs, SessionLiveError, SkillSession, Source, SourceOptions, StoredSession, ToolUse,
-    split_scheme,
+    SessionAttrs, SessionLiveError, SkillSession, Source, SourceOptions, StoredSession,
+    SummaryAttrs, ToolUse, WrittenContent, split_scheme,
 };
 use serde::Deserialize;
 use serde_json::{Map, Value};
@@ -37,7 +39,7 @@ use crate::content_schema;
 use crate::home::ClaudeHome;
 use crate::index::{
     ClaudeSessionAttrs, Fingerprint, IndexStore, LockMode, ToolUseCollector, derive_entry,
-    derive_session, derive_session_from,
+    derive_session, derive_session_from, project_of,
 };
 use crate::model::resolve_model;
 use crate::plugin;
@@ -162,7 +164,8 @@ impl Driver for ClaudeDriver {
         &self,
         session: &mut dyn NativeSession,
         sink: &mut dyn ContentSink,
-    ) -> Result<String, DriverError> {
+    ) -> Result<WrittenContent, DriverError> {
+        use std::io::Write;
         let claude = session
             .as_any()
             .downcast_ref::<ClaudeNativeSession>()
@@ -173,8 +176,45 @@ impl Driver for ClaudeDriver {
         // content is intentionally left out until a consumer exists for
         // it; a session is re-added over time, so that content can join
         // later at no duplication cost (git shares identical blobs).
-        copy_transcript_into_sink(claude.session_path(), "session.jsonl", sink)?;
-        Ok(CONTENT_FORMAT.to_string())
+        //
+        // One read serves the write and the derive, so the attrs
+        // describe the bytes stored and not the file as it was at some
+        // other moment.
+        let path = claude.session_path().to_path_buf();
+        let bytes = fs::read(&path).map_err(DriverError::Io)?;
+        sink.create("session.jsonl")
+            .and_then(|mut w| w.write_all(&bytes))
+            .map_err(DriverError::Io)?;
+        let fingerprint = Fingerprint {
+            mtime_ms: millis(claude.mtime),
+            size: bytes.len() as u64,
+        };
+        let native_id = claude.native_id.clone();
+        let project = claude.project.clone();
+        let store = claude.store.clone();
+        Ok(WrittenContent::with_derive(CONTENT_FORMAT, move || {
+            let derived = derive_session_from(
+                &native_id,
+                SessionReader::new(bytes.as_slice()),
+                fingerprint,
+                project,
+            )
+            .map_err(|e| DriverError::Other(format!("{}: {e}", path.display())))?;
+            cache_attrs(&store, &native_id, &derived.attrs);
+            Ok(Box::new(derived.attrs) as Box<dyn SessionAttrs>)
+        }))
+    }
+
+    /// A transcript grows by lines: more lines is a later state,
+    /// fewer is an older copy, and the same count with other bytes is
+    /// a modification in place. A stored session without a line
+    /// count is from before the count was recorded, so the native one
+    /// supersedes it.
+    fn native_order(&self, native: &SummaryAttrs, stored: &SummaryAttrs) -> Ordering {
+        match (native.line_count, stored.line_count) {
+            (Some(native), Some(stored)) => native.cmp(&stored),
+            _ => Ordering::Greater,
+        }
     }
 
     /// A stored session is read under the format this build writes;
@@ -568,14 +608,11 @@ impl Source for ClaudeSource {
             .collect();
         let span = progress::read_sessions(uncached.len());
         for (done, s) in uncached.iter().enumerate() {
-            // Opening derives the summary and writes it to the cache.
-            // A session that cannot be read is skipped here and
-            // reported by the table scan, which shows it with default
-            // attributes.
-            match ClaudeNativeSession::open(&s.id, &s.src, s.mtime, &self.root, &self.store) {
-                Ok(_) => {}
-                Err(e) => tracing::warn!(session_id = %s.id, "session summary unavailable: {e}"),
-            }
+            // The first read of the attrs derives the summary and
+            // writes it to the cache. A session that cannot be read
+            // caches its read error and shows with default attributes.
+            ClaudeNativeSession::open(&s.id, &s.src, s.mtime, s.size, &self.root, &self.store)
+                .claude_attrs();
             progress::advance(&span, done + 1);
         }
         Ok(())
@@ -658,9 +695,10 @@ impl Source for ClaudeSource {
             native_id,
             &path,
             mtime,
+            meta.len(),
             &self.root,
             &self.store,
-        )?))
+        )))
     }
 
     fn delete_native(&self, native_id: &str) -> Result<(), DriverError> {
@@ -881,40 +919,6 @@ fn load_projects(root: &Path) -> io::Result<HashMap<String, PathBuf>> {
         .collect())
 }
 
-/// Copy the transcript at `src` into the sink under `dest_key` byte
-/// for byte, decoding each line as it passes. The bytes decoded are
-/// the bytes written, so a line this build's codec cannot decode
-/// aborts the copy and the stored content is content the codec reads.
-fn copy_transcript_into_sink(
-    src: &Path,
-    dest_key: &str,
-    sink: &mut dyn ContentSink,
-) -> Result<(), DriverError> {
-    use std::io::{BufRead, Write};
-    let mut reader = io::BufReader::new(File::open(src).map_err(DriverError::Io)?);
-    let mut writer = sink.create(dest_key).map_err(DriverError::Io)?;
-    let mut line = Vec::new();
-    let mut line_num: u32 = 0;
-    loop {
-        line.clear();
-        if reader
-            .read_until(b'\n', &mut line)
-            .map_err(DriverError::Io)?
-            == 0
-        {
-            return Ok(());
-        }
-        line_num += 1;
-        let text = line.trim_ascii();
-        if !text.is_empty() {
-            codec().decode(text).map_err(|e| {
-                DriverError::Other(format!("{}: line {line_num}: {e}", src.display()))
-            })?;
-        }
-        writer.write_all(&line).map_err(DriverError::Io)?;
-    }
-}
-
 /// Resolve the projects directory from a source value. A leading
 /// `claude:` scheme is stripped; any other scheme is an error. An
 /// empty body is the default location (`CLAUDE_PROJECTS_DIR`, else
@@ -1033,46 +1037,39 @@ pub struct ClaudeNativeSession {
     /// `claude:<absolute root>/<uuid>`
     source: String,
     session_path: PathBuf,
-    attrs: ClaudeSessionAttrs,
+    /// The file's mtime and size as the directory walk saw them
+    mtime: SystemTime,
+    size: u64,
+    project: String,
+    store: IndexStore,
+    /// The derived attributes, read on first use: from the summary
+    /// cache when it is current, otherwise from the transcript
+    derived: OnceCell<ClaudeSessionAttrs>,
 }
 
 impl ClaudeNativeSession {
-    /// Open the session at `path`. `mtime` and `size` are the file's
-    /// stat values the caller already holds from its directory walk;
-    /// `root` is the absolute Claude root the file sits under.
+    /// Open the session at `path` without reading it. `mtime` and
+    /// `size` are the file's stat values the caller already holds from
+    /// its directory walk; `root` is the absolute Claude root the file
+    /// sits under; `store` holds the summary cache.
     pub fn open(
         native_id: &str,
         path: &Path,
         mtime: SystemTime,
+        size: u64,
         root: &Path,
         store: &IndexStore,
-    ) -> Result<Self, DriverError> {
-        // A transcript that does not derive is still a session: the
-        // walk listed it. Its attributes carry the error in place of
-        // the derived values and are cached like any other, so the
-        // file is read again only when it changes. A file that cannot
-        // be stat'd has no fingerprint to cache against and is the one
-        // failure that propagates.
-        let attrs = match store.session_attrs(native_id, mtime) {
-            Some(cached) => cached,
-            None => {
-                let attrs = match derive_session(native_id, path) {
-                    Ok(derived) => derived.attrs,
-                    Err(e) => {
-                        let fingerprint = Fingerprint::stat(path)?;
-                        ClaudeSessionAttrs::with_read_error(path, fingerprint, e)
-                    }
-                };
-                store.put_session_attrs(native_id, &attrs)?;
-                attrs
-            }
-        };
-        Ok(Self {
+    ) -> Self {
+        Self {
             native_id: native_id.to_string(),
             source: session_url(root, native_id),
             session_path: path.to_path_buf(),
-            attrs,
-        })
+            mtime,
+            size,
+            project: project_of(path),
+            store: store.clone(),
+            derived: OnceCell::new(),
+        }
     }
 
     pub fn session_path(&self) -> &Path {
@@ -1082,14 +1079,57 @@ impl ClaudeNativeSession {
     /// Record `project` as the session's project in place of the slug
     /// of the directory the transcript sits in.
     pub fn set_project(&mut self, project: String) {
-        self.attrs.project = project;
+        if let Some(derived) = self.derived.get_mut() {
+            derived.project = project.clone();
+        }
+        self.project = project;
     }
 
     /// The full derived attributes, including the token counts the
-    /// generic [`SessionAttrs`] view does not carry.
+    /// generic [`SessionAttrs`] view does not carry. The first call
+    /// reads the transcript unless the summary cache holds it.
     pub fn claude_attrs(&self) -> &ClaudeSessionAttrs {
-        &self.attrs
+        self.derived.get_or_init(|| {
+            // A transcript that does not derive is still a session: the
+            // walk listed it. Its attributes carry the error in place
+            // of the derived values and are cached like any other, so
+            // the file is read again only when it changes.
+            let mut attrs = match self.store.session_attrs(&self.native_id, self.mtime) {
+                Some(cached) => cached,
+                None => {
+                    let attrs = match derive_session(&self.native_id, &self.session_path) {
+                        Ok(derived) => derived.attrs,
+                        Err(e) => {
+                            let fingerprint = Fingerprint {
+                                mtime_ms: millis(self.mtime),
+                                size: self.size,
+                            };
+                            ClaudeSessionAttrs::with_read_error(&self.session_path, fingerprint, e)
+                        }
+                    };
+                    cache_attrs(&self.store, &self.native_id, &attrs);
+                    attrs
+                }
+            };
+            attrs.project = self.project.clone();
+            attrs
+        })
     }
+}
+
+/// Write `attrs` to the summary cache. The cache is rebuilt from the
+/// transcript on any read that misses it, so a failed write costs a
+/// later read and is logged rather than raised.
+fn cache_attrs(store: &IndexStore, native_id: &str, attrs: &ClaudeSessionAttrs) {
+    if let Err(e) = store.put_session_attrs(native_id, attrs) {
+        tracing::warn!(session_id = %native_id, "summary cache write failed: {e}");
+    }
+}
+
+fn millis(time: SystemTime) -> i64 {
+    time.duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64
 }
 
 impl NativeSession for ClaudeNativeSession {
@@ -1106,11 +1146,67 @@ impl NativeSession for ClaudeNativeSession {
     }
 
     fn attrs(&self) -> &dyn SessionAttrs {
-        &self.attrs
+        self
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
         self
+    }
+}
+
+/// The stat facts answer without a read; everything derived reads
+/// the transcript on first use.
+impl SessionAttrs for ClaudeNativeSession {
+    fn native_mtime(&self) -> SystemTime {
+        self.mtime
+    }
+
+    fn native_size(&self) -> u64 {
+        self.size
+    }
+
+    fn is_empty(&self) -> Option<bool> {
+        self.claude_attrs().is_empty()
+    }
+
+    fn project_name(&self) -> Option<&str> {
+        Some(&self.project)
+    }
+
+    fn title(&self) -> Option<&str> {
+        self.claude_attrs().title()
+    }
+
+    fn model(&self) -> Option<&str> {
+        self.claude_attrs().model()
+    }
+
+    fn message_count(&self) -> Option<u64> {
+        self.claude_attrs().message_count()
+    }
+
+    fn line_count(&self) -> Option<u64> {
+        self.claude_attrs().line_count()
+    }
+
+    fn input_tokens(&self) -> Option<u64> {
+        self.claude_attrs().input_tokens()
+    }
+
+    fn output_tokens(&self) -> Option<u64> {
+        self.claude_attrs().output_tokens()
+    }
+
+    fn cached_tokens(&self) -> Option<u64> {
+        self.claude_attrs().cached_tokens()
+    }
+
+    fn cost_usd(&self) -> Option<f64> {
+        self.claude_attrs().cost_usd()
+    }
+
+    fn extra_attrs(&self) -> Map<String, Value> {
+        self.claude_attrs().extra_attrs()
     }
 }
 
@@ -1891,26 +1987,122 @@ mod tests {
         );
     }
 
-    /// The copy stores the transcript's bytes as they are, line endings
-    /// and a missing final newline included, and admits a torn line
-    /// as the codec does. A line the codec does not recognize refuses
-    /// the copy, naming the line.
+    const USER_LINE: &str =
+        "{\"type\":\"user\",\"uuid\":\"u1\",\"message\":{\"role\":\"user\",\"content\":\"hi\"}}\n";
+
+    /// The attrs reported with a write describe the bytes written: a
+    /// transcript that grew after the session was opened is stored as
+    /// it is at the write, and the line count and size say so.
     #[test]
-    fn copy_admits_a_torn_line_byte_for_byte_and_refuses_an_unrecognized_one() {
+    fn write_native_derives_attrs_from_the_bytes_it_writes() {
+        use std::io::Write;
         let tmp = TempDir::new().unwrap();
-        let torn = tmp.path().join("torn.jsonl");
-        let bytes = "{\"type\":\"a\"}\r\n{\"type\":\"b\",\"x\":\"cu{\"type\":\"c\"}\n\n{ \"type\" : \"d\" }";
-        fs::write(&torn, bytes).unwrap();
+        let root = tmp.path();
+        let id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+        let path = seed_session(root, "/Users/alice/Code/gage", id, USER_LINE);
+        let source = ClaudeDriver::new().open_source(&options_for(root)).unwrap();
+        let mut session = source.open_native(id).unwrap();
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(USER_LINE.as_bytes())
+            .unwrap();
+
         let mut sink = MemorySink::default();
-        copy_transcript_into_sink(&torn, "session.jsonl", &mut sink).unwrap();
-        assert_eq!(sink.0["session.jsonl"], bytes.as_bytes());
-        let prose = tmp.path().join("prose.jsonl");
-        fs::write(&prose, "{\"type\":\"a\"}\n\nhello\n").unwrap();
+        let written = ClaudeDriver::new()
+            .write_native(session.as_mut(), &mut sink)
+            .unwrap();
+        assert_eq!(written.content_format, CONTENT_FORMAT);
+        assert_eq!(sink.0["session.jsonl"], fs::read(&path).unwrap());
+        let attrs = (written.attrs)().unwrap();
+        assert_eq!(attrs.line_count(), Some(2));
+        assert_eq!(attrs.native_size(), (USER_LINE.len() * 2) as u64);
+        assert_eq!(attrs.project_name(), Some("-Users-alice-Code-gage"));
+    }
+
+    /// A line the codec does not recognize fails the derive, naming
+    /// the line, so the store writes no such session; a torn line is
+    /// admitted as the codec admits it.
+    #[test]
+    fn write_native_refuses_a_line_the_codec_does_not_recognize() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let torn = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeee1";
+        seed_session(
+            root,
+            "/Users/alice/Code/gage",
+            torn,
+            "{\"type\":\"a\"}\n{\"type\":\"b\",\"x\":\"cu{\"type\":\"c\"}\n",
+        );
+        let prose = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeee2";
+        seed_session(
+            root,
+            "/Users/alice/Code/gage",
+            prose,
+            "{\"type\":\"a\"}\n\nhello\n",
+        );
+        let source = ClaudeDriver::new().open_source(&options_for(root)).unwrap();
+
+        let mut session = source.open_native(torn).unwrap();
         let mut sink = MemorySink::default();
-        let err = copy_transcript_into_sink(&prose, "session.jsonl", &mut sink)
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("prose.jsonl: line 3: "), "{err}");
+        let written = ClaudeDriver::new()
+            .write_native(session.as_mut(), &mut sink)
+            .unwrap();
+        assert_eq!((written.attrs)().unwrap().line_count(), Some(2));
+
+        let mut session = source.open_native(prose).unwrap();
+        let mut sink = MemorySink::default();
+        let written = ClaudeDriver::new()
+            .write_native(session.as_mut(), &mut sink)
+            .unwrap();
+        let err = match (written.attrs)() {
+            Err(e) => e.to_string(),
+            Ok(attrs) => panic!(
+                "a line the codec does not recognize derived: {:?}",
+                attrs.line_count()
+            ),
+        };
+        assert!(err.contains(&format!("{prose}.jsonl: line 3: ")), "{err}");
+    }
+
+    /// Opening a native session reads nothing: the stat facts answer
+    /// from the walk, and a transcript that cannot be read still opens
+    /// and reports the read error in place of its derived values.
+    #[cfg(unix)]
+    #[test]
+    fn opening_a_native_session_does_not_read_the_transcript() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+        let path = seed_session(root, "/Users/alice/Code/gage", id, USER_LINE);
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+        let source = ClaudeDriver::new().open_source(&options_for(root)).unwrap();
+        let session = source.open_native(id).unwrap();
+        assert_eq!(session.attrs().native_size(), USER_LINE.len() as u64);
+        assert_eq!(session.attrs().title(), None);
+        assert!(
+            session.attrs().extra_attrs().contains_key("read_error"),
+            "{:?}",
+            session.attrs().extra_attrs()
+        );
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+    }
+
+    #[test]
+    fn native_order_compares_line_counts() {
+        let lines = |line_count| SummaryAttrs {
+            line_count,
+            ..Default::default()
+        };
+        let order =
+            |native, stored| ClaudeDriver::new().native_order(&lines(native), &lines(stored));
+        assert_eq!(order(Some(3), Some(2)), Ordering::Greater);
+        assert_eq!(order(Some(2), Some(3)), Ordering::Less);
+        assert_eq!(order(Some(2), Some(2)), Ordering::Equal);
+        assert_eq!(order(Some(1), None), Ordering::Greater);
+        assert_eq!(order(None, Some(1)), Ordering::Greater);
     }
 
     #[test]

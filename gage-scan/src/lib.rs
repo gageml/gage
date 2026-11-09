@@ -1264,6 +1264,7 @@ mod tests {
     use gage_session::{
         AgentEvent, AgentMcp, AgentSession, AgentSpec, ContentSink, ContentSource, DriverError,
         NativeSession, SessionAttrs, Source, SourceOptions, StoredSession, TurnResult,
+        WrittenContent,
     };
     use gage_store::DatasetStore;
     use tempfile::TempDir;
@@ -1548,6 +1549,7 @@ mod tests {
         cleaned_up: Arc<std::sync::atomic::AtomicBool>,
     }
 
+    #[derive(Clone)]
     struct ScriptedNative {
         id: String,
         source: String,
@@ -1655,14 +1657,21 @@ mod tests {
         }
         fn write_native(
             &self,
-            _session: &mut dyn NativeSession,
+            session: &mut dyn NativeSession,
             sink: &mut dyn ContentSink,
-        ) -> Result<String, DriverError> {
+        ) -> Result<WrittenContent, DriverError> {
             use std::io::Write as _;
+            let native = session
+                .as_any()
+                .downcast_ref::<ScriptedNative>()
+                .ok_or_else(|| DriverError::Other("not a ScriptedNative".into()))?;
             let mut w = sink.create("session.jsonl").map_err(DriverError::Io)?;
             w.write_all(b"{\"type\":\"user\"}\n{\"type\":\"assistant\"}\n")
                 .map_err(DriverError::Io)?;
-            Ok("scripted 1".to_string())
+            Ok(WrittenContent::new(
+                "scripted 1".to_string(),
+                Box::new(native.clone()),
+            ))
         }
         fn read_stored(
             &self,
@@ -1727,14 +1736,21 @@ mod tests {
         }
         fn write_native(
             &self,
-            _session: &mut dyn NativeSession,
+            session: &mut dyn NativeSession,
             sink: &mut dyn ContentSink,
-        ) -> Result<String, DriverError> {
+        ) -> Result<WrittenContent, DriverError> {
             use std::io::Write as _;
+            let native = session
+                .as_any()
+                .downcast_ref::<ScriptedNative>()
+                .ok_or_else(|| DriverError::Other("not a ScriptedNative".into()))?;
             let mut w = sink.create("session.jsonl").map_err(DriverError::Io)?;
             w.write_all(b"{\"type\":\"user\"}\n{\"type\":\"assistant\"}\n")
                 .map_err(DriverError::Io)?;
-            Ok("scripted 1".to_string())
+            Ok(WrittenContent::new(
+                "scripted 1".to_string(),
+                Box::new(native.clone()),
+            ))
         }
         fn read_stored(
             &self,
@@ -1847,14 +1863,21 @@ mod tests {
         }
         fn write_native(
             &self,
-            _session: &mut dyn NativeSession,
+            session: &mut dyn NativeSession,
             sink: &mut dyn ContentSink,
-        ) -> Result<String, DriverError> {
+        ) -> Result<WrittenContent, DriverError> {
             use std::io::Write as _;
+            let native = session
+                .as_any()
+                .downcast_ref::<ScriptedNative>()
+                .ok_or_else(|| DriverError::Other("not a ScriptedNative".into()))?;
             let mut w = sink.create("session.jsonl").map_err(DriverError::Io)?;
             w.write_all(b"{\"type\":\"user\"}\n{\"type\":\"assistant\"}\n")
                 .map_err(DriverError::Io)?;
-            Ok("scripted 1".to_string())
+            Ok(WrittenContent::new(
+                "scripted 1".to_string(),
+                Box::new(native.clone()),
+            ))
         }
         fn read_stored(
             &self,
@@ -4733,7 +4756,7 @@ mod tests {
                 &self,
                 _session: &mut dyn NativeSession,
                 _sink: &mut dyn ContentSink,
-            ) -> Result<String, DriverError> {
+            ) -> Result<WrittenContent, DriverError> {
                 Err(DriverError::Other("not used".into()))
             }
             fn read_stored(

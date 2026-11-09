@@ -416,17 +416,17 @@ impl SessionExec {
                 Some(attrs) => Some(SummaryAttrs::from_attrs(&attrs)),
                 None if !needs_summary => None,
                 None => {
-                    let opened =
-                        ClaudeNativeSession::open(&s.id, &s.src, s.mtime, &root, &self.store);
+                    let opened = ClaudeNativeSession::open(
+                        &s.id,
+                        &s.src,
+                        s.mtime,
+                        s.size,
+                        &root,
+                        &self.store,
+                    );
                     read += 1;
                     progress::advance(&span, read);
-                    match opened {
-                        Ok(session) => Some(SummaryAttrs::from_attrs(session.claude_attrs())),
-                        Err(e) => {
-                            tracing::warn!(session_id = %s.id, "session summary unavailable: {e}");
-                            None
-                        }
-                    }
+                    Some(SummaryAttrs::from_attrs(opened.claude_attrs()))
                 }
             };
             derived

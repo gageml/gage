@@ -581,9 +581,10 @@ impl AgentSession for ClaudeAgent {
             &native_id,
             &path,
             meta.modified()?,
+            meta.len(),
             claude.root(),
             &claude.index_store(),
-        )?;
+        );
         if let Some(project) = &self.project {
             session.set_project(project.clone());
         }

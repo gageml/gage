@@ -1521,13 +1521,16 @@ mod tests {
             &self,
             _session: &mut dyn gage_session::NativeSession,
             sink: &mut dyn gage_session::ContentSink,
-        ) -> Result<String, gage_session::DriverError> {
+        ) -> Result<gage_session::WrittenContent, gage_session::DriverError> {
             use std::io::Write as _;
             for (path, bytes) in [("b.txt", &b"two"[..]), ("a.txt", &b"one"[..])] {
                 let mut w = sink.create(path).map_err(gage_session::DriverError::Io)?;
                 w.write_all(bytes).map_err(gage_session::DriverError::Io)?;
             }
-            Ok("fake-lines 1".to_string())
+            Ok(gage_session::WrittenContent::new(
+                "fake-lines 1",
+                Box::new(FakeAttrs),
+            ))
         }
         fn read_stored(
             &self,
