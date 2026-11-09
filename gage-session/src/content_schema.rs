@@ -3,8 +3,8 @@
 //!
 //! The entry, message, and tool_use tables are the contract every
 //! driver fills. Their `raw`, `input_raw`, and `result_raw` columns
-//! hold the driver's native record verbatim, so their shape is the
-//! driver's to state. A driver states it per content format it reads,
+//! hold the codec's JSON text of the driver's native record, so their
+//! shape is the driver's to state. A driver states it per content format it reads,
 //! keyed by the `content_format` value the session table carries, as
 //! a JSON Schema. A reader scopes rows to one content format before
 //! reading into a native column.

@@ -1,7 +1,8 @@
 //! Line reader over a transcript: each non-blank line decoded through
-//! the Claude codec with its 1-based line number. A line that does not
-//! decode is an error carrying its line number; the caller decides
-//! whether to skip it or to stop.
+//! the Claude codec with its 1-based line number and its `raw` text,
+//! the codec's JSON text of the entry. A line that does not decode is
+//! an error carrying its line number; the caller decides whether to
+//! skip it or to stop.
 
 use std::fmt;
 use std::fs::File;
@@ -12,8 +13,13 @@ use gage_session::{DriverError, EntryCodec, EntryValue};
 
 use crate::codec::codec;
 
-/// Iterator over the decoded lines of a transcript. Blank lines
-/// consume a line number and yield nothing.
+/// Iterator over the decoded lines of a transcript as `(line, raw,
+/// value)`. Blank lines consume a line number and yield nothing.
+///
+/// `raw` is the codec's JSON text of the entry. A line the codec
+/// decoded as it stands is that text already and is yielded as read;
+/// a line the codec stood in for yields the stand-in entry's text, as
+/// `encode` would not give the line back.
 pub struct SessionReader<R: Read = File> {
     reader: io::Lines<BufReader<R>>,
     line_num: u32,
@@ -76,7 +82,7 @@ impl<R: Read> SessionReader<R> {
 }
 
 impl<R: Read> Iterator for SessionReader<R> {
-    type Item = Result<(u32, EntryValue), ReadError>;
+    type Item = Result<(u32, String, EntryValue), ReadError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
@@ -89,12 +95,41 @@ impl<R: Read> Iterator for SessionReader<R> {
                 continue;
             }
             return Some(match codec().decode(line.as_bytes()) {
-                Ok(value) => Ok((self.line_num, value)),
+                Ok(value) => {
+                    let raw = match value.invalid_entry_raw() {
+                        Some(_) => value.to_string(),
+                        None => line,
+                    };
+                    Ok((self.line_num, raw, value))
+                }
                 Err(error) => Err(ReadError::Decode {
                     line: self.line_num,
                     error,
                 }),
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A decodable line is its own `raw`, byte for byte, whatever its
+    /// key order or spacing; a torn line's `raw` is the stand-in entry
+    /// the codec yields for it.
+    #[test]
+    fn raw_is_the_line_as_read_unless_the_codec_stood_in() {
+        let spaced = r#"{ "z" : 1.50, "a" : [ "s" ] , "type":"user" }"#;
+        let torn = r#"{"type":"user","a":"cu{"type":"c"}"#;
+        let text = format!("{spaced}\n\n{torn}\n");
+        let items: Vec<(u32, String, EntryValue)> = SessionReader::new(text.as_bytes())
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(items[0].0, 1);
+        assert_eq!(items[0].1, spaced);
+        assert_eq!(items[1].0, 3);
+        assert_eq!(items[1].1, items[1].2.to_string());
+        assert_eq!(items[1].2.invalid_entry_raw(), Some(torn));
     }
 }

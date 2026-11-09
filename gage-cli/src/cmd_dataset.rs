@@ -393,7 +393,7 @@ impl AddView {
 #[derive(Debug)]
 pub(crate) enum AddEvent<'a> {
     /// A session, one of `total`, is about to be written
-    Starting { total: usize, native_id: &'a str },
+    Starting { total: usize },
     /// A session was written and placed
     Added {
         outcome: SessionOutcome,
@@ -474,9 +474,7 @@ impl AddCounts {
 impl fmt::Display for AddEvent<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            AddEvent::Starting { native_id, .. } => {
-                write!(f, "Adding session {}", short_uuid(native_id))
-            }
+            AddEvent::Starting { .. } => f.write_str("Adding sessions"),
             AddEvent::Added {
                 outcome,
                 id,
@@ -564,9 +562,9 @@ pub(crate) fn add_native_to_dataset(
                     .map_err(|e| StoreError::Parse(format!("{native_id}: {e}")))
             },
             &mut |step| match step {
-                AddStep::Starting { index, native_id } => {
+                AddStep::Starting { index, .. } => {
                     current = index;
-                    on_event(AddEvent::Starting { total, native_id });
+                    on_event(AddEvent::Starting { total });
                 }
                 AddStep::Added(outcome) => on_event(AddEvent::Added {
                     outcome: outcome.outcome,
@@ -978,6 +976,16 @@ fn open_store(command: &str) -> Result<Store, CliError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The progress label is constant: the sessions pass too quickly
+    /// for an id to be read.
+    #[test]
+    fn starting_line_names_no_session() {
+        assert_eq!(
+            AddEvent::Starting { total: 3 }.to_string(),
+            "Adding sessions"
+        );
+    }
 
     /// A session's line names the outcome, and the dataset preposition
     /// follows the verb: a session is added to a dataset and updated or

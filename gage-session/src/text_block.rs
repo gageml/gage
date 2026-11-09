@@ -384,7 +384,7 @@ impl TextDescriptor {
         // JSONPath evaluates on the unordered form; a pointer is the
         // same in both.
         let decoded = entry;
-        let entry: Value = decoded.into();
+        let entry = decoded.to_json_value();
         let strings_at = |paths: &[JsonPath]| {
             paths
                 .iter()
@@ -448,7 +448,7 @@ impl TextDescriptor {
     /// The text values of one entry, in document order. A string at or
     /// under a safe path is excluded.
     pub fn text_values(&self, entry: &EntryValue) -> Vec<TextValue> {
-        let value: Option<Value> = self.safe.has_irregular().then(|| entry.into());
+        let value = self.safe.has_irregular().then(|| entry.to_json_value());
         let safe_roots = self.safe.irregular_pointers(value.as_ref());
         entry
             .strings()

@@ -79,6 +79,13 @@ impl EntryValue {
         EntryValue::Object(map)
     }
 
+    /// A copy of the value as a `serde_json::Value`, for a value the
+    /// caller keeps. `Value::from` moves and is the conversion to
+    /// reach for; this one copies every string.
+    pub fn to_json_value(&self) -> Value {
+        Value::from(self.clone())
+    }
+
     /// The `raw` text of an [`INVALID_ENTRY_TYPE`] entry; `None` for
     /// any other entry.
     pub fn invalid_entry_raw(&self) -> Option<&str> {
@@ -298,24 +305,21 @@ impl From<Value> for EntryValue {
     }
 }
 
-impl From<&EntryValue> for Value {
-    fn from(value: &EntryValue) -> Self {
+impl From<EntryValue> for Value {
+    /// An entry value as a `serde_json::Value`. Strings and numbers
+    /// move; only the containers are rebuilt, and an object's keys
+    /// take the map's order, which is sorted without `preserve_order`.
+    fn from(value: EntryValue) -> Self {
         match value {
             EntryValue::Null => Value::Null,
-            EntryValue::Bool(b) => Value::Bool(*b),
-            EntryValue::Number(n) => Value::Number(n.clone()),
-            EntryValue::String(s) => Value::String(s.clone()),
-            EntryValue::Array(items) => Value::Array(items.iter().map(Into::into).collect()),
+            EntryValue::Bool(b) => Value::Bool(b),
+            EntryValue::Number(n) => Value::Number(n),
+            EntryValue::String(s) => Value::String(s),
+            EntryValue::Array(items) => Value::Array(items.into_iter().map(Into::into).collect()),
             EntryValue::Object(map) => {
-                Value::Object(map.iter().map(|(k, v)| (k.clone(), v.into())).collect())
+                Value::Object(map.into_iter().map(|(k, v)| (k, v.into())).collect())
             }
         }
-    }
-}
-
-impl From<EntryValue> for Value {
-    fn from(value: EntryValue) -> Self {
-        Value::from(&value)
     }
 }
 
@@ -516,7 +520,7 @@ mod tests {
     fn converts_to_and_from_serde_json_value() {
         let v = EntryValue::from(json!({"z": 1, "a": [true, null, "s"]}));
         assert_eq!(v.to_string(), r#"{"a":[true,null,"s"],"z":1}"#);
-        let back = Value::from(&v);
+        let back = Value::from(v);
         assert_eq!(back, json!({"z": 1, "a": [true, null, "s"]}));
     }
 

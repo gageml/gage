@@ -75,8 +75,8 @@ fn session_schema() -> SchemaRef {
             false,
         ),
         // Provenance
-        // The driver's name and version for the byte layout of `raw`;
-        // a reader of `raw` checks it
+        // The content format whose codec renders `raw`; a reader of
+        // `raw` checks it
         Field::new("content_format", DataType::Utf8, false),
         // Content
         // The byte size of the session file

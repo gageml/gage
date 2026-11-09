@@ -991,10 +991,7 @@ fn add_native(
         if dialog::interrupted() {
             break;
         }
-        on_event(AddEvent::Starting {
-            total,
-            native_id: id,
-        });
+        on_event(AddEvent::Starting { total });
         let mut session = opened
             .open_native(id)
             .map_err(|e| DialogError::Failed(format!("{id}: {e}")))?;

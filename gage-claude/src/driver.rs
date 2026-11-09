@@ -173,9 +173,7 @@ impl Driver for ClaudeDriver {
         // content is intentionally left out until a consumer exists for
         // it; a session is re-added over time, so that content can join
         // later at no duplication cost (git shares identical blobs).
-        let session_path = claude.session_path().to_path_buf();
-        check_decodes(&session_path)?;
-        copy_file_into_sink(&session_path, "session.jsonl", sink)?;
+        copy_transcript_into_sink(claude.session_path(), "session.jsonl", sink)?;
         Ok(CONTENT_FORMAT.to_string())
     }
 
@@ -883,25 +881,38 @@ fn load_projects(root: &Path) -> io::Result<HashMap<String, PathBuf>> {
         .collect())
 }
 
-/// Every line of the transcript at `path` reads and decodes. A file
-/// with a line the codec does not recognize never enters a store,
-/// whatever the summary cache holds for it.
-fn check_decodes(path: &Path) -> Result<(), DriverError> {
-    for item in SessionReader::open(path)? {
-        item.map_err(|e| DriverError::Other(format!("{}: {e}", path.display())))?;
-    }
-    Ok(())
-}
-
-fn copy_file_into_sink(
+/// Copy the transcript at `src` into the sink under `dest_key` byte
+/// for byte, decoding each line as it passes. The bytes decoded are
+/// the bytes written, so a line this build's codec cannot decode
+/// aborts the copy and the stored content is content the codec reads.
+fn copy_transcript_into_sink(
     src: &Path,
     dest_key: &str,
     sink: &mut dyn ContentSink,
 ) -> Result<(), DriverError> {
+    use std::io::{BufRead, Write};
+    let mut reader = io::BufReader::new(File::open(src).map_err(DriverError::Io)?);
     let mut writer = sink.create(dest_key).map_err(DriverError::Io)?;
-    let mut file = File::open(src).map_err(DriverError::Io)?;
-    io::copy(&mut file, &mut writer).map_err(DriverError::Io)?;
-    Ok(())
+    let mut line = Vec::new();
+    let mut line_num: u32 = 0;
+    loop {
+        line.clear();
+        if reader
+            .read_until(b'\n', &mut line)
+            .map_err(DriverError::Io)?
+            == 0
+        {
+            return Ok(());
+        }
+        line_num += 1;
+        let text = line.trim_ascii();
+        if !text.is_empty() {
+            codec().decode(text).map_err(|e| {
+                DriverError::Other(format!("{}: line {line_num}: {e}", src.display()))
+            })?;
+        }
+        writer.write_all(&line).map_err(DriverError::Io)?;
+    }
 }
 
 /// Resolve the projects directory from a source value. A leading
@@ -1231,8 +1242,7 @@ impl StoredSession for ClaudeStoredSession {
         };
         let native_id = self.native_id.clone();
         Box::new(reader.filter_map(move |item| match item {
-            Ok((line_num, decoded)) => {
-                let raw = decoded.to_string();
+            Ok((line_num, raw, decoded)) => {
                 let value = serde_json::Value::from(decoded);
                 derive_entry(&native_id, line_num, &value, raw).map(Ok)
             }
@@ -1253,7 +1263,7 @@ impl StoredSession for ClaudeStoredSession {
         let mut failures = Vec::new();
         for item in reader {
             match item {
-                Ok((line_num, decoded)) => {
+                Ok((line_num, _, decoded)) => {
                     collector.push(line_num, &serde_json::Value::from(decoded));
                 }
                 Err(e) => failures.push(Err(DriverError::from(e))),
@@ -1881,22 +1891,25 @@ mod tests {
         );
     }
 
-    /// The admission check passes a transcript with a torn line and
-    /// refuses one with a line the codec does not recognize, naming
-    /// the file and the line.
+    /// The copy stores the transcript's bytes as they are, line endings
+    /// and a missing final newline included, and admits a torn line
+    /// as the codec does. A line the codec does not recognize refuses
+    /// the copy, naming the line.
     #[test]
-    fn check_decodes_admits_a_torn_line_and_refuses_an_unrecognized_one() {
+    fn copy_admits_a_torn_line_byte_for_byte_and_refuses_an_unrecognized_one() {
         let tmp = TempDir::new().unwrap();
         let torn = tmp.path().join("torn.jsonl");
-        fs::write(
-            &torn,
-            "{\"type\":\"a\"}\n{\"type\":\"b\",\"x\":\"cu{\"type\":\"c\"}\n",
-        )
-        .unwrap();
-        check_decodes(&torn).unwrap();
+        let bytes = "{\"type\":\"a\"}\r\n{\"type\":\"b\",\"x\":\"cu{\"type\":\"c\"}\n\n{ \"type\" : \"d\" }";
+        fs::write(&torn, bytes).unwrap();
+        let mut sink = MemorySink::default();
+        copy_transcript_into_sink(&torn, "session.jsonl", &mut sink).unwrap();
+        assert_eq!(sink.0["session.jsonl"], bytes.as_bytes());
         let prose = tmp.path().join("prose.jsonl");
         fs::write(&prose, "{\"type\":\"a\"}\n\nhello\n").unwrap();
-        let err = check_decodes(&prose).unwrap_err().to_string();
+        let mut sink = MemorySink::default();
+        let err = copy_transcript_into_sink(&prose, "session.jsonl", &mut sink)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("prose.jsonl: line 3: "), "{err}");
     }
 

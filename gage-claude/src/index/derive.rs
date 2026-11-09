@@ -512,8 +512,7 @@ pub fn derive_session_from<R: std::io::Read>(
         // A line that does not read or decode fails the session. The
         // codec stands in for the corruption it recognizes with an
         // invalid entry, which derives a row like any other line.
-        let (line_num, decoded) = result?;
-        let raw = decoded.to_string();
+        let (line_num, raw, decoded) = result?;
         let entry = serde_json::Value::from(decoded);
 
         let entry_type = entry.get("type").and_then(|v| v.as_str());

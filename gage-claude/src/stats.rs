@@ -52,7 +52,7 @@ pub fn compute_session_stats(path: &Path) -> io::Result<SessionStats> {
     let mut max_turn: usize = 0;
 
     for item in reader {
-        let (_, decoded) = item?;
+        let (_, _, decoded) = item?;
         let entry = Value::from(decoded);
 
         // Every row of one API response repeats its usage; the first row
