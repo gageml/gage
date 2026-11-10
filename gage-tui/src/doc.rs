@@ -11,6 +11,8 @@ use gage_session::INVALID_ENTRY_TYPE;
 use gage_store::{ChangeKind, NoteValue};
 use serde_json::Value;
 
+use crate::selection::{Selection, select};
+
 pub struct Document {
     pub session: Session,
     pub entries: Vec<Entry>,
@@ -268,14 +270,21 @@ pub struct Entry {
     /// The message's text, from the `message` table; `None` for an
     /// entry that is not a message
     pub message_text: Option<String>,
+    /// The tags the driver split off the front of a user message's
+    /// text, from the `message` table, as the harness wrote them
+    pub ide_tags: Option<String>,
     /// The harness's row, verbatim
     pub value: Value,
 }
 
 /// What the rendered view shows for an entry.
 pub enum EntryBody {
-    /// The message text, rendered as markdown
-    Text(String),
+    /// The message text, rendered as markdown, and the name and
+    /// content of each tag split off the front of it
+    Text {
+        text: String,
+        tags: Vec<(String, String)>,
+    },
     /// The calls a tool call entry made
     ToolCalls(Vec<ToolUse>),
     /// The results a tool result entry returned
@@ -285,6 +294,9 @@ pub enum EntryBody {
     /// A native line the driver's codec could not decode, as the
     /// codec stands in for it
     InvalidEntry(InvalidEntry),
+    /// The values the entry's selection rule names, for an entry no
+    /// other body covers
+    Selection(Selection),
 }
 
 /// The entry the codec writes in place of a native line it could not
@@ -297,16 +309,21 @@ pub struct InvalidEntry {
 
 /// An attachment entry as the viewer shows it, read from the entry's
 /// own row: the harness's `attachment.type`, a subtype a few types
-/// carry beside it, and the text the harness sent to the model.
+/// carry beside it, and the text the harness sent to the model. A row
+/// without that text shows what its selection rule names.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Attachment {
     pub kind: String,
     /// `reminderType` where present, else the hook event and name
     pub subtype: Option<String>,
+    /// Caption and value rows a selection rule names; empty for a row
+    /// with `rendered` text
+    pub attrs: Vec<(&'static str, String)>,
     /// The text of each `rendered` item in order, without the
-    /// `<system-reminder>` wrapper the harness puts around it; empty
-    /// for a bookkeeping row the harness never sent and for a row
-    /// written before the harness recorded `rendered`
+    /// `<system-reminder>` wrapper the harness puts around it. A row
+    /// without that text, one the harness never sent or one written
+    /// before the harness recorded `rendered`, has the text its
+    /// selection rule names, which may be none
     pub rendered: Vec<String>,
 }
 
@@ -365,9 +382,10 @@ pub struct ToolUse {
 impl Document {
     /// The rendered view's content for the entry at `index`: its tool
     /// calls for a tool call row, its results for a tool result row,
-    /// its attachment for an attachment row, its message text for any
-    /// other message, nothing for an entry without a message or for a
-    /// tool row the `tool_use` table has no rows for.
+    /// its attachment for an attachment row, its message text and
+    /// leading tags for any other message, what its selection rule
+    /// names for an entry with neither, nothing when no rule selects
+    /// a value or for a tool row the `tool_use` table has no rows for.
     pub fn entry_body(&self, index: usize) -> Option<EntryBody> {
         let entry = self.entries.get(index)?;
         if entry.entry_type == "attachment" {
@@ -395,9 +413,51 @@ impl Document {
                     .collect();
                 (!results.is_empty()).then_some(EntryBody::ToolResults(results))
             }
-            _ => entry.message_text.clone().map(EntryBody::Text),
+            _ => {
+                let tags = entry.ide_tags.as_deref().map(tag_pairs).unwrap_or_default();
+                match &entry.message_text {
+                    Some(text) => Some(EntryBody::Text {
+                        text: text.clone(),
+                        tags,
+                    }),
+                    None if !tags.is_empty() => Some(EntryBody::Text {
+                        text: String::new(),
+                        tags,
+                    }),
+                    None => select(&entry.value).map(EntryBody::Selection),
+                }
+            }
         }
     }
+}
+
+/// The name and trimmed content of each top-level `<name>…</name>`
+/// pair in `tags`, in order. A tag nested in a pair's content stays in
+/// the content. Text that does not open a closed pair ends the walk
+/// and is kept whole under an empty name, so nothing is left out.
+fn tag_pairs(tags: &str) -> Vec<(String, String)> {
+    let mut pairs = Vec::new();
+    let mut rest = tags.trim();
+    while !rest.is_empty() {
+        let Some((name, content, after)) = leading_pair(rest) else {
+            pairs.push((String::new(), rest.to_string()));
+            break;
+        };
+        pairs.push((name.to_string(), content.trim().to_string()));
+        rest = after.trim_start();
+    }
+    pairs
+}
+
+/// The name and content of the pair `text` opens with, and the text
+/// after its close tag.
+fn leading_pair(text: &str) -> Option<(&str, &str, &str)> {
+    let after_lt = text.strip_prefix('<')?;
+    let name_end = after_lt.find(|c: char| c == '>' || c == '/' || c.is_whitespace())?;
+    let name = &after_lt[..name_end];
+    let (_, after_open) = after_lt.split_once('>')?;
+    let (content, after) = after_open.split_once(&format!("</{name}>"))?;
+    (!name.is_empty()).then_some((name, content, after))
 }
 
 /// The error and raw text of an invalid entry row; each is empty when
@@ -431,14 +491,21 @@ fn attachment_body(value: &Value) -> Attachment {
         (Some(event), Some(name)) => Some(format!("{event} {name}")),
         (event, name) => event.or(name),
     });
-    let rendered = value
+    let rendered: Vec<String> = value
         .get("rendered")
         .and_then(Value::as_array)
         .map(|items| items.iter().filter_map(rendered_text).collect())
         .unwrap_or_default();
+    let (attrs, rendered) = if rendered.is_empty() {
+        let selection = select(value).unwrap_or_default();
+        (selection.attrs, selection.text)
+    } else {
+        (Vec::new(), rendered)
+    };
     Attachment {
         kind: field("type").unwrap_or_default(),
         subtype,
+        attrs,
         rendered,
     }
 }
@@ -519,6 +586,7 @@ mod tests {
                     entry_type: "user".to_string(),
                     message_subtype: None,
                     message_text: None,
+                    ide_tags: None,
                     value: json!({}),
                 })
                 .collect(),
@@ -644,6 +712,7 @@ mod tests {
             Attachment {
                 kind: "file".to_string(),
                 subtype: None,
+                attrs: vec![],
                 rendered: vec!["Called the Read tool".to_string(), "fn a() {}".to_string()],
             }
         );
@@ -667,9 +736,11 @@ mod tests {
         );
     }
 
-    /// A row without `rendered` keeps its type; the body has no text.
+    /// A row without `rendered` text keeps its type and shows what
+    /// its selection rule names; a row no rule selects from has its
+    /// type alone.
     #[test]
-    fn an_attachment_row_without_rendered_text_keeps_its_type() {
+    fn an_attachment_row_without_rendered_text_shows_its_selection() {
         let doc = attachment_doc(json!({
             "type": "attachment",
             "attachment": {"type": "credential_org", "organizationUuid": "o1"},
@@ -679,9 +750,123 @@ mod tests {
             Attachment {
                 kind: "credential_org".to_string(),
                 subtype: None,
+                attrs: vec![("organizationUuid", "o1".to_string())],
                 rendered: Vec::new(),
             }
         );
+
+        let doc = attachment_doc(json!({
+            "type": "attachment",
+            "attachment": {"type": "batching_reminder_sent", "text": "List first."},
+        }));
+        assert_eq!(attachment(&doc).rendered, ["List first."]);
+
+        let doc = attachment_doc(json!({
+            "type": "attachment",
+            "attachment": {"type": "auto_mode_exit"},
+        }));
+        assert_eq!(
+            attachment(&doc),
+            Attachment {
+                kind: "auto_mode_exit".to_string(),
+                subtype: None,
+                attrs: Vec::new(),
+                rendered: Vec::new(),
+            }
+        );
+    }
+
+    /// Each top-level pair is a name and its trimmed content; a
+    /// nested tag and an attribute on the open tag stay out of the
+    /// name.
+    #[test]
+    fn tag_pairs_are_the_top_level_names_and_contents() {
+        let pairs = tag_pairs(concat!(
+            "<command-message>gage:publish</command-message>\n",
+            "<command-name>/gage:publish</command-name>\n",
+            "<task-notification>\n<task-id>t1</task-id>\n</task-notification>",
+            "<ide_selection lines=\"1-2\">fn a() {}</ide_selection>",
+        ));
+        let pairs: Vec<(&str, &str)> = pairs
+            .iter()
+            .map(|(n, c)| (n.as_str(), c.as_str()))
+            .collect();
+        assert_eq!(
+            pairs,
+            [
+                ("command-message", "gage:publish"),
+                ("command-name", "/gage:publish"),
+                ("task-notification", "<task-id>t1</task-id>"),
+                ("ide_selection", "fn a() {}"),
+            ]
+        );
+    }
+
+    /// Text that does not open a closed pair is kept whole under an
+    /// empty name, after the pairs before it.
+    #[test]
+    fn tag_text_that_is_not_a_pair_is_kept() {
+        let pairs = tag_pairs("<command-name>/x</command-name> <unclosed>rest");
+        assert_eq!(
+            pairs,
+            [
+                ("command-name".to_string(), "/x".to_string()),
+                (String::new(), "<unclosed>rest".to_string()),
+            ]
+        );
+        assert_eq!(tag_pairs("  "), []);
+    }
+
+    /// A message's body carries its text and its tags; a message of
+    /// tags alone has a body with empty text.
+    #[test]
+    fn a_message_body_carries_its_tags() {
+        let mut doc = derived();
+        doc.entries[0].message_text = Some("hello".to_string());
+        doc.entries[0].ide_tags = Some("<ide_opened_file>a.rs</ide_opened_file>".to_string());
+        let expected = vec![("ide_opened_file".to_string(), "a.rs".to_string())];
+        match doc.entry_body(0) {
+            Some(EntryBody::Text { text, tags }) => {
+                assert_eq!(text, "hello");
+                assert_eq!(tags, expected);
+            }
+            _ => panic!("a message row has a text body"),
+        }
+        doc.entries[0].message_text = None;
+        match doc.entry_body(0) {
+            Some(EntryBody::Text { text, tags }) => {
+                assert_eq!(text, "");
+                assert_eq!(tags, expected);
+            }
+            _ => panic!("a message of tags alone has a text body"),
+        }
+    }
+
+    /// An entry without a message shows what its selection rule
+    /// names; a message keeps its text; a type without a rule has no
+    /// body.
+    #[test]
+    fn an_entry_without_a_message_shows_its_selection() {
+        let mut doc = derived();
+        doc.entries[0].entry_type = "ai-title".to_string();
+        doc.entries[0].message_subtype = None;
+        doc.entries[0].message_text = None;
+        doc.entries[0].value = json!({"type": "ai-title", "aiTitle": "Review documentation"});
+        match doc.entry_body(0) {
+            Some(EntryBody::Selection(selection)) => {
+                assert_eq!(selection.text, ["Review documentation"]);
+            }
+            _ => panic!("an ai-title row has a selection body"),
+        }
+
+        doc.entries[0].message_text = Some("message text".to_string());
+        assert!(
+            matches!(doc.entry_body(0), Some(EntryBody::Text { text, .. }) if text == "message text")
+        );
+
+        doc.entries[0].message_text = None;
+        doc.entries[0].value = json!({"type": "not-a-type", "content": "x"});
+        assert!(doc.entry_body(0).is_none());
     }
 
     /// A reminder's `reminderType` qualifies its type; a hook row is

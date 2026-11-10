@@ -35,7 +35,9 @@ use crate::outline::{AttachmentFiles, CollapseOutcome, Expansion, Outline, RowKi
 use crate::picker::{self, PickColumn, PickItem, Picker, PickerAction};
 use crate::session::{self, Backend};
 use crate::textarea::TextArea;
-use crate::{attachment, invalid_entry, json, markdown, session_attachment, styles, tool};
+use crate::{
+    attachment, invalid_entry, json, message, selection, session_attachment, styles, tool,
+};
 
 pub async fn run(
     terminal: &mut DefaultTerminal,
@@ -2002,11 +2004,12 @@ fn draw_entry(frame: &mut Frame, state: &mut AppState, entry: &EntrySnap, area: 
     let mut sections: Vec<Section> = Vec::new();
     if let Some(body) = &entry.body {
         let lines = match body {
-            EntryBody::Text(text) => markdown::render(text),
+            EntryBody::Text { text, tags } => message::body(text, tags),
             EntryBody::ToolCalls(calls) => tool::calls(calls),
             EntryBody::ToolResults(results) => tool::results(results),
             EntryBody::Attachment(attachment) => attachment::body(attachment),
             EntryBody::InvalidEntry(invalid) => invalid_entry::body(invalid),
+            EntryBody::Selection(selected) => selection::body(selected),
         };
         let panel = Paragraph::new(lines)
             .wrap(Wrap { trim: false })
@@ -2657,6 +2660,7 @@ mod tests {
                     entry_type: "user".into(),
                     message_subtype: Some("text".into()),
                     message_text: None,
+                    ide_tags: None,
                     value: serde_json::json!({"type": "user"}),
                 })
                 .collect(),
@@ -2795,7 +2799,7 @@ mod tests {
     /// An attachment row's body opens with its type, and its subtype
     /// when it has one, then the text the harness sent to the model
     /// without its wrapper, item by item. A row the harness never sent
-    /// shows its type alone.
+    /// shows its type and the attributes its selection rule names.
     #[test]
     fn attachment_rows_render_their_type_and_rendered_text() {
         let mut doc = doc_with_entries(3);
@@ -2845,7 +2849,8 @@ mod tests {
         state.select_line(2);
         terminal.draw(|frame| draw(frame, &mut state)).unwrap();
         let text = screen(&terminal);
-        assert!(text.contains("Type  credential_org"), "{text}");
+        assert!(text.contains("Type              credential_org"), "{text}");
+        assert!(text.contains("organizationUuid  o1"), "{text}");
         assert!(!text.contains("Subtype"), "{text}");
 
         state.select_line(3);

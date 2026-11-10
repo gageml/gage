@@ -10,8 +10,8 @@ use unicode_width::UnicodeWidthStr;
 use crate::styles;
 
 /// Caption/value rows with plain values.
-pub fn attr_lines(attrs: &[(&'static str, &str)]) -> Vec<Line<'static>> {
-    let styled: Vec<(&'static str, &str, Style)> = attrs
+pub fn attr_lines(attrs: &[(&str, &str)]) -> Vec<Line<'static>> {
+    let styled: Vec<(&str, &str, Style)> = attrs
         .iter()
         .map(|(caption, value)| (*caption, *value, Style::new()))
         .collect();
@@ -21,7 +21,7 @@ pub fn attr_lines(attrs: &[(&'static str, &str)]) -> Vec<Line<'static>> {
 /// Caption/value rows, each value in its own style. The captions are
 /// dim and padded to the widest caption plus two spaces, so the values
 /// share a column; a value's later lines are indented to that column.
-pub fn styled_attr_lines(attrs: &[(&'static str, &str, Style)]) -> Vec<Line<'static>> {
+pub fn styled_attr_lines(attrs: &[(&str, &str, Style)]) -> Vec<Line<'static>> {
     let caption_width = attrs.iter().map(|(c, _, _)| c.width()).max().unwrap_or(0);
     let indent = " ".repeat(caption_width + 2);
     let mut lines = Vec::new();

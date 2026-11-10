@@ -293,7 +293,7 @@ impl Backend {
     async fn load_entries(&self, session_id: &str) -> Result<Vec<Entry>, Box<dyn Error>> {
         let id = sql_str(session_id);
         let sql = format!(
-            "SELECT e.line, e.uuid, e.type, m.subtype, e.raw, m.text \
+            "SELECT e.line, e.uuid, e.type, m.subtype, e.raw, m.text, m.ide_tags \
              FROM {} e LEFT JOIN {} m ON m.session_id = '{id}' AND m.line = e.line \
              WHERE e.session_id = '{id}' ORDER BY e.line",
             self.entry_rel(),
@@ -308,6 +308,7 @@ impl Backend {
             let subtypes = column::<StringArray>(batch, 3);
             let raws = column::<StringArray>(batch, 4);
             let texts = column::<StringArray>(batch, 5);
+            let ide_tags = column::<StringArray>(batch, 6);
             for i in 0..batch.num_rows() {
                 // A driver that supplies no raw row leaves the entry
                 // with nothing to render; it still holds its line
@@ -322,6 +323,7 @@ impl Backend {
                     entry_type: types.value(i).to_string(),
                     message_subtype: subtypes.is_valid(i).then(|| subtypes.value(i).to_string()),
                     message_text: texts.is_valid(i).then(|| texts.value(i).to_string()),
+                    ide_tags: ide_tags.is_valid(i).then(|| ide_tags.value(i).to_string()),
                     value,
                 });
             }
@@ -935,6 +937,7 @@ pub(crate) mod tests {
     use tempfile::TempDir;
 
     use super::*;
+    use crate::doc::EntryBody;
 
     /// A native Claude session in a temporary source, also added to a
     /// temporary store: the source spec, the native id, the store,
@@ -1101,6 +1104,43 @@ pub(crate) mod tests {
         let beyond = u64::from(u32::MAX) + 1;
         assert!(target_lines(&format!("session:abc#{beyond}")).is_err());
         assert!(target_lines(&format!("session:abc#1-{beyond}")).is_err());
+    }
+
+    /// A user message's leading tags load beside its text: a message
+    /// with text after its tags has both, and a message that is all
+    /// tags has the tags and no body text.
+    #[tokio::test]
+    async fn entries_load_the_tags_split_off_a_user_message() {
+        let f = fixture_with_content(concat!(
+            r#"{"type":"user","uuid":"u1","timestamp":"2025-01-01T00:00:00Z","cwd":"/w/proj","message":{"role":"user","content":"<ide_opened_file>a.rs</ide_opened_file>\nhello there"}}"#,
+            "\n",
+            r#"{"type":"user","uuid":"u2","timestamp":"2025-01-01T00:00:01Z","message":{"role":"user","content":"<command-name>/gage:publish</command-name>"}}"#,
+            "\n",
+            r#"{"type":"assistant","uuid":"a1","timestamp":"2025-01-01T00:00:02Z","message":{"role":"assistant","model":"claude-x","content":[{"type":"text","text":"hi"}]}}"#,
+            "\n",
+        ));
+        let backend = Backend::stored(f.store).await;
+        let doc = backend.load(&f.session_id).await.unwrap();
+        assert_eq!(doc.entries[0].message_text.as_deref(), Some("hello there"));
+        assert_eq!(
+            doc.entries[0].ide_tags.as_deref(),
+            Some("<ide_opened_file>a.rs</ide_opened_file>")
+        );
+        assert_eq!(
+            doc.entries[1].ide_tags.as_deref(),
+            Some("<command-name>/gage:publish</command-name>")
+        );
+        assert_eq!(doc.entries[2].ide_tags, None);
+        match doc.entry_body(1) {
+            Some(EntryBody::Text { text, tags }) => {
+                assert!(text.trim().is_empty(), "{text:?}");
+                assert_eq!(
+                    tags,
+                    [("command-name".to_string(), "/gage:publish".to_string())]
+                );
+            }
+            _ => panic!("a message of tags alone has a text body"),
+        }
     }
 
     /// The store backend reads the session, its entries, and its
