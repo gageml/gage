@@ -391,7 +391,6 @@ async fn init_writes_the_annotated_file_with_the_title_and_init_args() {
     let publisher = Publisher::with_root(&f.store, &f.publish_root, registry());
     let init = InitArgs {
         groups: vec!["public".into(), "reading".into()],
-        notes: Some("For the blog".into()),
     };
     let id = publisher
         .init(&f.original, &[], &[], "session:test", &init)
@@ -407,7 +406,7 @@ async fn init_writes_the_annotated_file_with_the_title_and_init_args() {
         "{text}"
     );
     assert!(
-        text.contains(r#""init": {"groups":["public","reading"],"notes":"For the blog"}"#),
+        text.contains(r#""init": {"groups":["public","reading"]}"#),
         "{text}"
     );
     let definition = publisher.definition(&id).unwrap();

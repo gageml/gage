@@ -45,6 +45,17 @@ ways:
 6. Review the session before publishing to confirm the user goals are met
 7. Apply the publish command to add each session to the store
 
+### Skill arguments
+
+The skill arguments may include `--description <TEXT>`: free text that states
+what to publish, for whom, and for what use. Read the description as the user's
+request and use it to decide the sessions, groups, filters, and segments that
+the arguments do not already name. `--description` is not an option of any
+`gage publish` subcommand; do not pass it on.
+
+The other arguments are `gage publish init` options, `--share` options, and
+session IDs.
+
 ### Sessions to publish
 
 The user may want to publish more than one session.

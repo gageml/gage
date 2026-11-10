@@ -231,8 +231,6 @@ pub struct InitArgs {
     /// The filter groups that selected the filters
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub groups: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub notes: Option<String>,
 }
 
 /// The title the published session takes, set by an entry the driver
@@ -896,7 +894,6 @@ mod tests {
         );
         d.init = InitArgs {
             groups: vec!["public".into()],
-            notes: Some("For the blog".into()),
         };
         d.filters.push(filter_with(
             "system",
@@ -923,7 +920,7 @@ mod tests {
             "  \"session\": \"abc\", // title: Fix the duck\n",
             "\n",
             "  // Recorded by init. Not read by publish.\n",
-            "  \"init\": {\"groups\":[\"public\"],\"notes\":\"For the blog\"},\n",
+            "  \"init\": {\"groups\":[\"public\"]},\n",
             "\n",
             "  // [text, author]: the title the published session takes, set by an\n",
             "  // entry added after its last line. null keeps the title the content\n",
@@ -1018,6 +1015,18 @@ mod tests {
         let t = d.title.as_ref().unwrap();
         assert_eq!(t.text, "Second");
         assert_eq!(t.author, "user:b");
+    }
+
+    /// The `init` record holds groups alone; a file that records any
+    /// other field there is refused, naming the field.
+    #[test]
+    fn init_refuses_a_field_other_than_groups() {
+        let err = PublishDefinition::from_jsonc(
+            r#"{"session": "abc", "init": {"groups": ["public"], "notes": "For the blog"}}"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("notes"), "{err}");
     }
 
     /// A missing list reads as empty, and a redaction or title without

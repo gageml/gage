@@ -173,14 +173,14 @@ mod tests {
     #[test]
     fn skill_arguments_are_shell_words() {
         let words = [
-            "--notes".to_string(),
+            "--description".to_string(),
             "For the blog's readers".to_string(),
             String::new(),
             "a/b:c@d".to_string(),
         ];
         assert_eq!(
             skill_prompt("gage:publish", &words),
-            r"/gage:publish --notes 'For the blog'\''s readers' '' a/b:c@d"
+            r"/gage:publish --description 'For the blog'\''s readers' '' a/b:c@d"
         );
     }
 

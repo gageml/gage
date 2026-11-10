@@ -10,8 +10,7 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "groups": {"type": "array", "items": {"type": "string"}},
-        "notes": {"type": "string"}
+        "groups": {"type": "array", "items": {"type": "string"}}
       }
     },
     "title": {

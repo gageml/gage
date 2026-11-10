@@ -55,7 +55,6 @@ use crate::cmd_session::{self, ViewOptionArgs};
 use crate::cmd_tag::TAG_HELP;
 use crate::dialog::{self, DialogError, DialogResult};
 use crate::error::CliError;
-use crate::filter_prompt::prompt_filter_multiselect;
 use crate::human::{count, format_elapsed_ms};
 use crate::model_prompt;
 use crate::progress;
@@ -113,7 +112,7 @@ pub struct PublishRunArgs {
         short,
         long,
         value_name = "FILTER",
-        long_help = format!("Filter to apply (repeatable)\n\n{FILTER_HELP} {FILTER_PROMPT_HELP}")
+        long_help = format!("Filter to apply (repeatable)\n\n{FILTER_HELP}")
     )]
     filter: Vec<String>,
 
@@ -124,11 +123,12 @@ pub struct PublishRunArgs {
     #[arg(short = 't', long, value_name = "TEXT")]
     segment: Vec<String>,
 
-    /// Notes about audience, use, segments
+    /// Description of publish for model
     ///
-    /// Read from a file as @PATH.
-    #[arg(short = 'N', long, value_name = "TEXT")]
-    notes: Option<String>,
+    /// Read from a file as @PATH. If omitted, dialog prompts for an
+    /// optional description.
+    #[arg(short, long, value_name = "TEXT")]
+    description: Option<String>,
 
     /// Add to share (tag, ID, or prefix; repeatable)
     #[arg(
@@ -158,7 +158,8 @@ pub struct PublishRunArgs {
 
     /// Skip confirmation prompt
     ///
-    /// Without --model, model takes its default
+    /// Without --model, model takes its default. Without
+    /// --description, none is given.
     #[arg(short, long)]
     yes: bool,
 
@@ -320,12 +321,6 @@ pub struct InitArgs {
     #[arg(short = 't', long, value_name = "TEXT")]
     segment: Vec<String>,
 
-    /// Notes about audience, use, segments
-    ///
-    /// Read from a file as @PATH. Recorded in definition with groups.
-    #[arg(short = 'N', long, value_name = "TEXT")]
-    notes: Option<String>,
-
     /// Skip confirmation prompt
     #[arg(short, long)]
     yes: bool,
@@ -346,11 +341,6 @@ session is linked to each share after it is written.";
 const FILTER_HELP: &str = "A filter name; see --list-filters. A trailing #{..} overrides filter \
 params, as pii#{ prompt: \"Watch for hosts.\" }. A filter given here is added to those --group \
 selects and replaces a selected filter of the same name.";
-
-/// The sentence the top-level run adds to `FILTER_HELP`: its prompt
-/// when no group or filter is given, which `init` does not have.
-const FILTER_PROMPT_HELP: &str = "With neither --group nor --filter, a prompt offers every \
-filter with none selected; --yes needs a group or filter.";
 
 #[derive(Args)]
 pub struct ViewArgs {
@@ -550,9 +540,9 @@ pub async fn run(args: PublishArgs) -> Result<(), CliError> {
 }
 
 /// Publish the selected sessions through Claude Code. The dialog
-/// settles the inputs and spells them as `gage publish init`
-/// arguments for the skill; the skill session runs after it, since
-/// the harness owns the terminal from then on.
+/// shows the inputs given, asks for a description and a model, and
+/// spells the inputs as skill arguments; the skill session runs after
+/// it, since the harness owns the terminal from then on.
 async fn publish_sessions(args: PublishRunArgs) -> Result<(), CliError> {
     let fail = |e: String| CliError::message(format!("gage publish: {e}"));
     if args.list_filters {
@@ -573,14 +563,15 @@ async fn publish_sessions(args: PublishRunArgs) -> Result<(), CliError> {
                 .map_err(|e| fail(e.to_string()))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let notes = match &args.notes {
-        Some(text) => Some(
-            text_value("gage publish", "--notes", text)
+    let description = args
+        .description
+        .as_deref()
+        .map(|text| {
+            text_value("gage publish", "--description", text)
                 .map(|t| t.trim().to_string())
-                .map_err(|e| fail(e.to_string()))?,
-        ),
-        None => None,
-    };
+                .map_err(|e| fail(e.to_string()))
+        })
+        .transpose()?;
     let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
     let shares = resolve_shares("gage publish", &store, &args.share)?;
 
@@ -594,26 +585,21 @@ async fn publish_sessions(args: PublishRunArgs) -> Result<(), CliError> {
         } else {
             Vec::new()
         };
-        let prompt = !args.yes;
-        let selection = select_filters(&registry, &config.filters, &args.group, &specs, prompt)?;
-        let notes = match notes {
-            Some(notes) => {
-                dialog::step_value("Notes", value_cell(&notes))?;
-                Some(notes)
-            }
-            None if prompt => prompt_notes()?,
-            None => None,
-        };
+        if !args.group.is_empty() || !specs.is_empty() {
+            select_filters(&registry, &config.filters, &args.group, &specs)?;
+        }
+        if !segments.is_empty() {
+            dialog::step_list("Segments", segments.iter().map(|s| value_cell(s)))?;
+        }
+        let description = description_step(description, args.yes)?;
         let model = model_prompt::model_step(args.model.as_deref(), args.yes)?;
         if !args.yes {
             dialog::usage_notice(usage_notice(args.batch))?;
             dialog::confirm(false, true)?;
         }
-        let inputs = InitInputs {
-            groups: &args.group,
-            filters: &selection.specs,
+        let inputs = SkillInputs {
+            description: description.as_deref(),
             segments: &segments,
-            notes: notes.as_deref(),
         };
         setup = Some(PublishSetup {
             skill_args: skill_args(&args, &inputs, &ids),
@@ -650,39 +636,58 @@ struct PublishSetup {
     model: Option<String>,
 }
 
-/// The publish inputs the dialog settled, as the skill receives them:
-/// the groups as given, and the `--filter` values as given or the
-/// names chosen in the prompt.
-struct InitInputs<'a> {
-    groups: &'a [String],
-    filters: &'a [String],
-    segments: &'a [String],
-    notes: Option<&'a str>,
+/// The "Description" step: the given description is shown, `yes`
+/// without one gives none, and otherwise an optional prompt asks.
+fn description_step(given: Option<String>, yes: bool) -> Result<Option<String>, DialogError> {
+    match given {
+        Some(description) => {
+            dialog::step_value("Description", value_cell(&description))?;
+            Ok(Some(description))
+        }
+        None if yes => Ok(None),
+        None => {
+            let text: String = cli::input("Description")
+                .placeholder("What to publish and for whom (optional)")
+                .required(false)
+                .interact()?;
+            let text = text.trim();
+            Ok((!text.is_empty()).then(|| text.to_string()))
+        }
+    }
 }
 
-/// The skill's arguments: the `gage publish init` options that spell
-/// the settled inputs, the `--share` options the skill passes to
-/// `gage publish apply`, then the selected session ids. The source
-/// comes first, so the ids read against it; a session selection is
-/// already resolved to ids, so no selection option is passed.
-fn skill_args(args: &PublishRunArgs, inputs: &InitInputs<'_>, ids: &[String]) -> Vec<String> {
+/// The inputs the dialog settled that `PublishRunArgs` does not hold
+/// in the form the skill receives.
+struct SkillInputs<'a> {
+    description: Option<&'a str>,
+    /// The `--segment` values with `@PATH` read
+    segments: &'a [String],
+}
+
+/// The skill's arguments: the `--description` option the skill reads
+/// itself, the `gage publish init` options that spell the inputs
+/// given, the `--share` options the skill passes to `gage publish
+/// apply`, then the selected session ids. The source comes ahead of
+/// the ids, so they read against it; a session selection is already
+/// resolved to ids, so no selection option is passed.
+fn skill_args(args: &PublishRunArgs, inputs: &SkillInputs<'_>, ids: &[String]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
+    if let Some(description) = inputs.description {
+        out.extend(["--description".to_string(), description.to_string()]);
+    }
     if args.stored {
         out.push("--stored".to_string());
     } else if let Some(source) = &args.source {
         out.extend(["--source".to_string(), source.clone()]);
     }
-    for group in inputs.groups {
+    for group in &args.group {
         out.extend(["--group".to_string(), group.clone()]);
     }
-    for spec in inputs.filters {
+    for spec in &args.filter {
         out.extend(["--filter".to_string(), spec.clone()]);
     }
     for text in inputs.segments {
         out.extend(["--segment".to_string(), text.clone()]);
-    }
-    if let Some(notes) = inputs.notes {
-        out.extend(["--notes".to_string(), notes.to_string()]);
     }
     for share in &args.share {
         out.extend(["--share".to_string(), share.clone()]);
@@ -703,58 +708,26 @@ fn usage_notice(batch: bool) -> &'static str {
     }
 }
 
-/// The filters a publish stages, settled in the dialog. With a group
-/// or a `--filter` value given, the `Groups` and `Filters` steps show
-/// what they select. With neither, a prompt offers every filter with
-/// none selected, and a run that cannot prompt fails.
+/// The filters the groups and `--filter` values select, shown as the
+/// `Groups` and `Filters` steps. With neither given, the selection
+/// fails.
 fn select_filters<'a>(
     registry: &'a FilterRegistry,
     config: &FilterConfig,
     groups: &[String],
     specs: &'a [ResolvedSpec<'a>],
-    prompt: bool,
-) -> Result<FilterSelection<'a>, DialogError> {
+) -> Result<Vec<Filter<'a>>, DialogError> {
     if groups.is_empty() && specs.is_empty() {
-        if !prompt {
-            return Err(DialogError::Failed(
-                "A filter or group is required; see --list-filters".to_string(),
-            ));
-        }
-        let names = prompt_filter_multiselect(registry, true)?;
-        if names.is_empty() {
-            return Err(DialogError::Failed("No filters selected".to_string()));
-        }
-        let filters = names
-            .iter()
-            .map(|name| {
-                let def = registry
-                    .get_def(name)
-                    .expect("the prompt offers registry names");
-                Filter::from_spec(def, config, None, name)
-                    .map_err(|e| DialogError::Failed(e.to_string()))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        return Ok(FilterSelection {
-            filters,
-            specs: names,
-        });
+        return Err(DialogError::Failed(
+            "A filter or group is required; see --list-filters".to_string(),
+        ));
     }
     if !groups.is_empty() {
         dialog::step_list("Groups", groups.iter().cloned())?;
     }
     let filters = selected_filters(registry, config, groups, specs).map_err(DialogError::Failed)?;
     dialog::step_list("Filters", filters.iter().map(|f| f.def.name.clone()))?;
-    Ok(FilterSelection {
-        filters,
-        specs: specs.iter().map(|s| s.spec.to_string()).collect(),
-    })
-}
-
-/// What the dialog settled: the filters to stage, and the `--filter`
-/// values that spell them for the skill.
-struct FilterSelection<'a> {
-    filters: Vec<Filter<'a>>,
-    specs: Vec<String>,
+    Ok(filters)
 }
 
 /// The filters `groups` select in listing order, each once, then each
@@ -785,16 +758,6 @@ fn selected_filters<'a>(
         }
     }
     Ok(filters)
-}
-
-/// The notes prompt; `None` when nothing was entered.
-fn prompt_notes() -> Result<Option<String>, DialogError> {
-    let text: String = cli::input("Notes")
-        .placeholder("Additional notes (optional)")
-        .required(false)
-        .interact()?;
-    let text = text.trim();
-    Ok((!text.is_empty()).then(|| text.to_string()))
 }
 
 /// The rule clap does not express: `--batch` runs without a session
@@ -991,18 +954,8 @@ async fn init(args: InitArgs) -> Result<(), CliError> {
                 .map_err(|e| fail(e.to_string()))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let notes = args
-        .notes
-        .as_deref()
-        .map(|text| {
-            text_value("gage publish init", "--notes", text)
-                .map(|t| t.trim().to_string())
-                .map_err(|e| fail(e.to_string()))
-        })
-        .transpose()?;
     let record = InitRecord {
         groups: args.group.clone(),
-        notes,
     };
     let originals = resolve_originals(
         &store,
@@ -1021,15 +974,11 @@ async fn init(args: InitArgs) -> Result<(), CliError> {
     };
     dialog::run_async(title, || async {
         originals.preview()?;
-        let selection = select_filters(registry, &config.filters, &args.group, &specs, false)?;
-        let filters: Vec<FilterEntry> = selection
-            .filters
-            .iter()
-            .map(FilterEntry::from_filter)
-            .collect();
-        if let Some(notes) = &record.notes {
-            dialog::step_value("Notes", value_cell(notes))?;
-        }
+        let filters: Vec<FilterEntry> =
+            select_filters(registry, &config.filters, &args.group, &specs)?
+                .iter()
+                .map(FilterEntry::from_filter)
+                .collect();
         if !segments.is_empty() {
             dialog::step_list("Segments", segments.iter().map(|s| value_cell(s)))?;
         }
@@ -2059,8 +2008,6 @@ mod tests {
             "The question",
             "--segment",
             "The reply",
-            "-N",
-            "For the blog",
             "-g",
             "public",
             "--group",
@@ -2069,7 +2016,6 @@ mod tests {
         ]);
         assert_eq!(args.sessions, ["abc", "def"]);
         assert_eq!(args.segment, ["The question", "The reply"]);
-        assert_eq!(args.notes.as_deref(), Some("For the blog"));
         assert_eq!(args.group, ["public", "reading"]);
         assert!(args.yes && !args.stored);
         assert_eq!(check_init_args(&args), Ok(()));
@@ -2255,7 +2201,7 @@ mod tests {
             "pii",
             "-t",
             "The question",
-            "-N",
+            "-d",
             "For the blog",
             "-m",
             "opus",
@@ -2268,7 +2214,7 @@ mod tests {
         assert_eq!(args.group, ["public", "reading"]);
         assert_eq!(args.filter, ["pii"]);
         assert_eq!(args.segment, ["The question"]);
-        assert_eq!(args.notes.as_deref(), Some("For the blog"));
+        assert_eq!(args.description.as_deref(), Some("For the blog"));
         assert_eq!(args.model.as_deref(), Some("opus"));
         assert_eq!(args.extra_args, ["--verbose"]);
         assert!(args.batch && args.yes && !args.stored);
@@ -2295,9 +2241,11 @@ mod tests {
             );
         }
     }
-    /// The skill receives the settled inputs as `gage publish init`
-    /// options, source first and ids last, with no selection option:
-    /// the selection is already resolved to ids.
+    /// The skill receives the description as `--description` first,
+    /// then the inputs given as `gage publish init` options, source
+    /// ahead of the ids and ids last, with no selection option: the
+    /// selection is already resolved to ids. Without a description,
+    /// no `--description` is passed.
     #[test]
     fn skill_args_spell_the_init_invocation() {
         let run_args = |argv: &[&str]| {
@@ -2317,16 +2265,16 @@ mod tests {
             "-f",
             "pii#{ prompt: \"Watch for hosts.\" }",
         ]);
-        let inputs = InitInputs {
-            groups: &args.group,
-            filters: &args.filter,
+        let inputs = SkillInputs {
+            description: Some("For the blog"),
             segments: &["The question".to_string()],
-            notes: Some("For the blog"),
         };
         let ids = ["n1".to_string(), "n2".to_string()];
         assert_eq!(
             skill_args(&args, &inputs, &ids),
             [
+                "--description",
+                "For the blog",
                 "--source",
                 "claude:/tmp/c",
                 "--group",
@@ -2335,18 +2283,14 @@ mod tests {
                 "pii#{ prompt: \"Watch for hosts.\" }",
                 "--segment",
                 "The question",
-                "--notes",
-                "For the blog",
                 "n1",
                 "n2",
             ]
         );
         let args = run_args(&["-S"]);
-        let inputs = InitInputs {
-            groups: &[],
-            filters: &[],
+        let inputs = SkillInputs {
+            description: None,
             segments: &[],
-            notes: None,
         };
         assert_eq!(skill_args(&args, &inputs, &[]), ["--stored"]);
     }
@@ -2574,14 +2518,13 @@ mod tests {
         assert_eq!(row("pii")[2], "public");
     }
 
-    /// `init` settles filters without a prompt: with neither a group
-    /// nor a filter, the selection fails naming the requirement instead
-    /// of opening the multiselect the top-level run offers.
+    /// With neither a group nor a filter, the selection fails naming
+    /// the requirement.
     #[test]
-    fn init_without_a_group_or_filter_fails_instead_of_prompting() {
+    fn selection_without_a_group_or_filter_fails() {
         let registry = registry();
         let config = FilterConfig::default();
-        match select_filters(&registry, &config, &[], &[], false) {
+        match select_filters(&registry, &config, &[], &[]) {
             Err(DialogError::Failed(msg)) => {
                 assert_eq!(msg, "A filter or group is required; see --list-filters");
             }
