@@ -647,7 +647,7 @@ fn description_step(given: Option<String>, yes: bool) -> Result<Option<String>, 
         None if yes => Ok(None),
         None => {
             let text: String = cli::input("Description")
-                .placeholder("What to publish and for whom (optional)")
+                .placeholder("What do you want to publish? (optional)")
                 .required(false)
                 .interact()?;
             let text = text.trim();

@@ -31,7 +31,7 @@ use crate::index::{ObjectQuery, Order, SelectedTip};
 use crate::object::{EditOutcome, Object, ObjectTree, object_ref, require_type};
 use crate::scan::import_opaque_tree;
 use crate::share::{ShareMembers, ShareStore};
-use crate::writer::{TreeInput, is_dot_git, mktree, write_blob_stream};
+use crate::writer::{TreeInput, blob_sha, is_dot_git, mktree, tree_sha, write_hashed_blob};
 use crate::{Store, StoreError};
 
 pub const OBJECT_TYPE: &str = "gage::session";
@@ -238,12 +238,13 @@ impl<'a> SessionStore<'a> {
     /// the serialization through [`Driver::write_native`]; the
     /// returned `content_format` is stored as the session's
     /// `content_format`, and the attributes it derived from the bytes
-    /// written are the session's attrs. The content is always written
+    /// written are the session's attrs. The content is always read
     /// through the sink: its tree SHA is the identity the decision
     /// rests on. Content equal to the live object's, written by the
     /// same driver version in the same format, is unchanged. Content
     /// that differs is written when the driver orders it at or after
-    /// the stored state, and left alone when it orders it before.
+    /// the stored state, and left alone when it orders it before. The
+    /// store receives the content only when the session is written.
     pub fn add(
         &self,
         driver: &dyn Driver,
@@ -268,7 +269,7 @@ impl<'a> SessionStore<'a> {
             }
         };
 
-        let mut sink = GitContentSink::new(path.to_path_buf(), self.max_session_bytes);
+        let mut sink = GitContentSink::new(self.max_session_bytes);
         let written = match driver.write_native(session, &mut sink) {
             Ok(written) => written,
             // A size-cap abort surfaces through the sink, not as the
@@ -280,8 +281,14 @@ impl<'a> SessionStore<'a> {
             }
         };
         let size = sink.total_bytes;
-        let file_entries = sink.into_entries()?;
-        let files_tree_sha = build_files_tree(path, file_entries)?;
+        let files = sink.into_files()?;
+        let file_entries = || {
+            files
+                .iter()
+                .map(|f| (f.path.clone(), f.sha.clone()))
+                .collect()
+        };
+        let files_tree_sha = files_tree_sha(file_entries())?;
 
         // The live object, with whether it holds these same bytes
         let live = current
@@ -330,6 +337,14 @@ impl<'a> SessionStore<'a> {
             publish: None,
         };
 
+        // Content the live object holds is in the store already, loose
+        // or packed, and is not written a second time.
+        if !matches!(stored, Some((_, true, _))) {
+            for file in &files {
+                write_hashed_blob(path, &file.sha, &file.bytes)?;
+            }
+            build_files_tree_inner(path, file_entries())?;
+        }
         let mut tree = ObjectTree {
             attrs: Some(
                 serde_json::to_value(&attrs)
@@ -953,13 +968,12 @@ fn change_value(r: &ChangeRecord) -> Value {
     }
 }
 
-/// A [`ContentSink`] that captures each `create` call into a git blob
-/// under the store's object directory and records the resulting SHA.
-/// Blobs are buffered in memory to compute their SHA (matching git's
-/// `hash-object` behavior for a stream of unknown length).
+/// A [`ContentSink`] that holds each created file in memory with the
+/// SHA of the blob it would be. Nothing reaches the store: the caller
+/// compares the SHAs with what the store holds and writes the files
+/// it decides to keep.
 pub(crate) struct GitContentSink {
-    store_path: PathBuf,
-    entries: Vec<(String, String)>,
+    files: Vec<SinkFile>,
     write_error: Option<StoreError>,
     /// The cap on total bytes across every file written for one
     /// session; `None` is unlimited.
@@ -968,22 +982,30 @@ pub(crate) struct GitContentSink {
     total_bytes: u64,
 }
 
+/// One file a driver wrote into a [`GitContentSink`].
+pub(crate) struct SinkFile {
+    /// The file's path relative to the content root
+    path: String,
+    /// The SHA of `bytes` as a blob
+    sha: String,
+    bytes: Vec<u8>,
+}
+
 impl GitContentSink {
-    pub(crate) fn new(store_path: PathBuf, max_bytes: Option<u64>) -> Self {
+    pub(crate) fn new(max_bytes: Option<u64>) -> Self {
         Self {
-            store_path,
-            entries: Vec::new(),
+            files: Vec::new(),
             write_error: None,
             max_bytes,
             total_bytes: 0,
         }
     }
 
-    pub(crate) fn into_entries(self) -> Result<Vec<(String, String)>, StoreError> {
+    pub(crate) fn into_files(self) -> Result<Vec<SinkFile>, StoreError> {
         if let Some(e) = self.write_error {
             return Err(e);
         }
-        Ok(self.entries)
+        Ok(self.files)
     }
 
     /// Take a recorded write error, leaving none. The caller uses this
@@ -1015,7 +1037,7 @@ impl Write for GitBlobWriter<'_> {
         // Enforce the cap as bytes arrive, so a runaway session stops at
         // the limit rather than buffering to exhaustion. On breach the
         // sink records `SessionTooLarge` and the write errors, which
-        // aborts the copy before any blob is finalized.
+        // aborts the copy before the file is recorded.
         if let Some(max) = self.sink.max_bytes {
             let projected = self.sink.total_bytes + buf.len() as u64;
             if projected > max {
@@ -1041,14 +1063,19 @@ impl Drop for GitBlobWriter<'_> {
             return;
         }
         let bytes = std::mem::take(&mut self.buffer);
-        match write_blob_stream(&self.sink.store_path, io::Cursor::new(bytes)) {
-            Ok(sha) => self
-                .sink
-                .entries
-                .push((std::mem::take(&mut self.path), sha)),
-            Err(e) => self.sink.write_error = Some(e),
-        }
+        self.sink.files.push(SinkFile {
+            path: std::mem::take(&mut self.path),
+            sha: blob_sha(&bytes),
+            bytes,
+        });
     }
+}
+
+/// The SHA of the `files.d/` tree [`build_files_tree`] writes from
+/// `(relative_path, blob_sha)` pairs. Nothing is written.
+fn files_tree_sha(entries: Vec<(String, String)>) -> Result<String, StoreError> {
+    validate_session_paths(&entries)?;
+    files_tree(entries, &tree_sha)
 }
 
 /// Build the `files.d/` tree from `(relative_path, blob_sha)` pairs.
@@ -1126,6 +1153,16 @@ pub(crate) fn build_files_tree_inner(
     path: &Path,
     entries: Vec<(String, String)>,
 ) -> Result<String, StoreError> {
+    files_tree(entries, &|entries| mktree(path, entries))
+}
+
+/// The SHA of the tree of `entries`, with each directory level made
+/// into a tree by `tree`: [`mktree`] to write the trees, [`tree_sha`]
+/// to name them only.
+fn files_tree(
+    entries: Vec<(String, String)>,
+    tree: &dyn Fn(&[TreeInput<'_>]) -> Result<String, StoreError>,
+) -> Result<String, StoreError> {
     let mut blobs: BTreeMap<String, String> = BTreeMap::new();
     let mut subdirs: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
     for (rel, sha) in entries {
@@ -1143,7 +1180,7 @@ pub(crate) fn build_files_tree_inner(
     }
     let mut subtree_shas: Vec<(String, String)> = Vec::with_capacity(subdirs.len());
     for (dir, sub) in subdirs {
-        subtree_shas.push((dir, build_files_tree_inner(path, sub)?));
+        subtree_shas.push((dir, files_tree(sub, tree)?));
     }
     let mut entries: Vec<TreeInput<'_>> = blobs
         .iter()
@@ -1158,7 +1195,7 @@ pub(crate) fn build_files_tree_inner(
         sha,
         name: dir,
     }));
-    mktree(path, &entries)
+    tree(&entries)
 }
 
 #[cfg(test)]
@@ -1691,6 +1728,152 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!(same.outcome, SessionOutcome::Unchanged);
         assert_eq!(same.commit_sha, bumped.commit_sha);
+    }
+
+    /// The `(loose, packed)` object counts of the store's object
+    /// database.
+    fn object_counts(store: &Store) -> (u64, u64) {
+        let out = run(git_in(store.path(), ["count-objects", "-v"])).unwrap();
+        let field = |name: &str| {
+            out.lines()
+                .find_map(|line| line.strip_prefix(name))
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap()
+        };
+        (field("count:"), field("in-pack:"))
+    }
+
+    /// A pack leaves no loose file to find, and an unchanged session
+    /// is settled from SHAs alone: the re-add writes no object.
+    #[test]
+    fn re_add_of_an_unchanged_session_writes_nothing_to_a_packed_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let sessions = SessionStore::from(&store);
+
+        let first = sessions
+            .add(&FakeDriver, &mut fake_lines("s1", "{}\n{}\n"))
+            .unwrap();
+        run(git_in(store.path(), ["gc", "--quiet"])).unwrap();
+        let packed = object_counts(&store);
+        assert_eq!(packed.0, 0, "gc should pack every object");
+
+        let again = sessions
+            .add(&FakeDriver, &mut fake_lines("s1", "{}\n{}\n"))
+            .unwrap();
+        assert_eq!(again.outcome, SessionOutcome::Unchanged);
+        assert_eq!(again.commit_sha, first.commit_sha);
+        assert_eq!(object_counts(&store), packed);
+    }
+
+    /// A driver version change commits new attrs over content the
+    /// live object holds: on a packed store the content is not
+    /// written again as loose objects.
+    #[test]
+    fn a_driver_version_change_does_not_rewrite_packed_content() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let sessions = SessionStore::from(&store);
+
+        let first = sessions
+            .add(&FakeDriver, &mut fake_lines("s1", "{}\n{}\n"))
+            .unwrap();
+        run(git_in(store.path(), ["gc", "--quiet"])).unwrap();
+
+        let bumped = sessions
+            .add(&VersionedDriver("0.2"), &mut fake_lines("s1", "{}\n{}\n"))
+            .unwrap();
+        assert_eq!(bumped.outcome, SessionOutcome::Updated);
+        let files_tree = files_tree_sha(&store, &first.commit_sha);
+        assert_eq!(files_tree_sha(&store, &bumped.commit_sha), files_tree);
+        let blob = run(git_in(
+            store.path(),
+            ["rev-parse", &format!("{files_tree}:session.jsonl")],
+        ))
+        .unwrap();
+        for sha in [files_tree.as_str(), blob.trim()] {
+            let (dir, file) = sha.split_at(2);
+            assert!(
+                !store.path().join("objects").join(dir).join(file).exists(),
+                "{sha} was written as a loose object"
+            );
+        }
+    }
+
+    /// Content the driver orders before the stored state is refused
+    /// before any of it reaches the store.
+    #[test]
+    fn a_refused_older_copy_writes_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let sessions = SessionStore::from(&store);
+
+        sessions
+            .add(&FakeDriver, &mut fake_lines("s1", "{}\n{}\n{}\n"))
+            .unwrap();
+        let before = object_counts(&store);
+        let older = sessions
+            .add(&FakeDriver, &mut fake_lines("s1", "{\"older\":1}\n"))
+            .unwrap();
+        assert_eq!(older.outcome, SessionOutcome::Unchanged);
+        assert_eq!(object_counts(&store), before);
+    }
+
+    /// `FakeDriver` whose written content does not derive.
+    struct UnderivableDriver;
+
+    impl DriverTrait for UnderivableDriver {
+        fn name(&self) -> &'static str {
+            FakeDriver.name()
+        }
+        fn version(&self) -> &'static str {
+            FakeDriver.version()
+        }
+        fn schemes(&self) -> &'static [&'static str] {
+            FakeDriver.schemes()
+        }
+        fn open_source(&self, options: &SourceOptions) -> Result<Box<dyn Source>, DriverError> {
+            FakeDriver.open_source(options)
+        }
+        fn split_session_url(&self, session_url: &str) -> Result<(String, String), DriverError> {
+            FakeDriver.split_session_url(session_url)
+        }
+        fn write_native(
+            &self,
+            session: &mut dyn NativeSession,
+            sink: &mut dyn ContentSink,
+        ) -> Result<WrittenContent, DriverError> {
+            let written = FakeDriver.write_native(session, sink)?;
+            Ok(WrittenContent::with_derive(written.content_format, || {
+                Err(DriverError::Other("content does not derive".into()))
+            }))
+        }
+        fn read_stored(
+            &self,
+            native_id: String,
+            content_format: &str,
+            source: Box<dyn ContentSource>,
+        ) -> Result<Box<dyn StoredSession>, DriverError> {
+            FakeDriver.read_stored(native_id, content_format, source)
+        }
+    }
+
+    /// A session whose content does not derive fails the add before
+    /// any of the content reaches the store.
+    #[test]
+    fn a_failed_derive_writes_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let sessions = SessionStore::from(&store);
+
+        let before = object_counts(&store);
+        let err = sessions
+            .add(&UnderivableDriver, &mut fake_lines("s1", "{}\n"))
+            .unwrap_err();
+        assert!(err.to_string().contains("content does not derive"), "{err}");
+        assert_eq!(object_counts(&store), before);
     }
 
     #[test]

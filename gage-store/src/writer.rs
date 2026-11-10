@@ -20,7 +20,7 @@
 //! the compare-and-swap on the old value.
 
 use std::fs;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::Path;
 
 use flate2::Compression;
@@ -48,19 +48,29 @@ pub(crate) fn write_blob(path: &Path, content: &[u8]) -> Result<String, StoreErr
     write_object(path, "blob", content)
 }
 
-/// Read `content` to its end and write it as a blob. The whole
-/// content is held in memory to compute its SHA, as `git hash-object`
-/// does for a stream of unknown length.
-pub(crate) fn write_blob_stream(path: &Path, mut content: impl Read) -> Result<String, StoreError> {
-    let mut bytes = Vec::new();
-    content
-        .read_to_end(&mut bytes)
-        .map_err(StoreError::ReadContent)?;
-    write_object(path, "blob", &bytes)
+/// The SHA of `content` as a blob. Nothing is written.
+pub(crate) fn blob_sha(content: &[u8]) -> String {
+    object_sha("blob", content)
+}
+
+/// Write `content` as the blob named `sha`, which the caller computed
+/// from the same bytes with [`blob_sha`].
+pub(crate) fn write_hashed_blob(path: &Path, sha: &str, content: &[u8]) -> Result<(), StoreError> {
+    write_hashed_object(path, "blob", sha, content)
 }
 
 /// Write a tree from `entries`, in any order, and return its SHA.
 pub(crate) fn mktree(path: &Path, entries: &[TreeInput<'_>]) -> Result<String, StoreError> {
+    write_object(path, "tree", &tree_body(entries)?)
+}
+
+/// The SHA of the tree [`mktree`] writes from `entries`. Nothing is
+/// written.
+pub(crate) fn tree_sha(entries: &[TreeInput<'_>]) -> Result<String, StoreError> {
+    Ok(object_sha("tree", &tree_body(entries)?))
+}
+
+fn tree_body(entries: &[TreeInput<'_>]) -> Result<Vec<u8>, StoreError> {
     let mut sorted: Vec<&TreeInput<'_>> = entries.iter().collect();
     sorted.sort_by_key(|entry| tree_sort_key(entry));
     let mut body = Vec::new();
@@ -73,7 +83,7 @@ pub(crate) fn mktree(path: &Path, entries: &[TreeInput<'_>]) -> Result<String, S
         body.push(0);
         body.extend_from_slice(&decode_sha(entry.sha)?);
     }
-    write_object(path, "tree", &body)
+    Ok(body)
 }
 
 /// Rejects tree entry names git's own parser or `fsck --strict` would
@@ -173,23 +183,35 @@ fn commit_tree_at(
     write_object(path, "commit", body.as_bytes())
 }
 
-/// Write one loose object and return its SHA. An object that already
-/// exists is left in place; git's content addressing makes the write
-/// a no-op.
+/// Write one loose object and return its SHA.
 fn write_object(path: &Path, kind: &str, bytes: &[u8]) -> Result<String, StoreError> {
+    let sha = object_sha(kind, bytes);
+    write_hashed_object(path, kind, &sha, bytes)?;
+    Ok(sha)
+}
+
+/// The SHA git gives an object of `kind` holding `bytes`.
+fn object_sha(kind: &str, bytes: &[u8]) -> String {
     let mut hasher = Sha1::new();
     hasher.update(format!("{kind} {}\0", bytes.len()).as_bytes());
     hasher.update(bytes);
-    let sha: String = hasher
+    hasher
         .finalize()
         .iter()
         .map(|b| format!("{b:02x}"))
-        .collect();
+        .collect()
+}
+
+/// Write the loose object named `sha`, which the caller computed from
+/// `kind` and `bytes` with [`object_sha`]. An object that already
+/// exists as a loose file is left in place; git's content addressing
+/// makes the write a no-op.
+fn write_hashed_object(path: &Path, kind: &str, sha: &str, bytes: &[u8]) -> Result<(), StoreError> {
     let (dir_name, file_name) = sha.split_at(2);
     let dir = path.join("objects").join(dir_name);
     let file = dir.join(file_name);
     if file.exists() {
-        return Ok(sha);
+        return Ok(());
     }
     let write = |source| StoreError::Write {
         path: file.clone(),
@@ -212,7 +234,7 @@ fn write_object(path: &Path, kind: &str, bytes: &[u8]) -> Result<String, StoreEr
     let mut tmp = NamedTempFile::new_in(&dir).map_err(write)?;
     tmp.write_all(&compressed).map_err(write)?;
     tmp.persist(&file).map_err(|e| write(e.error))?;
-    Ok(sha)
+    Ok(())
 }
 
 /// Decode a 40-character hex SHA into its 20 bytes.
