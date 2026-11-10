@@ -995,7 +995,7 @@ fn format_session_commit_message(outcomes: &[DatasetSessionAddOutcome]) -> Strin
         match o.outcome {
             SessionOutcome::Added => added.push(o.session_num),
             SessionOutcome::Updated => updated.push(o.session_num),
-            SessionOutcome::Unchanged => {}
+            SessionOutcome::Unchanged | SessionOutcome::Older => {}
         }
     }
     added.sort();

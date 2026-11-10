@@ -149,7 +149,8 @@ pub struct SessionAddOutcome {
     /// Derived Gage object id for the session.
     pub id: String,
     /// Commit SHA of the resulting version. When `outcome` is
-    /// [`SessionOutcome::Unchanged`] this is the existing commit.
+    /// [`SessionOutcome::Unchanged`] and [`SessionOutcome::Older`]
+    /// this is the existing commit.
     pub commit_sha: String,
     pub outcome: SessionOutcome,
 }
@@ -162,6 +163,10 @@ pub enum SessionOutcome {
     Updated,
     /// Existing session content matched; no commit was written.
     Unchanged,
+    /// The native content differs and the driver orders it before the
+    /// stored state; the stored session was kept and no commit was
+    /// written.
+    Older,
 }
 
 /// Outcome of removing sessions from the store.
@@ -243,7 +248,8 @@ impl<'a> SessionStore<'a> {
     /// rests on. Content equal to the live object's, written by the
     /// same driver version in the same format, is unchanged. Content
     /// that differs is written when the driver orders it at or after
-    /// the stored state, and left alone when it orders it before. The
+    /// the stored state, and reported as older and left alone when it
+    /// orders it before. The
     /// store receives the content only when the session is written.
     pub fn add(
         &self,
@@ -295,10 +301,10 @@ impl<'a> SessionStore<'a> {
             .as_ref()
             .filter(|c| !c.header.is_tombstone())
             .map(|c| (c, c.tree.subtrees.get(FILES_TREE) == Some(&files_tree_sha)));
-        let unchanged = |current: &Object| SessionAddOutcome {
+        let kept = |current: &Object, outcome| SessionAddOutcome {
             id: id.clone(),
             commit_sha: current.commit_sha.clone(),
-            outcome: SessionOutcome::Unchanged,
+            outcome,
         };
         let stored = match live {
             Some((current, same_content)) => {
@@ -309,7 +315,7 @@ impl<'a> SessionStore<'a> {
                     && stored.driver == driver_stamp
                     && stored.content_format == written.content_format
                 {
-                    return Ok(unchanged(current));
+                    return Ok(kept(current, SessionOutcome::Unchanged));
                 }
                 Some((current, same_content, stored))
             }
@@ -321,7 +327,7 @@ impl<'a> SessionStore<'a> {
         if let Some((current, false, stored)) = &stored
             && driver.native_order(&summary, &stored.summary) == Ordering::Less
         {
-            return Ok(unchanged(current));
+            return Ok(kept(current, SessionOutcome::Older));
         }
 
         let attrs = SessionAttrsRecord {
@@ -1687,7 +1693,7 @@ pub(crate) mod tests {
         let older = sessions
             .add(&FakeDriver, &mut fake_lines("s1", "{}\n"))
             .unwrap();
-        assert_eq!(older.outcome, SessionOutcome::Unchanged);
+        assert_eq!(older.outcome, SessionOutcome::Older);
         assert_eq!(older.commit_sha, three.commit_sha);
 
         let modified = sessions
@@ -1817,7 +1823,7 @@ pub(crate) mod tests {
         let older = sessions
             .add(&FakeDriver, &mut fake_lines("s1", "{\"older\":1}\n"))
             .unwrap();
-        assert_eq!(older.outcome, SessionOutcome::Unchanged);
+        assert_eq!(older.outcome, SessionOutcome::Older);
         assert_eq!(object_counts(&store), before);
     }
 

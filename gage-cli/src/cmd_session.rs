@@ -888,6 +888,9 @@ fn add_outro(
         SessionOutcome::Added => format!("Added session {shown} to {place}"),
         SessionOutcome::Updated => format!("Updated session {shown} in {place}"),
         SessionOutcome::Unchanged => format!("Session {shown} is unchanged in {place}"),
+        SessionOutcome::Older => {
+            format!("Kept stored session {shown} in {place} (native is older)")
+        }
     }
 }
 
@@ -1992,6 +1995,14 @@ mod tests {
                 "1 session unchanged"
             ),
             "Session 01k2h4t9 is unchanged in the store"
+        );
+        assert_eq!(
+            outro(
+                &[placed(SessionOutcome::Older)],
+                None,
+                "1 session older than stored"
+            ),
+            "Kept stored session 01k2h4t9 in the store (native is older)"
         );
         assert_eq!(
             outro(

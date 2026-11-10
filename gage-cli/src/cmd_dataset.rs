@@ -414,6 +414,7 @@ pub(crate) struct AddCounts {
     pub(crate) added: usize,
     pub(crate) updated: usize,
     pub(crate) unchanged: usize,
+    pub(crate) older: usize,
 }
 
 impl AddCounts {
@@ -424,48 +425,41 @@ impl AddCounts {
                 SessionOutcome::Added => counts.added += 1,
                 SessionOutcome::Updated => counts.updated += 1,
                 SessionOutcome::Unchanged => counts.unchanged += 1,
+                SessionOutcome::Older => counts.older += 1,
             }
         }
         counts
     }
 
     /// The closing line: the leading nonzero count in the order added,
-    /// updated, unchanged, carrying the dataset when there is one, then
-    /// each remaining nonzero count as a short clause.
+    /// updated, unchanged, older, carrying the dataset when there is
+    /// one, then each remaining nonzero count as a short clause.
     fn fmt_line(&self, f: &mut fmt::Formatter<'_>, dataset: Option<&str>) -> fmt::Result {
         let place = |preposition: &str| match dataset {
             Some(dataset) => format!(" {preposition} dataset {}", short_uuid(dataset)),
             None => String::new(),
         };
-        let mut rest: Vec<String> = Vec::new();
-        if self.added > 0 {
-            write!(f, "Added {}{}", count(self.added, "session"), place("to"))?;
-            if self.updated > 0 {
-                rest.push(format!("updated {}", self.updated));
-            }
-            if self.unchanged > 0 {
-                rest.push(format!("{} unchanged", self.unchanged));
-            }
-        } else if self.updated > 0 {
-            write!(
-                f,
-                "Updated {}{}",
-                count(self.updated, "session"),
-                place("in")
-            )?;
-            if self.unchanged > 0 {
-                rest.push(format!("{} unchanged", self.unchanged));
-            }
-        } else {
-            write!(
-                f,
-                "{} unchanged{}",
-                count(self.unchanged, "session"),
-                place("in")
-            )?;
+        let counts = [self.added, self.updated, self.unchanged, self.older];
+        // An add of no sessions reads as none unchanged.
+        let (lead, n) = counts
+            .into_iter()
+            .enumerate()
+            .find(|(_, n)| *n > 0)
+            .unwrap_or((2, 0));
+        let sessions = count(n, "session");
+        match lead {
+            0 => write!(f, "Added {sessions}{}", place("to"))?,
+            1 => write!(f, "Updated {sessions}{}", place("in"))?,
+            2 => write!(f, "{sessions} unchanged{}", place("in"))?,
+            _ => write!(f, "{sessions} older than stored{}", place("in"))?,
         }
-        for clause in rest {
-            write!(f, ", {clause}")?;
+        for (kind, n) in counts.iter().enumerate().skip(lead + 1) {
+            match (kind, n) {
+                (_, 0) => {}
+                (1, n) => write!(f, ", updated {n}")?,
+                (2, n) => write!(f, ", {n} unchanged")?,
+                (_, n) => write!(f, ", {n} older")?,
+            }
         }
         Ok(())
     }
@@ -481,17 +475,25 @@ impl fmt::Display for AddEvent<'_> {
                 native_id,
                 dataset,
             } => {
-                let (verb, preposition) = match outcome {
-                    SessionOutcome::Added => ("Added", "to"),
-                    SessionOutcome::Updated => ("Updated", "in"),
-                    SessionOutcome::Unchanged => ("Unchanged", "in"),
+                let (id, native_id) = (short_uuid(id), short_uuid(native_id));
+                let preposition = match outcome {
+                    SessionOutcome::Added => {
+                        write!(f, "Added session {id} (native {native_id})")?;
+                        "to"
+                    }
+                    SessionOutcome::Updated => {
+                        write!(f, "Updated session {id} (native {native_id})")?;
+                        "in"
+                    }
+                    SessionOutcome::Unchanged => {
+                        write!(f, "Unchanged session {id} (native {native_id})")?;
+                        "in"
+                    }
+                    SessionOutcome::Older => {
+                        write!(f, "Kept stored session {id} (native {native_id} is older)")?;
+                        "in"
+                    }
                 };
-                write!(
-                    f,
-                    "{verb} session {} (native {})",
-                    short_uuid(id),
-                    short_uuid(native_id)
-                )?;
                 match dataset {
                     Some(dataset) => {
                         write!(f, " {preposition} dataset {}", short_uuid(dataset))
@@ -1018,6 +1020,14 @@ mod tests {
             line(SessionOutcome::Unchanged, dataset),
             "Unchanged session 01k2h4t9 (native fb064932) in dataset 7zzzzzzz"
         );
+        assert_eq!(
+            line(SessionOutcome::Older, None),
+            "Kept stored session 01k2h4t9 (native fb064932 is older)"
+        );
+        assert_eq!(
+            line(SessionOutcome::Older, dataset),
+            "Kept stored session 01k2h4t9 (native fb064932 is older) in dataset 7zzzzzzz"
+        );
     }
 
     /// The closing line leads with the first nonzero count in the
@@ -1033,7 +1043,7 @@ mod tests {
             .to_string()
         };
         let dataset = Some("7zzzzzzzzzzzzzzzzzzzzzzzzz");
-        use SessionOutcome::{Added, Unchanged, Updated};
+        use SessionOutcome::{Added, Older, Unchanged, Updated};
         assert_eq!(line(&[Added], None), "Added 1 session");
         assert_eq!(line(&[Added, Added], None), "Added 2 sessions");
         assert_eq!(line(&[Updated, Updated], None), "Updated 2 sessions");
@@ -1057,6 +1067,18 @@ mod tests {
         assert_eq!(
             line(&[Unchanged, Unchanged], dataset),
             "2 sessions unchanged in dataset 7zzzzzzz"
+        );
+        assert_eq!(
+            line(&[Added, Updated, Unchanged, Older, Older], None),
+            "Added 1 session, updated 1, 1 unchanged, 2 older"
+        );
+        assert_eq!(
+            line(&[Unchanged, Older], dataset),
+            "1 session unchanged in dataset 7zzzzzzz, 1 older"
+        );
+        assert_eq!(
+            line(&[Older, Older], dataset),
+            "2 sessions older than stored in dataset 7zzzzzzz"
         );
     }
 }
