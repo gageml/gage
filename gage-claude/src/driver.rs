@@ -1050,6 +1050,8 @@ pub struct ClaudeNativeSession {
     /// the filesystem, before the session was opened.
     mtime: SystemTime,
     size: u64,
+    /// Also held in the derived attrs. The derive needs it before
+    /// those exist, and the store reads it from them afterwards.
     project: String,
     store: IndexStore,
     /// The derived attributes, read on first use: from the summary
