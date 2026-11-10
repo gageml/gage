@@ -280,7 +280,8 @@ pub struct Entry {
 /// What the rendered view shows for an entry.
 pub enum EntryBody {
     /// The message text, rendered as markdown, and the name and
-    /// content of each tag split off the front of it
+    /// content of each tag split off the front of it, which are shown
+    /// when there is no text
     Text {
         text: String,
         tags: Vec<(String, String)>,
