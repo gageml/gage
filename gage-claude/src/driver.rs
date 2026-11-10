@@ -177,9 +177,14 @@ impl Driver for ClaudeDriver {
         // it; a session is re-added over time, so that content can join
         // later at no duplication cost (git shares identical blobs).
         //
-        // One read serves the write and the derive, so the attrs
-        // describe the bytes stored and not the file as it was at some
-        // other moment.
+        // One read serves the write and the derive, so the derived
+        // attrs and the size describe the bytes stored.
+        //
+        // The mtime is the one read when the session was opened. A
+        // transcript that grows between the open and this read is
+        // stored with its new content and that earlier mtime. The
+        // interval is one store lookup for a session opened by id, and
+        // the cost is one early timestamp, so the race is accepted.
         let path = claude.session_path().to_path_buf();
         let bytes = fs::read(&path).map_err(DriverError::Io)?;
         sink.create("session.jsonl")
@@ -1037,7 +1042,8 @@ pub struct ClaudeNativeSession {
     /// `claude:<absolute root>/<uuid>`
     source: String,
     session_path: PathBuf,
-    /// The file's mtime and size as the directory walk saw them
+    /// The file's mtime and size as the caller last read them from
+    /// the filesystem, before the session was opened.
     mtime: SystemTime,
     size: u64,
     project: String,
@@ -1049,9 +1055,11 @@ pub struct ClaudeNativeSession {
 
 impl ClaudeNativeSession {
     /// Open the session at `path` without reading it. `mtime` and
-    /// `size` are the file's stat values the caller already holds from
-    /// its directory walk; `root` is the absolute Claude root the file
-    /// sits under; `store` holds the summary cache.
+    /// `size` are the file's stat values as the caller last read them:
+    /// from its directory walk when it lists sessions, or from a stat
+    /// of this one file when it opens a session by id. `root` is the
+    /// absolute Claude root the file sits under; `store` holds the
+    /// summary cache.
     pub fn open(
         native_id: &str,
         path: &Path,
