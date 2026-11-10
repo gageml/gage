@@ -101,3 +101,18 @@ pub(crate) fn reopen(store: Store) -> Store {
     drop(store);
     open(&path).unwrap()
 }
+
+/// The `(loose, packed)` object counts of the object database at
+/// `path`.
+pub(crate) fn object_counts(path: &Path) -> (u64, u64) {
+    let out = run(git_in(path, ["count-objects", "-v"])).unwrap();
+    let field = |name: &str| {
+        out.lines()
+            .find_map(|line| line.strip_prefix(name))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap()
+    };
+    (field("count:"), field("in-pack:"))
+}

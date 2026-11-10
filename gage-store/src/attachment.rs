@@ -687,8 +687,9 @@ fn decode_attrs(object: &Object) -> Result<AttachmentAttrs, StoreError> {
 mod tests {
     use super::*;
     use crate::KeyStore;
+    use crate::git::{git_in, run};
     use crate::object::object_ref;
-    use crate::test_support::open_store;
+    use crate::test_support::{object_counts, open_store};
     use std::slice;
 
     fn write(path: &Path, content: &str) {
@@ -880,6 +881,35 @@ mod tests {
         validate_key(&key).unwrap();
         assert_ne!(key, default_attachment_key("other", root, &pats, &excludes));
         assert_ne!(key, default_attachment_key("cfg", root, &pats, &[]));
+    }
+
+    /// A pack leaves no loose file to find; the writer finds the
+    /// attachment's objects in the pack and writes none of them again.
+    #[test]
+    fn re_add_of_an_unchanged_attachment_writes_nothing_to_a_packed_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(dir.path());
+        let root = fixture_root(dir.path());
+        let attachments = AttachmentStore::from(&store);
+        let pats = patterns(&["**"]);
+        let key = default_attachment_key("cfg", &root, &pats, &[]);
+        let spec = AttachmentSpec {
+            name: Some("cfg"),
+            key: Some(&key),
+            targets: &[],
+            root: &root,
+            includes: &pats,
+            excludes: &[],
+        };
+        let first = attachments.add(&spec).unwrap();
+        run(git_in(store.path(), ["gc", "--quiet"])).unwrap();
+        let packed = object_counts(store.path());
+        assert_eq!(packed.0, 0, "gc should pack every object");
+
+        let again = attachments.add(&spec).unwrap();
+        assert_eq!(again.outcome, AttachmentOutcome::Unchanged);
+        assert_eq!(again.commit_sha, first.commit_sha);
+        assert_eq!(object_counts(store.path()), packed);
     }
 
     #[test]

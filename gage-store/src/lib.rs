@@ -53,6 +53,7 @@ pub mod key;
 mod ls;
 mod note;
 pub mod object;
+mod pack_index;
 pub mod query;
 pub mod refs;
 mod remote;

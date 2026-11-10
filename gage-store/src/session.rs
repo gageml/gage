@@ -1220,7 +1220,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::DatasetStore;
     use crate::git::{git_in, run};
-    use crate::test_support::open_store;
+    use crate::test_support::{object_counts, open_store};
     use gage_core::uuid::new_uuid;
     use gage_session::SessionAttrs;
 
@@ -1823,21 +1823,6 @@ pub(crate) mod tests {
         );
     }
 
-    /// The `(loose, packed)` object counts of the store's object
-    /// database.
-    fn object_counts(store: &Store) -> (u64, u64) {
-        let out = run(git_in(store.path(), ["count-objects", "-v"])).unwrap();
-        let field = |name: &str| {
-            out.lines()
-                .find_map(|line| line.strip_prefix(name))
-                .unwrap()
-                .trim()
-                .parse()
-                .unwrap()
-        };
-        (field("count:"), field("in-pack:"))
-    }
-
     /// A pack leaves no loose file to find, and an unchanged session
     /// is settled from SHAs alone: the re-add writes no object.
     #[test]
@@ -1850,7 +1835,7 @@ pub(crate) mod tests {
             .add(&FakeDriver, &mut fake_lines("s1", "{}\n{}\n"))
             .unwrap();
         run(git_in(store.path(), ["gc", "--quiet"])).unwrap();
-        let packed = object_counts(&store);
+        let packed = object_counts(store.path());
         assert_eq!(packed.0, 0, "gc should pack every object");
 
         let again = sessions
@@ -1858,7 +1843,7 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!(again.outcome, SessionOutcome::Unchanged);
         assert_eq!(again.commit_sha, first.commit_sha);
-        assert_eq!(object_counts(&store), packed);
+        assert_eq!(object_counts(store.path()), packed);
     }
 
     /// A later summary generation commits new attrs over content the
@@ -1912,12 +1897,12 @@ pub(crate) mod tests {
         sessions
             .add(&FakeDriver, &mut fake_lines("s1", "{}\n{}\n{}\n"))
             .unwrap();
-        let before = object_counts(&store);
+        let before = object_counts(store.path());
         let older = sessions
             .add(&FakeDriver, &mut fake_lines("s1", "{\"older\":1}\n"))
             .unwrap();
         assert_eq!(older.outcome, SessionOutcome::Older);
-        assert_eq!(object_counts(&store), before);
+        assert_eq!(object_counts(store.path()), before);
     }
 
     /// `FakeDriver` whose written content does not derive.
@@ -1969,12 +1954,12 @@ pub(crate) mod tests {
         let (store, _fsck) = open_store(tmp.path());
         let sessions = SessionStore::from(&store);
 
-        let before = object_counts(&store);
+        let before = object_counts(store.path());
         let err = sessions
             .add(&UnderivableDriver, &mut fake_lines("s1", "{}\n"))
             .unwrap_err();
         assert!(err.to_string().contains("content does not derive"), "{err}");
-        assert_eq!(object_counts(&store), before);
+        assert_eq!(object_counts(store.path()), before);
     }
 
     #[test]

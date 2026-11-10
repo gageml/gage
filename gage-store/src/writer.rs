@@ -20,7 +20,7 @@
 //! the compare-and-swap on the old value.
 
 use std::fs;
-use std::io::Write;
+use std::io::{self, Write};
 use std::path::Path;
 
 use flate2::Compression;
@@ -29,6 +29,7 @@ use sha1::{Digest, Sha1};
 use tempfile::NamedTempFile;
 
 use crate::StoreError;
+use crate::pack_index::{reuse_packed, touch};
 
 /// Fixed identity written to the author and committer of every object
 /// commit.
@@ -203,14 +204,30 @@ fn object_sha(kind: &str, bytes: &[u8]) -> String {
 }
 
 /// Write the loose object named `sha`, which the caller computed from
-/// `kind` and `bytes` with [`object_sha`]. An object that already
-/// exists as a loose file is left in place; git's content addressing
-/// makes the write a no-op.
+/// `kind` and `bytes` with [`object_sha`]. An object the store already
+/// holds, as a loose file or in a pack, is left in place; git's
+/// content addressing makes the write a no-op.
+///
+/// An object left in place is marked as in use by setting the
+/// modification time of its file or pack to now, as git does. The
+/// commit that will refer to it may not be written yet, and `gc`
+/// deletes unreachable objects it takes for old.
 fn write_hashed_object(path: &Path, kind: &str, sha: &str, bytes: &[u8]) -> Result<(), StoreError> {
     let (dir_name, file_name) = sha.split_at(2);
     let dir = path.join("objects").join(dir_name);
     let file = dir.join(file_name);
-    if file.exists() {
+    match touch(&file) {
+        Ok(()) => return Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        // The write below replaces the file with identical bytes.
+        Err(e) => {
+            tracing::warn!(
+                object = sha,
+                "loose object not marked as in use, rewritten: {e}"
+            );
+        }
+    }
+    if reuse_packed(path, &decode_sha(sha)?) {
         return Ok(());
     }
     let write = |source| StoreError::Write {
@@ -273,6 +290,126 @@ mod tests {
             .unwrap()
             .trim()
             .to_string()
+    }
+
+    fn loose_file(path: &Path, sha: &str) -> std::path::PathBuf {
+        let (dir, file) = sha.split_at(2);
+        path.join("objects").join(dir).join(file)
+    }
+
+    /// Write `bytes` as a blob a ref reaches, then pack the store. `gc`
+    /// packs reachable objects; an unreachable one stays loose or
+    /// goes to a cruft pack.
+    fn packed_blob(path: &Path, bytes: &[u8]) -> String {
+        let sha = write_blob(path, bytes).unwrap();
+        let tree = mktree(
+            path,
+            &[TreeInput {
+                mode: "100644",
+                sha: &sha,
+                name: "file",
+            }],
+        )
+        .unwrap();
+        let commit = commit_tree(path, &tree, "packed", &[]).unwrap();
+        run(git_in(
+            path,
+            ["update-ref", "refs/gage/1/object/packed", &commit],
+        ))
+        .unwrap();
+        run(git_in(path, ["gc", "--quiet"])).unwrap();
+        assert!(!loose_file(path, &sha).exists(), "gc should pack the blob");
+        sha
+    }
+
+    /// The one pack file of a store that `gc` has packed.
+    fn pack_file(path: &Path, extension: &str) -> std::path::PathBuf {
+        fs::read_dir(path.join("objects").join("pack"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|p| p.extension().is_some_and(|ext| ext == extension))
+            .unwrap()
+    }
+
+    fn mtime(path: &Path) -> std::time::SystemTime {
+        fs::metadata(path).unwrap().modified().unwrap()
+    }
+
+    /// Set the modification time of `path` to the epoch, so a later
+    /// touch is visible whatever the clock's resolution.
+    fn age(path: &Path) {
+        fs::File::open(path)
+            .unwrap()
+            .set_modified(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap();
+    }
+
+    /// An object `gc` moved into a pack is found there: writing it
+    /// again creates no loose file and marks the pack as in use.
+    #[test]
+    fn a_packed_object_is_not_written_again_and_its_pack_is_touched() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = repo(tmp.path());
+        let sha = packed_blob(&path, b"packed\n");
+        let pack = pack_file(&path, "pack");
+        age(&pack);
+
+        assert_eq!(write_blob(&path, b"packed\n").unwrap(), sha);
+        assert!(!loose_file(&path, &sha).exists());
+        assert!(mtime(&pack) > std::time::SystemTime::UNIX_EPOCH);
+
+        let other = write_blob(&path, b"not packed\n").unwrap();
+        assert!(loose_file(&path, &other).exists());
+    }
+
+    /// A loose object left in place is marked as in use.
+    #[test]
+    fn a_loose_object_left_in_place_is_touched() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = repo(tmp.path());
+        let sha = write_blob(&path, b"loose\n").unwrap();
+        let file = loose_file(&path, &sha);
+        age(&file);
+
+        assert_eq!(write_blob(&path, b"loose\n").unwrap(), sha);
+        assert!(mtime(&file) > std::time::SystemTime::UNIX_EPOCH);
+    }
+
+    /// A pack index of a version this reader does not know lists
+    /// nothing it can find, so the object is written loose.
+    #[test]
+    fn an_index_of_another_version_is_ignored() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let path = repo(tmp.path());
+        let sha = packed_blob(&path, b"packed\n");
+        let index = pack_file(&path, "idx");
+        let mut bytes = fs::read(&index).unwrap();
+        bytes[7] = 3;
+        fs::set_permissions(&index, fs::Permissions::from_mode(0o644)).unwrap();
+        fs::write(&index, &bytes).unwrap();
+
+        assert_eq!(write_blob(&path, b"packed\n").unwrap(), sha);
+        assert!(loose_file(&path, &sha).exists());
+
+        // Restore the index for the fsck that ends the test.
+        bytes[7] = 2;
+        fs::write(&index, &bytes).unwrap();
+    }
+
+    /// A cruft pack holds objects `gc` has set aside for deletion; an
+    /// object found only there is written loose.
+    #[test]
+    fn an_object_in_a_cruft_pack_is_written_again() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = repo(tmp.path());
+        let sha = packed_blob(&path, b"packed\n");
+        let mtimes = pack_file(&path, "pack").with_extension("mtimes");
+        fs::write(&mtimes, b"").unwrap();
+
+        assert_eq!(write_blob(&path, b"packed\n").unwrap(), sha);
+        assert!(loose_file(&path, &sha).exists());
+        fs::remove_file(&mtimes).unwrap();
     }
 
     #[test]
@@ -599,15 +736,17 @@ mod tests {
         }
     }
 
+    /// A write renames a new file into place, which changes the
+    /// inode; an object left in place keeps it.
     #[test]
     fn existing_object_is_not_rewritten() {
+        use std::os::unix::fs::MetadataExt;
         let tmp = tempfile::tempdir().unwrap();
         let path = repo(tmp.path());
         let sha = write_blob(&path, b"same").unwrap();
-        let file = path.join("objects").join(&sha[..2]).join(&sha[2..]);
-        let before = fs::metadata(&file).unwrap().modified().unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        let file = loose_file(&path, &sha);
+        let before = fs::metadata(&file).unwrap().ino();
         assert_eq!(write_blob(&path, b"same").unwrap(), sha);
-        assert_eq!(fs::metadata(&file).unwrap().modified().unwrap(), before);
+        assert_eq!(fs::metadata(&file).unwrap().ino(), before);
     }
 }
