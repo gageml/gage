@@ -554,6 +554,10 @@ pub trait StoredSession {
     /// no native artifact: the mtime is the epoch and the size is the
     /// content's.
     fn attrs(&mut self) -> Result<Box<dyn SessionAttrs>, DriverError>;
+    /// The generation of the summary [`Self::attrs`] derives: the
+    /// [`WrittenContent::summary_version`] the driver reports for a
+    /// native session.
+    fn summary_version(&self) -> u32;
 }
 
 /// The changes a derived session makes to its original, by native
@@ -739,6 +743,11 @@ pub trait ContentSource: Send + Sync {
 /// session whose content the store already holds costs no derive.
 pub struct WrittenContent {
     pub content_format: String,
+    /// The generation of the summary the attributes derive. The driver
+    /// raises it on any change to what a summary holds or means, and
+    /// the store derives a stored session again when its recorded
+    /// generation is lower.
+    pub summary_version: u32,
     pub attrs: DeriveAttrs,
 }
 
@@ -747,17 +756,23 @@ pub type DeriveAttrs = Box<dyn FnOnce() -> Result<Box<dyn SessionAttrs>, DriverE
 
 impl WrittenContent {
     /// Written content whose attributes are already in hand.
-    pub fn new(content_format: impl Into<String>, attrs: Box<dyn SessionAttrs>) -> Self {
-        Self::with_derive(content_format, move || Ok(attrs))
+    pub fn new(
+        content_format: impl Into<String>,
+        summary_version: u32,
+        attrs: Box<dyn SessionAttrs>,
+    ) -> Self {
+        Self::with_derive(content_format, summary_version, move || Ok(attrs))
     }
 
     /// Written content whose attributes `derive` produces on request.
     pub fn with_derive(
         content_format: impl Into<String>,
+        summary_version: u32,
         derive: impl FnOnce() -> Result<Box<dyn SessionAttrs>, DriverError> + 'static,
     ) -> Self {
         Self {
             content_format: content_format.into(),
+            summary_version,
             attrs: Box::new(derive),
         }
     }
@@ -767,6 +782,7 @@ impl fmt::Debug for WrittenContent {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("WrittenContent")
             .field("content_format", &self.content_format)
+            .field("summary_version", &self.summary_version)
             .finish_non_exhaustive()
     }
 }

@@ -38,8 +38,8 @@ use crate::codec::codec;
 use crate::content_schema;
 use crate::home::ClaudeHome;
 use crate::index::{
-    ClaudeSessionAttrs, Fingerprint, IndexStore, LockMode, ToolUseCollector, derive_entry,
-    derive_session, derive_session_from, project_of,
+    ClaudeSessionAttrs, Fingerprint, IndexStore, LockMode, SUMMARY_VERSION, ToolUseCollector,
+    derive_entry, derive_session, derive_session_from, project_of,
 };
 use crate::model::resolve_model;
 use crate::plugin;
@@ -197,17 +197,21 @@ impl Driver for ClaudeDriver {
         let native_id = claude.native_id.clone();
         let project = claude.project.clone();
         let store = claude.store.clone();
-        Ok(WrittenContent::with_derive(CONTENT_FORMAT, move || {
-            let derived = derive_session_from(
-                &native_id,
-                SessionReader::new(bytes.as_slice()),
-                fingerprint,
-                project,
-            )
-            .map_err(|e| DriverError::Other(format!("{}: {e}", path.display())))?;
-            cache_attrs(&store, &native_id, &derived.attrs);
-            Ok(Box::new(derived.attrs) as Box<dyn SessionAttrs>)
-        }))
+        Ok(WrittenContent::with_derive(
+            CONTENT_FORMAT,
+            SUMMARY_VERSION,
+            move || {
+                let derived = derive_session_from(
+                    &native_id,
+                    SessionReader::new(bytes.as_slice()),
+                    fingerprint,
+                    project,
+                )
+                .map_err(|e| DriverError::Other(format!("{}: {e}", path.display())))?;
+                cache_attrs(&store, &native_id, &derived.attrs);
+                Ok(Box::new(derived.attrs) as Box<dyn SessionAttrs>)
+            },
+        ))
     }
 
     /// A transcript grows by lines: more lines is a later state,
@@ -1428,6 +1432,10 @@ impl StoredSession for ClaudeStoredSession {
         .map_err(|e| DriverError::Other(format!("stored session {}: {e}", self.native_id)))?;
         Ok(Box::new(derived.attrs))
     }
+
+    fn summary_version(&self) -> u32 {
+        SUMMARY_VERSION
+    }
 }
 
 impl ClaudeStoredSession {
@@ -2022,6 +2030,7 @@ mod tests {
             .write_native(session.as_mut(), &mut sink)
             .unwrap();
         assert_eq!(written.content_format, CONTENT_FORMAT);
+        assert_eq!(written.summary_version, SUMMARY_VERSION);
         assert_eq!(sink.0["session.jsonl"], fs::read(&path).unwrap());
         let attrs = (written.attrs)().unwrap();
         assert_eq!(attrs.line_count(), Some(2));

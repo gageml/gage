@@ -1670,6 +1670,7 @@ mod tests {
                 .map_err(DriverError::Io)?;
             Ok(WrittenContent::new(
                 "scripted 1".to_string(),
+                1,
                 Box::new(native.clone()),
             ))
         }
@@ -1749,6 +1750,7 @@ mod tests {
                 .map_err(DriverError::Io)?;
             Ok(WrittenContent::new(
                 "scripted 1".to_string(),
+                1,
                 Box::new(native.clone()),
             ))
         }
@@ -1876,6 +1878,7 @@ mod tests {
                 .map_err(DriverError::Io)?;
             Ok(WrittenContent::new(
                 "scripted 1".to_string(),
+                1,
                 Box::new(native.clone()),
             ))
         }

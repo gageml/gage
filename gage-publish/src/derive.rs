@@ -949,8 +949,9 @@ fn apply_spans(text: &str, spans: &[Span]) -> (String, Vec<(usize, usize)>) {
     (out, positions)
 }
 
-/// Rewrite `size` and the driver summary in the staged `attrs.json`
-/// from the content written, and leave `project` out. `staged` reads
+/// Rewrite `size` and the driver summary, with its generation, in the
+/// staged `attrs.json` from the content written, and leave `project`
+/// out. `staged` reads
 /// the staged content, not the original, so every summary field, the
 /// title included, describes the published content. A published
 /// session belongs to no project; `origin` names the original.
@@ -965,6 +966,10 @@ pub fn update_attrs(
         object.insert("size".to_string(), json!(size));
         object.remove("project");
         object.insert("summary".to_string(), serde_json::to_value(&summary)?);
+        object.insert(
+            "summary_version".to_string(),
+            json!(staged.summary_version()),
+        );
     }
     let mut bytes = serde_json::to_vec(&attrs)?;
     bytes.push(b'\n');

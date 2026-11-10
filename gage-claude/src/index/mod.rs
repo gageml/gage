@@ -30,6 +30,7 @@ pub use derive::{
 };
 pub use gage_index::LockMode;
 pub use reconcile::{IndexStore, ReconcileOutcome, Status};
+pub use summary_cache::VERSION as SUMMARY_VERSION;
 pub use tool_use::ToolUseCollector;
 
 #[derive(Debug)]

@@ -18,10 +18,13 @@ use std::time::SystemTime;
 
 use super::derive::ClaudeSessionAttrs;
 
-/// Cache format version, recorded in the manifest. Bumped on any
-/// schema or semantic change to `ClaudeSessionAttrs` (new field,
-/// changed title heuristic, fixed token accounting, ...). A directory
-/// whose manifest records another version is discarded and rebuilt.
+/// The generation of `ClaudeSessionAttrs`. Bumped on any schema or
+/// semantic change to it (new field, changed title heuristic, fixed
+/// token accounting, ...). It is recorded in the cache manifest, and
+/// a directory whose manifest records another version is discarded
+/// and rebuilt. It is also the `summary_version` of every session the
+/// driver writes to a store, where a stored session with a lower
+/// version is derived again on its next add.
 pub const VERSION: u32 = 10;
 
 /// The manifest file beside the session files

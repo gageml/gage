@@ -1040,6 +1040,32 @@ async fn the_staged_summary_is_computed_from_the_staged_content() {
     );
 }
 
+/// The staged summary is derived by this build's driver, so the staged
+/// attrs carry the driver's summary generation whatever generation
+/// the original's summary was written at.
+#[tokio::test]
+async fn the_staged_summary_version_is_the_drivers() {
+    let f = fixture();
+    let publisher = Publisher::with_root(&f.store, &f.publish_root, registry());
+    let id = stage(&publisher, &f.original, &[]).await;
+    let driver_version = f.original.attrs.summary_version.unwrap();
+
+    let earlier = driver_version - 1;
+    let path = f.publish_root.join(&id).join("session").join("attrs.json");
+    let mut attrs = staged_attrs(&f.publish_root, &id);
+    attrs["summary_version"] = earlier.into();
+    fs::write(&path, serde_json::to_vec(&attrs).unwrap()).unwrap();
+
+    edit(&publisher, &id, |d| {
+        d.push_redact("Hello", "privacy", "user:test", true);
+    })
+    .await;
+    assert_eq!(
+        staged_attrs(&f.publish_root, &id)["summary_version"],
+        driver_version
+    );
+}
+
 /// A title in the definition is written as the driver's title entry
 /// after the last staged line, recorded as a title change at that
 /// line with the title's author, and read back as the summary title.

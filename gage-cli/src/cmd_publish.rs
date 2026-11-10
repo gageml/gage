@@ -2409,6 +2409,7 @@ mod tests {
                     title: title.map(String::from),
                     ..SummaryAttrs::default()
                 },
+                summary_version: None,
                 publish: None,
             },
             dir: PathBuf::from("/tmp/publish").join(id),

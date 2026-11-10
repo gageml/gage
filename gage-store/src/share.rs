@@ -778,6 +778,7 @@ mod tests {
             size: 2,
             project: None,
             summary: SummaryAttrs::default(),
+            summary_version: None,
             publish: Some(PublishAttrs {
                 filters: filters
                     .iter()

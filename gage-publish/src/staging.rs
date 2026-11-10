@@ -171,6 +171,7 @@ impl<'a> Staging<'a> {
             size,
             project: None,
             summary: original.attrs.summary.clone(),
+            summary_version: original.attrs.summary_version,
             publish: None,
         };
         let value = serde_json::to_value(&attrs)?;

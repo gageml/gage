@@ -1130,6 +1130,7 @@ mod tests {
             }
             Ok(WrittenContent::new(
                 "fake-lines 1".to_string(),
+                1,
                 Box::new(fake.attrs.clone()),
             ))
         }

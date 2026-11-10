@@ -818,6 +818,7 @@ mod tests {
             w.write_all(b"{}").map_err(DriverError::Io)?;
             Ok(WrittenContent::new(
                 "fake-lines 1".to_string(),
+                1,
                 Box::new(FakeAttrs),
             ))
         }

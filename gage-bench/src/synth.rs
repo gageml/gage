@@ -240,6 +240,7 @@ impl Driver for SyntheticDriver {
         }
         Ok(WrittenContent::new(
             SYNTHETIC_CONTENT_FORMAT.to_string(),
+            1,
             Box::new(synth.attrs.clone()),
         ))
     }

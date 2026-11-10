@@ -146,6 +146,7 @@ impl Driver for FakeDriver {
             .map_err(DriverError::Io)?;
         Ok(WrittenContent::new(
             "fake-lines 1".to_string(),
+            1,
             Box::new(fake.clone()),
         ))
     }
@@ -281,6 +282,7 @@ fn write_generation_1_fixture() {
         origin: format!("session:{}@{}", session.id, session.commit_sha),
         native_mtime: 0,
         native_size: 0,
+        summary_version: None,
         publish: Some(PublishAttrs {
             filters: vec![PublishFilter {
                 name: "secret".into(),

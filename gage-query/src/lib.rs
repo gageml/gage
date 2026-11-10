@@ -1844,6 +1844,7 @@ mod tests {
                 &published_id,
                 &SessionAttrsRecord {
                     origin: format!("session:{}@{}", original.id, original.commit_sha),
+                    summary_version: None,
                     publish: Some(PublishAttrs {
                         filters: vec![PublishFilter {
                             name: "secret".into(),

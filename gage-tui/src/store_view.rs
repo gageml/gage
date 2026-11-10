@@ -1529,6 +1529,7 @@ mod tests {
             }
             Ok(gage_session::WrittenContent::new(
                 "fake-lines 1",
+                1,
                 Box::new(FakeAttrs),
             ))
         }

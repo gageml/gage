@@ -67,7 +67,9 @@ impl<'a> From<&'a Store> for SessionStore<'a> {
 /// The `attrs.json` shape of a session.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct SessionAttrsRecord {
-    /// `"<driver name> <driver version>"`.
+    /// `"<driver name> <driver version>"`, for display. The version
+    /// is the driver's release and says nothing of the record's
+    /// shape; `add` does not read it.
     pub driver: String,
     /// The session this one was made from, as a URL. A native origin
     /// is the session source URL the driver spelled,
@@ -95,6 +97,12 @@ pub struct SessionAttrsRecord {
     pub project: Option<String>,
     /// The driver's projection of the session, written at add time.
     pub summary: SummaryAttrs,
+    /// The driver's generation of `summary`. `add` derives the
+    /// summary again when this is lower than the driver's own. Absent
+    /// on a session written before the generation was recorded, which
+    /// orders below every generation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary_version: Option<u32>,
     /// What established a published session. Absent on a session
     /// added from a native source.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -245,8 +253,9 @@ impl<'a> SessionStore<'a> {
     /// `content_format`, and the attributes it derived from the bytes
     /// written are the session's attrs. The content is always read
     /// through the sink: its tree SHA is the identity the decision
-    /// rests on. Content equal to the live object's, written by the
-    /// same driver version in the same format, is unchanged. Content
+    /// rests on. Content equal to the live object's, in the same
+    /// content format and with a summary of the driver's generation or
+    /// a later one, is unchanged. Content
     /// that differs is written when the driver orders it at or after
     /// the stored state, and reported as older and left alone when it
     /// orders it before. The
@@ -309,11 +318,12 @@ impl<'a> SessionStore<'a> {
         let stored = match live {
             Some((current, same_content)) => {
                 let stored = decode_attrs(current)?;
-                // Same bytes are rewritten only when the driver or the
-                // format that derived their attrs changed.
+                // Same bytes are rewritten only for another content
+                // format or a summary of an earlier generation. An
+                // absent generation orders below every number.
                 if same_content
-                    && stored.driver == driver_stamp
                     && stored.content_format == written.content_format
+                    && stored.summary_version >= Some(written.summary_version)
                 {
                     return Ok(kept(current, SessionOutcome::Unchanged));
                 }
@@ -340,6 +350,7 @@ impl<'a> SessionStore<'a> {
             size,
             project: derived.project_name().map(String::from),
             summary,
+            summary_version: Some(written.summary_version),
             publish: None,
         };
 
@@ -1224,6 +1235,7 @@ pub(crate) mod tests {
             size: 0,
             project: None,
             summary: SummaryAttrs::default(),
+            summary_version: None,
             publish: None,
         }
     }
@@ -1355,6 +1367,7 @@ pub(crate) mod tests {
         }
         Ok(WrittenContent::new(
             "fake-lines 1".to_string(),
+            FAKE_SUMMARY_VERSION,
             Box::new(fake.summary.clone()),
         ))
     }
@@ -1402,15 +1415,18 @@ pub(crate) mod tests {
         }
     }
 
-    /// `FakeDriver` at another version.
-    struct VersionedDriver(&'static str);
+    /// `FakeDriver` at another release version and summary generation.
+    struct VersionedDriver {
+        version: &'static str,
+        summary_version: u32,
+    }
 
     impl DriverTrait for VersionedDriver {
         fn name(&self) -> &'static str {
             FakeDriver.name()
         }
         fn version(&self) -> &'static str {
-            self.0
+            self.version
         }
         fn schemes(&self) -> &'static [&'static str] {
             FakeDriver.schemes()
@@ -1426,7 +1442,11 @@ pub(crate) mod tests {
             session: &mut dyn NativeSession,
             sink: &mut dyn ContentSink,
         ) -> Result<WrittenContent, DriverError> {
-            FakeDriver.write_native(session, sink)
+            let written = FakeDriver.write_native(session, sink)?;
+            Ok(WrittenContent {
+                summary_version: self.summary_version,
+                ..written
+            })
         }
         fn read_stored(
             &self,
@@ -1552,7 +1572,7 @@ pub(crate) mod tests {
         );
         assert_eq!(
             cat(&store, &format!("{ref_path}:attrs.json")),
-            "{\"content_format\":\"fake-lines 1\",\"driver\":\"fake 0.1\",\"native_mtime\":0,\"native_size\":4,\"origin\":\"fake:s1\",\"project\":\"proj\",\"session_type\":\"fake\",\"size\":4,\"summary\":{\"is_empty\":false}}\n"
+            "{\"content_format\":\"fake-lines 1\",\"driver\":\"fake 0.1\",\"native_mtime\":0,\"native_size\":4,\"origin\":\"fake:s1\",\"project\":\"proj\",\"session_type\":\"fake\",\"size\":4,\"summary\":{\"is_empty\":false},\"summary_version\":1}\n"
         );
         assert_eq!(cat(&store, &format!("{ref_path}:files.d/sub/a.txt")), "a");
 
@@ -1707,10 +1727,52 @@ pub(crate) mod tests {
         );
     }
 
-    /// A driver version change alone rewrites the attrs and keeps the
-    /// content tree; the same version writes nothing.
+    /// The summary generation `FakeDriver` writes.
+    const FAKE_SUMMARY_VERSION: u32 = 1;
+
+    /// A driver of a later summary generation rewrites the attrs and
+    /// keeps the content tree. The same generation writes nothing,
+    /// and a driver of an earlier generation leaves the later summary
+    /// in place.
     #[test]
-    fn a_driver_version_change_rewrites_attrs_and_keeps_the_content() {
+    fn a_later_summary_version_rewrites_attrs_and_keeps_the_content() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let sessions = SessionStore::from(&store);
+        let later = VersionedDriver {
+            version: FakeDriver.version(),
+            summary_version: FAKE_SUMMARY_VERSION + 1,
+        };
+
+        let first = sessions
+            .add(&FakeDriver, &mut fake_lines("s1", "{}\n"))
+            .unwrap();
+        let bumped = sessions.add(&later, &mut fake_lines("s1", "{}\n")).unwrap();
+        assert_eq!(bumped.outcome, SessionOutcome::Updated);
+        assert_ne!(bumped.commit_sha, first.commit_sha);
+        assert_eq!(
+            files_tree_sha(&store, &bumped.commit_sha),
+            files_tree_sha(&store, &first.commit_sha)
+        );
+        let summary_version = || sessions.get(&first.id).unwrap().attrs.summary_version;
+        assert_eq!(summary_version(), Some(FAKE_SUMMARY_VERSION + 1));
+
+        let same = sessions.add(&later, &mut fake_lines("s1", "{}\n")).unwrap();
+        assert_eq!(same.outcome, SessionOutcome::Unchanged);
+        assert_eq!(same.commit_sha, bumped.commit_sha);
+
+        let earlier = sessions
+            .add(&FakeDriver, &mut fake_lines("s1", "{}\n"))
+            .unwrap();
+        assert_eq!(earlier.outcome, SessionOutcome::Unchanged);
+        assert_eq!(earlier.commit_sha, bumped.commit_sha);
+        assert_eq!(summary_version(), Some(FAKE_SUMMARY_VERSION + 1));
+    }
+
+    /// The driver's release version decides nothing: another release
+    /// with the same summary generation writes nothing.
+    #[test]
+    fn a_driver_release_change_alone_writes_nothing() {
         let tmp = tempfile::tempdir().unwrap();
         let (store, _fsck) = open_store(tmp.path());
         let sessions = SessionStore::from(&store);
@@ -1718,22 +1780,47 @@ pub(crate) mod tests {
         let first = sessions
             .add(&FakeDriver, &mut fake_lines("s1", "{}\n"))
             .unwrap();
-        let bumped = sessions
-            .add(&VersionedDriver("0.2"), &mut fake_lines("s1", "{}\n"))
+        let release = VersionedDriver {
+            version: "0.2",
+            summary_version: FAKE_SUMMARY_VERSION,
+        };
+        let again = sessions
+            .add(&release, &mut fake_lines("s1", "{}\n"))
             .unwrap();
-        assert_eq!(bumped.outcome, SessionOutcome::Updated);
-        assert_ne!(bumped.commit_sha, first.commit_sha);
-        assert_eq!(
-            files_tree_sha(&store, &bumped.commit_sha),
-            files_tree_sha(&store, &first.commit_sha)
-        );
-        assert_eq!(sessions.get(&first.id).unwrap().attrs.driver, "fake 0.2");
+        assert_eq!(again.outcome, SessionOutcome::Unchanged);
+        assert_eq!(again.commit_sha, first.commit_sha);
+        assert_eq!(sessions.get(&first.id).unwrap().attrs.driver, "fake 0.1");
+    }
 
-        let same = sessions
-            .add(&VersionedDriver("0.2"), &mut fake_lines("s1", "{}\n"))
+    /// A session written before the summary generation was recorded
+    /// has none, and is derived again on its next add.
+    #[test]
+    fn a_session_without_a_summary_version_is_derived_again() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let sessions = SessionStore::from(&store);
+
+        let first = sessions
+            .add(&FakeDriver, &mut fake_lines("s1", "{}\n"))
             .unwrap();
-        assert_eq!(same.outcome, SessionOutcome::Unchanged);
-        assert_eq!(same.commit_sha, bumped.commit_sha);
+        let current = store.read_object(&first.commit_sha).unwrap();
+        let mut tree = current.tree.clone();
+        tree.attrs
+            .as_mut()
+            .and_then(Value::as_object_mut)
+            .unwrap()
+            .remove("summary_version");
+        store.edit(&current, &tree, "session edit: legacy").unwrap();
+        assert_eq!(sessions.get(&first.id).unwrap().attrs.summary_version, None);
+
+        let again = sessions
+            .add(&FakeDriver, &mut fake_lines("s1", "{}\n"))
+            .unwrap();
+        assert_eq!(again.outcome, SessionOutcome::Updated);
+        assert_eq!(
+            sessions.get(&first.id).unwrap().attrs.summary_version,
+            Some(FAKE_SUMMARY_VERSION)
+        );
     }
 
     /// The `(loose, packed)` object counts of the store's object
@@ -1774,11 +1861,11 @@ pub(crate) mod tests {
         assert_eq!(object_counts(&store), packed);
     }
 
-    /// A driver version change commits new attrs over content the
+    /// A later summary generation commits new attrs over content the
     /// live object holds: on a packed store the content is not
     /// written again as loose objects.
     #[test]
-    fn a_driver_version_change_does_not_rewrite_packed_content() {
+    fn a_later_summary_version_does_not_rewrite_packed_content() {
         let tmp = tempfile::tempdir().unwrap();
         let (store, _fsck) = open_store(tmp.path());
         let sessions = SessionStore::from(&store);
@@ -1789,7 +1876,13 @@ pub(crate) mod tests {
         run(git_in(store.path(), ["gc", "--quiet"])).unwrap();
 
         let bumped = sessions
-            .add(&VersionedDriver("0.2"), &mut fake_lines("s1", "{}\n{}\n"))
+            .add(
+                &VersionedDriver {
+                    version: FakeDriver.version(),
+                    summary_version: FAKE_SUMMARY_VERSION + 1,
+                },
+                &mut fake_lines("s1", "{}\n{}\n"),
+            )
             .unwrap();
         assert_eq!(bumped.outcome, SessionOutcome::Updated);
         let files_tree = files_tree_sha(&store, &first.commit_sha);
@@ -1852,9 +1945,11 @@ pub(crate) mod tests {
             sink: &mut dyn ContentSink,
         ) -> Result<WrittenContent, DriverError> {
             let written = FakeDriver.write_native(session, sink)?;
-            Ok(WrittenContent::with_derive(written.content_format, || {
-                Err(DriverError::Other("content does not derive".into()))
-            }))
+            Ok(WrittenContent::with_derive(
+                written.content_format,
+                written.summary_version,
+                || Err(DriverError::Other("content does not derive".into())),
+            ))
         }
         fn read_stored(
             &self,
