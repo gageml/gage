@@ -362,11 +362,7 @@ fn session_lines(
     tag: Option<&str>,
     width: usize,
 ) -> Vec<String> {
-    let listed = if sessions.len() > PREVIEW_SESSIONS + 1 {
-        PREVIEW_SESSIONS
-    } else {
-        sessions.len()
-    };
+    let listed = listed_count(sessions.len());
     let mut lines: Vec<String> = sessions
         .iter()
         .take(listed)
@@ -394,9 +390,21 @@ fn session_lines(
     lines
 }
 
-/// The preview lines for native sessions `ids` in `source`, titles
-/// read through the `native_session` table. The result keeps the
-/// order of `ids`.
+/// How many of `selected` sessions a preview lists by name. The rest
+/// are summed up in one line.
+fn listed_count(selected: usize) -> usize {
+    if selected > PREVIEW_SESSIONS + 1 {
+        PREVIEW_SESSIONS
+    } else {
+        selected
+    }
+}
+
+/// The preview lines for native sessions `ids` in `source`, in the
+/// order of `ids`. Titles are read through the `native_session`
+/// table for the sessions the preview lists by name and for no
+/// other: a title is derived from the transcript, and a selection can
+/// hold thousands of sessions the preview only counts.
 pub async fn native_session_lines(
     source: Option<&str>,
     ids: &[String],
@@ -407,12 +415,7 @@ pub async fn native_session_lines(
     let registry = source::driver_registry();
     let (_, spec) = source::resolve_source(&registry, source).map_err(anyhow::Error::msg)?;
     let ctx = ContextBuilder::new(None).build().await;
-    let in_list: Vec<String> = ids.iter().map(|id| format!("'{}'", sql_str(id))).collect();
-    let sql = format!(
-        "SELECT id, title FROM native_session('{}') WHERE id IN ({})",
-        sql_str(&spec),
-        in_list.join(", ")
-    );
+    let sql = title_query(&spec, ids);
     let batches = ctx.sql(&sql).await?.collect().await?;
     let mut titles: HashMap<String, Option<String>> = HashMap::with_capacity(ids.len());
     for batch in &batches {
@@ -430,6 +433,21 @@ pub async fn native_session_lines(
             title: titles.get(id).cloned().flatten(),
         })
         .collect())
+}
+
+/// The query for the titles of the sessions of `ids` a preview lists
+/// by name.
+fn title_query(spec: &str, ids: &[String]) -> String {
+    let in_list: Vec<String> = ids
+        .iter()
+        .take(listed_count(ids.len()))
+        .map(|id| format!("'{}'", sql_str(id)))
+        .collect();
+    format!(
+        "SELECT id, title FROM native_session('{}') WHERE id IN ({})",
+        sql_str(spec),
+        in_list.join(", ")
+    )
 }
 
 /// The preview lines for stored sessions `ids`, in the order of `ids`.
@@ -603,7 +621,7 @@ mod tests {
     use super::{
         DIALOG_GUTTER, DialogError, MIN_PREVIEW_WIDTH, PREVIEW_SESSIONS, RIGHT_MARGIN,
         SessionFilterArgs, SessionLine, SessionSelect, SessionSelectError, preview_width,
-        project_path_candidate, resolve_project_slug, select_sessions, session_lines,
+        project_path_candidate, resolve_project_slug, select_sessions, session_lines, title_query,
     };
 
     fn attrs(title: Option<&str>) -> SessionAttrsRecord {
@@ -707,6 +725,22 @@ mod tests {
             ),
             [line(IdKind::Gage, "5h9m0k09", "")]
         );
+    }
+
+    /// The title query names the sessions the preview lists and no
+    /// other, so a session the preview only counts is not read.
+    #[test]
+    fn title_query_names_only_the_listed_sessions() {
+        let ids = |n: usize| -> Vec<String> { (0..n).map(|i| format!("id-{i}")).collect() };
+        let named = |sql: &str| sql.matches("'id-").count();
+
+        let fits = title_query("claude:", &ids(PREVIEW_SESSIONS + 1));
+        assert_eq!(named(&fits), PREVIEW_SESSIONS + 1);
+
+        let capped = title_query("claude:", &ids(PREVIEW_SESSIONS + 3));
+        assert_eq!(named(&capped), PREVIEW_SESSIONS);
+        assert!(capped.contains(&format!("'id-{}'", PREVIEW_SESSIONS - 1)));
+        assert!(!capped.contains(&format!("'id-{PREVIEW_SESSIONS}'")));
     }
 
     /// Every session is listed when the list fits in the lines a
