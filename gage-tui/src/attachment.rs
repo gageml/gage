@@ -13,7 +13,12 @@ pub fn body(attachment: &Attachment, width: u16) -> Vec<Line<'static>> {
     if let Some(subtype) = &attachment.subtype {
         attrs.push(("Subtype", subtype.as_str()));
     }
-    attrs.extend(attachment.attrs.iter().map(|(c, v)| (*c, v.as_str())));
+    attrs.extend(
+        attachment
+            .attrs
+            .iter()
+            .map(|(c, v)| (c.as_str(), v.as_str())),
+    );
     let mut out = attr_lines(&attrs, width);
     for rendered in &attachment.rendered {
         out.push(Line::raw(""));

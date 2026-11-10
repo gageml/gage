@@ -317,9 +317,10 @@ pub struct Attachment {
     pub kind: String,
     /// `reminderType` where present, else the hook event and name
     pub subtype: Option<String>,
-    /// Caption and value rows a selection rule names; empty for a row
-    /// with `rendered` text
-    pub attrs: Vec<(&'static str, String)>,
+    /// Caption and value rows a selection rule names, without the
+    /// type the body already opens with; empty for a row with
+    /// `rendered` text
+    pub attrs: Vec<(String, String)>,
     /// The text of each `rendered` item in order, without the
     /// `<system-reminder>` wrapper the harness puts around it. A row
     /// without that text, one the harness never sent or one written
@@ -498,7 +499,8 @@ fn attachment_body(value: &Value) -> Attachment {
         .map(|items| items.iter().filter_map(rendered_text).collect())
         .unwrap_or_default();
     let (attrs, rendered) = if rendered.is_empty() {
-        let selection = select(value).unwrap_or_default();
+        let mut selection = select(value).unwrap_or_default();
+        selection.attrs.retain(|(caption, _)| caption != "type");
         (selection.attrs, selection.text)
     } else {
         (Vec::new(), rendered)
@@ -751,7 +753,7 @@ mod tests {
             Attachment {
                 kind: "credential_org".to_string(),
                 subtype: None,
-                attrs: vec![("organizationUuid", "o1".to_string())],
+                attrs: vec![("organizationUuid".to_string(), "o1".to_string())],
                 rendered: Vec::new(),
             }
         );
@@ -760,7 +762,10 @@ mod tests {
             "type": "attachment",
             "attachment": {"type": "batching_reminder_sent", "text": "List first."},
         }));
-        assert_eq!(attachment(&doc).rendered, ["List first."]);
+        assert_eq!(
+            attachment(&doc).attrs,
+            [("text".to_string(), "List first.".to_string())]
+        );
 
         let doc = attachment_doc(json!({
             "type": "attachment",

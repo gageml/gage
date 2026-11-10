@@ -19,21 +19,39 @@ pub fn attr_lines(attrs: &[(&str, &str)], width: u16) -> Vec<Line<'static>> {
     styled_attr_lines(&styled, width)
 }
 
+/// The widest caption that shares a line with its value.
+const MAX_CAPTION_WIDTH: usize = 24;
+
 /// Caption/value rows, each value in its own style. The captions are
 /// dim and padded to the widest caption plus two spaces, so the values
-/// share a column. A value line longer than the columns left of
-/// `width` is wrapped, and every row after a value's first is indented
-/// to the value column.
+/// share a column. A caption wider than [`MAX_CAPTION_WIDTH`] takes no
+/// part in that column: it has its own line and its value starts on
+/// the next. A value line longer than the columns left of `width` is
+/// wrapped, and every row after a caption is indented to the value
+/// column.
 pub fn styled_attr_lines(attrs: &[(&str, &str, Style)], width: u16) -> Vec<Line<'static>> {
-    let caption_width = attrs.iter().map(|(c, _, _)| c.width()).max().unwrap_or(0);
+    let caption_width = attrs
+        .iter()
+        .map(|(c, _, _)| c.width())
+        .filter(|w| *w <= MAX_CAPTION_WIDTH)
+        .max()
+        .unwrap_or(0);
     let indent = " ".repeat(caption_width + 2);
     let value_width = usize::from(width).saturating_sub(caption_width + 2);
     let mut lines = Vec::new();
     for (caption, value, style) in attrs {
-        let mut lead = Span::styled(
-            format!("{caption:<width$}  ", width = caption_width),
-            styles::Text::dim(),
-        );
+        let mut lead = if caption.width() > MAX_CAPTION_WIDTH {
+            lines.push(Line::from(Span::styled(
+                caption.to_string(),
+                styles::Text::dim(),
+            )));
+            Span::raw(indent.clone())
+        } else {
+            Span::styled(
+                format!("{caption:<width$}  ", width = caption_width),
+                styles::Text::dim(),
+            )
+        };
         let mut rows = value.lines().flat_map(|line| value_rows(line, value_width));
         let first = rows.next().unwrap_or("");
         for row in std::iter::once(first).chain(rows) {
@@ -120,6 +138,31 @@ mod tests {
         );
         assert!(texts.iter().all(|t| t.width() <= 16), "{texts:?}");
         assert_eq!(lines[4].spans[1].style.fg, Some(Color::Red));
+    }
+
+    /// A caption wider than the maximum has its own line, its value
+    /// starts on the next line in the value column, and it does not
+    /// widen that column.
+    #[test]
+    fn a_caption_over_the_maximum_has_its_own_line() {
+        let lines = attr_lines(
+            &[
+                ("messageId", "m1"),
+                ("gage-rscan/src/a_long_runner.rs", "v8\nv9"),
+            ],
+            80,
+        );
+        let texts: Vec<String> = lines.iter().map(text).collect();
+        assert_eq!(
+            texts,
+            [
+                "messageId  m1",
+                "gage-rscan/src/a_long_runner.rs",
+                "           v8",
+                "           v9",
+            ]
+        );
+        assert!(lines[1].spans[0].style.add_modifier.contains(Modifier::DIM));
     }
 
     /// A width with no columns left for values leaves each value line
