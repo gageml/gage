@@ -1158,67 +1158,11 @@ impl NativeSession for ClaudeNativeSession {
     }
 
     fn attrs(&self) -> &dyn SessionAttrs {
-        self
+        self.claude_attrs()
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
         self
-    }
-}
-
-/// The stat facts answer without a read; everything derived reads
-/// the transcript on first use.
-impl SessionAttrs for ClaudeNativeSession {
-    fn native_mtime(&self) -> SystemTime {
-        self.mtime
-    }
-
-    fn native_size(&self) -> u64 {
-        self.size
-    }
-
-    fn is_empty(&self) -> Option<bool> {
-        self.claude_attrs().is_empty()
-    }
-
-    fn project_name(&self) -> Option<&str> {
-        Some(&self.project)
-    }
-
-    fn title(&self) -> Option<&str> {
-        self.claude_attrs().title()
-    }
-
-    fn model(&self) -> Option<&str> {
-        self.claude_attrs().model()
-    }
-
-    fn message_count(&self) -> Option<u64> {
-        self.claude_attrs().message_count()
-    }
-
-    fn line_count(&self) -> Option<u64> {
-        self.claude_attrs().line_count()
-    }
-
-    fn input_tokens(&self) -> Option<u64> {
-        self.claude_attrs().input_tokens()
-    }
-
-    fn output_tokens(&self) -> Option<u64> {
-        self.claude_attrs().output_tokens()
-    }
-
-    fn cached_tokens(&self) -> Option<u64> {
-        self.claude_attrs().cached_tokens()
-    }
-
-    fn cost_usd(&self) -> Option<f64> {
-        self.claude_attrs().cost_usd()
-    }
-
-    fn extra_attrs(&self) -> Map<String, Value> {
-        self.claude_attrs().extra_attrs()
     }
 }
 
