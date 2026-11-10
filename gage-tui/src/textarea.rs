@@ -387,7 +387,7 @@ impl TextArea {
 /// Wraps `line` at `width` cells. Returns byte ranges into `line`, one per
 /// visual row. Empty input returns an empty vec — the caller treats this as
 /// one blank row.
-fn wrap_line(line: &str, width: u16) -> Vec<Range<usize>> {
+pub(crate) fn wrap_line(line: &str, width: u16) -> Vec<Range<usize>> {
     if line.is_empty() || width == 0 {
         return Vec::new();
     }

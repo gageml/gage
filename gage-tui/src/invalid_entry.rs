@@ -8,8 +8,8 @@ use crate::doc::InvalidEntry;
 
 /// The codec's error as an attribute, then the raw line as plain text
 /// after a blank line.
-pub fn body(invalid: &InvalidEntry) -> Vec<Line<'static>> {
-    let mut out = attr_lines(&[("Error", invalid.error.as_str())]);
+pub fn body(invalid: &InvalidEntry, width: u16) -> Vec<Line<'static>> {
+    let mut out = attr_lines(&[("Error", invalid.error.as_str())], width);
     out.push(Line::raw(""));
     out.extend(
         invalid

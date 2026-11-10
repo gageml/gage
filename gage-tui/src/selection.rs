@@ -27,13 +27,13 @@ impl Selection {
 }
 
 /// The attribute rows, then each text item after a blank line.
-pub fn body(selection: &Selection) -> Vec<Line<'static>> {
+pub fn body(selection: &Selection, width: u16) -> Vec<Line<'static>> {
     let attrs: Vec<(&'static str, &str)> = selection
         .attrs
         .iter()
         .map(|(caption, value)| (*caption, value.as_str()))
         .collect();
-    let mut out = attr_lines(&attrs);
+    let mut out = attr_lines(&attrs, width);
     for text in &selection.text {
         if !out.is_empty() {
             out.push(Line::raw(""));
@@ -542,7 +542,7 @@ mod tests {
             attrs: vec![("operation", "remove".to_string())],
             text: vec!["first\nsecond".to_string(), "third".to_string()],
         };
-        let lines: Vec<String> = body(&selection).iter().map(text).collect();
+        let lines: Vec<String> = body(&selection, 80).iter().map(text).collect();
         assert_eq!(
             lines,
             ["operation  remove", "", "first", "second", "", "third"]
@@ -552,7 +552,7 @@ mod tests {
             attrs: vec![],
             text: vec!["Review documentation".to_string()],
         };
-        let lines: Vec<String> = body(&text_only).iter().map(text).collect();
+        let lines: Vec<String> = body(&text_only, 80).iter().map(text).collect();
         assert_eq!(lines, ["Review documentation"]);
     }
 }

@@ -2517,8 +2517,8 @@ fn draw_dialogs(frame: &mut Frame, state: &mut ViewState) {
         Dialog::ConfirmQuit => draw_confirm_quit(frame),
         Dialog::Canceling => dialog::draw_message(frame, "Canceling the scan...", ""),
         Dialog::Note { note } => {
-            scroll_view.render_modal(frame, format!(" Note {} ", note.id), |_| {
-                vec![note_lines(note)]
+            scroll_view.render_modal(frame, format!(" Note {} ", note.id), |width| {
+                vec![note_lines(note, width)]
             })
         }
         Dialog::Issue { issue } => {
@@ -2661,7 +2661,7 @@ fn draw_actions(frame: &mut Frame, issue: &IssueItem) {
 
 /// Note detail content: caption/value header columns (with an optional
 /// multi-line Metadata attribute) and the value rendered as markdown.
-fn note_lines(note: &NoteItem) -> Vec<Line<'static>> {
+fn note_lines(note: &NoteItem, width: u16) -> Vec<Line<'static>> {
     let metadata_pretty = note.metadata.as_deref().map(pretty_json);
     let mut attrs: Vec<(&'static str, &str)> = vec![
         ("Name", &note.name),
@@ -2672,7 +2672,7 @@ fn note_lines(note: &NoteItem) -> Vec<Line<'static>> {
     if let Some(pretty) = &metadata_pretty {
         attrs.push(("Metadata", pretty));
     }
-    let mut lines = attr_lines(&attrs);
+    let mut lines = attr_lines(&attrs, width);
     lines.push(Line::raw(""));
     lines.extend(markdown::render(&note.value_full));
     lines
@@ -2690,12 +2690,18 @@ fn pretty_json(raw: &str) -> String {
 /// the Notes and Issue history sections; the session dialog omits them
 /// to keep its embedded issues compact.
 fn issue_lines(issue: &IssueItem, width: usize, related: bool) -> Vec<Line<'static>> {
-    let mut lines = attr_lines(&[
-        ("Name", &issue.name),
-        ("Status", &issue.status),
-        ("Author", &issue.author),
-        ("Created", &issue.created),
-    ]);
+    let cols = u16::try_from(width).unwrap_or(u16::MAX);
+    // A content box has a border and one column of padding each side
+    let boxed_cols = cols.saturating_sub(4);
+    let mut lines = attr_lines(
+        &[
+            ("Name", &issue.name),
+            ("Status", &issue.status),
+            ("Author", &issue.author),
+            ("Created", &issue.created),
+        ],
+        cols,
+    );
     let mut body = vec![Line::raw(issue.title.clone())];
     if let Some(description) = &issue.description {
         body.push(Line::raw(""));
@@ -2720,8 +2726,10 @@ fn issue_lines(issue: &IssueItem, width: usize, related: bool) -> Vec<Line<'stat
     if !issue.evidence.is_empty() {
         let mut content: Vec<Line<'static>> = Vec::new();
         for ev in &issue.evidence {
-            let mut entry =
-                attr_lines(&[("Id", &ev.id), ("Name", &ev.name), ("Target", &ev.target)]);
+            let mut entry = attr_lines(
+                &[("Id", &ev.id), ("Name", &ev.name), ("Target", &ev.target)],
+                boxed_cols,
+            );
             entry.push(Line::raw(""));
             entry.extend(
                 ev.value
@@ -2736,11 +2744,14 @@ fn issue_lines(issue: &IssueItem, width: usize, related: bool) -> Vec<Line<'stat
     if !issue.events.is_empty() {
         let mut content: Vec<Line<'static>> = Vec::new();
         for ev in &issue.events {
-            let mut entry = attr_lines(&[
-                ("Change", &ev.kind),
-                ("Author", &ev.author),
-                ("Created", &ev.timestamp),
-            ]);
+            let mut entry = attr_lines(
+                &[
+                    ("Change", &ev.kind),
+                    ("Author", &ev.author),
+                    ("Created", &ev.timestamp),
+                ],
+                boxed_cols,
+            );
             if let Some(message) = &ev.message {
                 entry.push(Line::raw(""));
                 entry.extend(

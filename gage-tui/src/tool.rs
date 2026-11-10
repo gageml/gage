@@ -9,13 +9,13 @@ use crate::doc::ToolUse;
 
 /// The calls an entry made: each call's tool and its input, with a
 /// blank line between calls.
-pub fn calls(calls: &[ToolUse]) -> Vec<Line<'static>> {
+pub fn calls(calls: &[ToolUse], width: u16) -> Vec<Line<'static>> {
     let mut out = Vec::new();
     for call in calls {
         if !out.is_empty() {
             out.push(Line::raw(""));
         }
-        out.extend(attr_lines(&[("Tool", &call.name)]));
+        out.extend(attr_lines(&[("Tool", &call.name)], width));
         out.push(Line::raw(""));
         append_maybe_json(&mut out, &call.input);
     }
@@ -24,7 +24,7 @@ pub fn calls(calls: &[ToolUse]) -> Vec<Line<'static>> {
 
 /// The results an entry returned: each result's tool, its error status
 /// when it failed, and its output, with a blank line between results.
-pub fn results(results: &[ToolUse]) -> Vec<Line<'static>> {
+pub fn results(results: &[ToolUse], width: u16) -> Vec<Line<'static>> {
     let mut out = Vec::new();
     for result in results {
         if !out.is_empty() {
@@ -34,7 +34,7 @@ pub fn results(results: &[ToolUse]) -> Vec<Line<'static>> {
         if result.is_error == Some(true) {
             attrs.push(("Status", "error", Style::new().fg(Color::Red)));
         }
-        out.extend(styled_attr_lines(&attrs));
+        out.extend(styled_attr_lines(&attrs, width));
         if let Some(output) = &result.output {
             out.push(Line::raw(""));
             append_maybe_json(&mut out, output);

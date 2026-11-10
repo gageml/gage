@@ -12,7 +12,7 @@ use crate::styles;
 /// The attachment's attributes as caption/value rows, an absent name,
 /// key, or target list omitted, then its files under a `Files`
 /// heading when it has any.
-pub fn body(attachment: &SessionAttachment) -> Vec<Line<'static>> {
+pub fn body(attachment: &SessionAttachment, width: u16) -> Vec<Line<'static>> {
     let targets = attachment.targets.join("\n");
     let root = shorten_home(&attachment.root);
     let file_count = attachment.file_count.to_string();
@@ -36,7 +36,7 @@ pub fn body(attachment: &SessionAttachment) -> Vec<Line<'static>> {
         ("Created", &created),
         ("Modified", &modified),
     ]);
-    let mut out = attr_lines(&attrs);
+    let mut out = attr_lines(&attrs, width);
     if attachment.files.is_empty() {
         return out;
     }

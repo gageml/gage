@@ -1748,7 +1748,7 @@ fn draw_body(frame: &mut Frame, state: &mut AppState, area: Rect) {
 
     match row_kind {
         Some(RowKind::Session) => {
-            let lines = session_lines(&state.doc.session.attrs);
+            let lines = session_lines(&state.doc.session.attrs, padded_width(inner));
             let source = state
                 .view
                 .source
@@ -1776,7 +1776,7 @@ fn draw_body(frame: &mut Frame, state: &mut AppState, area: Rect) {
         }
         Some(RowKind::Attachment { attachment_id }) => match state.doc.attachment(&attachment_id) {
             Some(a) => {
-                let lines = session_attachment::body(a);
+                let lines = session_attachment::body(a, padded_width(inner));
                 draw_lines(frame, state, lines, inner);
             }
             None => draw_placeholder(frame, "(missing attachment)", inner),
@@ -2003,13 +2003,14 @@ struct EntrySnap {
 fn draw_entry(frame: &mut Frame, state: &mut AppState, entry: &EntrySnap, area: Rect) {
     let mut sections: Vec<Section> = Vec::new();
     if let Some(body) = &entry.body {
+        let width = padded_width(area);
         let lines = match body {
-            EntryBody::Text { text, tags } => message::body(text, tags),
-            EntryBody::ToolCalls(calls) => tool::calls(calls),
-            EntryBody::ToolResults(results) => tool::results(results),
-            EntryBody::Attachment(attachment) => attachment::body(attachment),
-            EntryBody::InvalidEntry(invalid) => invalid_entry::body(invalid),
-            EntryBody::Selection(selected) => selection::body(selected),
+            EntryBody::Text { text, tags } => message::body(text, tags, width),
+            EntryBody::ToolCalls(calls) => tool::calls(calls, width),
+            EntryBody::ToolResults(results) => tool::results(results, width),
+            EntryBody::Attachment(attachment) => attachment::body(attachment, width),
+            EntryBody::InvalidEntry(invalid) => invalid_entry::body(invalid, width),
+            EntryBody::Selection(selected) => selection::body(selected, width),
         };
         let panel = Paragraph::new(lines)
             .wrap(Wrap { trim: false })
@@ -2037,6 +2038,12 @@ fn draw_entry(frame: &mut Frame, state: &mut AppState, entry: &EntrySnap, area: 
     draw_stack(frame, state, sections, area);
 }
 
+/// The columns a body section has for text inside its one column of
+/// padding on each side.
+fn padded_width(area: Rect) -> u16 {
+    area.width.saturating_sub(2)
+}
+
 fn source_banner(width: u16) -> Section {
     Section::from_paragraph(
         Paragraph::new(Line::from(Span::styled(
@@ -2049,7 +2056,7 @@ fn source_banner(width: u16) -> Section {
 
 /// The session's attributes as the root row shows them: the title in
 /// bold, a blank line, then the fields as caption/value rows.
-fn session_lines(attrs: &SessionAttrs) -> Vec<Line<'static>> {
+fn session_lines(attrs: &SessionAttrs, width: u16) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     if !attrs.title.is_empty() {
         lines.push(Line::from(Span::styled(
@@ -2063,7 +2070,7 @@ fn session_lines(attrs: &SessionAttrs) -> Vec<Line<'static>> {
         .iter()
         .map(|(label, value)| (*label, value.as_str()))
         .collect();
-    lines.extend(attr_lines(&fields));
+    lines.extend(attr_lines(&fields, width));
     lines
 }
 
