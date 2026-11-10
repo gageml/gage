@@ -7,11 +7,11 @@
 
 use std::path::PathBuf;
 
-use gage_session::INVALID_ENTRY_TYPE;
+use std::sync::Arc;
+
+use gage_session::{Driver, DriverError, EntryBody, EntryCodec, EntryValue};
 use gage_store::{ChangeKind, NoteValue};
 use serde_json::Value;
-
-use crate::selection::{Selection, select};
 
 pub struct Document {
     pub session: Session,
@@ -23,6 +23,8 @@ pub struct Document {
     /// The session's tool calls, in the order the `tool_use` table
     /// yields them, which is the order of the calls in the session
     pub tool_uses: Vec<ToolUse>,
+    /// What describes an entry's body
+    pub bodies: BodySource,
     pub notes: Vec<Note>,
     /// The store attachments that target the session, oldest first
     pub attachments: Vec<SessionAttachment>,
@@ -267,66 +269,53 @@ pub struct Entry {
     /// The message subtype the driver derived, from the `message`
     /// table; `None` for an entry that is not a message
     pub message_subtype: Option<String>,
-    /// The message's text, from the `message` table; `None` for an
-    /// entry that is not a message
-    pub message_text: Option<String>,
-    /// The tags the driver split off the front of a user message's
-    /// text, from the `message` table, as the harness wrote them
-    pub ide_tags: Option<String>,
-    /// The harness's row, verbatim
-    pub value: Value,
+    /// The harness's row as the driver's codec decodes it
+    pub value: EntryValue,
+}
+
+/// The driver that describes the document's entries, and the content
+/// format it reads them in.
+pub struct BodySource {
+    driver: Arc<dyn Driver>,
+    content_format: String,
+}
+
+impl BodySource {
+    pub fn new(driver: Arc<dyn Driver>, content_format: impl Into<String>) -> Self {
+        Self {
+            driver,
+            content_format: content_format.into(),
+        }
+    }
+
+    /// The codec that decodes the document's entries.
+    pub fn codec(&self) -> Result<Arc<dyn EntryCodec>, DriverError> {
+        self.driver.codec(&self.content_format)
+    }
+
+    fn entry_body(&self, entry: &EntryValue) -> EntryBody {
+        self.driver.entry_body(&self.content_format, entry)
+    }
+
+    /// The Claude Code driver over the format the fixtures are in.
+    #[cfg(test)]
+    pub(crate) fn claude() -> Self {
+        let registry = gage_registry::driver::DriverRegistry::builtin();
+        Self::new(
+            registry.for_name("claude").unwrap(),
+            crate::format::SUPPORTED,
+        )
+    }
 }
 
 /// What the rendered view shows for an entry.
-pub enum EntryBody {
-    /// The message text, rendered as markdown, and the name and
-    /// content of each tag split off the front of it, which are shown
-    /// when there is no text
-    Text {
-        text: String,
-        tags: Vec<(String, String)>,
-    },
+pub enum Body {
     /// The calls a tool call entry made
     ToolCalls(Vec<ToolUse>),
     /// The results a tool result entry returned
     ToolResults(Vec<ToolUse>),
-    /// The content the harness injected beside a turn
-    Attachment(Attachment),
-    /// A native line the driver's codec could not decode, as the
-    /// codec stands in for it
-    InvalidEntry(InvalidEntry),
-    /// The values the entry's selection rule names, for an entry no
-    /// other body covers
-    Selection(Selection),
-}
-
-/// The entry the codec writes in place of a native line it could not
-/// decode: why, and the line's text.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InvalidEntry {
-    pub error: String,
-    pub raw: String,
-}
-
-/// An attachment entry as the viewer shows it, read from the entry's
-/// own row: the harness's `attachment.type`, a subtype a few types
-/// carry beside it, and the text the harness sent to the model. A row
-/// without that text shows what its selection rule names.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Attachment {
-    pub kind: String,
-    /// `reminderType` where present, else the hook event and name
-    pub subtype: Option<String>,
-    /// Caption and value rows a selection rule names, without the
-    /// type the body already opens with; empty for a row with
-    /// `rendered` text
-    pub attrs: Vec<(String, String)>,
-    /// The text of each `rendered` item in order, without the
-    /// `<system-reminder>` wrapper the harness puts around it. A row
-    /// without that text, one the harness never sent or one written
-    /// before the harness recorded `rendered`, has the text its
-    /// selection rule names, which may be none
-    pub rendered: Vec<String>,
+    /// The body the session's driver describes for the entry
+    Entry(EntryBody),
 }
 
 /// A store attachment that targets the document's session, as the
@@ -383,156 +372,30 @@ pub struct ToolUse {
 
 impl Document {
     /// The rendered view's content for the entry at `index`: its tool
-    /// calls for a tool call row, its results for a tool result row,
-    /// its attachment for an attachment row, its message text and
-    /// leading tags for any other message, what its selection rule
-    /// names for an entry with neither, nothing when no rule selects
-    /// a value or for a tool row the `tool_use` table has no rows for.
-    pub fn entry_body(&self, index: usize) -> Option<EntryBody> {
+    /// calls for a tool call row and its results for a tool result
+    /// row, when the `tool_use` table has rows for it, else the body
+    /// the session's driver describes. Nothing for an entry the
+    /// driver describes no body for.
+    pub fn entry_body(&self, index: usize) -> Option<Body> {
         let entry = self.entries.get(index)?;
-        if entry.entry_type == "attachment" {
-            return Some(EntryBody::Attachment(attachment_body(&entry.value)));
-        }
-        if entry.entry_type == INVALID_ENTRY_TYPE {
-            return Some(EntryBody::InvalidEntry(invalid_entry_body(&entry.value)));
-        }
-        match entry.message_subtype.as_deref() {
-            Some("tool_use") => {
-                let calls: Vec<ToolUse> = self
-                    .tool_uses
-                    .iter()
-                    .filter(|t| t.line == entry.line)
-                    .cloned()
-                    .collect();
-                (!calls.is_empty()).then_some(EntryBody::ToolCalls(calls))
-            }
-            Some("tool_result") => {
-                let results: Vec<ToolUse> = self
-                    .tool_uses
-                    .iter()
-                    .filter(|t| t.result_line == Some(entry.line))
-                    .cloned()
-                    .collect();
-                (!results.is_empty()).then_some(EntryBody::ToolResults(results))
-            }
-            _ => {
-                let tags = entry.ide_tags.as_deref().map(tag_pairs).unwrap_or_default();
-                match &entry.message_text {
-                    Some(text) => Some(EntryBody::Text {
-                        text: text.clone(),
-                        tags,
-                    }),
-                    None if !tags.is_empty() => Some(EntryBody::Text {
-                        text: String::new(),
-                        tags,
-                    }),
-                    None => select(&entry.value).map(EntryBody::Selection),
-                }
-            }
-        }
-    }
-}
-
-/// The name and trimmed content of each top-level `<name>…</name>`
-/// pair in `tags`, in order. A tag nested in a pair's content stays in
-/// the content. Text that does not open a closed pair ends the walk
-/// and is kept whole under an empty name, so nothing is left out.
-fn tag_pairs(tags: &str) -> Vec<(String, String)> {
-    let mut pairs = Vec::new();
-    let mut rest = tags.trim();
-    while !rest.is_empty() {
-        let Some((name, content, after)) = leading_pair(rest) else {
-            pairs.push((String::new(), rest.to_string()));
-            break;
+        let tool_uses: Vec<ToolUse> = match entry.message_subtype.as_deref() {
+            Some("tool_use") => self.tool_uses_where(|t| t.line == entry.line),
+            Some("tool_result") => self.tool_uses_where(|t| t.result_line == Some(entry.line)),
+            _ => Vec::new(),
         };
-        pairs.push((name.to_string(), content.trim().to_string()));
-        rest = after.trim_start();
+        match entry.message_subtype.as_deref() {
+            Some("tool_use") if !tool_uses.is_empty() => Some(Body::ToolCalls(tool_uses)),
+            Some("tool_result") if !tool_uses.is_empty() => Some(Body::ToolResults(tool_uses)),
+            _ => {
+                let body = self.bodies.entry_body(&entry.value);
+                (!body.blocks.is_empty()).then_some(Body::Entry(body))
+            }
+        }
     }
-    pairs
-}
 
-/// The name and content of the pair `text` opens with, and the text
-/// after its close tag.
-fn leading_pair(text: &str) -> Option<(&str, &str, &str)> {
-    let after_lt = text.strip_prefix('<')?;
-    let name_end = after_lt.find(|c: char| c == '>' || c == '/' || c.is_whitespace())?;
-    let name = &after_lt[..name_end];
-    let (_, after_open) = after_lt.split_once('>')?;
-    let (content, after) = after_open.split_once(&format!("</{name}>"))?;
-    (!name.is_empty()).then_some((name, content, after))
-}
-
-/// The error and raw text of an invalid entry row; each is empty when
-/// the row lacks it.
-fn invalid_entry_body(value: &Value) -> InvalidEntry {
-    let field = |key: &str| {
-        value
-            .get(key)
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string()
-    };
-    InvalidEntry {
-        error: field("error"),
-        raw: field("raw"),
+    fn tool_uses_where(&self, keep: impl Fn(&ToolUse) -> bool) -> Vec<ToolUse> {
+        self.tool_uses.iter().filter(|t| keep(t)).cloned().collect()
     }
-}
-
-/// The attachment an entry row carries. The viewer reads it from the
-/// row because no table normalizes attachments; the `message` table
-/// has no row for one.
-fn attachment_body(value: &Value) -> Attachment {
-    let attachment = value.get("attachment");
-    let field = |key: &str| {
-        attachment
-            .and_then(|a| a.get(key))
-            .and_then(Value::as_str)
-            .map(str::to_string)
-    };
-    let subtype = field("reminderType").or_else(|| match (field("hookEvent"), field("hookName")) {
-        (Some(event), Some(name)) => Some(format!("{event} {name}")),
-        (event, name) => event.or(name),
-    });
-    let rendered: Vec<String> = value
-        .get("rendered")
-        .and_then(Value::as_array)
-        .map(|items| items.iter().filter_map(rendered_text).collect())
-        .unwrap_or_default();
-    let (attrs, rendered) = if rendered.is_empty() {
-        let mut selection = select(value).unwrap_or_default();
-        selection.attrs.retain(|(caption, _)| caption != "type");
-        (selection.attrs, selection.text)
-    } else {
-        (Vec::new(), rendered)
-    };
-    Attachment {
-        kind: field("type").unwrap_or_default(),
-        subtype,
-        attrs,
-        rendered,
-    }
-}
-
-/// The text of one `rendered` item. Its `content` is a string, or on a
-/// queued command a list of text blocks, which are joined. One outer
-/// `<system-reminder>` wrapper is removed; the harness puts it around
-/// every item, and a reader of the body knows the text is injected.
-fn rendered_text(item: &Value) -> Option<String> {
-    let text = match item.get("content")? {
-        Value::String(s) => s.clone(),
-        Value::Array(blocks) => blocks
-            .iter()
-            .filter_map(|b| b.get("text").and_then(Value::as_str))
-            .collect::<Vec<_>>()
-            .join("\n\n"),
-        _ => return None,
-    };
-    let trimmed = text.trim();
-    let inner = trimmed
-        .strip_prefix("<system-reminder>")
-        .and_then(|t| t.strip_suffix("</system-reminder>"))
-        .unwrap_or(trimmed);
-    Some(inner.trim().to_string())
 }
 
 impl Entry {
@@ -553,6 +416,7 @@ impl Entry {
 
 #[cfg(test)]
 mod tests {
+    use gage_session::BodyBlock;
     use serde_json::json;
 
     use super::*;
@@ -588,13 +452,12 @@ mod tests {
                     uuid: None,
                     entry_type: "user".to_string(),
                     message_subtype: None,
-                    message_text: None,
-                    ide_tags: None,
-                    value: json!({}),
+                    value: json!({}).into(),
                 })
                 .collect(),
             turns: Vec::new(),
             tool_uses: Vec::new(),
+            bodies: BodySource::claude(),
             notes: Vec::new(),
             attachments: Vec::new(),
             redactions: vec![
@@ -658,243 +521,63 @@ mod tests {
         assert_eq!(lines, [(2, Some(3)), (3, Some(3))]);
     }
 
-    fn attachment_doc(value: Value) -> Document {
-        let mut doc = derived();
-        doc.entries[0].entry_type = "attachment".to_string();
-        doc.entries[0].value = value;
-        doc
+    fn blocks(doc: &Document, index: usize) -> Vec<BodyBlock> {
+        match doc.entry_body(index) {
+            Some(Body::Entry(body)) => body.blocks,
+            _ => panic!("entry {index} has a driver body"),
+        }
     }
 
-    /// An invalid entry row's body is the codec's error and the raw
-    /// line.
+    /// An entry's body is what the session's driver describes for its
+    /// value; an entry the driver describes nothing for has no body.
     #[test]
-    fn an_invalid_entry_row_shows_its_error_and_raw_line() {
+    fn an_entry_body_is_the_drivers() {
         let mut doc = derived();
-        doc.entries[0].entry_type = INVALID_ENTRY_TYPE.to_string();
         doc.entries[0].value = json!({
-            "type": INVALID_ENTRY_TYPE,
-            "error": "expected `,` or `}` at line 1 column 30",
-            "raw": "{\"type\":\"user\",\"x\":\"cu{\"type\":\"c\"}",
-        });
-        let body = match doc.entry_body(0) {
-            Some(EntryBody::InvalidEntry(body)) => body,
-            _ => panic!("an invalid entry row has an invalid entry body"),
-        };
-        assert_eq!(
-            body,
-            InvalidEntry {
-                error: "expected `,` or `}` at line 1 column 30".to_string(),
-                raw: "{\"type\":\"user\",\"x\":\"cu{\"type\":\"c\"}".to_string(),
-            }
-        );
+            "type": "user",
+            "message": {"role": "user", "content": "hello"},
+        })
+        .into();
+        assert_eq!(blocks(&doc, 0), [BodyBlock::Markdown("hello".to_string())]);
+
+        doc.entries[1].value = json!({"type": "ai-title", "aiTitle": "Review"}).into();
+        assert_eq!(blocks(&doc, 1), [BodyBlock::Text("Review".to_string())]);
+
+        doc.entries[2].value = json!({"type": "not-a-type"}).into();
+        assert!(doc.entry_body(2).is_none());
     }
 
-    fn attachment(doc: &Document) -> Attachment {
-        match doc.entry_body(0) {
-            Some(EntryBody::Attachment(a)) => a,
-            _ => panic!("an attachment row has an attachment body"),
-        }
-    }
-
-    /// An attachment row's body is its `attachment.type` and the text
-    /// of each `rendered` item in order, whatever its message subtype.
-    /// The `<system-reminder>` wrapper is removed; text without one is
-    /// kept as it is.
+    /// A tool call row and a tool result row show the `tool_use`
+    /// table's rows for their line. A tool row the table has no rows
+    /// for shows the driver's body.
     #[test]
-    fn an_attachment_row_shows_its_type_and_rendered_text() {
-        let doc = attachment_doc(json!({
-            "type": "attachment",
-            "attachment": {"type": "file", "filename": "a.rs"},
-            "rendered": [
-                {"content": "<system-reminder>\nCalled the Read tool\n</system-reminder>"},
-                {"content": "fn a() {}"},
-            ],
-        }));
-        assert_eq!(
-            attachment(&doc),
-            Attachment {
-                kind: "file".to_string(),
-                subtype: None,
-                attrs: vec![],
-                rendered: vec!["Called the Read tool".to_string(), "fn a() {}".to_string()],
-            }
-        );
-    }
-
-    /// A queued command's rendered content is a list of text blocks;
-    /// their texts are joined into one item.
-    #[test]
-    fn rendered_text_blocks_are_joined_into_one_item() {
-        let doc = attachment_doc(json!({
-            "type": "attachment",
-            "attachment": {"type": "queued_command", "prompt": "stop"},
-            "rendered": [{"content": [
-                {"type": "text", "text": "<system-reminder>\nThe user sent a new message:\nstop"},
-                {"type": "text", "text": "Do not proceed.\n</system-reminder>"},
-            ]}],
-        }));
-        assert_eq!(
-            attachment(&doc).rendered,
-            ["The user sent a new message:\nstop\n\nDo not proceed."]
-        );
-    }
-
-    /// A row without `rendered` text keeps its type and shows what
-    /// its selection rule names; a row no rule selects from has its
-    /// type alone.
-    #[test]
-    fn an_attachment_row_without_rendered_text_shows_its_selection() {
-        let doc = attachment_doc(json!({
-            "type": "attachment",
-            "attachment": {"type": "credential_org", "organizationUuid": "o1"},
-        }));
-        assert_eq!(
-            attachment(&doc),
-            Attachment {
-                kind: "credential_org".to_string(),
-                subtype: None,
-                attrs: vec![("organizationUuid".to_string(), "o1".to_string())],
-                rendered: Vec::new(),
-            }
-        );
-
-        let doc = attachment_doc(json!({
-            "type": "attachment",
-            "attachment": {"type": "batching_reminder_sent", "text": "List first."},
-        }));
-        assert_eq!(
-            attachment(&doc).attrs,
-            [("text".to_string(), "List first.".to_string())]
-        );
-
-        let doc = attachment_doc(json!({
-            "type": "attachment",
-            "attachment": {"type": "auto_mode_exit"},
-        }));
-        assert_eq!(
-            attachment(&doc),
-            Attachment {
-                kind: "auto_mode_exit".to_string(),
-                subtype: None,
-                attrs: Vec::new(),
-                rendered: Vec::new(),
-            }
-        );
-    }
-
-    /// Each top-level pair is a name and its trimmed content; a
-    /// nested tag and an attribute on the open tag stay out of the
-    /// name.
-    #[test]
-    fn tag_pairs_are_the_top_level_names_and_contents() {
-        let pairs = tag_pairs(concat!(
-            "<command-message>gage:publish</command-message>\n",
-            "<command-name>/gage:publish</command-name>\n",
-            "<task-notification>\n<task-id>t1</task-id>\n</task-notification>",
-            "<ide_selection lines=\"1-2\">fn a() {}</ide_selection>",
-        ));
-        let pairs: Vec<(&str, &str)> = pairs
-            .iter()
-            .map(|(n, c)| (n.as_str(), c.as_str()))
-            .collect();
-        assert_eq!(
-            pairs,
-            [
-                ("command-message", "gage:publish"),
-                ("command-name", "/gage:publish"),
-                ("task-notification", "<task-id>t1</task-id>"),
-                ("ide_selection", "fn a() {}"),
-            ]
-        );
-    }
-
-    /// Text that does not open a closed pair is kept whole under an
-    /// empty name, after the pairs before it.
-    #[test]
-    fn tag_text_that_is_not_a_pair_is_kept() {
-        let pairs = tag_pairs("<command-name>/x</command-name> <unclosed>rest");
-        assert_eq!(
-            pairs,
-            [
-                ("command-name".to_string(), "/x".to_string()),
-                (String::new(), "<unclosed>rest".to_string()),
-            ]
-        );
-        assert_eq!(tag_pairs("  "), []);
-    }
-
-    /// A message's body carries its text and its tags; a message of
-    /// tags alone has a body with empty text.
-    #[test]
-    fn a_message_body_carries_its_tags() {
+    fn a_tool_row_shows_its_table_rows_or_the_drivers_body() {
         let mut doc = derived();
-        doc.entries[0].message_text = Some("hello".to_string());
-        doc.entries[0].ide_tags = Some("<ide_opened_file>a.rs</ide_opened_file>".to_string());
-        let expected = vec![("ide_opened_file".to_string(), "a.rs".to_string())];
-        match doc.entry_body(0) {
-            Some(EntryBody::Text { text, tags }) => {
-                assert_eq!(text, "hello");
-                assert_eq!(tags, expected);
-            }
-            _ => panic!("a message row has a text body"),
-        }
-        doc.entries[0].message_text = None;
-        match doc.entry_body(0) {
-            Some(EntryBody::Text { text, tags }) => {
-                assert_eq!(text, "");
-                assert_eq!(tags, expected);
-            }
-            _ => panic!("a message of tags alone has a text body"),
-        }
-    }
-
-    /// An entry without a message shows what its selection rule
-    /// names; a message keeps its text; a type without a rule has no
-    /// body.
-    #[test]
-    fn an_entry_without_a_message_shows_its_selection() {
-        let mut doc = derived();
-        doc.entries[0].entry_type = "ai-title".to_string();
-        doc.entries[0].message_subtype = None;
-        doc.entries[0].message_text = None;
-        doc.entries[0].value = json!({"type": "ai-title", "aiTitle": "Review documentation"});
-        match doc.entry_body(0) {
-            Some(EntryBody::Selection(selection)) => {
-                assert_eq!(selection.text, ["Review documentation"]);
-            }
-            _ => panic!("an ai-title row has a selection body"),
-        }
-
-        doc.entries[0].message_text = Some("message text".to_string());
-        assert!(
-            matches!(doc.entry_body(0), Some(EntryBody::Text { text, .. }) if text == "message text")
-        );
-
-        doc.entries[0].message_text = None;
-        doc.entries[0].value = json!({"type": "not-a-type", "content": "x"});
-        assert!(doc.entry_body(0).is_none());
-    }
-
-    /// A reminder's `reminderType` qualifies its type; a hook row is
-    /// qualified by its event and hook name.
-    #[test]
-    fn an_attachment_subtype_is_the_reminder_type_or_the_hook() {
-        let reminder = attachment_doc(json!({
-            "type": "attachment",
-            "attachment": {"type": "auto_mode", "reminderType": "bash_first"},
-        }));
-        assert_eq!(attachment(&reminder).subtype.as_deref(), Some("bash_first"));
-        let hook = attachment_doc(json!({
-            "type": "attachment",
-            "attachment": {
-                "type": "hook_success",
-                "hookEvent": "PostToolUse",
-                "hookName": "PostToolUse:Edit",
-            },
-        }));
+        doc.entries[0].message_subtype = Some("tool_use".to_string());
+        doc.entries[1].message_subtype = Some("tool_result".to_string());
+        doc.entries[1].value = json!({
+            "type": "user",
+            "message": {"role": "user", "content": [{
+                "type": "tool_result",
+                "tool_use_id": "toolu_1",
+                "content": "Async agent launched",
+            }]},
+        })
+        .into();
         assert_eq!(
-            attachment(&hook).subtype.as_deref(),
-            Some("PostToolUse PostToolUse:Edit")
+            blocks(&doc, 1),
+            [BodyBlock::Text("Async agent launched".to_string())]
         );
+
+        doc.tool_uses = vec![ToolUse {
+            line: 1,
+            result_line: Some(2),
+            name: "Bash".to_string(),
+            input: "{}".to_string(),
+            output: Some("ok".to_string()),
+            is_error: None,
+        }];
+        assert!(matches!(doc.entry_body(0), Some(Body::ToolCalls(calls)) if calls.len() == 1));
+        assert!(matches!(doc.entry_body(1), Some(Body::ToolResults(r)) if r.len() == 1));
     }
 }

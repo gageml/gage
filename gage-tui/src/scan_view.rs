@@ -3689,7 +3689,7 @@ mod tests {
     use gage_store::Store;
 
     use super::*;
-    use crate::doc::{Document, Session, SessionAttrs};
+    use crate::doc::{BodySource, Document, Session, SessionAttrs};
 
     /// A host with nothing behind it, for views the tests drive
     /// without data
@@ -3813,6 +3813,7 @@ mod tests {
             entries: Vec::new(),
             turns: Vec::new(),
             tool_uses: Vec::new(),
+            bodies: BodySource::claude(),
             notes: Vec::new(),
             attachments: Vec::new(),
             redactions: Vec::new(),

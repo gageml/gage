@@ -1,15 +1,13 @@
-//! The content format this crate reads entries in directly.
+//! The content format this crate shows entries of.
 //!
-//! An entry's `raw` is the harness's own row, opaque by contract.
-//! Two readers here open it anyway: the message pane renders its
-//! content blocks, and the outline labels entries by what the
-//! driver derived from it. Each document is checked against the one
-//! format those readers understand before any of them runs. Reading
-//! `raw` this way is a decision to keep, not an accident; a second
-//! format adds its own readers here or moves the work into the
-//! driver.
+//! An entry's body comes from the session's driver, which reads the
+//! entry in its own format. One reader here still depends on the
+//! format: the outline decides which rows to show by the entry types
+//! and message subtypes of this format. Each document is checked
+//! against that format before the outline is built; a second format
+//! adds its own row rules here or moves them into the driver.
 
-/// The `content_format` whose `raw` entries this crate reads
+/// The `content_format` whose entry types this crate's outline reads
 pub const SUPPORTED: &str = "claude-jsonl 1";
 
 /// Panics unless `content_format` is [`SUPPORTED`]. A session in

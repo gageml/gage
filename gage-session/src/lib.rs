@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 pub mod agent;
+pub mod body;
 pub mod codec;
 pub mod content_schema;
 pub mod filter;
@@ -37,6 +38,7 @@ pub mod tool_use_file;
 pub use agent::{
     AgentEvent, AgentMcp, AgentSession, AgentSpec, SystemPrompt, ToolUseEntries, TurnResult,
 };
+pub use body::{BodyAttr, BodyBlock, EntryBody};
 pub use codec::{DecodedEntry, EntryCodec, EntryValue, INVALID_ENTRY_TYPE};
 pub use content_schema::{
     ContentField, ContentSchema, content_schema_batch, content_schema_schema,
@@ -193,6 +195,14 @@ pub trait Driver: Send + Sync {
             "driver {:?} has no codec for content format {content_format:?}",
             self.name()
         )))
+    }
+
+    /// What a viewer shows for `entry`, an entry of `content_format`
+    /// as the format's codec decodes it. The default is a body with no
+    /// blocks, for a driver that describes no entries and for an
+    /// entry the driver has nothing to show for.
+    fn entry_body(&self, _content_format: &str, _entry: &EntryValue) -> EntryBody {
+        EntryBody::default()
     }
 
     /// Start an agent on this driver's harness and return the handle

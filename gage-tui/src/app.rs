@@ -27,7 +27,7 @@ use serde_json::Value;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use crate::attrs::attr_lines;
-use crate::doc::{Document, Dropped, EntryBody, Note, Redaction, SessionAttrs};
+use crate::doc::{Body, Document, Dropped, Note, Redaction, SessionAttrs};
 use crate::hint;
 use crate::input::spawn_input_thread;
 use crate::options::ViewOptions;
@@ -35,9 +35,7 @@ use crate::outline::{AttachmentFiles, CollapseOutcome, Expansion, Outline, RowKi
 use crate::picker::{self, PickColumn, PickItem, Picker, PickerAction};
 use crate::session::{self, Backend};
 use crate::textarea::TextArea;
-use crate::{
-    attachment, invalid_entry, json, message, selection, session_attachment, styles, tool,
-};
+use crate::{body, json, session_attachment, styles, tool};
 
 pub async fn run(
     terminal: &mut DefaultTerminal,
@@ -1765,7 +1763,7 @@ fn draw_body(frame: &mut Frame, state: &mut AppState, area: Rect) {
                 source: state
                     .view
                     .source
-                    .then(|| json::render(&e.value, inner.width)),
+                    .then(|| json::render(&e.value.to_json_value(), inner.width)),
                 body: state.doc.entry_body(index),
                 redactions,
             });
@@ -1994,7 +1992,7 @@ struct EntrySnap {
     /// The entry's value as rows fitted to the pane, when the source
     /// view option is on
     source: Option<Vec<Line<'static>>>,
-    body: Option<EntryBody>,
+    body: Option<Body>,
     /// The entry's redaction records as listed, empty when the view
     /// option is off or the entry has none
     redactions: Vec<Line<'static>>,
@@ -2005,12 +2003,9 @@ fn draw_entry(frame: &mut Frame, state: &mut AppState, entry: &EntrySnap, area: 
     if let Some(body) = &entry.body {
         let width = padded_width(area);
         let lines = match body {
-            EntryBody::Text { text, tags } => message::body(text, tags, width),
-            EntryBody::ToolCalls(calls) => tool::calls(calls, width),
-            EntryBody::ToolResults(results) => tool::results(results, width),
-            EntryBody::Attachment(attachment) => attachment::body(attachment, width),
-            EntryBody::InvalidEntry(invalid) => invalid_entry::body(invalid, width),
-            EntryBody::Selection(selected) => selection::body(selected, width),
+            Body::ToolCalls(calls) => tool::calls(calls, width),
+            Body::ToolResults(results) => tool::results(results, width),
+            Body::Entry(entry_body) => body::lines(entry_body, width),
         };
         let panel = Paragraph::new(lines)
             .wrap(Wrap { trim: false })
@@ -2301,7 +2296,9 @@ mod tests {
     use ratatui::crossterm::event::KeyEvent;
 
     use super::*;
-    use crate::doc::{AttachmentFile, Entry, Session, SessionAttachment, ToolUse};
+    use gage_session::EntryValue;
+
+    use crate::doc::{AttachmentFile, BodySource, Entry, Session, SessionAttachment, ToolUse};
     use crate::session::tests::fixture;
 
     /// The rendered screen as one string, rows joined by newlines
@@ -2409,6 +2406,7 @@ mod tests {
             entries: Vec::new(),
             turns: Vec::new(),
             tool_uses: Vec::new(),
+            bodies: BodySource::claude(),
             notes: Vec::new(),
             attachments: Vec::new(),
             redactions: Vec::new(),
@@ -2481,7 +2479,7 @@ mod tests {
     fn doc_with_redactions() -> Document {
         use crate::doc::Redaction;
         let mut doc = doc_with_entries(5);
-        doc.entries[0].message_text = Some("hello [REDACTED]".into());
+        doc.entries[0].value = message_value("user", serde_json::json!("hello [REDACTED]"));
         doc.redactions = vec![
             Redaction {
                 kind: ChangeKind::Text,
@@ -2666,31 +2664,42 @@ mod tests {
                     uuid: Some(format!("u{line}")),
                     entry_type: "user".into(),
                     message_subtype: Some("text".into()),
-                    message_text: None,
-                    ide_tags: None,
-                    value: serde_json::json!({"type": "user"}),
+                    value: serde_json::json!({"type": "user"}).into(),
                 })
                 .collect(),
             turns: Vec::new(),
             tool_uses: Vec::new(),
+            bodies: BodySource::claude(),
             notes: Vec::new(),
             attachments: Vec::new(),
             redactions: Vec::new(),
         }
     }
 
-    /// A message entry's body is its `message.text`, rendered as
+    /// A user or assistant entry whose message has `content`.
+    fn message_value(kind: &str, content: serde_json::Value) -> EntryValue {
+        serde_json::json!({"type": kind, "message": {"role": kind, "content": content}}).into()
+    }
+
+    /// A message entry's body is its message text, rendered as
     /// markdown; text that is not markdown renders as it is. A
     /// thinking row renders the same way as a prompt or a reply.
     #[test]
-    fn message_rows_render_their_text_column() {
+    fn message_rows_render_their_text() {
         let mut doc = doc_with_entries(3);
-        doc.entries[0].message_text = Some("Hello **world** from the prompt".into());
+        doc.entries[0].value =
+            message_value("user", serde_json::json!("Hello **world** from the prompt"));
         doc.entries[1].entry_type = "assistant".into();
         doc.entries[1].message_subtype = Some("thinking".into());
-        doc.entries[1].message_text = Some("- step one\n- step two".into());
+        doc.entries[1].value = message_value(
+            "assistant",
+            serde_json::json!([{"type": "thinking", "thinking": "- step one\n- step two"}]),
+        );
         doc.entries[2].entry_type = "assistant".into();
-        doc.entries[2].message_text = Some("a < b > c {not markdown".into());
+        doc.entries[2].value = message_value(
+            "assistant",
+            serde_json::json!([{"type": "text", "text": "a < b > c {not markdown"}]),
+        );
         let mut state = AppState::new(doc, &ViewOptions::default(), DocSource::Backend, false);
         let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
 
@@ -2806,7 +2815,7 @@ mod tests {
     /// An attachment row's body opens with its type, and its subtype
     /// when it has one, then the text the harness sent to the model
     /// without its wrapper, item by item. A row the harness never sent
-    /// shows its type and the attributes its selection rule names.
+    /// shows its type and its scalar members.
     #[test]
     fn attachment_rows_render_their_type_and_rendered_text() {
         let mut doc = doc_with_entries(3);
@@ -2821,16 +2830,19 @@ mod tests {
                 {"content": "<system-reminder>\n# Environment\nPlatform: linux\n</system-reminder>"},
                 {"content": "second item"},
             ],
-        });
+        })
+        .into();
         doc.entries[1].value = serde_json::json!({
             "type": "attachment",
             "attachment": {"type": "credential_org", "organizationUuid": "o1"},
-        });
+        })
+        .into();
         doc.entries[2].value = serde_json::json!({
             "type": "attachment",
             "attachment": {"type": "auto_mode", "reminderType": "bash_first"},
             "rendered": [{"content": "<system-reminder>\nWhile auto mode is active\n</system-reminder>"}],
-        });
+        })
+        .into();
         let options = ViewOptions {
             all_entries: true,
             ..ViewOptions::default()
@@ -2960,7 +2972,7 @@ mod tests {
         doc.entries[0].entry_type = "system".into();
         doc.entries[0].message_subtype = None;
         doc.entries[0].value =
-            serde_json::json!({"type": "system", "subtype": "stop_hook_summary"});
+            serde_json::json!({"type": "system", "subtype": "stop_hook_summary"}).into();
         let backend = test_backend().await;
         let view = ViewOptions {
             all_entries: true,
@@ -3000,9 +3012,19 @@ mod tests {
         let mut doc = doc_with_entries(2);
         doc.entries[0].entry_type = "assistant".into();
         doc.entries[0].message_subtype = Some("tool_use".into());
-        doc.entries[0].message_text = Some("PROSE-NOT-SHOWN".into());
+        doc.entries[0].value = message_value(
+            "assistant",
+            serde_json::json!([{"type": "text", "text": "PROSE-NOT-SHOWN"}]),
+        );
         doc.entries[1].message_subtype = Some("tool_result".into());
-        doc.entries[1].message_text = Some("RESULT-TEXT-NOT-SHOWN".into());
+        doc.entries[1].value = message_value(
+            "user",
+            serde_json::json!([{
+                "type": "tool_result",
+                "tool_use_id": "t1",
+                "content": "RESULT-TEXT-NOT-SHOWN",
+            }]),
+        );
         doc.tool_uses = vec![ToolUse {
             line: 1,
             result_line: Some(2),
@@ -3113,7 +3135,7 @@ mod tests {
     fn doc_with_hidden_entry(count: u32, hidden: usize) -> Document {
         let mut doc = doc_with_entries(count);
         doc.entries[hidden].entry_type = "system".into();
-        doc.entries[hidden].value = serde_json::json!({"type": "system"});
+        doc.entries[hidden].value = serde_json::json!({"type": "system"}).into();
         doc
     }
 

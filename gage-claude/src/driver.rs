@@ -25,15 +25,16 @@ use gage_core::config::{default_cache_root, plugin_marketplace_dir};
 use gage_session::progress;
 use gage_session::{
     AgentSession, AgentSpec, AuthInfo, ContentSchema, ContentSink, ContentSource, DecodedEntry,
-    Derivation, Driver, DriverError, DriverStatus, DriverTables, Entry, EntryCodec, EntryValue,
-    Field, HarnessInfo, HarnessSession, InstallInfo, InstallReport, InstallUi, MaintenanceOutcome,
-    MaintenanceStatus, MessageTextFilter, MessageTextHit, NativeLookupError, NativeSession,
-    SessionAttrs, SessionLiveError, SkillSession, Source, SourceOptions, StoredSession,
-    SummaryAttrs, ToolUse, WrittenContent, split_scheme,
+    Derivation, Driver, DriverError, DriverStatus, DriverTables, Entry, EntryBody, EntryCodec,
+    EntryValue, Field, HarnessInfo, HarnessSession, InstallInfo, InstallReport, InstallUi,
+    MaintenanceOutcome, MaintenanceStatus, MessageTextFilter, MessageTextHit, NativeLookupError,
+    NativeSession, SessionAttrs, SessionLiveError, SkillSession, Source, SourceOptions,
+    StoredSession, SummaryAttrs, ToolUse, WrittenContent, split_scheme,
 };
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
+use crate::body;
 use crate::codec::codec;
 use crate::content_schema;
 use crate::home::ClaudeHome;
@@ -150,6 +151,13 @@ impl Driver for ClaudeDriver {
             )));
         }
         Ok(codec())
+    }
+
+    fn entry_body(&self, content_format: &str, entry: &EntryValue) -> EntryBody {
+        if content_format != CONTENT_FORMAT {
+            return EntryBody::default();
+        }
+        body::entry_body(entry)
     }
 
     fn format_model(&self, model: &str) -> String {

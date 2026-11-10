@@ -22,8 +22,8 @@ use gage_core::datetime::format_elapsed_ms;
 use gage_core::human::format_size;
 use gage_query::ContextBuilder;
 use gage_registry::driver::DriverRegistry;
-use gage_session::Driver;
 use gage_session::is_system;
+use gage_session::{Driver, EntryValue};
 use gage_store::url::{self, LineSelection};
 use gage_store::{
     ChangeKind, ExternalSession, NoteEdit, NoteFull, NoteInput, NoteStore, NoteValue, Store,
@@ -32,8 +32,8 @@ use ratatui::crossterm::terminal;
 use serde_json::Value;
 
 use crate::doc::{
-    AttachmentFile, Document, Entry, Note, Redaction, Session, SessionAttachment, SessionAttrs,
-    ToolUse,
+    AttachmentFile, BodySource, Document, Entry, Note, Redaction, Session, SessionAttachment,
+    SessionAttrs, ToolUse,
 };
 use crate::format;
 
@@ -155,7 +155,8 @@ impl Backend {
         if let Some(content_format) = session.value.get("content_format").and_then(Value::as_str) {
             format::require_supported(session_id, content_format);
         }
-        let entries = self.load_entries(session_id).await?;
+        let bodies = self.body_source(&session)?;
+        let entries = self.load_entries(session_id, &bodies).await?;
         let turns = self.load_turns(session_id, &entries).await?;
         let tool_uses = self.load_tool_uses(session_id).await?;
         // A native session is never a publish, and its context has no
@@ -180,6 +181,7 @@ impl Backend {
             entries,
             turns,
             tool_uses,
+            bodies,
             notes,
             attachments,
             redactions,
@@ -290,10 +292,15 @@ impl Backend {
     /// other side, so an unfiltered message relation scans every
     /// session: 15 s against a store of 198k messages versus 0.4 s
     /// with the literal in the join condition.
-    async fn load_entries(&self, session_id: &str) -> Result<Vec<Entry>, Box<dyn Error>> {
+    async fn load_entries(
+        &self,
+        session_id: &str,
+        bodies: &BodySource,
+    ) -> Result<Vec<Entry>, Box<dyn Error>> {
+        let codec = bodies.codec()?;
         let id = sql_str(session_id);
         let sql = format!(
-            "SELECT e.line, e.uuid, e.type, m.subtype, e.raw, m.text, m.ide_tags \
+            "SELECT e.line, e.uuid, e.type, m.subtype, e.raw \
              FROM {} e LEFT JOIN {} m ON m.session_id = '{id}' AND m.line = e.line \
              WHERE e.session_id = '{id}' ORDER BY e.line",
             self.entry_rel(),
@@ -307,23 +314,19 @@ impl Backend {
             let types = column::<StringArray>(batch, 2);
             let subtypes = column::<StringArray>(batch, 3);
             let raws = column::<StringArray>(batch, 4);
-            let texts = column::<StringArray>(batch, 5);
-            let ide_tags = column::<StringArray>(batch, 6);
             for i in 0..batch.num_rows() {
                 // A driver that supplies no raw row leaves the entry
                 // with nothing to render; it still holds its line
                 let value = if raws.is_null(i) {
-                    Value::Null
+                    EntryValue::Null
                 } else {
-                    serde_json::from_str(raws.value(i))?
+                    codec.decode(raws.value(i).as_bytes())?
                 };
                 entries.push(Entry {
                     line: u32::try_from(lines.value(i)).unwrap_or(0),
                     uuid: uuids.is_valid(i).then(|| uuids.value(i).to_string()),
                     entry_type: types.value(i).to_string(),
                     message_subtype: subtypes.is_valid(i).then(|| subtypes.value(i).to_string()),
-                    message_text: texts.is_valid(i).then(|| texts.value(i).to_string()),
-                    ide_tags: ide_tags.is_valid(i).then(|| ide_tags.value(i).to_string()),
                     value,
                 });
             }
@@ -649,6 +652,20 @@ impl Backend {
         Ok(items)
     }
 
+    /// The driver that describes the session's entries and the
+    /// content format they are in.
+    fn body_source(&self, session: &Session) -> Result<BodySource, Box<dyn Error>> {
+        let field = |key| {
+            session
+                .value
+                .get(key)
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+        };
+        let driver = self.row_driver(field("driver"))?;
+        Ok(BodySource::new(driver, field("content_format")))
+    }
+
     /// The driver that names a listed row's project: the source's
     /// driver for a native row, the recorded driver for a stored one.
     fn row_driver(&self, driver_col: &str) -> Result<Arc<dyn Driver>, Box<dyn Error>> {
@@ -936,8 +953,21 @@ pub(crate) mod tests {
     };
     use tempfile::TempDir;
 
+    use gage_session::{BodyAttr, BodyBlock};
+
     use super::*;
-    use crate::doc::EntryBody;
+    use crate::doc::Body;
+
+    fn blocks(doc: &Document, index: usize) -> Vec<BodyBlock> {
+        match doc.entry_body(index) {
+            Some(Body::Entry(body)) => body.blocks,
+            _ => panic!("entry {index} has a driver body"),
+        }
+    }
+
+    fn markdown(text: &str) -> Vec<BodyBlock> {
+        vec![BodyBlock::Markdown(text.to_string())]
+    }
 
     /// A native Claude session in a temporary source, also added to a
     /// temporary store: the source spec, the native id, the store,
@@ -1106,11 +1136,12 @@ pub(crate) mod tests {
         assert!(target_lines(&format!("session:abc#1-{beyond}")).is_err());
     }
 
-    /// A user message's leading tags load beside its text: a message
-    /// with text after its tags has both, and a message that is all
-    /// tags has the tags and no body text.
+    /// A loaded entry's body is the driver's, over the value the
+    /// driver's codec decodes: a message with text after its leading
+    /// tags shows the text, and a message that is all tags shows the
+    /// tags.
     #[tokio::test]
-    async fn entries_load_the_tags_split_off_a_user_message() {
+    async fn loaded_entries_have_the_drivers_body() {
         let f = fixture_with_content(concat!(
             r#"{"type":"user","uuid":"u1","timestamp":"2025-01-01T00:00:00Z","cwd":"/w/proj","message":{"role":"user","content":"<ide_opened_file>a.rs</ide_opened_file>\nhello there"}}"#,
             "\n",
@@ -1121,26 +1152,23 @@ pub(crate) mod tests {
         ));
         let backend = Backend::stored(f.store).await;
         let doc = backend.load(&f.session_id).await.unwrap();
-        assert_eq!(doc.entries[0].message_text.as_deref(), Some("hello there"));
+        assert_eq!(blocks(&doc, 0), markdown("hello there"));
         assert_eq!(
-            doc.entries[0].ide_tags.as_deref(),
-            Some("<ide_opened_file>a.rs</ide_opened_file>")
+            blocks(&doc, 1),
+            [BodyBlock::Attrs(vec![BodyAttr::new(
+                "command-name",
+                "/gage:publish"
+            )])]
         );
-        assert_eq!(
-            doc.entries[1].ide_tags.as_deref(),
-            Some("<command-name>/gage:publish</command-name>")
-        );
-        assert_eq!(doc.entries[2].ide_tags, None);
-        match doc.entry_body(1) {
-            Some(EntryBody::Text { text, tags }) => {
-                assert!(text.trim().is_empty(), "{text:?}");
-                assert_eq!(
-                    tags,
-                    [("command-name".to_string(), "/gage:publish".to_string())]
-                );
-            }
-            _ => panic!("a message of tags alone has a text body"),
-        }
+        assert_eq!(blocks(&doc, 2), markdown("hi"));
+        let keys: Vec<&str> = doc.entries[0]
+            .value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(keys, ["type", "uuid", "timestamp", "cwd", "message"]);
     }
 
     /// The store backend reads the session, its entries, and its
@@ -1156,8 +1184,8 @@ pub(crate) mod tests {
         let doc = backend.load(&f.session_id).await.unwrap();
         assert_eq!(doc.entries.len(), 2);
         assert_eq!(doc.entries[0].entry_type(), "user");
-        assert_eq!(doc.entries[0].message_text.as_deref(), Some("hello there"));
-        assert_eq!(doc.entries[1].message_text.as_deref(), Some("hi"));
+        assert_eq!(blocks(&doc, 0), markdown("hello there"));
+        assert_eq!(blocks(&doc, 1), markdown("hi"));
         let origin = doc.session.value["origin"].as_str().unwrap();
         assert!(origin.ends_with(&f.native_id), "{origin}");
         assert!(doc.session.value.get("locator").is_none());
@@ -1373,7 +1401,7 @@ pub(crate) mod tests {
         let doc = backend.load(&pending.id).await.unwrap();
         assert!(doc.session.pending);
         assert_eq!(doc.entries.len(), 2);
-        assert_eq!(doc.entries[0].message_text.as_deref(), Some("hello there"));
+        assert_eq!(blocks(&doc, 0), markdown("hello there"));
         assert_eq!(doc.redactions.len(), 1);
         assert!(doc.notes.is_empty());
         let origin = doc.session.value["origin"].as_str().unwrap();
