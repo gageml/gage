@@ -9,8 +9,13 @@
 //! Validation is by mtime: a cache file whose mtime is at least the
 //! JSONL's mtime is treated as fresh. JSONL files only grow (Claude
 //! Code appends), so any write moves mtime forward and invalidates the
-//! cache. Worst case is a few messages short during a reconcile-vs-write
-//! race; the lag self-heals on the next JSONL write.
+//! cache.
+//!
+//! A session is defined at the time it is read. A line appended after
+//! the read and before the cache write is not in the entry, and the
+//! entry is still treated as fresh until the JSONL is written again.
+//! This is a decision, not an oversight: the interval is milliseconds
+//! and the cost is a summary a few lines short.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};

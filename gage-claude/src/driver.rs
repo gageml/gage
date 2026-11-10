@@ -177,8 +177,10 @@ impl Driver for ClaudeDriver {
         // it; a session is re-added over time, so that content can join
         // later at no duplication cost (git shares identical blobs).
         //
-        // One read serves the write and the derive, so the derived
-        // attrs and the size describe the bytes stored.
+        // The session added is the transcript as this read finds it.
+        // A change to the file after the read is not included. One
+        // read serves the write and the derive, so the derived attrs
+        // and the size describe the bytes stored.
         //
         // The mtime is the one read when the session was opened. A
         // transcript that grows between the open and this read is
