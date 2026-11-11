@@ -1157,6 +1157,38 @@ mod tests {
         );
     }
 
+    /// Every `native_session` row names its session type, the value a
+    /// stored session carries after `add`, whether or not its
+    /// transcript holds anything.
+    #[tokio::test]
+    async fn native_session_names_its_session_type() {
+        let claude_root = tempfile::tempdir().unwrap();
+        let dir = claude_root.path().join("projects").join("-w-proj");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("dddddddd-0000-0000-0000-000000000001.jsonl"),
+            concat!(
+                r#"{"type":"user","uuid":"u1","timestamp":"2025-01-01T00:00:00Z","message":{"role":"user","content":"Fix the parser"}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        std::fs::write(dir.join("dddddddd-0000-0000-0000-000000000002.jsonl"), "").unwrap();
+        let spec = format!("claude:{}", claude_root.path().display());
+        let ctx = ContextBuilder::new(None)
+            .cache_root(claude_root.path().join("cache"))
+            .build()
+            .await;
+        assert_eq!(
+            strings(
+                &ctx,
+                &format!("SELECT session_type FROM native_session('{spec}') ORDER BY id")
+            )
+            .await,
+            ["claude", "claude"]
+        );
+    }
+
     /// A file the walk lists is a session whether or not it reads. One
     /// that does not decode is a row whose `summary` carries the error
     /// and whose derived columns are null, so `--empty` never selects
@@ -1260,7 +1292,7 @@ mod tests {
         let from = format!("native_session('{spec}')");
 
         let listing = format!(
-            "SELECT id, id_display, id_prefix, project, title, '' AS session_type, model, size, \
+            "SELECT id, id_display, id_prefix, project, title, session_type, model, size, \
                     message_count, mtime AS time, '' AS driver \
              FROM {from} ORDER BY mtime DESC LIMIT 2"
         );

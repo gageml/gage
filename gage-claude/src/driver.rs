@@ -67,7 +67,7 @@ const NAME: &str = "claude";
 const HARNESS_NAME: &str = "Claude Code";
 const SCHEMES: &[&str] = &["claude"];
 const VERSION: &str = env!("CARGO_PKG_VERSION");
-const SESSION_TYPE: &str = "claude";
+pub(crate) const SESSION_TYPE: &str = "claude";
 /// `content_format` value returned by `write_native` and expected by
 /// `read_stored`. The name identifies the byte layout under
 /// `files.d/`; the trailing digit is its version.

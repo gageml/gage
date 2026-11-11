@@ -70,9 +70,9 @@ native_tool_use(source), and native_tool_use_file(source) read the source
 directly. The argument is required: '' names the default source, 'claude:' the
 default Claude Code source, 'claude:/path' a projects directory.
 
-native_session returns (id, title, project, mtime, content_format, size, model,
-message_count, line_count, input_tokens, output_tokens, cached_tokens, cost_usd,
-summary, is_empty): mtime and size are the session file's, where the stored
+native_session returns (id, title, project, mtime, session_type, content_format,
+size, model, message_count, line_count, input_tokens, output_tokens,
+cached_tokens, cost_usd, summary, is_empty): mtime and size are the session file's, where the stored
 session table has created, modified, and the stored content size; the derived
 columns and summary are the same as the stored table's. The other four return
 their stored tables' columns and key on the native UUID: id in native_session,
