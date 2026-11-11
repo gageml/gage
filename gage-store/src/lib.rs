@@ -110,8 +110,8 @@ pub use query::{
 };
 pub use refs::{GENERATION, KEY_REFS, OBJECT_REFS, ROOT as REFS_ROOT, TAG_REFS};
 pub use remote::{
-    FetchSource, PushSet, Remote, RemoteDiff, RemoteStore, Repository, tracking_prefix,
-    validate_objects as validate_remote_objects,
+    FetchSource, LeasedRef, PushSet, Remote, RemoteDiff, RemoteStore, Repository, Retraction,
+    tracking_prefix, validate_objects as validate_remote_objects,
 };
 pub use scan::{
     AgentAttrs, AgentRecord, DirFiles, LOG_NAMES, OBJECT_TYPE as SCAN_TYPE, ScanAttrs, ScanContent,
@@ -123,7 +123,7 @@ pub use session::{
     ChangeKind, ChangeRecord, ExternalSession, ExternalSessionRecord, OBJECT_TYPE as SESSION_TYPE,
     PublishAttrs, PublishFilter, SessionAddOutcome, SessionAttrsRecord, SessionDirLayout,
     SessionOutcome, SessionQuery, SessionRecord, SessionRemoveOutcome, SessionStore,
-    format_changes, parse_changes, session_object_id,
+    format_changes, parse_changes, published_session_id, session_object_id,
 };
 pub use share::{
     FilterSpec, OBJECT_TYPE as SHARE_TYPE, ShareAttrs, ShareDeleted, ShareEditOutcome,

@@ -22,8 +22,8 @@ use gage_registry::driver::DriverRegistry;
 use gage_session::{Driver, NativeLookupError, SessionLiveError, Source, SourceOptions};
 use gage_store::url::LineSelection;
 use gage_store::{
-    DatasetStore, SESSION_TYPE, SessionOutcome, SessionRecord, SessionStore, ShareStore, Store,
-    StoreError, TagStore,
+    DatasetStore, SESSION_TYPE, SessionOutcome, SessionRecord, SessionStore, ShareRecord,
+    ShareStore, Store, StoreError, TagStore,
 };
 use gage_tui::session::{Backend, picker_page_size};
 use gage_tui::{ViewOptions, session_view};
@@ -152,6 +152,14 @@ pub struct SessionAddArgs {
     /// and linked in one step
     #[arg(short, long, value_name = "DATASET")]
     pub dataset: Option<String>,
+
+    /// Add sessions to share (tag, ID, or prefix)
+    ///
+    /// Share tag, ID, or prefix. Native sessions are added to the
+    /// store and linked in one step. A share that names filters
+    /// admits published sessions only
+    #[arg(long, value_name = "SHARE", conflicts_with = "dataset")]
+    pub share: Option<String>,
 
     #[command(flatten)]
     pub filter: SessionFilterArgs,
@@ -842,6 +850,10 @@ async fn add_dialog(
         ),
         None => None,
     };
+    let share = match args.share.as_deref() {
+        Some(prefix) => Some(open_share(&store, prefix)?),
+        None => None,
+    };
     let max_bytes = Some(
         args.size
             .max_bytes()
@@ -882,6 +894,9 @@ async fn add_dialog(
     if let Some(id) = &dataset_id {
         dialog::step_value("Dataset", short_uuid(id))?;
     }
+    if let Some(share) = &share {
+        dialog::step_value("Share", short_uuid(&share.id))?;
+    }
     let lines = native_session_lines(source.as_deref(), &selected)
         .await
         .map_err(|e| DialogError::Failed(format!("{e}")))?;
@@ -897,6 +912,21 @@ async fn add_dialog(
     )?;
     let done = view.done().to_string();
     view.finish()?;
+    if let Some(share) = &share {
+        let ids: Vec<String> = placed.iter().map(|p| p.id.clone()).collect();
+        let outcomes = ShareStore::from(&store)
+            .link(&share.id, &ids)
+            .map_err(|e| DialogError::Failed(format!("--share {}: {e}", short_uuid(&share.id))))?;
+        let linked = outcomes
+            .iter()
+            .filter(|o| o.outcome != SessionOutcome::Unchanged)
+            .count();
+        cli::log::info(format!(
+            "Linked {} to share {}",
+            count(linked, "session"),
+            short_uuid(&share.id)
+        ))?;
+    }
     if let Some(name) = &args.tag {
         // The selection check in `add` admits one session, and an
         // interrupted add of one session fails before this point
@@ -917,6 +947,21 @@ async fn add_dialog(
         }
     }
     Ok(add_outro(&store, &placed, dataset_id.as_deref(), &done).into())
+}
+
+/// The share `--share` names, refused before anything is written when
+/// it names filters: a session added from a source applied none.
+fn open_share(store: &Store, prefix: &str) -> Result<ShareRecord, DialogError> {
+    let share = ShareStore::from(store)
+        .get(prefix)
+        .map_err(|e| DialogError::Failed(format!("--share {prefix}: {e}")))?;
+    if !share.attrs.filters.is_empty() {
+        return Err(DialogError::Failed(format!(
+            "--share {prefix}: share requires filters {}; publish sessions to add them",
+            share.attrs.filters.join(", ")
+        )));
+    }
+    Ok(share)
 }
 
 /// A session an add placed: its stored id and what the add did to it.
@@ -962,6 +1007,7 @@ pub(crate) async fn add_all(
 ) -> Result<String, DialogError> {
     let filter = SessionFilterArgs {
         project: None,
+        touches: None,
         days: None,
         today: false,
         all: true,
@@ -1989,6 +2035,45 @@ mod tests {
         id
     }
 
+    /// `session add --share` excludes `--dataset`. A share that names
+    /// no filter is opened, and one that names filters is refused
+    /// with the filters it requires.
+    #[test]
+    fn add_share_option_excludes_dataset_and_refuses_a_filtered_share() {
+        let add = |argv: &[&str]| {
+            Cli::try_parse_from([&["gage", "session", "add", "abc"], argv].concat())
+        };
+        assert!(add(&["--share", "work"]).is_ok());
+        assert!(add(&["--share", "work", "--dataset", "d"]).is_err());
+
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("store.git");
+        gage_store::init(&path).unwrap();
+        let store = Store::open_with_cache_root(&path, &tmp.path().join("cache")).unwrap();
+        let shares = ShareStore::from(&store);
+        let open = shares.create(&ShareAttrs::default(), &[]).unwrap();
+        let filtered = shares
+            .create(
+                &ShareAttrs {
+                    description: None,
+                    filters: vec!["gitleaks".into()],
+                },
+                &[],
+            )
+            .unwrap();
+        let Ok(share) = open_share(&store, &open) else {
+            panic!("a share with no filters was refused");
+        };
+        assert_eq!(share.id, open);
+        let Err(DialogError::Failed(message)) = open_share(&store, &filtered) else {
+            panic!("a filtered share was opened");
+        };
+        assert!(
+            message.ends_with("share requires filters gitleaks; publish sessions to add them"),
+            "{message}"
+        );
+    }
+
     /// A share listing holds the share's members and no other stored
     /// session, and the limit and the total apply to the members.
     #[tokio::test]
@@ -2354,6 +2439,7 @@ mod tests {
             SessionAddArgs {
                 sessions: sessions.iter().map(|s| s.to_string()).collect(),
                 dataset: None,
+                share: None,
                 filter,
                 size: SizeLimitArgs { max_size: None },
                 tag: Some("baseline".to_string()),
@@ -2363,6 +2449,7 @@ mod tests {
         }
         let no_filter = || SessionFilterArgs {
             project: None,
+            touches: None,
             days: None,
             today: false,
             all: false,

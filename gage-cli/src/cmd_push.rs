@@ -10,6 +10,14 @@
 //! a configured remote or a bare Git URL or path; a push writes
 //! nothing local either way. With no argument, the objects are the
 //! ones the remote records as its push default.
+//!
+//! A retraction is sent in place of the commit the remote holds: a
+//! tombstone, a published session written again without descent, and
+//! a share rewritten without a removed member. Each takes content out
+//! of reach, so none can be a fast-forward. The push replaces the
+//! remote's commit under a lease on the commit the remote advertised.
+//! A member a share dropped because it was removed is sent as its
+//! tombstone with the share, so the remote stops holding its content.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
@@ -20,12 +28,14 @@ use cliclack as cli;
 use datafusion::arrow::array::StringArray;
 use gage_query::ContextBuilder;
 use gage_store::{
-    IdMatch, OBJECT_REFS, PushSet, RemoteStore, Repository, Store, StoreError, TAG_REFS, TagStore,
+    IdMatch, LeasedRef, OBJECT_REFS, PushSet, RemoteStore, Repository, Retraction, Store,
+    StoreError, TAG_REFS, TagStore,
 };
 
 use crate::cmd_session::run_query;
 use crate::dialog;
 use crate::error::CliError;
+use crate::human::count;
 
 #[derive(Args)]
 pub struct PushArgs {
@@ -45,6 +55,15 @@ pub struct PushArgs {
     /// Also push notes targeting named objects
     #[arg(long)]
     with_notes: bool,
+
+    /// Replace remote commits this store has not fetched
+    ///
+    /// A deleted object, a republished session, and a share that lost
+    /// a deleted member replace what a remote holds. When a remote
+    /// holds a commit this store has not fetched, push stops; this
+    /// option replaces that commit. Nothing else is replaced
+    #[arg(long)]
+    force: bool,
 
     /// Skip confirmation prompt
     #[arg(short, long)]
@@ -98,24 +117,45 @@ pub async fn main(args: PushArgs) -> Result<(), CliError> {
         }
     }
 
-    let refs = refs_to_send(&store, &objects, &tag_refs).context("gage push")?;
-    let on_remote = {
+    let mut refs = refs_to_send(&store, &objects, &tag_refs).context("gage push")?;
+    let (plan, on_remote) = {
         let store = store.lock().unwrap();
-        RemoteStore::from(&*store)
-            .ls_remote(&repository)
-            .context("gage push")?
+        let remotes = RemoteStore::from(&*store);
+        let on_remote = remotes.ls_remote(&repository).context("gage push")?;
+        let retracted = retracted_members(&store, &refs, &on_remote).context("gage push")?;
+        refs.extend(retracted.iter().map(|m| RefToSend {
+            name: format!("{OBJECT_REFS}{}", m.id),
+            sha: m.tip_sha.clone(),
+        }));
+        objects.extend(retracted);
+        let plan = plan_push(&remotes, &refs, &on_remote, args.force).context("gage push")?;
+        (plan, on_remote)
     };
-    let (send, up_to_date): (Vec<&RefToSend>, Vec<&RefToSend>) = refs
-        .iter()
-        .partition(|r| on_remote.get(&r.name) != Some(&r.sha));
-    if send.is_empty() {
+    if !plan.unverified.is_empty() {
+        return Err(CliError::message(format!(
+            "gage push: {remote} holds a commit of {} that this store has not fetched; \
+             fetch first (gage fetch {remote}), or replace it with --force",
+            count(plan.unverified.len(), "object")
+        )));
+    }
+    let set = plan.set;
+    if set.is_empty() {
         return dialog::run(&format!("Push to {remote}"), || {
             Ok(format!("Everything up to date on {remote}").into())
         });
     }
-    let send_names: Vec<String> = send.iter().map(|r| r.name.clone()).collect();
+    let up_to_date = refs
+        .iter()
+        .filter(|r| on_remote.get(&r.name) == Some(&r.sha))
+        .count();
 
-    let summary = summary_lines(&objects, &tag_refs, up_to_date.len());
+    let mut summary = summary_lines(&objects, &tag_refs, up_to_date);
+    if !set.replace.is_empty() {
+        summary.push(format!(
+            "Replacing {} on {remote}",
+            count(set.replace.len(), "object")
+        ));
+    }
     // The dialog previews and confirms; the push runs after it, so
     // git's own output lands outside the dialog
     let mut confirmed = false;
@@ -123,7 +163,7 @@ pub async fn main(args: PushArgs) -> Result<(), CliError> {
         cli::log::remark(summary.join("\n"))?;
         dialog::confirm(args.yes, false)?;
         confirmed = true;
-        Ok(format!("Pushing {} refs to {remote}", send_names.len()).into())
+        Ok(format!("Pushing {} refs to {remote}", set.len()).into())
     })?;
     if !confirmed {
         return Ok(());
@@ -131,10 +171,6 @@ pub async fn main(args: PushArgs) -> Result<(), CliError> {
 
     let store = store.lock().unwrap();
     let remotes = RemoteStore::from(&*store);
-    let set = PushSet {
-        send: send_names,
-        ..PushSet::default()
-    };
     let approval = remotes.approval_digest(&set.names()).context("gage push")?;
     let status = remotes
         .push(&repository, &set, &approval)
@@ -171,6 +207,92 @@ fn objects_to_push(
         );
     }
     Ok(default)
+}
+
+/// The removed objects that a ref of `refs` linked in the commit the
+/// remote holds: a share's members removed since the share was last
+/// sent. Each is a tombstone the push carries with the share. A remote
+/// commit the store does not hold contributes none.
+fn retracted_members(
+    store: &Store,
+    refs: &[RefToSend],
+    on_remote: &BTreeMap<String, String>,
+) -> Result<Vec<IdMatch>, StoreError> {
+    let mut out: Vec<IdMatch> = Vec::new();
+    for r in refs {
+        let Some(remote_sha) = on_remote.get(&r.name) else {
+            continue;
+        };
+        if *remote_sha == r.sha || !r.name.starts_with(OBJECT_REFS) {
+            continue;
+        }
+        if store
+            .object_info(&format!("{remote_sha}^{{commit}}"))?
+            .is_none()
+        {
+            continue;
+        }
+        for member in store.tombstoned_links(remote_sha)? {
+            let name = format!("{OBJECT_REFS}{}", member.id);
+            let known =
+                refs.iter().any(|r| r.name == name) || out.iter().any(|m| m.id == member.id);
+            if !known {
+                out.push(member);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// What a push does with each ref, and the object refs it cannot
+/// place.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct PushPlan {
+    set: PushSet,
+    /// Refs whose local commit is a retraction of a remote commit the
+    /// store does not hold
+    unverified: Vec<String>,
+}
+
+/// Decide what the push does with each of `refs` given what the remote
+/// advertises. A ref the remote lacks is sent, and one it holds at the
+/// same commit is left out. An object ref whose local commit retracts
+/// the remote's is replaced under a lease on the advertised commit.
+/// When the store does not hold the remote's commit, the ref is
+/// replaced only with `force` and is otherwise reported. Every other
+/// ref is sent, and the remote refuses it unless it is a fast-forward.
+fn plan_push(
+    remotes: &RemoteStore<'_>,
+    refs: &[RefToSend],
+    on_remote: &BTreeMap<String, String>,
+    force: bool,
+) -> Result<PushPlan, StoreError> {
+    let mut plan = PushPlan::default();
+    for r in refs {
+        let Some(remote_sha) = on_remote.get(&r.name) else {
+            plan.set.send.push(r.name.clone());
+            continue;
+        };
+        if *remote_sha == r.sha {
+            continue;
+        }
+        let retraction = if r.name.starts_with(OBJECT_REFS) {
+            remotes.retraction(&r.sha, remote_sha)?
+        } else {
+            Retraction::No
+        };
+        let leased = || LeasedRef {
+            name: r.name.clone(),
+            expect: remote_sha.clone(),
+        };
+        match retraction {
+            Retraction::No => plan.set.send.push(r.name.clone()),
+            Retraction::Verified => plan.set.replace.push(leased()),
+            Retraction::Unverified if force => plan.set.replace.push(leased()),
+            Retraction::Unverified => plan.unverified.push(r.name.clone()),
+        }
+    }
+    Ok(plan)
 }
 
 /// The named objects and everything they link, transitively.
@@ -270,6 +392,16 @@ fn summary_lines(
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::slice;
+
+    use gage_session::SummaryAttrs;
+    use gage_store::{
+        PublishAttrs, SessionAttrsRecord, SessionDirLayout, SessionStore, ShareAttrs, ShareStore,
+        published_session_id,
+    };
+
     use super::*;
 
     /// A fresh store and the guard keeping its directory alive
@@ -313,5 +445,120 @@ mod tests {
             err.contains("only a remote records default objects"),
             "{err}"
         );
+    }
+
+    /// Write a published session directory for `id` under `root` with
+    /// `content` as its one file.
+    fn published_dir(root: &Path, id: &str, content: &str) -> PathBuf {
+        let dir = root.join(id);
+        let layout = SessionDirLayout::new(&dir);
+        fs::create_dir_all(layout.files_dir()).unwrap();
+        let attrs = SessionAttrsRecord {
+            driver: "claude 1".into(),
+            origin: "session:original@abc".into(),
+            native_mtime: 0,
+            native_size: 0,
+            session_type: "claude".into(),
+            content_format: "claude-jsonl 1".into(),
+            size: 0,
+            project: None,
+            summary: SummaryAttrs::default(),
+            summary_version: None,
+            publish: Some(PublishAttrs::default()),
+        };
+        fs::write(layout.attrs_file(), serde_json::to_vec(&attrs).unwrap()).unwrap();
+        fs::write(layout.changes_file(), "[]\n").unwrap();
+        fs::write(layout.files_dir().join("session.jsonl"), content).unwrap();
+        dir
+    }
+
+    /// A ref the remote lacks is sent and one it holds at the same
+    /// commit is left out. A republished session, a removed session,
+    /// and a share that lost the removed member replace the commits
+    /// the remote holds, each under a lease on that commit, and the
+    /// removed member's tombstone joins the push. An update that
+    /// descends from the remote's commit is sent. A retraction of a
+    /// commit the store does not hold is reported, and replaced only
+    /// with force.
+    #[test]
+    fn a_push_replaces_what_a_retraction_supersedes_under_a_lease() {
+        let (tmp, store) = open_store();
+        let sessions = SessionStore::from(&store);
+        let remotes = RemoteStore::from(&store);
+        let tip = |id: &str| store.resolve_id(id).unwrap().1;
+        let name = |id: &str| format!("{OBJECT_REFS}{id}");
+        let to_send = |ids: &[&String]| -> Vec<RefToSend> {
+            ids.iter()
+                .map(|id| RefToSend {
+                    name: name(id),
+                    sha: tip(id),
+                })
+                .collect()
+        };
+        let ids: Vec<String> = ["republished", "removed", "updated", "fresh"]
+            .iter()
+            .map(|spec| published_session_id("original", spec))
+            .collect();
+        let [republished, removed, updated, fresh] = &ids[..] else {
+            panic!("four ids");
+        };
+        for id in &ids {
+            sessions
+                .create_from_dir(&published_dir(tmp.path(), id, "a\nsecret\n"))
+                .unwrap();
+        }
+        let share = ShareStore::from(&store)
+            .create(&ShareAttrs::default(), &ids)
+            .unwrap();
+        let mut on_remote: BTreeMap<String, String> = [republished, removed, updated, &share]
+            .iter()
+            .map(|id| (name(id), tip(id)))
+            .collect();
+
+        sessions
+            .replace_from_dir(&published_dir(tmp.path(), republished, "a\n"))
+            .unwrap();
+        sessions.remove(slice::from_ref(removed)).unwrap();
+        sessions
+            .update_from_dir(&published_dir(tmp.path(), updated, "a\nsecret\nb\n"))
+            .unwrap();
+
+        // An edit after the rewrite leaves the share's tip with a
+        // parent; its history is still cut from the remote's commit
+        let shares = ShareStore::from(&store);
+        shares.unlink(&share, slice::from_ref(fresh)).unwrap();
+        shares.link(&share, slice::from_ref(fresh)).unwrap();
+
+        let mut refs = to_send(&[republished, updated, fresh, &share]);
+        let retracted = retracted_members(&store, &refs, &on_remote).unwrap();
+        assert_eq!(
+            retracted.iter().map(|m| &m.id).collect::<Vec<_>>(),
+            [removed]
+        );
+        refs.extend(to_send(&[removed]));
+        let before = on_remote.clone();
+        let leased = |id: &String| LeasedRef {
+            name: name(id),
+            expect: before[&name(id)].clone(),
+        };
+        let plan = plan_push(&remotes, &refs, &on_remote, false).unwrap();
+        assert_eq!(plan.set.send, [name(updated), name(fresh)]);
+        assert_eq!(
+            plan.set.replace,
+            [leased(republished), leased(&share), leased(removed)]
+        );
+        assert!(plan.unverified.is_empty());
+
+        on_remote.insert(name(fresh), tip(fresh));
+        on_remote.insert(name(removed), "0".repeat(40));
+        let plan = plan_push(&remotes, &refs, &on_remote, false).unwrap();
+        assert_eq!(plan.unverified, [name(removed)]);
+        assert!(!plan.set.names().contains(&name(fresh)));
+        let plan = plan_push(&remotes, &refs, &on_remote, true).unwrap();
+        assert!(plan.unverified.is_empty());
+        assert!(plan.set.replace.contains(&LeasedRef {
+            name: name(removed),
+            expect: "0".repeat(40),
+        }));
     }
 }

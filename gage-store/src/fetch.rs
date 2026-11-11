@@ -34,7 +34,7 @@ use crate::key::plan_key_ref;
 use crate::object::{Object, ObjectTree};
 use crate::refs::{OBJECT_REFS, TAG_REFS};
 use crate::remote::FetchSource;
-use crate::session::OBJECT_TYPE as SESSION_TYPE;
+use crate::session::{OBJECT_TYPE as SESSION_TYPE, is_published};
 use crate::share::{OBJECT_TYPE as SHARE_TYPE, SESSIONS_LINK as SHARE_SESSIONS_LINK};
 use crate::{Store, StoreError};
 
@@ -61,6 +61,9 @@ pub enum Outcome {
     Tombstoned,
     /// The remote's live commit replaces the local tombstone
     Resurrected,
+    /// The remote's live commit of a published session replaces the
+    /// live local one it does not descend from
+    Replaced,
     /// Divergent commits merged into one new local commit
     Merged,
     /// A divergence resolved by the named side
@@ -148,6 +151,7 @@ impl Store {
                 Outcome::Created
                     | Outcome::FastForwarded
                     | Outcome::Resurrected
+                    | Outcome::Replaced
                     | Outcome::Merged
                     | Outcome::Resolved(_)
             ) {
@@ -249,6 +253,14 @@ impl Store {
             }
             // A local tombstone stands against a remote edit
             (true, false) => done(Outcome::Ahead),
+            // A published session is republished without descent when
+            // its earlier commit holds content the publish now removes.
+            // A merge would keep that content: the session merge takes
+            // the longer side when one is a prefix of the other.
+            (false, false) if same_identity && is_published(&remote) => {
+                self.record_ref_move(&remote, &local_sha)?;
+                done(Outcome::Replaced)
+            }
             (false, false) => {
                 let remote_set: HashSet<&str> = remote_chain.iter().map(String::as_str).collect();
                 let base_sha = local_chain
@@ -612,8 +624,12 @@ mod tests {
     use crate::note::{NoteEdit, NoteInput, NoteStore, NoteValue};
     use crate::refs::object_ref;
     use crate::remote::{RemoteStore, Repository};
+    use crate::session::tests::{attrs_with_origin, write_session_dir};
     use crate::test_support::open_store;
-    use crate::{DatasetStore, ShareAttrs, ShareStore, TagStore};
+    use crate::{
+        DatasetStore, PublishAttrs, SessionAttrsRecord, SessionStore, ShareAttrs, ShareStore,
+        TagStore, published_session_id,
+    };
 
     fn note(store: &Store, name: &str) -> String {
         NoteStore::from(store)
@@ -968,6 +984,52 @@ mod tests {
             .collect();
         assert_eq!(members, [n2, n3]);
         assert_eq!(ShareStore::from(&b).get(&share).unwrap().attrs, attrs);
+    }
+
+    /// A published session replaced on the remote without descent is
+    /// adopted as it is, including when the replacement's content is a
+    /// prefix of the local content, which a merge would resolve to the
+    /// local side. A session that is not a publish is not adopted this
+    /// way.
+    #[test]
+    fn a_replaced_published_session_is_adopted_without_a_merge() {
+        let (dir, a, b) = pair();
+        let sessions = SessionStore::from(&a);
+        let write = |id: &str, publish: Option<PublishAttrs>, content: &str| {
+            let attrs = SessionAttrsRecord {
+                publish,
+                ..attrs_with_origin("session:original@abc")
+            };
+            write_session_dir(
+                dir.path(),
+                id,
+                &attrs,
+                "[]\n",
+                &[("session.jsonl", content)],
+            )
+        };
+        let published = published_session_id("original", "gitleaks");
+        let plain = published_session_id("original", "none");
+        let publish = Some(PublishAttrs::default());
+        sessions
+            .create_from_dir(&write(&published, publish.clone(), "a\nb\nsecret\n"))
+            .unwrap();
+        sessions
+            .create_from_dir(&write(&plain, None, "a\nb\nsecret\n"))
+            .unwrap();
+        fetch(&b, "a", None);
+
+        let replaced = sessions
+            .replace_from_dir(&write(&published, publish, "a\nb\n"))
+            .unwrap();
+        sessions
+            .replace_from_dir(&write(&plain, None, "a\nb\n"))
+            .unwrap();
+        let report = fetch(&b, "a", None);
+        assert_eq!(outcome(&report, &published), &Outcome::Replaced);
+        assert_eq!(tip(&b, &published), replaced);
+        assert_eq!(b.walk_parent_chain(&replaced).unwrap(), [replaced]);
+        assert_ne!(outcome(&report, &plain), &Outcome::Replaced);
     }
 
     #[test]

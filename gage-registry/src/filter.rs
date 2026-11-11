@@ -88,6 +88,12 @@ pub struct FilterDef {
     /// declaration has none. A publish records it beside the filter's
     /// name, and a share's version requirement is checked against it.
     pub version: String,
+    /// The integer `FILTER.generation`; 0 when the declaration has
+    /// none. A filter raises it when sessions published under a lower
+    /// generation hold content the filter now removes. A publish
+    /// records it, and a batch publish replaces a published session
+    /// whose recorded generation is lower.
+    pub generation: u32,
     /// Group memberships declared via `FILTER.groups`; `-g --group`
     /// selects by any group name
     pub groups: Vec<String>,
@@ -350,6 +356,7 @@ fn parse_filter(source: &str, embed_key: &str, path: &Path) -> Result<FilterDef,
     let mut name = None;
     let mut description = None;
     let mut version = String::new();
+    let mut generation = 0;
     let mut groups: Vec<String> = Vec::new();
     let mut tasks_obj: Option<&ast::ExprObject> = None;
     let mut problems: Vec<Problem> = Vec::new();
@@ -380,6 +387,13 @@ fn parse_filter(source: &str, embed_key: &str, path: &Path) -> Result<FilterDef,
                     })
                 }
                 Some("version") => version = expr_str(source, expr).unwrap_or_default(),
+                Some("generation") => match expr_u32(source, expr) {
+                    Some(n) => generation = n,
+                    None => problems.push(problem(
+                        expr,
+                        "FILTER field 'generation' must be a non-negative integer",
+                    )),
+                },
                 Some("groups") => groups = expr_str_vec(source, expr),
                 Some("tasks") => match expr {
                     ast::Expr::Object(obj) => tasks_obj = Some(obj),
@@ -402,6 +416,7 @@ fn parse_filter(source: &str, embed_key: &str, path: &Path) -> Result<FilterDef,
         name,
         description: description.unwrap_or_default(),
         version,
+        generation,
         groups,
         tasks,
         problems,
@@ -410,6 +425,14 @@ fn parse_filter(source: &str, embed_key: &str, path: &Path) -> Result<FilterDef,
         embed_key: embed_key.to_string(),
         path: path.to_path_buf(),
     })
+}
+
+/// The value of an unsigned integer literal.
+fn expr_u32(source: &str, expr: &ast::Expr) -> Option<u32> {
+    let span = expr.span();
+    source[span.start.0 as usize..span.end.0 as usize]
+        .parse()
+        .ok()
 }
 
 /// Parse `FILTER.tasks`: each task is an object with an optional
@@ -472,6 +495,7 @@ pub const FILTER = #{
     name: "demo",
     description: "Remove demo content",
     version: "1.2.0",
+    generation: 3,
     groups: ["public", "trusted"],
     params: #{ prompt: #{ value: "", description: "Additional instructions" }, n: 2 },
     tasks: #{ "demo-task": #{}, other: #{ call: "run_other" } },
@@ -482,11 +506,33 @@ pub const FILTER = #{
         assert_eq!(def.name, "demo");
         assert_eq!(def.description, "Remove demo content");
         assert_eq!(def.version, "1.2.0");
+        assert_eq!(def.generation, 3);
         assert_eq!(def.groups, ["public", "trusted"]);
         assert_eq!(def.tasks["demo-task"].call, "demo_task");
         assert_eq!(def.tasks["other"].call, "run_other");
         let params = resolve_params(&def.params_def()).unwrap();
         assert_eq!(params, json::json!({ "prompt": "", "n": 2 }));
+    }
+
+    /// A declaration without a generation is generation 0, and a
+    /// generation that is not an unsigned integer is a problem.
+    #[test]
+    fn generation_defaults_to_zero_and_rejects_a_non_integer() {
+        let path = Path::new("/tmp/demo/filter.rn");
+        let def = parse_filter("pub const FILTER = #{ name: \"demo\" };", "demo", path).unwrap();
+        assert_eq!(def.generation, 0);
+        let def = parse_filter(
+            "pub const FILTER = #{ name: \"demo\", generation: \"2\" };",
+            "demo",
+            path,
+        )
+        .unwrap();
+        assert_eq!(def.generation, 0);
+        assert!(
+            def.problems[0].message.contains("'generation'"),
+            "{:?}",
+            def.problems
+        );
     }
 
     #[test]

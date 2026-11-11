@@ -25,7 +25,7 @@ pub const STORE_VERSION: u32 = crate::refs::GENERATION;
 /// `gage.hookVersion`. Bumped with any change to either script; a
 /// store whose recorded version differs has its hooks rewritten at
 /// open, so an upgraded build repairs every store it touches.
-pub const HOOK_VERSION: u32 = 1;
+pub const HOOK_VERSION: u32 = 2;
 const HOOK_VERSION_KEY: &str = "gage.hookVersion";
 
 /// Settings every store carries. `denyDeletes` and `denyNonFastForwards`
@@ -463,9 +463,14 @@ mod tests {
     use crate::git::{git_in, run};
     use crate::note::{NoteEdit, NoteInput, NoteStore, NoteValue};
     use crate::object::object_ref;
+    use crate::session::tests::{attrs_with_origin, write_session_dir};
     use crate::store::index_path;
     use crate::test_support::{cache_root_for, init_for_test, open, plant_blob, reopen};
     use crate::writer::{TreeInput, commit_tree, mktree};
+    use crate::{
+        PublishAttrs, SessionAttrsRecord, SessionStore, ShareAttrs, ShareStore,
+        published_session_id,
+    };
 
     #[test]
     fn store_path_is_gage_store_when_set_else_under_the_home() {
@@ -961,6 +966,70 @@ refs/heads/main\n";
 
         let target = open(&target_path).unwrap();
         assert_eq!(target.rev_parse(&a_ref).unwrap().unwrap(), live);
+    }
+
+    /// A published session written again without descent replaces the
+    /// commit the remote holds, and so does a share rewritten after a
+    /// member was removed. A session that is not a publish is held to
+    /// the fast-forward rule.
+    #[test]
+    fn update_hook_accepts_a_replaced_published_session_and_a_rewritten_share() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source_path = tmp.path().join("source.git");
+        let target_path = tmp.path().join("target.git");
+        init_for_test(&source_path);
+        init_for_test(&target_path);
+        let source = open(&source_path).unwrap();
+        let sessions = SessionStore::from(&source);
+        let tip = |id: &str| source.rev_parse(&object_ref(id)).unwrap().unwrap();
+        let push = |id: &str| push(&source_path, &target_path, &tip(id), &object_ref(id));
+        let write = |id: &str, publish: Option<PublishAttrs>, content: &str| {
+            let attrs = SessionAttrsRecord {
+                publish,
+                ..attrs_with_origin("session:original@abc")
+            };
+            write_session_dir(
+                tmp.path(),
+                id,
+                &attrs,
+                "[]\n",
+                &[("session.jsonl", content)],
+            )
+        };
+        let published = published_session_id("original", "gitleaks");
+        let plain = published_session_id("original", "none");
+        let publish = Some(PublishAttrs::default());
+        sessions
+            .create_from_dir(&write(&published, publish.clone(), "a\nsecret\n"))
+            .unwrap();
+        sessions
+            .create_from_dir(&write(&plain, None, "a\nsecret\n"))
+            .unwrap();
+        let share = ShareStore::from(&source)
+            .create(&ShareAttrs::default(), &[published.clone(), plain.clone()])
+            .unwrap();
+        for id in [&published, &plain, &share] {
+            push(id).unwrap();
+        }
+
+        sessions
+            .replace_from_dir(&write(&published, publish, "a\n"))
+            .unwrap();
+        push(&published).unwrap();
+        push(&share).unwrap();
+
+        sessions
+            .replace_from_dir(&write(&plain, None, "a\n"))
+            .unwrap();
+        assert_declined(push(&plain), "not a tombstone or a replacement");
+
+        sessions.remove(std::slice::from_ref(&plain)).unwrap();
+        push(&plain).unwrap();
+        push(&share).unwrap();
+        let target = open(&target_path).unwrap();
+        for id in [&published, &plain, &share] {
+            assert_eq!(target.rev_parse(&object_ref(id)).unwrap().unwrap(), tip(id));
+        }
     }
 
     /// A bare repository that received a backup's refs and carries no

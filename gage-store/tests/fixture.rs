@@ -287,6 +287,7 @@ fn write_generation_1_fixture() {
             filters: vec![PublishFilter {
                 name: "secret".into(),
                 version: Some("1.0.0".into()),
+                generation: None,
             }],
         }),
         ..original.attrs
@@ -478,6 +479,7 @@ fn reads_the_generation_1_fixture() {
             filters: vec![PublishFilter {
                 name: "secret".into(),
                 version: Some("1.0.0".into()),
+                generation: None,
             }],
         })
     );

@@ -18,6 +18,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::slice;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use gage_core::uuid::{derive_id, is_id};
@@ -127,6 +128,19 @@ pub struct PublishFilter {
     /// definition declared none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+    /// The filter definition's `generation` at publish time. Absent
+    /// on a session published before generations were recorded and
+    /// when the definition's generation is 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<u32>,
+}
+
+/// A session directory read for a write: the object's id, its content
+/// tree, and the commit message.
+struct StagedSession {
+    id: String,
+    tree: ObjectTree,
+    message: String,
 }
 
 impl SessionAttrsRecord {
@@ -211,6 +225,25 @@ pub struct SessionRecord {
 /// native session id.
 pub fn session_object_id(driver_name: &str, native_session_id: &str) -> String {
     derive_id(&format!("session\0{driver_name}\0{native_session_id}"))
+}
+
+/// Whether `object` is a session a publish wrote: its attrs carry a
+/// `publish` value.
+pub(crate) fn is_published(object: &Object) -> bool {
+    object.header.object_type == OBJECT_TYPE
+        && object
+            .tree
+            .attrs
+            .as_ref()
+            .is_some_and(|attrs| attrs.get("publish").is_some())
+}
+
+/// Derive the Gage object id of a published session from the id of
+/// the session it was published from and `spec`, the text form of what
+/// the publish applied. The same original published under the same
+/// spec is the same object, so a repeated publish finds it.
+pub fn published_session_id(original_id: &str, spec: &str) -> String {
+    derive_id(&format!("published\0{original_id}\0{spec}"))
 }
 
 impl<'a> SessionStore<'a> {
@@ -422,14 +455,64 @@ impl<'a> SessionStore<'a> {
     /// content is not inspected. The object's ref must not exist.
     /// Returns the commit SHA.
     pub fn create_from_dir(&self, dir: &Path) -> Result<String, StoreError> {
+        let staged = self.staged(dir)?;
+        if self.store.rev_parse(&object_ref(&staged.id))?.is_some() {
+            return Err(StoreError::ObjectExists(staged.id));
+        }
+        self.store.create(
+            OBJECT_TYPE,
+            OBJECT_VERSION,
+            &staged.id,
+            &staged.tree,
+            &staged.message,
+        )
+    }
+
+    /// Write the session directory `dir` as the next version of the
+    /// live session its name identifies: a child of the session's
+    /// current commit. The directory is read as [`create_from_dir`]
+    /// reads it. Content equal to the current commit writes nothing.
+    /// Returns the session's commit SHA after the write.
+    ///
+    /// [`create_from_dir`]: SessionStore::create_from_dir
+    pub fn update_from_dir(&self, dir: &Path) -> Result<String, StoreError> {
+        let staged = self.staged(dir)?;
+        let current = self.store.resolve_typed(&staged.id, OBJECT_TYPE)?;
+        match self.store.edit(&current, &staged.tree, &staged.message)? {
+            EditOutcome::Unchanged => Ok(current.commit_sha),
+            EditOutcome::Written(commit_sha) => Ok(commit_sha),
+        }
+    }
+
+    /// Write the session directory `dir` in place of the live session
+    /// its name identifies, as a commit that does not descend from the
+    /// session's current one. This is the write for a session whose
+    /// current commit holds content the new one retracts. Every share
+    /// that holds the session is rewritten the same way with the new
+    /// commit in the member's slot, so no ref reaches the replaced
+    /// commit through a share. Returns the new commit SHA.
+    pub fn replace_from_dir(&self, dir: &Path) -> Result<String, StoreError> {
+        let staged = self.staged(dir)?;
+        let current = self.store.resolve_typed(&staged.id, OBJECT_TYPE)?;
+        let commit_sha = self
+            .store
+            .replace(&current, &staged.tree, &staged.message)?;
+        let shares = ShareStore::from(self.store);
+        for members in shares.containing(slice::from_ref(&staged.id))? {
+            shares.replace_member(&members.share_id, &staged.id, &commit_sha)?;
+        }
+        Ok(commit_sha)
+    }
+
+    /// Read a session directory into the tree and commit message of
+    /// the object it stages. The attrs and the change records are
+    /// checked to decode; the content is imported as it stands.
+    fn staged(&self, dir: &Path) -> Result<StagedSession, StoreError> {
         let layout = SessionDirLayout::new(dir);
         let id = layout
             .session_id()
             .expect("a session directory is named by its id");
         assert!(is_id(id), "a session directory is named by its id: {id:?}");
-        if self.store.rev_parse(&object_ref(id))?.is_some() {
-            return Err(StoreError::ObjectExists(id.to_string()));
-        }
         let read = |path: &Path| fs::read(path).map_err(StoreError::ReadContent);
         let attrs_value: Value = serde_json::from_slice(&read(&layout.attrs_file())?)
             .map_err(|e| StoreError::Parse(format!("session attrs {id}: {e}")))?;
@@ -451,16 +534,20 @@ impl<'a> SessionStore<'a> {
         };
         tree.blobs.insert(CHANGES_FILE.to_string(), changes);
         tree.subtrees.insert(FILES_TREE.to_string(), files_tree);
-        let message = format!("session: {}", attrs.origin);
-        self.store
-            .create(OBJECT_TYPE, OBJECT_VERSION, id, &tree, &message)
+        Ok(StagedSession {
+            id: id.to_string(),
+            tree,
+            message: format!("session: {}", attrs.origin),
+        })
     }
 
     /// Remove stored sessions. Every id or prefix is resolved to a live
-    /// session before anything is written. Each dataset and share that
-    /// currently holds any of the sessions is edited once to unlink all
-    /// of them, then each session's ref gets a parentless tombstone
-    /// commit. The native sessions in their sources are not touched. A
+    /// session before anything is written. Each dataset that currently
+    /// holds any of the sessions is edited once to unlink all of them.
+    /// Each share that holds any is rewritten without them as a commit
+    /// that does not descend from its current one, so a push of the
+    /// share stops carrying the removed content. Then each session's
+    /// ref gets a parentless tombstone commit. The native sessions in their sources are not touched. A
     /// failure after the container edits leaves the sessions live and
     /// unlinked, which `add` with a dataset repairs.
     pub fn remove(&self, ids_or_prefixes: &[String]) -> Result<SessionRemoveOutcome, StoreError> {
@@ -481,7 +568,7 @@ impl<'a> SessionStore<'a> {
         let shares = ShareStore::from(self.store);
         let shared = shares.containing(&ids)?;
         for members in &shared {
-            shares.unlink(&members.share_id, &members.session_ids)?;
+            shares.retract(&members.share_id, &members.session_ids)?;
         }
 
         for record in &sessions {
@@ -1218,13 +1305,13 @@ fn files_tree(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::DatasetStore;
     use crate::git::{git_in, run};
     use crate::test_support::{object_counts, open_store};
+    use crate::{DatasetStore, ShareAttrs};
     use gage_core::uuid::new_uuid;
     use gage_session::SessionAttrs;
 
-    fn attrs_with_origin(origin: &str) -> SessionAttrsRecord {
+    pub(crate) fn attrs_with_origin(origin: &str) -> SessionAttrsRecord {
         SessionAttrsRecord {
             driver: "fake 0.1".into(),
             origin: origin.into(),
@@ -2351,6 +2438,96 @@ pub(crate) mod tests {
 
         let again = sessions.create_from_dir(&dir).unwrap_err();
         assert!(matches!(again, StoreError::ObjectExists(ref existing) if *existing == id));
+    }
+
+    /// An update is a child of the session's current commit. A
+    /// replacement does not descend from it, and a share that held the
+    /// session is rewritten so that its ref no longer reaches the
+    /// replaced commit.
+    #[test]
+    fn update_from_dir_descends_and_replace_from_dir_severs_session_and_share() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let sessions = SessionStore::from(&store);
+        let id = published_session_id("original", "gitleaks");
+        assert_eq!(id, published_session_id("original", "gitleaks"));
+        assert_ne!(id, published_session_id("original", "gitleaks,pii"));
+        let write = |content: &str| {
+            write_session_dir(
+                tmp.path(),
+                &id,
+                &attrs_with_origin("session:original@abc"),
+                "[]\n",
+                &[("session.jsonl", content)],
+            )
+        };
+        let first = sessions.create_from_dir(&write("a\nsecret\n")).unwrap();
+        let shares = ShareStore::from(&store);
+        let share = shares
+            .create(&ShareAttrs::default(), slice::from_ref(&id))
+            .unwrap();
+        let reachable = |ref_name: &str, commit: &str| {
+            run(git_in(store.path(), ["rev-list", ref_name]))
+                .unwrap()
+                .lines()
+                .any(|sha| sha == commit)
+        };
+
+        let second = sessions.update_from_dir(&write("a\nsecret\nb\n")).unwrap();
+        assert_eq!(
+            store.walk_parent_chain(&second).unwrap(),
+            [second.clone(), first.clone()]
+        );
+        assert_eq!(
+            sessions.update_from_dir(&write("a\nsecret\nb\n")).unwrap(),
+            second,
+            "equal content writes nothing"
+        );
+        shares.link(&share, slice::from_ref(&id)).unwrap();
+        assert!(reachable(&object_ref(&share), &second));
+
+        let third = sessions.replace_from_dir(&write("a\nb\n")).unwrap();
+        assert_eq!(store.walk_parent_chain(&third).unwrap(), [third.clone()]);
+        assert_eq!(sessions.get(&id).unwrap().commit_sha, third);
+        for old in [&first, &second] {
+            assert!(!reachable(&object_ref(&id), old));
+            assert!(!reachable(&object_ref(&share), old));
+        }
+        assert!(reachable(&object_ref(&share), &third));
+        let members = shares.sessions(&share).unwrap();
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0].commit_sha, third);
+    }
+
+    /// Removing a session rewrites a share that held it so that the
+    /// share's ref no longer reaches the removed session's commit.
+    #[test]
+    fn remove_severs_the_share_from_the_removed_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let sessions = SessionStore::from(&store);
+        let add = |name: &str| {
+            sessions
+                .add(&FakeDriver, &mut fake(name, &[("session.jsonl", "a\n")]))
+                .unwrap()
+        };
+        let (kept, removed) = (add("s1"), add("s2"));
+        let shares = ShareStore::from(&store);
+        let share = shares
+            .create(
+                &ShareAttrs::default(),
+                &[kept.id.clone(), removed.id.clone()],
+            )
+            .unwrap();
+
+        sessions.remove(slice::from_ref(&removed.id)).unwrap();
+
+        let reached = run(git_in(store.path(), ["rev-list", &object_ref(&share)])).unwrap();
+        assert!(!reached.lines().any(|sha| sha == removed.commit_sha));
+        assert!(reached.lines().any(|sha| sha == kept.commit_sha));
+        let members = shares.sessions(&share).unwrap();
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0].id, kept.id);
     }
 
     /// The directory name is the id, so a directory named otherwise is

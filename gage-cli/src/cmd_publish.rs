@@ -6,7 +6,10 @@
 //! its definition file; `edit` and `refresh` rebuild the staged
 //! session from the file; `show` prints it; `candidate` prints the
 //! text open to redaction; `abort` and `apply` end the publish.
-//! `apply` is the only command that writes the store. The original
+//! `apply` is the only subcommand that writes the store. A run with
+//! `--batch` publishes each session under an id derived from the
+//! session and what the publish applies, and writes the store itself
+//! when no part of the publish needs a model. The original
 //! sessions are resolved through `--source` and `--stored`, the way
 //! `gage scan` resolves sessions: a `--stored` session is used as is,
 //! and a native session is added to the store first so it has an
@@ -28,8 +31,8 @@ use gage_core::config::{Config, FilterConfig, gage_home};
 use gage_core::style::IdHighlighter;
 use gage_core::uuid::short_uuid;
 use gage_publish::{
-    FilterEntry, InitArgs as InitRecord, Problem, PublishError, Publisher, Staging, TextEntry,
-    candidate,
+    FilterEntry, InitArgs as InitRecord, Problem, PublishError, PublishedState, Publisher, Staging,
+    TextEntry, candidate,
 };
 use gage_registry::filter::{Filter, FilterDef, FilterRegistry, filter_source};
 use gage_registry::scanner::split_scanner_spec;
@@ -149,10 +152,14 @@ pub struct PublishRunArgs {
 
     /// Run without an interactive session
     ///
-    /// Run without an interactive session. Claude Code runs the publish
-    /// skill to completion and prints its response. Without it, Claude
-    /// Code opens an interactive session with the skill and the
-    /// arguments given.
+    /// Run without an interactive session. Each session is published
+    /// under an ID derived from session, filters, and segments. A
+    /// session published before with same inputs is written again
+    /// when it changed, left as it is when it did not, and skipped
+    /// when its published copy was removed. Claude Code runs publish
+    /// skill only when a filter, a segment, or a description needs a
+    /// model. Without it, Claude Code opens an interactive session
+    /// with skill and arguments given.
     #[arg(short, long)]
     batch: bool,
 
@@ -320,6 +327,16 @@ pub struct InitArgs {
     /// definition gives it lines.
     #[arg(short = 't', long, value_name = "TEXT")]
     segment: Vec<String>,
+
+    /// Derive publish ID from session and filters
+    ///
+    /// ID is derived from session, filters, and segments. Apply then
+    /// writes session an earlier publish of same inputs
+    /// wrote, in place of a new one. A session whose published copy is
+    /// current, and one whose published copy was removed, is not
+    /// staged.
+    #[arg(long)]
+    derive_id: bool,
 
     /// Skip confirmation prompt
     #[arg(short, long)]
@@ -550,6 +567,9 @@ async fn publish_sessions(args: PublishRunArgs) -> Result<(), CliError> {
         return Ok(());
     }
     check_run_args(&args).map_err(fail)?;
+    if args.batch {
+        return publish_batch(args).await;
+    }
     let registry = FilterRegistry::load();
     let config = Config::load_user().map_err(|e| fail(format!("reading config: {e}")))?;
     check_groups("gage publish", &registry, &args.group)?;
@@ -594,22 +614,19 @@ async fn publish_sessions(args: PublishRunArgs) -> Result<(), CliError> {
         let description = description_step(description, args.yes)?;
         let model = model_prompt::model_step(args.model.as_deref(), args.yes)?;
         if !args.yes {
-            dialog::usage_notice(usage_notice(args.batch))?;
+            dialog::usage_notice(usage_notice(false))?;
             dialog::confirm(false, true)?;
         }
         let inputs = SkillInputs {
             description: description.as_deref(),
             segments: &segments,
+            derived: false,
         };
         setup = Some(PublishSetup {
             skill_args: skill_args(&args, &inputs, &ids),
             model,
         });
-        Ok(DialogResult::from(if args.batch {
-            "Publishing sessions"
-        } else {
-            "Starting publish session"
-        }))
+        Ok(DialogResult::from("Starting publish session"))
     })
     .await?;
     let Some(setup) = setup else {
@@ -621,13 +638,269 @@ async fn publish_sessions(args: PublishRunArgs) -> Result<(), CliError> {
         args: &setup.skill_args,
         model: setup.model.as_deref(),
         extra_args: &args.extra_args,
-        mode: if args.batch {
-            SkillMode::Batch
-        } else {
-            SkillMode::Interactive
-        },
+        mode: SkillMode::Interactive,
     };
     source::run_skill_session("gage publish", &session)
+}
+
+/// Publish the selected sessions to completion. Each session is
+/// published under the id derived from it and from the filters and
+/// segments given, so a session published before is found again: one
+/// that is current is left as it is, one that was removed stays
+/// removed, and the rest are published. Every session found or
+/// published is placed in the shares given. The publish runs in this
+/// process when nothing in it needs a model. When a filter contributes
+/// redaction instructions, or a segment or a description is given,
+/// Claude Code runs the publish skill over the sessions left to
+/// publish.
+async fn publish_batch(args: PublishRunArgs) -> Result<(), CliError> {
+    let fail = |e: String| CliError::message(format!("gage publish: {e}"));
+    let store = Store::open(&gage_store::store_path()).map_err(|e| fail(e.to_string()))?;
+    let publisher = Publisher::new(&store, FilterRegistry::load());
+    let registry = publisher.filters();
+    let config = Config::load_user().map_err(|e| fail(format!("reading config: {e}")))?;
+    check_groups("gage publish", registry, &args.group)?;
+    let specs = resolve_filter_specs("gage publish", registry, &args.filter)?;
+    let segments = args
+        .segment
+        .iter()
+        .map(|text| {
+            text_value("gage publish", "--segment", text)
+                .map(|t| t.trim_end().to_string())
+                .map_err(|e| fail(e.to_string()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let description = args
+        .description
+        .as_deref()
+        .map(|text| {
+            text_value("gage publish", "--description", text)
+                .map(|t| t.trim().to_string())
+                .map_err(|e| fail(e.to_string()))
+        })
+        .transpose()?;
+    let shares = resolve_shares("gage publish", &store, &args.share)?;
+    let originals = resolve_originals(
+        &store,
+        args.source.as_deref(),
+        args.stored,
+        &args.sessions,
+        &args.select,
+    )
+    .await?;
+    let record = InitRecord {
+        groups: args.group.clone(),
+    };
+    let author = default_author();
+
+    let mut setup: Option<PublishSetup> = None;
+    dialog::run_async("Publish sessions", || async {
+        if !shares.is_empty() {
+            dialog::step_list("Shares", shares.iter().map(|s| short_uuid(s).to_string()))?;
+        }
+        originals.preview()?;
+        let filters: Vec<FilterEntry> = if args.group.is_empty() && specs.is_empty() {
+            Vec::new()
+        } else {
+            select_filters(registry, &config.filters, &args.group, &specs)?
+                .iter()
+                .map(FilterEntry::from_filter)
+                .collect()
+        };
+        if !segments.is_empty() {
+            dialog::step_list("Segments", segments.iter().map(|s| value_cell(s)))?;
+        }
+        let needs_model = description.is_some()
+            || publisher
+                .needs_model(&filters, &segments)
+                .await
+                .map_err(|e| DialogError::Failed(e.to_string()))?;
+        let model = if needs_model {
+            if let Some(description) = &description {
+                dialog::step_value("Description", value_cell(description))?;
+            }
+            let model = model_prompt::model_step(args.model.as_deref(), args.yes)?;
+            if !args.yes {
+                dialog::usage_notice(usage_notice(true))?;
+            }
+            model
+        } else {
+            None
+        };
+        dialog::confirm(args.yes, true)?;
+
+        let batch = Batch {
+            publisher: &publisher,
+            shares: &shares,
+            filters: &filters,
+            segments: &segments,
+            author: &author,
+            record: &record,
+        };
+        let tally = batch
+            .run(originals.into_stored(&store), !needs_model)
+            .await
+            .map_err(DialogError::Failed)?;
+        if tally.removed > 0 {
+            cli::log::info(format!(
+                "Skipped {} removed after an earlier publish",
+                count(tally.removed, "session")
+            ))?;
+        }
+        if tally.interrupted {
+            return Err(dialog::partial(
+                "Published",
+                tally.published,
+                tally.published + tally.pending.len(),
+                "session",
+            ));
+        }
+        if needs_model && !tally.pending.is_empty() {
+            let inputs = SkillInputs {
+                description: description.as_deref(),
+                segments: &segments,
+                derived: true,
+            };
+            let outro = format!("Publishing {}", count(tally.pending.len(), "session"));
+            setup = Some(PublishSetup {
+                skill_args: skill_args(&args, &inputs, &tally.pending),
+                model,
+            });
+            return Ok(DialogResult::from(outro));
+        }
+        Ok(DialogResult::from(tally.outro()))
+    })
+    .await?;
+    let Some(setup) = setup else {
+        return Ok(());
+    };
+    let session = SkillSession {
+        name: "Publish sessions",
+        skill: "gage:publish",
+        args: &setup.skill_args,
+        model: setup.model.as_deref(),
+        extra_args: &args.extra_args,
+        mode: SkillMode::Batch,
+    };
+    source::run_skill_session("gage publish", &session)
+}
+
+/// The inputs of a batch publish that hold for every session.
+struct Batch<'a> {
+    publisher: &'a Publisher<'a>,
+    /// Resolved share ids every found or published session joins
+    shares: &'a [String],
+    filters: &'a [FilterEntry],
+    segments: &'a [String],
+    author: &'a str,
+    record: &'a InitRecord,
+}
+
+/// What a batch publish did with the sessions it was given.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct BatchTally {
+    /// Sessions published now
+    published: usize,
+    /// Sessions found published and current
+    current: usize,
+    /// Sessions whose published copy was removed
+    removed: usize,
+    /// Stored ids of the sessions left to publish
+    pending: Vec<String>,
+    /// The run stopped on an interrupt with sessions left
+    interrupted: bool,
+}
+
+impl BatchTally {
+    fn outro(&self) -> String {
+        let mut text = format!("Published {}", count(self.published, "session"));
+        if self.current > 0 {
+            text.push_str(&format!("; {} already current", self.current));
+        }
+        text
+    }
+}
+
+impl Batch<'_> {
+    /// Take each of `originals` through the publish. Every share is
+    /// checked against what the publish applies before anything is
+    /// written. A session whose published copy was removed is counted
+    /// and left alone. One found current is placed in the shares. The
+    /// rest are published and placed in the shares when `publish` is
+    /// set, and are otherwise returned as pending.
+    async fn run(
+        &self,
+        originals: impl Iterator<Item = Result<SessionRecord, String>>,
+        publish: bool,
+    ) -> Result<BatchTally, String> {
+        let store_shares = ShareStore::from(self.publisher.store());
+        let applied = self.publisher.applied(self.filters);
+        for share in self.shares {
+            store_shares
+                .accepts(share, "a published session", &applied)
+                .map_err(|e| e.to_string())?;
+        }
+        let mut tally = BatchTally::default();
+        let mut stale: Vec<SessionRecord> = Vec::new();
+        for original in originals {
+            let original = original?;
+            let found = self
+                .publisher
+                .published(&original, self.filters, self.segments)
+                .map_err(|e| e.to_string())?;
+            match found.state {
+                PublishedState::Removed => tally.removed += 1,
+                PublishedState::Current => {
+                    self.place(&found.id)?;
+                    tally.current += 1;
+                }
+                PublishedState::Absent | PublishedState::Stale => stale.push(original),
+            }
+        }
+        if !publish {
+            tally.pending = stale.into_iter().map(|r| r.id).collect();
+            return Ok(tally);
+        }
+        let mut left = stale.into_iter();
+        for original in left.by_ref() {
+            if dialog::interrupted() {
+                tally.interrupted = true;
+                tally.pending.push(original.id);
+                break;
+            }
+            let init = self
+                .publisher
+                .init_derived(
+                    &original,
+                    self.filters,
+                    self.segments,
+                    self.author,
+                    self.record,
+                )
+                .await
+                .map_err(|e| format!("{}: {e}", short_uuid(&original.id)))?;
+            self.publisher
+                .apply(&init.id, true)
+                .await
+                .map_err(|e| format!("{}: {e}", short_uuid(&original.id)))?;
+            self.place(&init.id)?;
+            tally.published += 1;
+        }
+        tally.pending.extend(left.map(|r| r.id));
+        Ok(tally)
+    }
+
+    /// Make the published session `id` a member of every share, at
+    /// its current commit.
+    fn place(&self, id: &str) -> Result<(), String> {
+        let shares = ShareStore::from(self.publisher.store());
+        for share in self.shares {
+            shares
+                .link(share, slice::from_ref(&id.to_string()))
+                .map_err(|e| format!("share {}: {e}", short_uuid(share)))?;
+        }
+        Ok(())
+    }
 }
 
 /// What the dialog settled for the skill session
@@ -662,6 +935,8 @@ struct SkillInputs<'a> {
     description: Option<&'a str>,
     /// The `--segment` values with `@PATH` read
     segments: &'a [String],
+    /// The ids are stored sessions to publish under derived ids
+    derived: bool,
 }
 
 /// The skill's arguments: the `--description` option the skill reads
@@ -669,13 +944,17 @@ struct SkillInputs<'a> {
 /// given, the `--share` options the skill passes to `gage publish
 /// apply`, then the selected session ids. The source comes ahead of
 /// the ids, so they read against it; a session selection is already
-/// resolved to ids, so no selection option is passed.
+/// resolved to ids, so no selection option is passed. A batch publish
+/// passes stored ids and `--derive-id`, whatever source they came
+/// from.
 fn skill_args(args: &PublishRunArgs, inputs: &SkillInputs<'_>, ids: &[String]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     if let Some(description) = inputs.description {
         out.extend(["--description".to_string(), description.to_string()]);
     }
-    if args.stored {
+    if inputs.derived {
+        out.extend(["--stored".to_string(), "--derive-id".to_string()]);
+    } else if args.stored {
         out.push("--stored".to_string());
     } else if let Some(source) = &args.source {
         out.extend(["--source".to_string(), source.clone()]);
@@ -988,10 +1267,34 @@ async fn init(args: InitArgs) -> Result<(), CliError> {
         for original in originals.into_stored(&store) {
             let stage = async {
                 let record_of = original?;
-                let outcome = publisher
-                    .init(&record_of, &filters, &segments, &author, &record)
-                    .await
-                    .map_err(|e| e.to_string())?;
+                if args.derive_id {
+                    let found = publisher
+                        .published(&record_of, &filters, &segments)
+                        .map_err(|e| e.to_string())?;
+                    let skipped = match found.state {
+                        PublishedState::Current => Some("is published and current"),
+                        PublishedState::Removed => Some("was removed after an earlier publish"),
+                        PublishedState::Absent | PublishedState::Stale => None,
+                    };
+                    if let Some(why) = skipped {
+                        cli::log::info(format!(
+                            "Session {} {why}; not staged",
+                            short_uuid(&record_of.id)
+                        ))
+                        .map_err(|e| e.to_string())?;
+                        return Ok(None);
+                    }
+                }
+                let outcome = if args.derive_id {
+                    publisher
+                        .init_derived(&record_of, &filters, &segments, &author, &record)
+                        .await
+                } else {
+                    publisher
+                        .init(&record_of, &filters, &segments, &author, &record)
+                        .await
+                }
+                .map_err(|e| e.to_string())?;
                 cli::log::info(format!(
                     "Staged publish {} of session {}",
                     short_uuid(&outcome.id),
@@ -1001,10 +1304,11 @@ async fn init(args: InitArgs) -> Result<(), CliError> {
                 report_filter_redactions(&publisher, &outcome.id)
                     .await
                     .map_err(|e| e.to_string())?;
-                Ok::<String, String>(outcome.id)
+                Ok::<Option<String>, String>(Some(outcome.id))
             };
             match stage.await {
-                Ok(id) => staged.push(id),
+                Ok(Some(id)) => staged.push(id),
+                Ok(None) => {}
                 Err(e) if staged.is_empty() => return Err(DialogError::Failed(e)),
                 Err(e) => {
                     cli::log::error(e)?;
@@ -1902,7 +2206,9 @@ mod tests {
 
     use clap::Parser;
     use gage_core::datetime::now_ms;
-    use gage_store::{SessionAttrsRecord, SummaryAttrs};
+    use gage_publish::derived_id;
+    use gage_registry::driver::DriverRegistry;
+    use gage_store::{SessionAttrsRecord, ShareAttrs, SummaryAttrs};
 
     use super::*;
     use crate::{Cli, Command};
@@ -1911,6 +2217,135 @@ mod tests {
     fn registry() -> FilterRegistry {
         let builtin = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../filters"));
         FilterRegistry::load_from_roots(&builtin, vec![builtin.clone()])
+    }
+
+    /// Write a one-message Claude session `id` under `claude_root`
+    /// and add it to `store`: the stored session.
+    fn add_stored(store: &Store, claude_root: &Path, id: &str) -> SessionRecord {
+        let project_dir = claude_root.join("projects").join("-w-proj");
+        fs::create_dir_all(&project_dir).unwrap();
+        fs::write(
+            project_dir.join(format!("{id}.jsonl")),
+            concat!(
+                r#"{"type":"user","uuid":"u1","timestamp":"2025-01-01T00:00:00Z","message":{"role":"user","content":"hello"}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        let spec = format!("claude:{}", claude_root.display());
+        let drivers = DriverRegistry::builtin();
+        let driver = drivers.driver_for(&spec).unwrap();
+        let source = driver
+            .open_source(SourceOptions::new(&spec).cache_root(claude_root.join("cache")))
+            .unwrap();
+        let mut native = source.open_native(id).unwrap();
+        let sessions = SessionStore::from(store);
+        let outcome = sessions.add(driver.as_ref(), native.as_mut()).unwrap();
+        sessions.at_commit(&outcome.commit_sha).unwrap()
+    }
+
+    /// A batch publish writes each session under its derived id and
+    /// places it in the share. A second run finds every session
+    /// current, writes nothing, and still places a session the share
+    /// lost. A session whose published copy was removed is counted and
+    /// stays out of the share. Without the publish step the sessions
+    /// left to publish are returned. A share whose filters the publish
+    /// does not apply stops the run before anything is written.
+    #[tokio::test]
+    async fn a_batch_publish_is_idempotent_and_places_sessions_in_the_share() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("store.git");
+        gage_store::init(&path).unwrap();
+        let store = Store::open_with_cache_root(&path, &tmp.path().join("cache")).unwrap();
+        let claude_root = tmp.path().join("claude");
+        let originals = [
+            add_stored(&store, &claude_root, "11111111-2222-3333-4444-555555555555"),
+            add_stored(&store, &claude_root, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"),
+        ];
+        let publisher = Publisher::with_root(&store, tmp.path().join("publish"), registry());
+        let shares = ShareStore::from(&store);
+        let share = shares.create(&ShareAttrs::default(), &[]).unwrap();
+        let filters = [FilterEntry {
+            name: "gitleaks".into(),
+            params: None,
+        }];
+        let record = InitRecord::default();
+        let batch = |segments: &'static [String], share_ids: &[String]| Batch {
+            publisher: &publisher,
+            shares: &share_ids.to_vec().leak()[..],
+            filters: &filters,
+            segments,
+            author: "user:test",
+            record: &record,
+        };
+        let records = || originals.iter().cloned().map(Ok);
+        let ids: Vec<String> = originals
+            .iter()
+            .map(|o| derived_id(&o.id, &filters, &[]))
+            .collect();
+        let members = || -> Vec<String> {
+            let mut ids: Vec<String> = shares
+                .sessions(&share)
+                .unwrap()
+                .into_iter()
+                .map(|r| r.id)
+                .collect();
+            ids.sort();
+            ids
+        };
+        let mut sorted_ids = ids.clone();
+        sorted_ids.sort();
+        let in_share = slice::from_ref(&share);
+
+        let tally = batch(&[], in_share).run(records(), true).await.unwrap();
+        assert_eq!((tally.published, tally.current, tally.removed), (2, 0, 0));
+        assert_eq!(members(), sorted_ids);
+        let tips: Vec<String> = ids
+            .iter()
+            .map(|id| SessionStore::from(&store).get(id).unwrap().commit_sha)
+            .collect();
+
+        shares.unlink(&share, slice::from_ref(&ids[0])).unwrap();
+        let tally = batch(&[], in_share).run(records(), true).await.unwrap();
+        assert_eq!((tally.published, tally.current, tally.removed), (0, 2, 0));
+        assert_eq!(tally.outro(), "Published 0 sessions; 2 already current");
+        assert_eq!(members(), sorted_ids);
+        for (id, tip) in ids.iter().zip(&tips) {
+            assert_eq!(&SessionStore::from(&store).get(id).unwrap().commit_sha, tip);
+        }
+
+        SessionStore::from(&store)
+            .remove(slice::from_ref(&ids[0]))
+            .unwrap();
+        let tally = batch(&[], in_share).run(records(), true).await.unwrap();
+        assert_eq!((tally.published, tally.current, tally.removed), (0, 1, 1));
+        assert_eq!(members(), [ids[1].clone()]);
+
+        let segments: &'static [String] = vec!["Topic".to_string()].leak();
+        let tally = batch(segments, in_share)
+            .run(records(), false)
+            .await
+            .unwrap();
+        assert_eq!(tally.published, 0);
+        assert_eq!(
+            tally.pending,
+            [originals[0].id.clone(), originals[1].id.clone()]
+        );
+
+        let strict = shares
+            .create(
+                &ShareAttrs {
+                    description: None,
+                    filters: vec!["secret".into()],
+                },
+                &[],
+            )
+            .unwrap();
+        let err = batch(&[], slice::from_ref(&strict))
+            .run(records(), true)
+            .await
+            .unwrap_err();
+        assert!(err.contains("published without filter secret"), "{err}");
     }
 
     /// An unknown filter name reports as clap reports a value outside
@@ -1933,7 +2368,8 @@ mod tests {
             "{rendered}"
         );
         assert!(
-            rendered.contains("[possible values: harness, language, pii, secret, system]"),
+            rendered
+                .contains("[possible values: gitleaks, harness, language, pii, secret, system]"),
             "{rendered}"
         );
         assert!(
@@ -2268,6 +2704,7 @@ mod tests {
         let inputs = SkillInputs {
             description: Some("For the blog"),
             segments: &["The question".to_string()],
+            derived: false,
         };
         let ids = ["n1".to_string(), "n2".to_string()];
         assert_eq!(
@@ -2291,8 +2728,30 @@ mod tests {
         let inputs = SkillInputs {
             description: None,
             segments: &[],
+            derived: false,
         };
         assert_eq!(skill_args(&args, &inputs, &[]), ["--stored"]);
+
+        // A batch publish passes stored ids under derived ids,
+        // whatever source the selection named
+        let args = run_args(&[
+            "--source",
+            "claude:/tmp/c",
+            "-b",
+            "--days",
+            "7",
+            "-f",
+            "pii",
+        ]);
+        let inputs = SkillInputs {
+            description: None,
+            segments: &[],
+            derived: true,
+        };
+        assert_eq!(
+            skill_args(&args, &inputs, &["s1".to_string()]),
+            ["--stored", "--derive-id", "--filter", "pii", "s1"]
+        );
     }
 
     /// The notice names an interactive session without `--batch` and a
@@ -2557,11 +3016,11 @@ mod tests {
                 &["trusted", "reading"],
                 &["secret".to_string(), "pii".to_string()]
             ),
-            ["language", "secret", "harness", "pii"]
+            ["gitleaks", "language", "secret", "harness", "pii"]
         );
         assert_eq!(
             names(&["public", "trusted"], &[]),
-            ["language", "pii", "secret", "system"]
+            ["gitleaks", "language", "pii", "secret", "system"]
         );
         let specs = vec!["secret#{ prompt: \"Watch for hosts.\" }".to_string()];
         let Ok(specs) = resolve_filter_specs("gage publish init", &registry, &specs) else {

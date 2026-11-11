@@ -53,12 +53,48 @@ fi
 if git cat-file -e "$old:deleted" 2>/dev/null; then old_dead=1; else old_dead=0; fi
 if git cat-file -e "$new:deleted" 2>/dev/null; then new_dead=1; else new_dead=0; fi
 
-# Live to live: must be a fast-forward edit.
+# Whether new names the same object as old: the type, id, and created
+# entries are compared by blob SHA. A commit that supersedes another
+# copies these entries from it.
+same_identity() {
+    for entry in type id created; do
+        old_sha=$(git rev-parse --verify -q "$old:$entry" 2>/dev/null)
+        new_sha=$(git rev-parse --verify -q "$new:$entry" 2>/dev/null)
+        if [ -z "$old_sha" ] || [ "$old_sha" != "$new_sha" ]; then
+            mismatch=$entry
+            return 1
+        fi
+    done
+    return 0
+}
+
+# Whether new is a share or a published session: the two types whose
+# content a retraction replaces.
+retractable() {
+    case "$(git cat-file -p "$new:type" 2>/dev/null)" in
+        "gage::share "*) return 0 ;;
+        "gage::session "*)
+            case "$(git cat-file -p "$new:attrs.json" 2>/dev/null)" in
+                *'"publish"'*) return 0 ;;
+            esac
+            ;;
+    esac
+    return 1
+}
+
+# Live to live: a fast-forward edit, or a replacement. A replacement
+# retracts content: a share or a published session written again under
+# the same identity with no first-parent entry, so the ref stops
+# reaching the commit it held.
 if [ "$old_dead" = 0 ] && [ "$new_dead" = 0 ]; then
     if git merge-base --is-ancestor "$old" "$new" 2>/dev/null; then
         exit 0
     fi
-    echo "gage: non-fast-forward $refname is not a tombstone" >&2
+    if ! git cat-file -e "$new:first-parent" 2>/dev/null \
+        && retractable && same_identity; then
+        exit 0
+    fi
+    echo "gage: non-fast-forward $refname is not a tombstone or a replacement" >&2
     exit 1
 fi
 
@@ -71,8 +107,6 @@ fi
 # The remaining shapes are the identity-preserving exception: live to
 # tombstone (delete) and tombstone to live (resurrection of a derived-id
 # object). Both must be parentless and name the same object as old.
-# Identity is compared by blob SHA; the new commit copies these entries
-# from the commit it replaces.
 if [ "$new_dead" = 1 ]; then shape=tombstone; else shape=resurrection; fi
 
 if git rev-parse --verify -q "$new^1" >/dev/null 2>&1; then
@@ -85,13 +119,9 @@ if git rev-parse --verify -q "$new^1" >/dev/null 2>&1; then
     exit 1
 fi
 
-for entry in type id created; do
-    old_sha=$(git rev-parse --verify -q "$old:$entry" 2>/dev/null)
-    new_sha=$(git rev-parse --verify -q "$new:$entry" 2>/dev/null)
-    if [ -z "$old_sha" ] || [ "$old_sha" != "$new_sha" ]; then
-        echo "gage: $shape $refname does not match object identity ($entry)" >&2
-        exit 1
-    fi
-done
+if ! same_identity; then
+    echo "gage: $shape $refname does not match object identity ($mismatch)" >&2
+    exit 1
+fi
 
 exit 0

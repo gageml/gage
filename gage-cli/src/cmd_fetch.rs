@@ -458,6 +458,7 @@ fn print_report(source: &str, report: &FetchReport) {
             Outcome::FastForwarded => "fast-forwarded",
             Outcome::Tombstoned => "deleted",
             Outcome::Resurrected => "restored",
+            Outcome::Replaced => "replaced",
             Outcome::Merged => "merged",
             Outcome::Resolved(_) => "resolved",
             Outcome::Conflict(conflict) => {

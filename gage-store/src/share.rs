@@ -1,18 +1,18 @@
 //! Share objects: `gage::share 1`, reached through [`ShareStore`].
 //!
-//! A share is the set of published sessions one pushes to others.
-//! Content is `attrs.json`, holding a description and the filters
-//! every member was published with, and `sessions.link` listing the
+//! A share is the set of sessions one pushes to others. Content is
+//! `attrs.json`, holding a description and the filters every member
+//! was published with, and `sessions.link` listing the
 //! commit SHA of each member in insertion order. Every listed SHA is a
 //! commit parent, so pushing a share carries its members along. A
 //! session object has no link files of its own, so the share's link
 //! closure is its members and nothing else.
 //!
 //! Membership is a rule the store applies on every write that places
-//! a session: the session is published, and its publish applied every
-//! filter the share names at a version the share accepts. A write that
-//! would place a non-compliant session fails before anything is
-//! written. Tree construction, commit parents, and edits are the
+//! a session: its publish applied every filter the share names at a
+//! version the share accepts. A share that names no filter admits any
+//! session, published or not. A write that would place a non-compliant
+//! session fails before anything is written. Tree construction, commit parents, and edits are the
 //! generic object model's job; see [`crate::object`].
 
 use std::fmt;
@@ -26,7 +26,7 @@ use crate::dataset::DatasetStore;
 use crate::index::{ObjectQuery, Order, SelectedTip};
 use crate::object::{EditOutcome, Object, ObjectTree, require_type};
 use crate::session::{PublishAttrs, PublishFilter, SessionOutcome, SessionRecord, SessionStore};
-use crate::{Store, StoreError, url};
+use crate::{Store, StoreError};
 
 pub const OBJECT_TYPE: &str = "gage::share";
 pub(crate) const OBJECT_VERSION: &str = "1";
@@ -360,7 +360,7 @@ impl ShareStore<'_> {
             .map(|o| o.session_num)
             .collect();
         let message = format!("share link {}", join_nums(&changed));
-        self.write_members(&share, members, &message)?;
+        self.write_members(&share, members, &message, MemberWrite::Edit)?;
         Ok(outcomes)
     }
 
@@ -374,6 +374,60 @@ impl ShareStore<'_> {
         &self,
         id_or_prefix: &str,
         session_ids: &[String],
+    ) -> Result<Vec<ShareUnlinkOutcome>, StoreError> {
+        self.drop_members(id_or_prefix, session_ids, MemberWrite::Edit)
+    }
+
+    /// Unlink sessions whose content is retracted. The members are
+    /// resolved as [`unlink`] resolves them, and the share is written
+    /// as a commit that does not descend from its current one, so the
+    /// share's ref no longer reaches the commits it linked before.
+    ///
+    /// [`unlink`]: ShareStore::unlink
+    pub(crate) fn retract(
+        &self,
+        id_or_prefix: &str,
+        session_ids: &[String],
+    ) -> Result<Vec<ShareUnlinkOutcome>, StoreError> {
+        self.drop_members(id_or_prefix, session_ids, MemberWrite::Sever)
+    }
+
+    /// Put `commit_sha` in the slot of member `session_id` after the
+    /// session's content was retracted and republished. The share is
+    /// written as [`retract`] writes it. A share that does not hold
+    /// the session is left alone.
+    ///
+    /// [`retract`]: ShareStore::retract
+    pub(crate) fn replace_member(
+        &self,
+        id_or_prefix: &str,
+        session_id: &str,
+        commit_sha: &str,
+    ) -> Result<(), StoreError> {
+        let share = self.current(id_or_prefix)?;
+        let mut members = members(&share);
+        let mut slot = None;
+        for (idx, sha) in members.iter().enumerate() {
+            if self.store.read_header(sha)?.id == session_id {
+                slot = Some(idx);
+                break;
+            }
+        }
+        let Some(idx) = slot else {
+            return Ok(());
+        };
+        *members
+            .get_mut(idx)
+            .expect("idx came from enumerating members") = commit_sha.to_string();
+        let message = format!("share retract {}", idx + 1);
+        self.write_members(&share, members, &message, MemberWrite::Sever)
+    }
+
+    fn drop_members(
+        &self,
+        id_or_prefix: &str,
+        session_ids: &[String],
+        write: MemberWrite,
     ) -> Result<Vec<ShareUnlinkOutcome>, StoreError> {
         if session_ids.is_empty() {
             return Ok(Vec::new());
@@ -411,8 +465,12 @@ impl ShareStore<'_> {
             .collect();
         let mut nums: Vec<u32> = outcomes.iter().map(|o| o.session_num).collect();
         nums.sort();
-        let message = format!("share unlink {}", join_nums(&nums));
-        self.write_members(&share, kept, &message)?;
+        let verb = match write {
+            MemberWrite::Edit => "unlink",
+            MemberWrite::Sever => "retract",
+        };
+        let message = format!("share {verb} {}", join_nums(&nums));
+        self.write_members(&share, kept, &message, write)?;
         Ok(outcomes)
     }
 
@@ -525,14 +583,15 @@ impl ShareStore<'_> {
         self.store.resolve_typed(id_or_prefix, OBJECT_TYPE)
     }
 
-    /// Write `members` as the share's `sessions.link` in one edit
-    /// commit, keeping the attrs. Unchanged content writes nothing; an
-    /// empty list drops the file.
+    /// Write `members` as the share's `sessions.link` in one commit,
+    /// keeping the attrs. An edit with unchanged content writes
+    /// nothing; an empty list drops the file.
     fn write_members(
         &self,
         share: &Object,
         members: Vec<String>,
         message: &str,
+        write: MemberWrite,
     ) -> Result<(), StoreError> {
         let mut tree = ObjectTree {
             attrs: share.tree.attrs.clone(),
@@ -544,24 +603,32 @@ impl ShareStore<'_> {
         } else {
             tree.links.insert(SESSIONS_LINK.to_string(), members);
         }
-        match self.store.edit(share, &tree, message)? {
-            EditOutcome::Unchanged | EditOutcome::Written(_) => Ok(()),
+        match write {
+            MemberWrite::Edit => match self.store.edit(share, &tree, message)? {
+                EditOutcome::Unchanged | EditOutcome::Written(_) => Ok(()),
+            },
+            MemberWrite::Sever => {
+                self.store.replace(share, &tree, message)?;
+                Ok(())
+            }
         }
     }
 }
 
-/// The membership rule: `session` is published, and its publish
-/// applied every filter in `specs` at an accepted version.
+/// How a membership write relates to the share's current commit.
+#[derive(Clone, Copy)]
+enum MemberWrite {
+    /// A child of the current commit
+    Edit,
+    /// A commit that does not descend from the current one, for a
+    /// write that retracts content the current commit links
+    Sever,
+}
+
+/// The membership rule: the publish of `session` applied every filter
+/// in `specs` at an accepted version. A session that is not a publish
+/// applied none.
 fn check_membership(specs: &[FilterSpec], session: &SessionRecord) -> Result<(), StoreError> {
-    let published = url::parse(&session.attrs.origin)
-        .map(|u| u.scheme == "session")
-        .unwrap_or(false);
-    if !published {
-        return Err(StoreError::ShareMembership {
-            session: session.id.clone(),
-            reason: "not a published session".to_string(),
-        });
-    }
     let applied = session
         .attrs
         .publish
@@ -785,6 +852,7 @@ mod tests {
                     .map(|(name, version)| PublishFilter {
                         name: name.to_string(),
                         version: version.map(String::from),
+                        generation: None,
                     })
                     .collect(),
             }),
@@ -942,7 +1010,7 @@ mod tests {
         };
         assert_eq!(
             reason(slice::from_ref(&o)),
-            (o.clone(), "not a published session".to_string())
+            (o.clone(), "published without filter secret".to_string())
         );
         assert_eq!(
             reason(slice::from_ref(&other)),
@@ -971,6 +1039,13 @@ mod tests {
         assert!(matches!(err, StoreError::ShareMembership { .. }), "{err}");
         assert_eq!(rev_parse(&store, &share), before);
 
+        // A share that names no filter admits a session that is not a
+        // publish
+        let open = shares
+            .create(&ShareAttrs::default(), slice::from_ref(&o))
+            .unwrap();
+        assert_eq!(member_ids(&store, &open), [o.clone()]);
+
         // A bare name accepts a filter recorded without a version
         let lenient = shares
             .create(&with_filters(&["secret"]), slice::from_ref(&unversioned))
@@ -992,6 +1067,7 @@ mod tests {
                 .map(|(name, version)| PublishFilter {
                     name: name.to_string(),
                     version: Some(version.to_string()),
+                    generation: None,
                 })
                 .collect(),
         };

@@ -1881,6 +1881,7 @@ mod tests {
                         filters: vec![PublishFilter {
                             name: "secret".into(),
                             version: Some("1.3.0".into()),
+                            generation: None,
                         }],
                     }),
                     ..original.attrs

@@ -25,12 +25,13 @@ use std::fs;
 use std::io;
 use std::sync::Arc;
 
+use gage_core::uuid::new_uuid;
 use gage_registry::driver::DriverRegistry;
 use gage_registry::filter::FilterRegistry;
 use gage_session::{Driver, DriverError, EntryCodec, EntryValue, StoredSession};
 use gage_store::{
-    DirContentSource, PublishAttrs, PublishFilter, SessionAttrsRecord, SessionDirLayout,
-    SessionRecord, SessionStore, Store, StoreError,
+    DirContentSource, OBJECT_REFS, PublishAttrs, PublishFilter, SessionAttrsRecord,
+    SessionDirLayout, SessionRecord, SessionStore, Store, StoreError, published_session_id,
 };
 
 pub use definition::{
@@ -128,6 +129,52 @@ impl From<serde_json::Error> for PublishError {
     }
 }
 
+/// The session a derived publish writes, and its state in the store.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Published {
+    /// The derived id
+    pub id: String,
+    pub state: PublishedState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublishedState {
+    /// The store holds no such session
+    Absent,
+    /// The session was published from the original's current commit
+    /// under filter generations no lower than the present ones
+    Current,
+    /// The original changed since the publish, or a filter's
+    /// generation was raised
+    Stale,
+    /// The session was removed; its tombstone records that it is not
+    /// to be published again
+    Removed,
+}
+
+/// The id of the session a derived publish of `original_id` writes:
+/// derived from the original's id, each filter's name and params with
+/// the filters in name order, and the segment descriptions in the
+/// order given.
+pub fn derived_id(original_id: &str, filters: &[FilterEntry], segments: &[String]) -> String {
+    let mut filters: Vec<&FilterEntry> = filters.iter().collect();
+    filters.sort_by(|a, b| a.name.cmp(&b.name));
+    let spec = serde_json::json!({
+        "filters": filters
+            .iter()
+            .map(|f| {
+                // Sorted, so the id does not depend on the order the
+                // params were resolved in
+                let params: Option<BTreeMap<&String, &serde_json::Value>> =
+                    f.params.as_ref().map(|p| p.iter().collect());
+                serde_json::json!([f.name, params])
+            })
+            .collect::<Vec<_>>(),
+        "segments": segments,
+    });
+    published_session_id(original_id, &spec.to_string())
+}
+
 /// The publish operations over an opened store, with the filter
 /// registry the definitions' filters resolve through.
 pub struct Publisher<'a> {
@@ -173,6 +220,10 @@ impl<'a> Publisher<'a> {
         }
     }
 
+    pub fn store(&self) -> &'a Store {
+        self.store
+    }
+
     pub fn filters(&self) -> &FilterRegistry {
         &self.filters
     }
@@ -197,6 +248,93 @@ impl<'a> Publisher<'a> {
         author: &str,
         init: &InitArgs,
     ) -> Result<PublishInit, PublishError> {
+        self.stage(original, new_uuid(), filters, segments, author, init)
+            .await
+    }
+
+    /// Start a publish of `original` as [`init`] does, under the id
+    /// derived from `original` and what the publish applies. The same
+    /// original published under the same filters, params, and segment
+    /// descriptions is staged under the same id every time, so its
+    /// apply writes the session an earlier publish wrote.
+    ///
+    /// [`init`]: Publisher::init
+    pub async fn init_derived(
+        &self,
+        original: &SessionRecord,
+        filters: &[FilterEntry],
+        segments: &[String],
+        author: &str,
+        init: &InitArgs,
+    ) -> Result<PublishInit, PublishError> {
+        let id = derived_id(&original.id, filters, segments);
+        self.stage(original, id, filters, segments, author, init)
+            .await
+    }
+
+    /// The state of the session a derived publish of `original` under
+    /// `filters` and `segments` writes.
+    pub fn published(
+        &self,
+        original: &SessionRecord,
+        filters: &[FilterEntry],
+        segments: &[String],
+    ) -> Result<Published, PublishError> {
+        let id = derived_id(&original.id, filters, segments);
+        let Some(tip) = self.store.rev_parse(&format!("{OBJECT_REFS}{id}"))? else {
+            return Ok(Published {
+                id,
+                state: PublishedState::Absent,
+            });
+        };
+        if self.store.read_header(&tip)?.is_tombstone() {
+            return Ok(Published {
+                id,
+                state: PublishedState::Removed,
+            });
+        }
+        let stored = SessionStore::from(self.store).at_commit(&tip)?;
+        let origin = format!("session:{}@{}", original.id, original.commit_sha);
+        let current = self.applied(filters);
+        let stale = stored.attrs.origin != origin
+            || staging::raises_generation(stored.attrs.publish.as_ref(), Some(&current));
+        Ok(Published {
+            id,
+            state: if stale {
+                PublishedState::Stale
+            } else {
+                PublishedState::Current
+            },
+        })
+    }
+
+    /// Whether a publish under `filters` and `segments` needs a model:
+    /// a filter contributes redaction instructions, which an agent
+    /// carries out, or a segment is described, which an agent gives
+    /// its lines.
+    pub async fn needs_model(
+        &self,
+        filters: &[FilterEntry],
+        segments: &[String],
+    ) -> Result<bool, PublishError> {
+        if !segments.is_empty() {
+            return Ok(true);
+        }
+        let outputs = filter::run_filters(&self.filters, filters).await?;
+        Ok(outputs
+            .iter()
+            .any(|o| !o.contribution.instructions.is_empty()))
+    }
+
+    async fn stage(
+        &self,
+        original: &SessionRecord,
+        id: String,
+        filters: &[FilterEntry],
+        segments: &[String],
+        author: &str,
+        init: &InitArgs,
+    ) -> Result<PublishInit, PublishError> {
         let mut definition = PublishDefinition::new(&original.id, filters);
         definition.init = init.clone();
         for description in segments {
@@ -204,7 +342,7 @@ impl<'a> Publisher<'a> {
         }
         definition.validate()?;
         let outputs = self.outputs(&definition).await?;
-        let init = self.staging.init(original)?;
+        let init = self.staging.init_as(original, id)?;
         let session = self.open_original(&init.id)?;
         derive::run_filters(&mut definition, &session, &outputs)?;
         self.build(&init.id, &definition, &session, &outputs)?;
@@ -391,13 +529,21 @@ impl<'a> Publisher<'a> {
     }
 
     /// The record the published session carries of `definition`'s
-    /// filters: each name with the version its registry definition
-    /// declares, none when the declaration has no version or the
-    /// filter is not in the registry.
+    /// filters: each name with the version and the generation its
+    /// registry definition declares. The version is absent when the
+    /// declaration has none, the generation when it is 0, and both
+    /// when the filter is not in the registry.
     pub fn publish_attrs(&self, definition: &PublishDefinition) -> PublishAttrs {
+        self.applied(&definition.filters)
+    }
+
+    /// The record a publish under `filters` leaves, as
+    /// [`publish_attrs`] builds it for a definition.
+    ///
+    /// [`publish_attrs`]: Publisher::publish_attrs
+    pub fn applied(&self, filters: &[FilterEntry]) -> PublishAttrs {
         PublishAttrs {
-            filters: definition
-                .filters
+            filters: filters
                 .iter()
                 .map(|f| PublishFilter {
                     name: f.name.clone(),
@@ -406,6 +552,11 @@ impl<'a> Publisher<'a> {
                         .get_def(&f.name)
                         .map(|def| def.version.clone())
                         .filter(|v| !v.is_empty()),
+                    generation: self
+                        .filters
+                        .get_def(&f.name)
+                        .map(|def| def.generation)
+                        .filter(|g| *g > 0),
                 })
                 .collect(),
         }

@@ -246,6 +246,7 @@ fn push_set(diff: &RemoteDiff, force: bool, prune: bool) -> PushSet {
         } else {
             Vec::new()
         },
+        ..PushSet::default()
     }
 }
 

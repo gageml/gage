@@ -8,8 +8,8 @@ use std::fs;
 use std::path::PathBuf;
 
 use gage_publish::{
-    Allow, FilterEntry, InitArgs, PublishDefinition, PublishError, Publisher, Refreshed, TextEntry,
-    TitleEntry, candidate, format_lines,
+    Allow, FilterEntry, InitArgs, PublishDefinition, PublishError, PublishedState, Publisher,
+    Refreshed, TextEntry, TitleEntry, candidate, derived_id, format_lines,
 };
 use gage_registry::driver::DriverRegistry;
 use gage_registry::filter::FilterRegistry;
@@ -129,30 +129,15 @@ fn fixture() -> Fixture {
     fixture_with(SESSION)
 }
 
+const NATIVE_ID: &str = "11111111-2222-3333-4444-555555555555";
+
 fn fixture_with(session: &str) -> Fixture {
     let home = tempfile::tempdir().unwrap();
     let claude = tempfile::tempdir().unwrap();
-    let native_id = "11111111-2222-3333-4444-555555555555";
-    let project_dir = claude.path().join("projects").join("-home-garrett-proj");
-    fs::create_dir_all(&project_dir).unwrap();
-    fs::write(project_dir.join(format!("{native_id}.jsonl")), session).unwrap();
-
     let store_path = home.path().join("store.git");
     gage_store::init(&store_path).unwrap();
     let store = Store::open_with_cache_root(&store_path, &home.path().join("cache")).unwrap();
-    let spec = format!("claude:{}", claude.path().display());
-    let registry = DriverRegistry::builtin();
-    let driver = registry.driver_for(&spec).unwrap();
-    let source = driver
-        .open_source(SourceOptions::new(&spec).cache_root(claude.path().join("cache")))
-        .unwrap();
-    let mut native = source.open_native(native_id).unwrap();
-    let outcome = SessionStore::from(&store)
-        .add(driver.as_ref(), native.as_mut())
-        .unwrap();
-    let original = SessionStore::from(&store)
-        .at_commit(&outcome.commit_sha)
-        .unwrap();
+    let original = add_native(&store, claude.path(), session);
     Fixture {
         publish_root: home.path().join("publish"),
         _home: home,
@@ -160,6 +145,24 @@ fn fixture_with(session: &str) -> Fixture {
         store,
         original,
     }
+}
+
+/// Write `session` as the native session under `claude` and add it to
+/// `store`: the stored session at the commit the add left it at.
+fn add_native(store: &Store, claude: &std::path::Path, session: &str) -> SessionRecord {
+    let project_dir = claude.join("projects").join("-home-garrett-proj");
+    fs::create_dir_all(&project_dir).unwrap();
+    fs::write(project_dir.join(format!("{NATIVE_ID}.jsonl")), session).unwrap();
+    let spec = format!("claude:{}", claude.display());
+    let registry = DriverRegistry::builtin();
+    let driver = registry.driver_for(&spec).unwrap();
+    let source = driver
+        .open_source(SourceOptions::new(&spec).cache_root(claude.join("cache")))
+        .unwrap();
+    let mut native = source.open_native(NATIVE_ID).unwrap();
+    let sessions = SessionStore::from(store);
+    let outcome = sessions.add(driver.as_ref(), native.as_mut()).unwrap();
+    sessions.at_commit(&outcome.commit_sha).unwrap()
 }
 
 fn staged_lines(root: &std::path::Path, id: &str) -> Vec<String> {
@@ -313,7 +316,7 @@ async fn a_torn_line_publishes_byte_for_byte_and_redacts_in_place() {
 async fn init_runs_the_named_filters_and_records_their_instances() {
     let f = fixture();
     let publisher = Publisher::with_root(&f.store, &f.publish_root, registry());
-    let filters = [filter("pii"), filter("secret")];
+    let filters = [filter("pii"), filter("gitleaks")];
     let id = stage(&publisher, &f.original, &filters).await;
 
     let definition = publisher.definition(&id).unwrap();
@@ -327,8 +330,8 @@ async fn init_runs_the_named_filters_and_records_their_instances() {
     };
     // pii: the email pattern, plus the username typed literal
     assert_eq!(by_author("filter:pii"), 2, "{definition:#?}");
-    // secret: one key, found by pattern in two places
-    assert_eq!(by_author("filter:secret"), 1, "{definition:#?}");
+    // gitleaks: one key, found by pattern in two places
+    assert_eq!(by_author("filter:gitleaks"), 1, "{definition:#?}");
     let counts = publisher.instances(&id).await.unwrap();
     assert_eq!(counts.len(), 3);
     assert!(counts.values().all(|n| *n > 0), "{counts:?}");
@@ -588,20 +591,20 @@ async fn params_are_recorded_and_an_unknown_filter_is_refused() {
             .as_object()
             .cloned(),
     };
-    let id = stage(&publisher, &f.original, &[pii, filter("secret")]).await;
+    let id = stage(&publisher, &f.original, &[pii, filter("gitleaks")]).await;
     let definition = publisher.definition(&id).unwrap();
     assert_eq!(definition.filters[0].name, "pii");
     assert_eq!(
         definition.filters[0].params.as_ref().unwrap()["prompt"],
         "Watch for street addresses."
     );
-    assert_eq!(definition.filters[1], filter("secret"));
+    assert_eq!(definition.filters[1], filter("gitleaks"));
     let text = fs::read_to_string(publisher.staging().definition_file(&id)).unwrap();
     assert!(
         text.contains(r#"    ["pii", {"prompt":"Watch for street addresses."}],"#),
         "{text}"
     );
-    assert!(text.contains("    \"secret\",\n"), "{text}");
+    assert!(text.contains("    \"gitleaks\",\n"), "{text}");
     let instructions = publisher.instructions(&id).await.unwrap();
     assert!(
         instructions.contains("Watch for street addresses."),
@@ -896,7 +899,7 @@ async fn init_rejects_a_duplicate_filter() {
 async fn refresh_runs_an_added_filter_and_drops_a_removed_filters_rows() {
     let f = fixture();
     let publisher = Publisher::with_root(&f.store, &f.publish_root, registry());
-    let id = stage(&publisher, &f.original, &[filter("secret")]).await;
+    let id = stage(&publisher, &f.original, &[filter("gitleaks")]).await;
     edit(&publisher, &id, |d| {
         d.push_redact("fucking", "language", "user:test", true);
     })
@@ -913,7 +916,7 @@ async fn refresh_runs_an_added_filter_and_drops_a_removed_filters_rows() {
     let added = authors(&definition);
     assert!(added.contains(&"user:test".to_string()), "{added:?}");
     assert!(added.contains(&"filter:pii".to_string()), "{added:?}");
-    assert!(added.contains(&"filter:secret".to_string()), "{added:?}");
+    assert!(added.contains(&"filter:gitleaks".to_string()), "{added:?}");
     assert_eq!(definition.filters.len(), 2);
 
     let mut dup = definition.clone();
@@ -924,14 +927,14 @@ async fn refresh_runs_an_added_filter_and_drops_a_removed_filters_rows() {
     write_definition(&publisher, &id, &definition);
 
     edit(&publisher, &id, |d| {
-        d.filters.retain(|f| f.name != "secret");
+        d.filters.retain(|f| f.name != "gitleaks");
     })
     .await;
     let definition = publisher.definition(&id).unwrap();
     let left = authors(&definition);
     assert!(left.contains(&"user:test".to_string()), "{left:?}");
     assert!(left.contains(&"filter:pii".to_string()), "{left:?}");
-    assert!(!left.contains(&"filter:secret".to_string()), "{left:?}");
+    assert!(!left.contains(&"filter:gitleaks".to_string()), "{left:?}");
     assert_eq!(definition.named_filters(), vec!["pii".to_string()]);
     let lines = staged_lines(&f.publish_root, &id);
     assert!(
@@ -958,7 +961,7 @@ async fn refresh_runs_an_added_filter_and_drops_a_removed_filters_rows() {
 async fn refresh_reruns_filters_and_keeps_rows_in_place() {
     let f = fixture();
     let publisher = Publisher::with_root(&f.store, &f.publish_root, registry());
-    let filters = [filter("pii"), filter("secret")];
+    let filters = [filter("pii"), filter("gitleaks")];
     let id = stage(&publisher, &f.original, &filters).await;
     let before = publisher.definition(&id).unwrap();
     assert_eq!(before.redact.len(), 3);
@@ -989,7 +992,7 @@ async fn refresh_reruns_filters_and_keeps_rows_in_place() {
     let key = before
         .redact
         .iter()
-        .find(|t| t.author == "filter:secret")
+        .find(|t| t.author == "filter:gitleaks")
         .unwrap()
         .literal
         .clone();
@@ -1169,7 +1172,7 @@ async fn a_title_in_the_definition_adds_an_entry_after_the_last_line() {
 async fn an_allowed_literal_is_not_recorded_again() {
     let f = fixture();
     let publisher = Publisher::with_root(&f.store, &f.publish_root, registry());
-    let id = stage(&publisher, &f.original, &[filter("secret")]).await;
+    let id = stage(&publisher, &f.original, &[filter("gitleaks")]).await;
     edit(&publisher, &id, |d| {
         d.push_redact("garrett", "pii", "user:test", true);
     })
@@ -1188,7 +1191,7 @@ async fn an_allowed_literal_is_not_recorded_again() {
     let definition = publisher.definition(&id).unwrap();
     assert_eq!(definition.redact.len(), 1, "{definition:#?}");
     let key = definition.redact[0].literal.clone();
-    assert_eq!(definition.redact[0].author, "filter:secret");
+    assert_eq!(definition.redact[0].author, "filter:gitleaks");
 
     edit(&publisher, &id, |d| {
         d.redact.clear();
@@ -1420,7 +1423,7 @@ async fn candidates_are_the_disclosed_text_values_with_their_spans() {
 async fn apply_commits_the_derived_session_and_clears_the_staging() {
     let f = fixture();
     let publisher = Publisher::with_root(&f.store, &f.publish_root, registry());
-    let filters = [filter("pii"), filter("secret")];
+    let filters = [filter("pii"), filter("gitleaks")];
     let init = publisher
         .init(
             &f.original,
@@ -1457,10 +1460,12 @@ async fn apply_commits_the_derived_session_and_clears_the_staging() {
                 PublishFilter {
                     name: "pii".into(),
                     version: Some("1.0.0".into()),
+                    generation: None,
                 },
                 PublishFilter {
-                    name: "secret".into(),
+                    name: "gitleaks".into(),
                     version: Some("1.0.0".into()),
+                    generation: Some(1),
                 },
             ],
         })
@@ -1482,6 +1487,116 @@ async fn apply_commits_the_derived_session_and_clears_the_staging() {
     assert!(!f.publish_root.join(&init.id).exists());
     assert!(!publisher.staging().definition_file(&init.id).exists());
     assert!(publisher.staging().list().unwrap().is_empty());
+}
+
+/// A registry holding one rule-only filter `rule` at `generation` that
+/// redacts what `pattern` matches.
+fn rule_registry(dir: &std::path::Path, generation: u32, pattern: &str) -> FilterRegistry {
+    fs::create_dir_all(dir.join("rule")).unwrap();
+    fs::write(
+        dir.join("rule").join("filter.rn"),
+        format!(
+            "use gage::{{Patterns, filter::Reason, publish}};\n\
+             pub const FILTER = #{{ name: \"rule\", version: \"1.0.0\", generation: {generation}, \
+             tasks: #{{ run: #{{}} }} }};\n\
+             pub fn run() {{ publish().pattern_redact(#{{ k: \"{pattern}\" }}, Reason::Secret); }}\n"
+        ),
+    )
+    .unwrap();
+    FilterRegistry::load_from_roots(dir, vec![dir.to_path_buf()])
+}
+
+/// A derived publish writes the session its inputs name. A second
+/// publish finds that session current and has nothing to write. A grown
+/// original makes it stale, and the next publish is a child of the
+/// stored commit. A raised filter generation makes it stale, and the
+/// next publish does not descend from the stored commit. A removed
+/// session is reported as removed.
+#[tokio::test]
+async fn a_derived_publish_is_found_again_and_rewritten_only_when_stale() {
+    let f = fixture();
+    let filters_dir = tempfile::tempdir().unwrap();
+    let filters = [filter("rule")];
+    let sessions = SessionStore::from(&f.store);
+    let content = |commit: &str| {
+        let mut text = String::new();
+        sessions
+            .content(commit)
+            .open("session.jsonl")
+            .unwrap()
+            .read_to_string(&mut text)
+            .unwrap();
+        text
+    };
+    let publisher = Publisher::with_root(
+        &f.store,
+        &f.publish_root,
+        rule_registry(filters_dir.path(), 1, "alice@[a-z.]+"),
+    );
+    assert!(!publisher.needs_model(&filters, &[]).await.unwrap());
+    assert!(
+        publisher
+            .needs_model(&filters, &["Topic".to_string()])
+            .await
+            .unwrap()
+    );
+    let id = derived_id(&f.original.id, &filters, &[]);
+    assert_ne!(id, derived_id(&f.original.id, &filters, &["Topic".into()]));
+    assert_ne!(id, derived_id(&f.original.id, &[filter("pii")], &[]));
+    let state = |publisher: &Publisher<'_>, original: &SessionRecord| {
+        let published = publisher.published(original, &filters, &[]).unwrap();
+        assert_eq!(published.id, id);
+        published.state
+    };
+    let publish = async |publisher: &Publisher<'_>, original: &SessionRecord| {
+        let init = publisher
+            .init_derived(original, &filters, &[], "user:test", &InitArgs::default())
+            .await
+            .unwrap();
+        assert_eq!(init.id, id);
+        publisher.apply(&id, true).await.unwrap()
+    };
+
+    assert_eq!(state(&publisher, &f.original), PublishedState::Absent);
+    let first = publish(&publisher, &f.original).await;
+    assert_eq!(state(&publisher, &f.original), PublishedState::Current);
+    assert!(!content(&first).contains("alice@example.com"));
+    assert!(content(&first).contains("sk-ant-api03"));
+
+    let grown = add_native(
+        &f.store,
+        f._claude.path(),
+        &format!(
+            "{SESSION}{}\n",
+            r#"{"type":"user","uuid":"u3","timestamp":"2025-01-01T00:00:04Z","message":{"role":"user","content":"More"}}"#
+        ),
+    );
+    assert_eq!(state(&publisher, &grown), PublishedState::Stale);
+    let second = publish(&publisher, &grown).await;
+    assert_eq!(
+        f.store.walk_parent_chain(&second).unwrap(),
+        [second.clone(), first.clone()]
+    );
+    assert_eq!(state(&publisher, &grown), PublishedState::Current);
+
+    let raised = Publisher::with_root(
+        &f.store,
+        &f.publish_root,
+        rule_registry(
+            filters_dir.path(),
+            2,
+            "(alice@[a-z.]+|sk-ant-[A-Za-z0-9_-]+)",
+        ),
+    );
+    assert_eq!(state(&raised, &grown), PublishedState::Stale);
+    let third = publish(&raised, &grown).await;
+    assert_eq!(f.store.walk_parent_chain(&third).unwrap(), [third.clone()]);
+    assert!(!content(&third).contains("sk-ant-api03"));
+    assert_eq!(state(&raised, &grown), PublishedState::Current);
+    assert_eq!(sessions.get(&id).unwrap().commit_sha, third);
+
+    sessions.remove(std::slice::from_ref(&id)).unwrap();
+    assert_eq!(state(&raised, &grown), PublishedState::Removed);
 }
 
 /// `apply` refuses a staged session edited by hand: added text, a

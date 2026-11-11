@@ -34,7 +34,9 @@ use crate::source;
 /// help layout shows them. A wrapping args struct uses this list to
 /// make its positional session list conflict with every filter, and
 /// to build an `ArgGroup` when at least one selection is required.
-pub const FILTER_ARG_NAMES: &[&str] = &["project", "days", "today", "all", "limit", "sample"];
+pub const FILTER_ARG_NAMES: &[&str] = &[
+    "project", "touches", "days", "today", "all", "limit", "sample",
+];
 
 #[derive(Args)]
 pub struct SessionFilterArgs {
@@ -44,6 +46,13 @@ pub struct SessionFilterArgs {
     /// ~-prefixed) or a project slug as shown by 'gage session list'.
     #[arg(short = 'p', long, value_name = "PROJECT", allow_hyphen_values = true)]
     pub project: Option<String>,
+
+    /// Limit sessions to a touched directory
+    ///
+    /// A session touches DIR when it wrote or read a file in DIR or
+    /// below it, or when it started in DIR.
+    #[arg(long, value_name = "DIR")]
+    pub touches: Option<PathBuf>,
 
     /// Select sessions modified in past N days
     #[arg(long, value_name = "N", conflicts_with = "all")]
@@ -148,6 +157,7 @@ impl SessionFilterArgs {
     /// holds its clap default.
     pub fn is_empty(&self) -> bool {
         self.project.is_none()
+            && self.touches.is_none()
             && self.limit.is_none()
             && self.sample.is_none()
             && self.days.is_none()
@@ -168,13 +178,14 @@ impl SessionFilterArgs {
 /// days, and a missing limit defaults to 20 unless a window or
 /// `--project` was pinned (in which case the full filtered set is
 /// returned). The window is the native modification time for a
-/// source and the store's `modified` marker for the store.
+/// source and the store's `modified` marker for the store. `--touches`
+/// counts as `--project` does for the default limit.
 pub async fn select_sessions(
     select: SessionSelect<'_>,
     sessions: &[String],
     filter: &SessionFilterArgs,
 ) -> Result<Vec<String>, SessionSelectError> {
-    let (ctx, from, modified_col) = match select {
+    let (ctx, from, files, modified_col) = match select {
         SessionSelect::Native(source) => {
             let registry = source::driver_registry();
             let (driver, spec) =
@@ -191,7 +202,8 @@ pub async fn select_sessions(
             }
             let ctx = ContextBuilder::new(None).build().await;
             let from = format!("native_session('{}')", sql_str(&spec));
-            (ctx, from, "mtime")
+            let files = format!("native_tool_use_file('{}')", sql_str(&spec));
+            (ctx, from, files, "mtime")
         }
         SessionSelect::Stored(store) => {
             if !sessions.is_empty() {
@@ -208,7 +220,12 @@ pub async fn select_sessions(
             let ctx = ContextBuilder::new(Some(Arc::new(Mutex::new(store))))
                 .build()
                 .await;
-            (ctx, "session".to_string(), "modified")
+            (
+                ctx,
+                "session".to_string(),
+                "tool_use_file".to_string(),
+                "modified",
+            )
         }
     };
     let mut predicates = Vec::new();
@@ -216,6 +233,10 @@ pub async fn select_sessions(
     if let Some(value) = &filter.project {
         let slug = resolve_project_in(&ctx, &from, value).await?;
         predicates.push(format!("project = '{}'", sql_str(&slug)));
+    }
+
+    if let Some(dir) = &filter.touches {
+        predicates.push(touches_predicate(&ctx, &files, dir).await?);
     }
 
     let since = if filter.all {
@@ -242,7 +263,7 @@ pub async fn select_sessions(
         None
     } else if let Some(n) = filter.limit {
         Some(n)
-    } else if window_pinned || filter.project.is_some() {
+    } else if window_pinned || filter.project.is_some() || filter.touches.is_some() {
         None
     } else {
         Some(20)
@@ -265,6 +286,29 @@ pub async fn select_sessions(
         ids.truncate(n);
     }
     Ok(ids)
+}
+
+/// The predicate that keeps a session touching `dir`: the session
+/// wrote or read a file at or below `dir` according to the `files`
+/// table, or its project is the one the driver names for `dir`. A
+/// citation of a path is not a touch.
+async fn touches_predicate(
+    ctx: &SessionContext,
+    files: &str,
+    dir: &Path,
+) -> Result<String, SessionSelectError> {
+    let setup = |e: &dyn fmt::Display| SessionSelectError::Setup(e.to_string());
+    let cwd = std::env::current_dir().map_err(|e| setup(&e))?;
+    let dir = cwd.join(dir);
+    let dir = dir.canonicalize().unwrap_or(dir);
+    let slug = project_for_path(ctx, &dir).await.map_err(|e| setup(&e))?;
+    let path = sql_str(dir.to_string_lossy().trim_end_matches('/'));
+    Ok(format!(
+        "(project = '{}' OR id IN (SELECT session_id FROM {files} \
+         WHERE type IN ('write', 'read') \
+         AND (path = '{path}' OR starts_with(path, '{path}/'))))",
+        sql_str(&slug)
+    ))
 }
 
 /// Resolve every prefix through `find` before reporting, so one bad
@@ -873,16 +917,39 @@ mod tests {
     /// Write a one-message Claude session `id` under `project` in
     /// `claude_root` and add it to `store`; the stored id.
     fn add_stored(store: &Store, claude_root: &Path, project: &str, id: &str) -> String {
+        add_stored_with_tool(store, claude_root, project, id, None)
+    }
+
+    /// As `add_stored`, with an assistant message that calls `tool`
+    /// when one is given: a tool name, its JSON input, and whether
+    /// the call has a result.
+    fn add_stored_with_tool(
+        store: &Store,
+        claude_root: &Path,
+        project: &str,
+        id: &str,
+        tool: Option<(&str, &str, bool)>,
+    ) -> String {
         let project_dir = claude_root.join("projects").join(project);
         fs::create_dir_all(&project_dir).unwrap();
-        fs::write(
-            project_dir.join(format!("{id}.jsonl")),
-            concat!(
-                r#"{"type":"user","uuid":"u1","timestamp":"2025-01-01T00:00:00Z","message":{"role":"user","content":"hello"}}"#,
-                "\n",
-            ),
+        let mut content = concat!(
+            r#"{"type":"user","uuid":"u1","timestamp":"2025-01-01T00:00:00Z","message":{"role":"user","content":"hello"}}"#,
+            "\n",
         )
-        .unwrap();
+        .to_string();
+        if let Some((name, input, answered)) = tool {
+            content.push_str(&format!(
+                r#"{{"type":"assistant","uuid":"a1","parentUuid":"u1","timestamp":"2025-01-01T00:00:01Z","message":{{"role":"assistant","content":[{{"type":"tool_use","id":"toolu_1","name":"{name}","input":{input}}}]}}}}"#
+            ));
+            content.push('\n');
+            if answered {
+                content.push_str(concat!(
+                    r#"{"type":"user","uuid":"u2","parentUuid":"a1","timestamp":"2025-01-01T00:00:02Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"ok"}]}}"#,
+                    "\n",
+                ));
+            }
+        }
+        fs::write(project_dir.join(format!("{id}.jsonl")), content).unwrap();
         let spec = format!("claude:{}", claude_root.display());
         let registry = DriverRegistry::builtin();
         let driver = registry.driver_for(&spec).unwrap();
@@ -933,6 +1000,7 @@ mod tests {
         );
         let no_filter = || SessionFilterArgs {
             project: None,
+            touches: None,
             days: None,
             today: false,
             all: false,
@@ -1000,5 +1068,66 @@ mod tests {
             .len(),
             1
         );
+    }
+
+    /// `--touches` selects a session whose project is the directory's
+    /// and a session of another project with an answered tool call on
+    /// a file below the directory. A session whose call has no result
+    /// only cites the path and is left out, as is one that read a
+    /// sibling whose name extends the directory's.
+    #[tokio::test]
+    async fn touches_selects_by_project_and_by_files_read_or_written() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("store.git");
+        gage_store::init(&path).unwrap();
+        let store = Store::open_with_cache_root(&path, &tmp.path().join("cache")).unwrap();
+        let claude_root = tmp.path().join("claude");
+        let dir = tmp.path().canonicalize().unwrap().join("proj");
+        fs::create_dir_all(&dir).unwrap();
+        let slug: String = dir
+            .to_string_lossy()
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect();
+        let input = |file: &str| format!(r#"{{"file_path":"{}"}}"#, dir.join(file).display());
+        let sibling = format!(r#"{{"file_path":"{}-two/a.rs"}}"#, dir.display());
+        let started = add_stored(
+            &store,
+            &claude_root,
+            &slug,
+            "11111111-2222-3333-4444-555555555555",
+        );
+        let add_other = |id: &str, tool: (&str, &str, bool)| {
+            add_stored_with_tool(&store, &claude_root, "-w-other", id, Some(tool))
+        };
+        let reader = add_other(
+            "22222222-2222-3333-4444-555555555555",
+            ("Read", &input("src/a.rs"), true),
+        );
+        let writer = add_other(
+            "33333333-2222-3333-4444-555555555555",
+            ("Write", &input("b.rs"), true),
+        );
+        add_other(
+            "44444444-2222-3333-4444-555555555555",
+            ("Read", &input("src/a.rs"), false),
+        );
+        add_other(
+            "55555555-2222-3333-4444-555555555555",
+            ("Read", &sibling, true),
+        );
+        let filter = SessionFilterArgs {
+            project: None,
+            touches: Some(dir),
+            days: None,
+            today: false,
+            all: false,
+            limit: None,
+            sample: None,
+        };
+        let selected = select_sessions(SessionSelect::Stored(&store), &[], &filter)
+            .await
+            .unwrap();
+        assert_eq!(sorted(selected), sorted(vec![started, reader, writer]));
     }
 }

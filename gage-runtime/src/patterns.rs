@@ -543,7 +543,7 @@ mod tests {
     use super::*;
 
     /// The rule set the secret filter ships.
-    const GITLEAKS: &str = include_str!("../../filters/secret/gitleaks.toml");
+    const GITLEAKS: &str = include_str!("../../filters/gitleaks/gitleaks.toml");
 
     fn secret() -> Patterns {
         Patterns::from_gitleaks(GITLEAKS).unwrap()

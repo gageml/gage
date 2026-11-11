@@ -1,9 +1,10 @@
-//! `gage share`: the shares of published sessions.
+//! `gage share`: the shares of sessions.
 //!
-//! A share holds published sessions and the filters every member was
-//! published with. `add`, `link`, and `edit --filters` apply the
-//! membership rule before anything is written; `gage publish apply
-//! --share` is the other path a session takes into a share.
+//! A share holds sessions and the filters every member was published
+//! with. `add`, `link`, and `edit --filters` apply the membership rule
+//! before anything is written; `gage publish apply --share` and
+//! `gage session add --share` are the other paths a session takes
+//! into a share.
 
 use std::sync::{Arc, Mutex};
 
@@ -49,7 +50,7 @@ pub enum ShareCommand {
     /// Add a share
     ///
     /// Without sessions, adds an empty share. With sessions, adds a
-    /// share holding those published sessions, each checked against
+    /// share holding those sessions, each checked against
     /// --filters before anything is written. Dialog prompts for each
     /// of --description, --filters, and --tag that is not given; every
     /// answer is optional.
@@ -72,7 +73,7 @@ pub enum ShareCommand {
     /// Member sessions are kept unless --sessions is given.
     Delete(ShareDeleteArgs),
 
-    /// Add published sessions to a share
+    /// Add sessions to a share
     ///
     /// Each session is checked against share's filters before anything
     /// is written.

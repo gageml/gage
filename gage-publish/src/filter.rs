@@ -263,10 +263,11 @@ mod tests {
     #[tokio::test]
     async fn the_shipped_filters_run_and_contribute_what_they_declare() {
         let registry = builtin_registry();
-        let entries: Vec<FilterEntry> = ["harness", "language", "pii", "secret", "system"]
-            .into_iter()
-            .map(entry)
-            .collect();
+        let entries: Vec<FilterEntry> =
+            ["gitleaks", "harness", "language", "pii", "secret", "system"]
+                .into_iter()
+                .map(entry)
+                .collect();
         let outputs = run_filters(&registry, &entries).await.unwrap();
         let by_name = |name: &str| {
             &outputs
@@ -295,8 +296,11 @@ mod tests {
             pii.patterns[0].0.matches("mail a@b.co"),
             [("email", "a@b.co")]
         );
+        let gitleaks = by_name("gitleaks");
+        assert!(gitleaks.patterns[0].0.len() > 200);
+        assert!(gitleaks.instructions.is_empty());
         let secret = by_name("secret");
-        assert!(secret.patterns[0].0.len() > 200);
+        assert!(secret.patterns.is_empty());
         assert!(secret.instructions[0].starts_with("Remove every credential"));
         let system = by_name("system");
         assert_eq!(system.values, [(TypedSet::System, Reason::System)]);

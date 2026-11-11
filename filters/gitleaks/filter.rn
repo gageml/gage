@@ -1,0 +1,17 @@
+use gage::{Patterns, filter::Reason, publish};
+
+pub const FILTER = #{
+    name: "gitleaks",
+    version: "1.0.0",
+    generation: 1,
+    description: "Remove secrets that match gitleaks rules",
+    groups: ["public", "trusted"],
+    tasks: #{ secrets: #{} },
+};
+
+pub async fn secrets() {
+    publish().pattern_redact(
+        Patterns::from_gitleaks(include_str!("gitleaks.toml")),
+        Reason::Secret,
+    );
+}

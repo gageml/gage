@@ -114,8 +114,8 @@ pub enum StoreError {
     /// A share filter spec entry the grammar rejects: the entry and
     /// the reason
     FilterSpec(String),
-    /// A session a share refuses: not published, or published without
-    /// a filter the share requires
+    /// A session a share refuses: its publish did not apply a filter
+    /// the share requires at an accepted version
     ShareMembership { session: String, reason: String },
 }
 

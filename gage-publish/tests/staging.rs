@@ -280,27 +280,37 @@ fn apply_without_a_definition_attaches_nothing() {
     assert!(!f.publish_root.join(&init.id).exists());
 }
 
-/// `apply` refuses when the object's ref already exists and leaves
-/// the staging directory in place.
+/// `apply` over a session the store holds writes that session again:
+/// staged content equal to the stored commit writes nothing and
+/// returns that commit. `apply` over a removed session is refused and
+/// leaves the staging directory in place.
 #[test]
-fn apply_refuses_an_existing_object() {
+fn apply_writes_an_existing_session_again_and_refuses_a_removed_one() {
     let f = fixture();
     let staging = Staging::with_root(&f.store, &f.publish_root);
     let init = staging.init(&f.original).unwrap();
-    // Stage a second publish under the id of the first, as a copy of
+    // Stage further publishes under the id of the first, as copies of
     // its directory, after the first is applied
-    let twin = f.publish_root.join("twin");
-    copy_dir(&f.publish_root.join(&init.id), &twin);
-    staging.apply(&init.id, None).unwrap();
-    fs::rename(&twin, f.publish_root.join(&init.id)).unwrap();
+    let twins = [f.publish_root.join("twin1"), f.publish_root.join("twin2")];
+    for twin in &twins {
+        copy_dir(&f.publish_root.join(&init.id), twin);
+    }
+    let first = staging.apply(&init.id, None).unwrap();
+    let sessions = SessionStore::from(&f.store);
 
-    let exists = staging.apply(&init.id, None).unwrap_err();
+    fs::rename(&twins[0], f.publish_root.join(&init.id)).unwrap();
+    assert_eq!(staging.apply(&init.id, None).unwrap(), first);
+    assert!(!f.publish_root.join(&init.id).exists());
+    assert_eq!(sessions.iter().unwrap().count(), 2);
+
+    sessions.remove(std::slice::from_ref(&init.id)).unwrap();
+    fs::rename(&twins[1], f.publish_root.join(&init.id)).unwrap();
+    let removed = staging.apply(&init.id, None).unwrap_err();
     assert!(
-        matches!(exists, PublishError::Store(StoreError::ObjectExists(ref id)) if *id == init.id),
-        "{exists}"
+        matches!(removed, PublishError::Store(StoreError::ObjectDeleted(ref id)) if *id == init.id),
+        "{removed}"
     );
     assert!(f.publish_root.join(&init.id).is_dir());
-    assert_eq!(SessionStore::from(&f.store).iter().unwrap().count(), 2);
 }
 
 fn copy_dir(from: &std::path::Path, to: &std::path::Path) {

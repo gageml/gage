@@ -28,7 +28,10 @@ use std::process::{Command, ExitStatus, Stdio};
 use gage_core::uuid::new_uuid;
 
 use crate::git::{git_in, git_transport_in, run, run_with_stdin};
+use crate::object::Object;
 use crate::refs::{GENERATION, OBJECT_REFS, ROOT, TAG_REFS};
+use crate::session::is_published;
+use crate::share::OBJECT_TYPE as SHARE_TYPE;
 use crate::{Store, StoreError};
 
 /// Typed view over a [`Store`] for remotes.
@@ -58,12 +61,38 @@ pub struct Remote {
 
 /// The refs one push changes on the remote, by what happens to each:
 /// sent as a new ref or a fast-forward, sent with force so the
-/// remote's commit is replaced, or deleted.
+/// remote's commit is replaced, replaced on the condition that the
+/// remote still holds an expected commit, or deleted.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PushSet {
     pub send: Vec<String>,
     pub force: Vec<String>,
+    pub replace: Vec<LeasedRef>,
     pub delete: Vec<String>,
+}
+
+/// A ref a push replaces on the remote only while the remote holds
+/// `expect`. A remote that moved since `expect` was read rejects the
+/// ref, so the push never discards a commit the caller did not see.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LeasedRef {
+    pub name: String,
+    pub expect: String,
+}
+
+/// How a push of a local commit relates to the different commit the
+/// remote holds for the same ref.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Retraction {
+    /// The local commit is not a retraction of the remote's: it is sent
+    /// as any other commit and the remote decides
+    No,
+    /// The local commit retracts the remote's, which the store holds
+    /// and which names the same object
+    Verified,
+    /// The local commit is retraction-shaped and the store does not
+    /// hold the remote's commit, so what it would replace is unknown
+    Unverified,
 }
 
 impl PushSet {
@@ -73,13 +102,14 @@ impl PushSet {
         self.send
             .iter()
             .chain(&self.force)
+            .chain(self.replace.iter().map(|r| &r.name))
             .chain(&self.delete)
             .cloned()
             .collect()
     }
 
     pub fn len(&self) -> usize {
-        self.send.len() + self.force.len() + self.delete.len()
+        self.send.len() + self.force.len() + self.replace.len() + self.delete.len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -419,8 +449,10 @@ impl RemoteStore<'_> {
 
     /// Push `set` to `repository` with `approval` set for the store's
     /// `pre-push` hook. A sent ref is one refspec with no force, a
-    /// forced ref is one with `+`, and a deleted ref is one with an
-    /// empty source. Git's output goes to the terminal as it runs.
+    /// forced ref is one with `+`, a replaced ref is one with no `+`
+    /// under a lease naming the commit the remote is expected to hold,
+    /// and a deleted ref is one with an empty source. A `+` on a
+    /// leased ref would override the lease. Git's output goes to the terminal as it runs.
     /// Returns git's exit status; a rejection by either hook is a
     /// failing status whose reason git has already printed.
     pub fn push(
@@ -436,11 +468,53 @@ impl RemoteStore<'_> {
         for ref_name in &set.force {
             cmd.arg(format!("+{ref_name}:{ref_name}"));
         }
+        for LeasedRef { name, expect } in &set.replace {
+            cmd.arg(format!("--force-with-lease={name}:{expect}"));
+            cmd.arg(format!("{name}:{name}"));
+        }
         for ref_name in &set.delete {
             cmd.arg(format!(":{ref_name}"));
         }
         cmd.env("GAGE_PUSH_APPROVAL", approval);
         run_transport(cmd)
+    }
+
+    /// Whether the local commit `local_sha` retracts `remote_sha`, the
+    /// different commit a remote holds for the same ref. A retraction
+    /// is a tombstone, a published session, or a share whose history
+    /// was cut since the remote's commit: the three writes that take
+    /// content out of reach instead of adding to it. It is verified
+    /// when the store holds the remote's commit, that commit is of the
+    /// same object, and the two histories share no commit. Histories
+    /// that share a commit are an update or a divergence, which a
+    /// fetch merges, and are not retractions.
+    pub fn retraction(&self, local_sha: &str, remote_sha: &str) -> Result<Retraction, StoreError> {
+        let local = self.store.read_object(local_sha)?;
+        if !retracts(&local) {
+            return Ok(Retraction::No);
+        }
+        let local_chain = self.store.walk_parent_chain(local_sha)?;
+        if local_chain.iter().any(|sha| sha == remote_sha) {
+            return Ok(Retraction::No);
+        }
+        let held = self
+            .store
+            .object_info(&format!("{remote_sha}^{{commit}}"))?
+            .is_some();
+        if !held {
+            return Ok(Retraction::Unverified);
+        }
+        let remote = self.store.read_header(remote_sha)?;
+        let same_identity = remote.id == local.header.id
+            && remote.object_type == local.header.object_type
+            && remote.created_ms == local.header.created_ms;
+        let remote_chain = self.store.walk_parent_chain(remote_sha)?;
+        let related = remote_chain.iter().any(|sha| local_chain.contains(sha));
+        if same_identity && !related {
+            Ok(Retraction::Verified)
+        } else {
+            Ok(Retraction::No)
+        }
     }
 
     /// The store's object and tag refs against what `repository`
@@ -598,6 +672,12 @@ impl RemoteStore<'_> {
             Err(e) => Err(e),
         }
     }
+}
+
+/// Whether a commit of `object` with no `first-parent` takes content
+/// out of reach: a tombstone, a published session, or a share.
+fn retracts(object: &Object) -> bool {
+    object.header.is_tombstone() || object.header.object_type == SHARE_TYPE || is_published(object)
 }
 
 /// Check `objects` as the default objects of a remote. One that is
@@ -978,6 +1058,67 @@ mod tests {
             .to_string()
     }
 
+    /// A tombstone retracts the live commit a remote holds. The push
+    /// replaces that commit under a lease on it, and a remote that
+    /// moved to another commit since refuses the ref.
+    #[test]
+    fn a_leased_replacement_needs_the_remote_at_the_expected_commit() {
+        use crate::note::NoteStore;
+        let dir = tempfile::tempdir().unwrap();
+        let (source, _fsck) = open_store(&dir.path().join("source"));
+        let target = dir.path().join("target.git");
+        run(git_in(dir.path(), ["init", "--bare", "-q", "target.git"])).unwrap();
+        let remotes = RemoteStore::from(&source);
+        let repository = remotes.resolve(target.to_str().unwrap()).unwrap();
+        let (ref_name, live) = note_ref(&source, "v");
+        let sent = PushSet {
+            send: vec![ref_name.clone()],
+            ..PushSet::default()
+        };
+        let digest = remotes.approval_digest(&sent.names()).unwrap();
+        assert!(remotes.push(&repository, &sent, &digest).unwrap().success());
+
+        NoteStore::from(&source)
+            .delete(ref_name.strip_prefix(OBJECT_REFS).unwrap())
+            .unwrap();
+        let tombstone = source.rev_parse(&ref_name).unwrap().unwrap();
+        assert_eq!(
+            remotes.retraction(&tombstone, &live).unwrap(),
+            Retraction::Verified
+        );
+        assert_eq!(
+            remotes.retraction(&tombstone, &"0".repeat(40)).unwrap(),
+            Retraction::Unverified
+        );
+        assert_eq!(
+            remotes.retraction(&live, &tombstone).unwrap(),
+            Retraction::No
+        );
+        let replace = |expect: &str| {
+            let set = PushSet {
+                replace: vec![LeasedRef {
+                    name: ref_name.clone(),
+                    expect: expect.to_string(),
+                }],
+                ..PushSet::default()
+            };
+            let digest = remotes.approval_digest(&set.names()).unwrap();
+            remotes.push(&repository, &set, &digest).unwrap().success()
+        };
+
+        let moved = unrelated_commit(&target);
+        run(git_in(&target, ["update-ref", &ref_name, &moved])).unwrap();
+        assert!(!replace(&live), "the remote no longer holds the commit");
+        assert_eq!(remotes.ls_remote(&repository).unwrap()[&ref_name], moved);
+
+        run(git_in(&target, ["update-ref", &ref_name, &live])).unwrap();
+        assert!(replace(&live));
+        assert_eq!(
+            remotes.ls_remote(&repository).unwrap()[&ref_name],
+            tombstone
+        );
+    }
+
     #[test]
     fn diff_remote_classifies_every_ref() {
         use crate::note::{NoteEdit, NoteStore, NoteValue};
@@ -1052,9 +1193,9 @@ mod tests {
         assert!(!status.success(), "a divergent ref is not a fast-forward");
 
         let set = PushSet {
-            send: Vec::new(),
             force: vec![ref_name.clone()],
             delete: vec![extra.clone()],
+            ..PushSet::default()
         };
         assert_eq!(set.len(), 2);
         let wrong = remotes.approval_digest(&set.force).unwrap();

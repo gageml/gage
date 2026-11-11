@@ -570,6 +570,41 @@ impl Store {
         if !current.header.is_tombstone() {
             return Err(StoreError::ObjectLive(current.header.id.clone()));
         }
+        // A tombstone carries no key, so the live commit claims it as
+        // a create does
+        self.supersede(current, None, tree, message)
+    }
+
+    /// Replace the live commit `current` with a live commit carrying
+    /// `tree` that does not descend from it: no `first-parent`, and
+    /// link SHAs as the only commit parents. `type`, `id`, and
+    /// `created` are `current`'s entries, so the object keeps its
+    /// identity. The replaced commit and the content only it reaches
+    /// are no longer reachable from the object's ref, which is what
+    /// retracting published content requires. Returns the new commit's
+    /// SHA.
+    pub(crate) fn replace(
+        &self,
+        current: &Object,
+        tree: &ObjectTree,
+        message: &str,
+    ) -> Result<String, StoreError> {
+        if current.header.is_tombstone() {
+            return Err(StoreError::ObjectDeleted(current.header.id.clone()));
+        }
+        self.supersede(current, Some(current), tree, message)
+    }
+
+    /// Write a live commit over `current` that keeps its identity
+    /// entries and has no `first-parent`. `keyed` is the commit whose
+    /// key the write carries over, none when `current` holds no key.
+    fn supersede(
+        &self,
+        current: &Object,
+        keyed: Option<&Object>,
+        tree: &ObjectTree,
+        message: &str,
+    ) -> Result<String, StoreError> {
         let path = self.path();
         let now = now_ms();
         let modified_sha = write_blob(path, format!("{now}\n").as_bytes())?;
@@ -581,11 +616,9 @@ impl Store {
         entries.insert("modified".to_string(), blob_entry(&modified_sha));
         let tree_sha = mktree(path, &tree_lines(&entries))?;
 
-        // A tombstone carries no key, so the live commit claims it as
-        // a create does
         let key = plan_key_ref(
             self,
-            None,
+            keyed,
             &current.header.object_type,
             &current.header.id,
             Some(tree),
@@ -883,6 +916,36 @@ impl Store {
             unattributed,
             missing,
         })
+    }
+
+    /// The objects that `former`, an earlier commit of some object,
+    /// links and that are tombstones now, each once. These are the
+    /// objects a later commit dropped because their content was
+    /// removed; a push that supersedes `former` on a remote carries
+    /// their tombstones so the remote stops holding the content.
+    pub fn tombstoned_links(&self, former: &str) -> Result<Vec<IdMatch>, StoreError> {
+        let mut out: Vec<IdMatch> = Vec::new();
+        for link in self.find_link_files(former)? {
+            for sha in link.shas {
+                let id = self.read_header(&sha)?.id;
+                if out.iter().any(|m| m.id == id) {
+                    continue;
+                }
+                let Some(tip) = self.rev_parse(&object_ref(&id))? else {
+                    continue;
+                };
+                let header = self.read_header(&tip)?;
+                if header.is_tombstone() {
+                    out.push(IdMatch {
+                        id,
+                        tip_sha: tip,
+                        deleted: true,
+                        object_type: header.object_type,
+                    });
+                }
+            }
+        }
+        Ok(out)
     }
 
     /// Walk the `first-parent` chain from `commit`, oldest last (index 0
@@ -1671,6 +1734,52 @@ mod tests {
         ));
         assert!(matches!(
             store.delete(&object, "x").unwrap_err(),
+            StoreError::ObjectDeleted(id) if id == "abc"
+        ));
+    }
+
+    /// A replacement keeps the object's identity entries, has no
+    /// parent and no `first-parent`, and leaves the replaced commit
+    /// unreachable from the ref. A tombstone is not replaced.
+    #[test]
+    fn replace_writes_a_live_commit_that_does_not_descend_from_the_replaced_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let mut tree = ObjectTree::default();
+        tree.blobs.insert("body.txt".into(), b"secret".to_vec());
+        let first = store
+            .create("gage::test", "1", "abc", &tree, "test")
+            .unwrap();
+        let live = store.read_object(&first).unwrap();
+        let mut new_tree = ObjectTree::default();
+        new_tree.blobs.insert("body.txt".into(), b"clean".to_vec());
+
+        let replaced = store.replace(&live, &new_tree, "test: replace").unwrap();
+        assert!(commit_parents(&store, &replaced).is_empty());
+        for marker in ["type", "id", "created"] {
+            assert_eq!(
+                cat(&store, &format!("{replaced}:{marker}")),
+                cat(&store, &format!("{first}:{marker}")),
+                "{marker}"
+            );
+        }
+        assert_eq!(cat(&store, &format!("{replaced}:body.txt")), "clean");
+        assert_eq!(
+            store.rev_parse(&object_ref("abc")).unwrap().unwrap(),
+            replaced
+        );
+        let object = store.read_object(&replaced).unwrap();
+        assert_eq!(object.header.first_parent, None);
+        assert_eq!(object.header.created_ms, live.header.created_ms);
+        assert_eq!(
+            store.walk_parent_chain(&replaced).unwrap(),
+            [replaced.clone()]
+        );
+
+        let tomb = store.delete(&object, "test: delete").unwrap();
+        let tombstone = store.read_object(&tomb).unwrap();
+        assert!(matches!(
+            store.replace(&tombstone, &new_tree, "x").unwrap_err(),
             StoreError::ObjectDeleted(id) if id == "abc"
         ));
     }

@@ -19,9 +19,9 @@ use std::path::{Path, PathBuf};
 use gage_core::config::gage_home;
 use gage_core::uuid::{is_id, new_uuid};
 use gage_store::{
-    AttachmentSpec, AttachmentStore, ExternalSession, ExternalSessionRecord, IdMatch, PublishAttrs,
-    SESSION_TYPE, SessionAttrsRecord, SessionDirLayout, SessionRecord, SessionStore, Store,
-    StoreError, format_changes,
+    AttachmentSpec, AttachmentStore, ExternalSession, ExternalSessionRecord, IdMatch, OBJECT_REFS,
+    PublishAttrs, SESSION_TYPE, SessionAttrsRecord, SessionDirLayout, SessionRecord, SessionStore,
+    Store, StoreError, format_changes,
 };
 
 use crate::PublishError;
@@ -131,15 +131,31 @@ impl<'a> Staging<'a> {
         self.layout(id).definition_file()
     }
 
-    /// Start a publish of `original`, a stored session. Generates the
-    /// new session id, creates the staging directory, copies
-    /// `original`'s content into the session's `files.d`, writes
-    /// `attrs.json` with `origin` naming `original` and an empty
-    /// `changes.json`. Returns the new id. The definition beside the
-    /// session is the publish engine's to write. No store object is
-    /// written.
+    /// Start a publish of `original`, a stored session, under a new
+    /// session id. See [`init_as`].
+    ///
+    /// [`init_as`]: Staging::init_as
     pub fn init(&self, original: &SessionRecord) -> Result<PublishInit, PublishError> {
-        let id = new_uuid();
+        self.init_as(original, new_uuid())
+    }
+
+    /// Start a publish of `original`, a stored session, as the session
+    /// `id`. Creates the staging directory, copies `original`'s content
+    /// into the session's `files.d`, writes `attrs.json` with `origin`
+    /// naming `original` and an empty `changes.json`. A staging
+    /// directory an earlier publish left under `id` is replaced. The
+    /// definition beside the session is the publish engine's to write.
+    /// No store object is written.
+    pub fn init_as(
+        &self,
+        original: &SessionRecord,
+        id: String,
+    ) -> Result<PublishInit, PublishError> {
+        match fs::remove_dir_all(self.root.join(&id)) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
         let origin = format!("session:{}@{}", original.id, original.commit_sha);
         let session = self.layout(&id).session();
         fs::create_dir_all(session.files_dir())?;
@@ -251,8 +267,14 @@ impl<'a> Staging<'a> {
         Ok(out)
     }
 
-    /// Commit the staged session of the pending publish `id` as a new
-    /// session object, as it stands. With `definition`, its values
+    /// Commit the staged session of the pending publish `id` as the
+    /// session object `id`, as it stands. A session the store does not
+    /// hold is created. A session it holds live is written again: as a
+    /// replacement that does not descend from the stored commit when
+    /// the staged publish records a higher generation of any filter,
+    /// since the stored commit then holds content the filter now
+    /// removes, and as a child of the stored commit otherwise. With
+    /// `definition`, its values
     /// are kept as an unkeyed attachment named `publish-def` whose
     /// one target is the new session, written as JSON without the
     /// editing comments; the attachment's commit names the session's
@@ -317,7 +339,20 @@ impl<'a> Staging<'a> {
         layout: &PublishDirLayout,
         attachment: Option<&Path>,
     ) -> Result<String, PublishError> {
-        let commit_sha = SessionStore::from(self.store).create_from_dir(layout.root())?;
+        let sessions = SessionStore::from(self.store);
+        let commit_sha = match self.store.rev_parse(&format!("{OBJECT_REFS}{id}"))? {
+            None => sessions.create_from_dir(layout.root())?,
+            Some(_) => {
+                let stored = sessions.get(id)?;
+                let text = fs::read_to_string(layout.session().attrs_file())?;
+                let staged: SessionAttrsRecord = serde_json::from_str(&text)?;
+                if raises_generation(stored.attrs.publish.as_ref(), staged.publish.as_ref()) {
+                    sessions.replace_from_dir(layout.root())?
+                } else {
+                    sessions.update_from_dir(layout.root())?
+                }
+            }
+        };
         if let Some(dir) = attachment {
             AttachmentStore::from(self.store).add(&AttachmentSpec {
                 name: Some(DEFINITION_ATTACHMENT),
@@ -347,4 +382,24 @@ impl<'a> Staging<'a> {
             Err(e) => Err(e.into()),
         }
     }
+}
+
+/// Whether `staged` records a higher generation than `stored` for any
+/// filter. A filter that `stored` does not record, and one recorded
+/// without a generation, is at generation 0.
+pub(crate) fn raises_generation(
+    stored: Option<&PublishAttrs>,
+    staged: Option<&PublishAttrs>,
+) -> bool {
+    let recorded = |name: &str| {
+        stored
+            .and_then(|p| p.filters.iter().find(|f| f.name == name))
+            .and_then(|f| f.generation)
+            .unwrap_or(0)
+    };
+    staged.is_some_and(|p| {
+        p.filters
+            .iter()
+            .any(|f| f.generation.unwrap_or(0) > recorded(&f.name))
+    })
 }
