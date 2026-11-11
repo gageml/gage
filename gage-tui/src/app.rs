@@ -27,7 +27,7 @@ use serde_json::Value;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use crate::attrs::attr_lines;
-use crate::doc::{Body, Document, Dropped, Note, Redaction, SessionAttrs};
+use crate::doc::{Body, Document, Dropped, Note, Redaction, Session};
 use crate::hint;
 use crate::input::spawn_input_thread;
 use crate::options::ViewOptions;
@@ -1746,7 +1746,7 @@ fn draw_body(frame: &mut Frame, state: &mut AppState, area: Rect) {
 
     match row_kind {
         Some(RowKind::Session) => {
-            let lines = session_lines(&state.doc.session.attrs, padded_width(inner));
+            let lines = session_lines(&state.doc.session, padded_width(inner));
             let source = state
                 .view
                 .source
@@ -1811,7 +1811,7 @@ fn draw_body(frame: &mut Frame, state: &mut AppState, area: Rect) {
 
 fn body_title(doc: &Document, kind: Option<&RowKind>) -> String {
     match kind {
-        Some(RowKind::Session) => doc.session.id.clone(),
+        Some(RowKind::Session) => "Session".to_string(),
         Some(RowKind::Attachment { .. }) => format!("{} • attachment", doc.session.id),
         Some(RowKind::AttachmentFile { path, .. }) => format!("{} • {path}", doc.session.id),
         Some(RowKind::Entry { index }) => entry_header(doc, *index),
@@ -2049,24 +2049,23 @@ fn source_banner(width: u16) -> Section {
     )
 }
 
-/// The session's attributes as the root row shows them: the title in
-/// bold, a blank line, then the fields as caption/value rows.
-fn session_lines(attrs: &SessionAttrs, width: u16) -> Vec<Line<'static>> {
-    let mut lines = Vec::new();
-    if !attrs.title.is_empty() {
-        lines.push(Line::from(Span::styled(
-            attrs.title.clone(),
-            Style::new().add_modifier(Modifier::BOLD),
-        )));
-        lines.push(Line::from(""));
-    }
-    let fields: Vec<(&'static str, &str)> = attrs
-        .fields
-        .iter()
-        .map(|(label, value)| (*label, value.as_str()))
-        .collect();
-    lines.extend(attr_lines(&fields, width));
-    lines
+/// The session's attributes as the root row shows them: the id, the
+/// title, then the fields, as caption/value rows.
+fn session_lines(session: &Session, width: u16) -> Vec<Line<'static>> {
+    let fields: Vec<(&'static str, &str)> = [
+        ("Id", session.id.as_str()),
+        ("Title", session.attrs.title.as_str()),
+    ]
+    .into_iter()
+    .chain(
+        session
+            .attrs
+            .fields
+            .iter()
+            .map(|(label, value)| (*label, value.as_str())),
+    )
+    .collect();
+    attr_lines(&fields, width)
 }
 
 /// Lines as one wrapped, scrollable section.
@@ -2298,7 +2297,7 @@ mod tests {
     use super::*;
     use gage_session::EntryValue;
 
-    use crate::doc::{AttachmentFile, BodySource, Entry, Session, SessionAttachment, ToolUse};
+    use crate::doc::{AttachmentFile, BodySource, Entry, SessionAttachment, SessionAttrs, ToolUse};
     use crate::session::tests::fixture;
 
     /// The rendered screen as one string, rows joined by newlines
@@ -2881,8 +2880,8 @@ mod tests {
     }
 
     /// The root row shows the session's attributes as the listing
-    /// does: the title in bold, then one line per field, padded like
-    /// an entry body. The row's JSON follows a source banner only when
+    /// does: one line per field, the title first, padded like an entry
+    /// body. The row's JSON follows a source banner only when
     /// the source option is on.
     #[tokio::test(flavor = "multi_thread")]
     async fn the_root_row_shows_the_session_attributes() {
@@ -2909,21 +2908,18 @@ mod tests {
         let rows: Vec<&str> = text.lines().collect();
         // The body pane is the last bordered column of a row
         let body = |row: &str| row.rsplit('│').nth(1).unwrap_or("").to_string();
-        let title = rows
+        let first = rows
             .iter()
-            .position(|r| r.contains("Fix the widget"))
+            .position(|r| body(r).starts_with(" Id "))
             .unwrap_or_else(|| panic!("{text}"));
-        // One padding row above and one column to the left
-        assert!(body(rows[title - 1]).trim().is_empty(), "{text}");
-        assert!(body(rows[title]).starts_with(" Fix the widget"), "{text}");
-        assert!(
-            cell_modifiers(&terminal, "Fix the widget", 'F').contains(Modifier::BOLD),
-            "{text}"
-        );
-        assert!(body(rows[title + 1]).trim().is_empty(), "{text}");
-        // The labels are padded to the widest plus two spaces so the
-        // values share a column, and they take the caption style
+        assert!(rows[first - 2].contains("┌Session─"), "{text}");
+        // One padding row above and one column to the left. The labels
+        // are padded to the widest plus two spaces so the values share
+        // a column, and they take the caption style.
+        assert!(body(rows[first - 1]).trim().is_empty(), "{text}");
         let expected = [
+            " Id        s1",
+            " Title     Fix the widget",
             " Project   proj",
             " Type      claude",
             " Model     claude-x",
@@ -2932,8 +2928,12 @@ mod tests {
             " Created   3h ago",
         ];
         for (i, line) in expected.iter().enumerate() {
-            assert!(body(rows[title + 2 + i]).starts_with(line), "{text}");
+            assert!(body(rows[first + i]).starts_with(line), "{text}");
         }
+        assert!(
+            !cell_modifiers(&terminal, "Title     Fix the widget", 'F').contains(Modifier::BOLD),
+            "{text}"
+        );
         assert!(
             cell_modifiers(&terminal, "Project ", 'P').contains(Modifier::DIM),
             "{text}"
@@ -2955,11 +2955,37 @@ mod tests {
             .iter()
             .position(|r| r.contains("--- source ---"))
             .unwrap_or_else(|| panic!("{text}"));
-        assert!(banner > title + 7, "{text}");
+        assert!(banner > first + 7, "{text}");
         assert!(
             rows[banner + 1..]
                 .iter()
                 .any(|r| r.contains("\"origin\": \"claude:abc\"")),
+            "{text}"
+        );
+    }
+
+    /// A session without a title keeps its Title row, with no value.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_root_row_shows_an_empty_title() {
+        let mut doc = doc_with_entries(1);
+        doc.session.attrs = SessionAttrs {
+            title: String::new(),
+            fields: vec![("Project", "proj".into())],
+        };
+        let mut state = AppState::new(doc, &ViewOptions::default(), DocSource::Backend, false);
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        state.select_first();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let text = screen(&terminal);
+        let rows: Vec<&str> = text.lines().collect();
+        let body = |row: &str| row.rsplit('│').nth(1).unwrap_or("").to_string();
+        let project = rows
+            .iter()
+            .position(|r| body(r).starts_with(" Project  proj"))
+            .unwrap_or_else(|| panic!("{text}"));
+        assert_eq!(body(rows[project - 1]).trim(), "Title", "{text}");
+        assert!(
+            body(rows[project - 2]).starts_with(" Id       s1"),
             "{text}"
         );
     }
