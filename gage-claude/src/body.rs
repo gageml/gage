@@ -34,7 +34,7 @@ pub fn entry_body(entry: &EntryValue) -> EntryBody {
 fn invalid_entry(entry: &EntryValue) -> Vec<BodyBlock> {
     let field = |pointer| str_at(entry, pointer).unwrap_or_default().to_string();
     vec![
-        BodyBlock::Attrs(vec![BodyAttr::new("Error", field("/error"))]),
+        BodyBlock::Text(field("/error")),
         BodyBlock::Text(field("/raw")),
     ]
 }
@@ -140,48 +140,89 @@ fn system(entry: &EntryValue) -> Vec<BodyBlock> {
     rows_then_text(attrs(entry, attr_pointers), texts(entry, text_pointers))
 }
 
-/// An attachment: its type and subtype, then the text the harness
-/// sent to the model. A row without that text, one the harness never
-/// sent or one written before the harness recorded `rendered`, shows
-/// what its type keeps instead.
+/// An attachment: its type and the attributes selected for the type,
+/// then the text the harness sent to the model. A row without that
+/// text, one the harness never sent or one written before the harness
+/// recorded `rendered`, shows the text its type keeps instead. A type
+/// without a selection shows its type alone.
 fn attachment(entry: &EntryValue) -> Vec<BodyBlock> {
     let kind = str_at(entry, "/attachment/type").unwrap_or_default();
-    let mut rows = vec![BodyAttr::new("Type", kind)];
-    if let Some(subtype) = attachment_subtype(entry) {
-        rows.push(BodyAttr::new("Subtype", subtype));
-    }
+    let (attr_pointers, text_pointers) = attachment_selection(kind);
+    let mut rows = vec![BodyAttr::new("type", kind)];
+    rows.extend(attrs(entry, attr_pointers));
+    let mut blocks = vec![BodyBlock::Attrs(rows)];
     let rendered = rendered_texts(entry);
     if !rendered.is_empty() {
-        return rows_then_text(rows, rendered);
+        blocks.extend(rendered.into_iter().map(BodyBlock::Text));
+        return blocks;
     }
-    let text = match kind {
-        "deferred_tools_record" => deferred_tool_names(entry),
-        "thinking_drop" => {
-            rows.extend(thinking_drop_rows(entry));
-            Vec::new()
+    match kind {
+        "deferred_tools_record" => {
+            blocks.extend(deferred_tool_names(entry).into_iter().map(BodyBlock::Text));
         }
-        "batching_reminder_sent" => texts(entry, &["/attachment/text"]),
-        _ => {
-            let text_pointers = attachment_text_pointers(kind);
-            rows.extend(attachment_scalars(entry, text_pointers));
-            texts(entry, text_pointers)
-        }
-    };
-    rows_then_text(rows, text)
+        "queued_command" => blocks.extend(queued_prompt(entry)),
+        _ => blocks.extend(texts(entry, text_pointers).into_iter().map(BodyBlock::Text)),
+    }
+    blocks
 }
 
-/// `reminderType` where present, else the hook event and name.
-fn attachment_subtype(entry: &EntryValue) -> Option<String> {
-    let field = |pointer| str_at(entry, pointer).map(str::to_string);
-    field("/attachment/reminderType").or_else(|| {
-        match (
-            field("/attachment/hookEvent"),
-            field("/attachment/hookName"),
-        ) {
-            (Some(event), Some(name)) => Some(format!("{event} {name}")),
-            (event, name) => event.or(name),
+/// The pointers to the rows an attachment type shows after its type,
+/// and to the text it keeps for a reader when the entry has no
+/// `rendered` text.
+fn attachment_selection(kind: &str) -> (&'static [&'static str], &'static [&'static str]) {
+    match kind {
+        "edited_text_file" => (&["/attachment/filename"], &["/attachment/snippet"]),
+        "nested_memory" => (&["/attachment/path"], &["/attachment/content/content"]),
+        "directory" => (&["/attachment/path"], &["/attachment/content"]),
+        "hook_success" => (
+            &[
+                "/attachment/hookName",
+                "/attachment/command",
+                "/attachment/exitCode",
+                "/attachment/durationMs",
+            ],
+            &["/attachment/content"],
+        ),
+        "hook_non_blocking_error" => (
+            &[
+                "/attachment/hookName",
+                "/attachment/command",
+                "/attachment/exitCode",
+                "/attachment/durationMs",
+            ],
+            &["/attachment/stderr", "/attachment/stdout"],
+        ),
+        "hook_cancelled" => (
+            &[
+                "/attachment/hookName",
+                "/attachment/command",
+                "/attachment/timedOut",
+                "/attachment/timeoutMs",
+                "/attachment/durationMs",
+            ],
+            &[],
+        ),
+        "hook_additional_context" => (&["/attachment/hookName"], &["/attachment/content"]),
+        "auto_mode" | "ultra_effort_enter" => (&["/attachment/reminderType"], &[]),
+        "plan_mode" => (
+            &[
+                "/attachment/reminderType",
+                "/attachment/planFilePath",
+                "/attachment/isSubAgent",
+            ],
+            &[],
+        ),
+        "queued_command" => (&["/attachment/commandMode"], &[]),
+        "prompt_snapshot" => (&[], &["/attachment/systemPrompt"]),
+        "skill_listing" => (&[], &["/attachment/content"]),
+        "agent_listing_delta" | "deferred_tools_delta" => (&[], &["/attachment/addedLines"]),
+        "mcp_instructions_delta" => (&[], &["/attachment/addedBlocks"]),
+        "read_truncation_notice" => (&[], &["/attachment/banner"]),
+        "total_tokens_reminder" | "silent_turn_reminder" | "batching_reminder_sent" => {
+            (&[], &["/attachment/text"])
         }
-    })
+        _ => (&[], &[]),
+    }
 }
 
 /// The text of each `rendered` item in order. An item's `content` is a
@@ -231,65 +272,25 @@ fn deferred_tool_names(entry: &EntryValue) -> Vec<String> {
     vec![names.join("\n")]
 }
 
-/// How many thinking blocks the harness left out of a request, over
-/// how many turns, and why.
-fn thinking_drop_rows(entry: &EntryValue) -> Vec<BodyAttr> {
-    let count = |pointer| entry.pointer(pointer).and_then(EntryValue::as_u64);
-    let mut rows = Vec::new();
-    if let (Some(blocks), Some(turns)) = (
-        count("/attachment/newlyDropped/blockCount"),
-        count("/attachment/newlyDropped/turnCount"),
-    ) {
-        rows.push(BodyAttr::new(
-            "Dropped",
-            format!("{} in {}", counted(blocks, "block"), counted(turns, "turn")),
-        ));
+/// The queued prompt: a string as one text, or one block per element
+/// of a list in order, a text element as its text and any other
+/// element as a remark.
+fn queued_prompt(entry: &EntryValue) -> Vec<BodyBlock> {
+    let text_block = |text: &str| {
+        let text = text.trim();
+        (!text.is_empty()).then(|| BodyBlock::Text(text.to_string()))
+    };
+    match entry.pointer("/attachment/prompt") {
+        Some(EntryValue::String(prompt)) => text_block(prompt).into_iter().collect(),
+        Some(EntryValue::Array(elements)) => elements
+            .iter()
+            .filter_map(|element| match str_at(element, "/type") {
+                Some("text") => text_block(str_at(element, "/text").unwrap_or_default()),
+                _ => Some(BodyBlock::Remark("Image".to_string())),
+            })
+            .collect(),
+        _ => Vec::new(),
     }
-    if let Some(reason) = str_at(entry, "/attachment/newlyDropped/reason") {
-        rows.push(BodyAttr::new("Reason", reason));
-    }
-    rows
-}
-
-fn counted(count: u64, noun: &str) -> String {
-    match count {
-        1 => format!("1 {noun}"),
-        n => format!("{n} {noun}s"),
-    }
-}
-
-/// Where an attachment type keeps text a reader wants as text.
-fn attachment_text_pointers(kind: &str) -> &'static [&'static str] {
-    match kind {
-        "total_tokens_reminder" | "silent_turn_reminder" => &["/attachment/text"],
-        "prompt_snapshot" => &["/attachment/systemPrompt"],
-        "edited_text_file" => &["/attachment/snippet"],
-        "nested_memory" => &["/attachment/content/content"],
-        "directory" | "skill_listing" | "hook_success" | "hook_additional_context" => {
-            &["/attachment/content"]
-        }
-        "agent_listing_delta" | "deferred_tools_delta" => &["/attachment/addedLines"],
-        "mcp_instructions_delta" => &["/attachment/addedBlocks"],
-        "hook_non_blocking_error" => &["/attachment/stderr", "/attachment/stdout"],
-        "queued_command" => &["/attachment/prompt", "/attachment/prompt/0/text"],
-        "read_truncation_notice" => &["/attachment/banner"],
-        _ => &[],
-    }
-}
-
-/// The attachment's scalar members as rows, in the order the harness
-/// wrote them, without its type, the members its subtype is made of,
-/// and the members shown as text.
-fn attachment_scalars(entry: &EntryValue, text_pointers: &[&str]) -> Vec<BodyAttr> {
-    const SHOWN: [&str; 4] = ["type", "reminderType", "hookEvent", "hookName"];
-    let members = entry.pointer("/attachment").and_then(EntryValue::as_object);
-    members
-        .into_iter()
-        .flatten()
-        .filter(|(key, _)| !SHOWN.contains(&key.as_str()))
-        .filter(|(key, _)| !text_pointers.iter().any(|p| caption(p) == key.as_str()))
-        .filter_map(|(key, value)| Some(BodyAttr::new(key, scalar(value)?)))
-        .collect()
 }
 
 /// The session's totals, then each model's usage under the model's
@@ -672,13 +673,14 @@ mod tests {
         );
     }
 
-    /// An attachment with `rendered` text shows its type, its subtype,
-    /// and each rendered item without the `<system-reminder>` wrapper.
+    /// An attachment with `rendered` text shows its type, the
+    /// attributes selected for the type, and each rendered item
+    /// without the `<system-reminder>` wrapper.
     #[test]
     fn an_attachment_shows_its_type_and_rendered_text() {
         let blocks = body_of(json!({
             "type": "attachment",
-            "attachment": {"type": "auto_mode", "reminderType": "bash_first", "other": "x"},
+            "attachment": {"type": "auto_mode", "reminderType": "full", "other": "x"},
             "rendered": [
                 {"content": "<system-reminder>\nWhile auto mode is active\n</system-reminder>"},
                 {"content": [
@@ -690,34 +692,108 @@ mod tests {
         assert_eq!(
             blocks,
             [
-                rows(&[("Type", "auto_mode"), ("Subtype", "bash_first")]),
+                rows(&[("type", "auto_mode"), ("reminderType", "full")]),
                 text("While auto mode is active"),
                 text("first\n\nsecond"),
             ]
         );
     }
 
-    /// A hook attachment's subtype is its event and hook name.
+    /// The `rendered` text stands in for the text a type keeps, and
+    /// the type's selected attributes show beside either.
     #[test]
-    fn a_hook_attachment_subtype_is_its_event_and_name() {
-        let blocks = body_of(json!({
+    fn rendered_text_replaces_the_text_a_type_keeps() {
+        let attachment = json!({
+            "type": "edited_text_file", "filename": "/src/a.rs", "snippet": "1\tfn a() {}",
+        });
+        let kept = body_of(json!({"type": "attachment", "attachment": attachment}));
+        assert_eq!(
+            kept,
+            [
+                rows(&[("type", "edited_text_file"), ("filename", "/src/a.rs")]),
+                text("1\tfn a() {}"),
+            ]
+        );
+
+        let rendered = body_of(json!({
             "type": "attachment",
-            "attachment": {"type": "hook_cancelled", "hookEvent": "Stop", "hookName": "sound"},
+            "attachment": attachment,
+            "rendered": [{"content": "<system-reminder>\na.rs was edited\n</system-reminder>"}],
         }));
         assert_eq!(
-            blocks,
+            rendered,
+            [
+                rows(&[("type", "edited_text_file"), ("filename", "/src/a.rs")]),
+                text("a.rs was edited"),
+            ]
+        );
+    }
+
+    /// A type with a selection shows the selected attributes in the
+    /// selection's order under their own names, and no other member.
+    #[test]
+    fn a_selected_attachment_shows_its_selected_attributes() {
+        let hook = body(concat!(
+            r#"{"type":"attachment","attachment":{"type":"hook_non_blocking_error","#,
+            r#""hookName":"Stop","toolUseID":"t1","hookEvent":"Stop","stderr":"no such file","#,
+            r#""stdout":"","exitCode":127,"command":"bash hook.sh","durationMs":8}}"#,
+        ));
+        assert_eq!(
+            hook,
+            [
+                rows(&[
+                    ("type", "hook_non_blocking_error"),
+                    ("hookName", "Stop"),
+                    ("command", "bash hook.sh"),
+                    ("exitCode", "127"),
+                    ("durationMs", "8"),
+                ]),
+                text("no such file"),
+            ]
+        );
+
+        let cancelled = body_of(json!({
+            "type": "attachment",
+            "attachment": {
+                "type": "hook_cancelled", "hookEvent": "Stop", "hookName": "Stop",
+                "toolUseID": "t1", "command": "sound.sh", "durationMs": 5000,
+                "timedOut": true, "timeoutMs": 5000,
+            },
+        }));
+        assert_eq!(
+            cancelled,
             [rows(&[
-                ("Type", "hook_cancelled"),
-                ("Subtype", "Stop sound")
+                ("type", "hook_cancelled"),
+                ("hookName", "Stop"),
+                ("command", "sound.sh"),
+                ("timedOut", "true"),
+                ("timeoutMs", "5000"),
+                ("durationMs", "5000"),
+            ])]
+        );
+
+        let plan = body_of(json!({
+            "type": "attachment",
+            "attachment": {
+                "type": "plan_mode", "reminderType": "sparse", "isSubAgent": false,
+                "planFilePath": "/plans/a.md", "planExists": true,
+            },
+        }));
+        assert_eq!(
+            plan,
+            [rows(&[
+                ("type", "plan_mode"),
+                ("reminderType", "sparse"),
+                ("planFilePath", "/plans/a.md"),
+                ("isSubAgent", "false"),
             ])]
         );
     }
 
-    /// An attachment without `rendered` text shows its scalar members
-    /// as rows in the order they are written, and the member its type
-    /// keeps text in as text. Nested members are not shown.
+    /// A type that selects text alone shows its type and that text,
+    /// and none of its scalar members.
     #[test]
-    fn an_attachment_without_rendered_text_shows_its_members() {
+    fn an_attachment_without_selected_attributes_shows_its_type_and_text() {
         let blocks = body(concat!(
             r#"{"type":"attachment","attachment":{"type":"prompt_snapshot","#,
             r##""systemPrompt":["\nYou are an agent.\n","# Harness"],"reminderFold":false,"##,
@@ -726,29 +802,46 @@ mod tests {
         assert_eq!(
             blocks,
             [
-                rows(&[
-                    ("Type", "prompt_snapshot"),
-                    ("reminderFold", "false"),
-                    ("echoWireToolInputs", "true"),
-                    ("contextRendering", "announced"),
-                ]),
+                rows(&[("type", "prompt_snapshot")]),
                 text("You are an agent."),
                 text("# Harness"),
             ]
         );
+
+        let reminder = body_of(json!({
+            "type": "attachment",
+            "attachment": {
+                "type": "batching_reminder_sent", "text": "List first.",
+                "model": "claude-x", "clearAt": "next_user_message",
+            },
+        }));
+        assert_eq!(
+            reminder,
+            [
+                rows(&[("type", "batching_reminder_sent")]),
+                text("List first.")
+            ]
+        );
     }
 
-    /// An attachment with nothing a reader wants shows its type alone.
+    /// A type without a selection shows its type alone, whatever
+    /// members it holds.
     #[test]
-    fn an_attachment_with_no_scalar_members_shows_its_type() {
+    fn an_attachment_without_a_selection_shows_its_type_alone() {
         for attachment in [
             json!({"type": "auto_mode_exit"}),
+            json!({"type": "credential_org", "organizationUuid": "o1"}),
+            json!({"type": "not_a_known_type", "reminderType": "full", "hookName": "Stop"}),
             json!({"type": "todo_reminder", "content": [{"content": "x", "status": "pending"}]}),
             json!({"type": "deferred_tools_record", "entries": [], "toolInputCopies": [{"id": "t"}]}),
+            json!({
+                "type": "thinking_drop", "requestId": "req_1", "blockHashes": ["h"],
+                "newlyDropped": {"blockCount": 2, "turnCount": 1, "reason": "prefix_mismatch"},
+            }),
         ] {
             let kind = attachment["type"].as_str().unwrap().to_string();
             let blocks = body_of(json!({"type": "attachment", "attachment": attachment}));
-            assert_eq!(blocks, [rows(&[("Type", &kind)])]);
+            assert_eq!(blocks, [rows(&[("type", &kind)])]);
         }
     }
 
@@ -765,46 +858,51 @@ mod tests {
         assert_eq!(
             blocks,
             [
-                rows(&[("Type", "deferred_tools_record")]),
+                rows(&[("type", "deferred_tools_record")]),
                 text("WebFetch\nWebSearch")
             ]
         );
     }
 
-    /// A batching reminder shows the reminder's text and not the
-    /// members beside it; a thinking drop shows its counts and reason
-    /// and none of its ids.
+    /// A queued command shows its mode, then its prompt: a string as
+    /// one text, a list as one block per element in order with a
+    /// remark in place of an element that is not text.
     #[test]
-    fn peculiar_attachments_show_what_a_reader_wants() {
-        let reminder = body_of(json!({
+    fn a_queued_command_shows_its_prompt_elements() {
+        let string = body_of(json!({
             "type": "attachment",
             "attachment": {
-                "type": "batching_reminder_sent", "text": "List first.",
-                "model": "claude-x", "clearAt": "next_user_message",
+                "type": "queued_command", "prompt": "run the tests",
+                "commandMode": "prompt", "source_uuid": "u1",
             },
         }));
         assert_eq!(
-            reminder,
+            string,
             [
-                rows(&[("Type", "batching_reminder_sent")]),
-                text("List first.")
+                rows(&[("type", "queued_command"), ("commandMode", "prompt")]),
+                text("run the tests"),
             ]
         );
 
-        let drop = body_of(json!({
+        let list = body_of(json!({
             "type": "attachment",
             "attachment": {
-                "type": "thinking_drop", "requestId": "req_1", "blockHashes": ["h"],
-                "newlyDropped": {"blockCount": 2, "turnCount": 1, "reason": "prefix_mismatch"},
+                "type": "queued_command", "commandMode": "prompt",
+                "prompt": [
+                    {"type": "text", "text": "before"},
+                    {"type": "image", "source": {"type": "base64", "data": "AAAA"}},
+                    {"type": "text", "text": "after"},
+                ],
             },
         }));
         assert_eq!(
-            drop,
-            [rows(&[
-                ("Type", "thinking_drop"),
-                ("Dropped", "2 blocks in 1 turn"),
-                ("Reason", "prefix_mismatch"),
-            ])]
+            list,
+            [
+                rows(&[("type", "queued_command"), ("commandMode", "prompt")]),
+                text("before"),
+                remark("Image"),
+                text("after"),
+            ]
         );
     }
 
@@ -921,13 +1019,14 @@ mod tests {
         );
     }
 
-    /// An invalid entry shows the codec's error and the raw line.
+    /// An invalid entry shows the codec's error as text, then the raw
+    /// line.
     #[test]
     fn an_invalid_entry_shows_its_error_and_raw_line() {
         let entry = EntryValue::invalid_entry("expected `,`", "{\"type\":\"us");
         assert_eq!(
             entry_body(&entry).blocks,
-            [rows(&[("Error", "expected `,`")]), text("{\"type\":\"us")]
+            [text("expected `,`"), text("{\"type\":\"us")]
         );
     }
 

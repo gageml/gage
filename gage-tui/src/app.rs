@@ -2811,10 +2811,10 @@ mod tests {
         assert!(text.contains("(binary file)"), "{text}");
     }
 
-    /// An attachment row's body opens with its type, and its subtype
-    /// when it has one, then the text the harness sent to the model
-    /// without its wrapper, item by item. A row the harness never sent
-    /// shows its type and its scalar members.
+    /// An attachment row's body opens with its type and the attributes
+    /// selected for the type, then the text the harness sent to the
+    /// model without its wrapper, item by item. A row of a type without
+    /// selected attributes shows its type alone.
     #[test]
     fn attachment_rows_render_their_type_and_rendered_text() {
         let mut doc = doc_with_entries(3);
@@ -2838,7 +2838,7 @@ mod tests {
         .into();
         doc.entries[2].value = serde_json::json!({
             "type": "attachment",
-            "attachment": {"type": "auto_mode", "reminderType": "bash_first"},
+            "attachment": {"type": "auto_mode", "reminderType": "full"},
             "rendered": [{"content": "<system-reminder>\nWhile auto mode is active\n</system-reminder>"}],
         })
         .into();
@@ -2852,13 +2852,13 @@ mod tests {
         state.select_line(1);
         terminal.draw(|frame| draw(frame, &mut state)).unwrap();
         let text = screen(&terminal);
-        assert!(text.contains("Type  environment"), "{text}");
+        assert!(text.contains("type  environment"), "{text}");
         assert!(text.contains("second item"), "{text}");
         assert!(!text.contains("system-reminder"), "{text}");
         let rows: Vec<&str> = text.lines().collect();
         let header = rows
             .iter()
-            .position(|r| r.contains("Type  environment"))
+            .position(|r| r.contains("type  environment"))
             .unwrap();
         let body = |row: &str| row.rsplit('│').nth(1).unwrap_or("").to_string();
         assert!(body(rows[header + 1]).trim().is_empty(), "{text}");
@@ -2867,15 +2867,14 @@ mod tests {
         state.select_line(2);
         terminal.draw(|frame| draw(frame, &mut state)).unwrap();
         let text = screen(&terminal);
-        assert!(text.contains("Type              credential_org"), "{text}");
-        assert!(text.contains("organizationUuid  o1"), "{text}");
-        assert!(!text.contains("Subtype"), "{text}");
+        assert!(text.contains("type  credential_org"), "{text}");
+        assert!(!text.contains("organizationUuid"), "{text}");
 
         state.select_line(3);
         terminal.draw(|frame| draw(frame, &mut state)).unwrap();
         let text = screen(&terminal);
-        assert!(text.contains("Type     auto_mode"), "{text}");
-        assert!(text.contains("Subtype  bash_first"), "{text}");
+        assert!(text.contains("type          auto_mode"), "{text}");
+        assert!(text.contains("reminderType  full"), "{text}");
         assert!(text.contains("While auto mode is active"), "{text}");
     }
 
