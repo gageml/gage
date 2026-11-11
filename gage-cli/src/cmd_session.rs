@@ -500,14 +500,14 @@ async fn query_sessions(
         Some(n) => format!(" LIMIT {n}"),
         None => String::new(),
     };
-    let (type_col, time_col, driver_col) = match listing {
-        Listing::Native => ("'' AS session_type", "mtime AS time", "'' AS driver"),
-        Listing::Stored | Listing::Dataset => ("session_type", "created AS time", "driver"),
+    let (time_col, driver_col) = match listing {
+        Listing::Native => ("mtime AS time", "'' AS driver"),
+        Listing::Stored | Listing::Dataset => ("created AS time", "driver"),
     };
     let order_clause = listing.order_clause();
     let sql = format!(
         "SELECT id, id_display, id_prefix, project, \
-         title, {type_col}, model, size, message_count, \
+         title, session_type, model, size, message_count, \
          {time_col}, {driver_col} \
          FROM {from}{where_clause} \
          ORDER BY {order_clause}{limit_clause}",

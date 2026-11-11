@@ -2049,23 +2049,42 @@ fn source_banner(width: u16) -> Section {
     )
 }
 
-/// The session's attributes as the root row shows them: the id, the
-/// title, then the fields, as caption/value rows.
+/// The session's attributes as the root row shows them: members of
+/// the session's row under their own names, as caption/value rows. A
+/// native row has no `created` and shows the session file's `mtime`.
 fn session_lines(session: &Session, width: u16) -> Vec<Line<'static>> {
-    let fields: Vec<(&'static str, &str)> = [
-        ("Id", session.id.as_str()),
-        ("Title", session.attrs.title.as_str()),
-    ]
-    .into_iter()
-    .chain(
-        session
-            .attrs
-            .fields
-            .iter()
-            .map(|(label, value)| (*label, value.as_str())),
-    )
-    .collect();
+    let time = if session.value.get("mtime").is_some() {
+        "mtime"
+    } else {
+        "created"
+    };
+    let names = [
+        "id",
+        "title",
+        "project",
+        "session_type",
+        "model",
+        "size",
+        "message_count",
+        time,
+    ];
+    let values = names.map(|name| member_text(&session.value, name));
+    let fields: Vec<(&'static str, &str)> = names
+        .into_iter()
+        .zip(values.iter().map(String::as_str))
+        .collect();
     attr_lines(&fields, width)
+}
+
+/// The member's value as the row holds it: a string as it is, any
+/// other value as its JSON text, and nothing for a member that is
+/// null or absent.
+fn member_text(row: &Value, name: &str) -> String {
+    match row.get(name) {
+        Some(Value::String(text)) => text.clone(),
+        Some(Value::Null) | None => String::new(),
+        Some(value) => value.to_string(),
+    }
 }
 
 /// Lines as one wrapped, scrollable section.
@@ -2297,7 +2316,7 @@ mod tests {
     use super::*;
     use gage_session::EntryValue;
 
-    use crate::doc::{AttachmentFile, BodySource, Entry, SessionAttachment, SessionAttrs, ToolUse};
+    use crate::doc::{AttachmentFile, BodySource, Entry, SessionAttachment, ToolUse};
     use crate::session::tests::fixture;
 
     /// The rendered screen as one string, rows joined by newlines
@@ -2400,7 +2419,6 @@ mod tests {
                 id: "s1".into(),
                 value: serde_json::json!({}),
                 pending: false,
-                attrs: SessionAttrs::default(),
             },
             entries: Vec::new(),
             turns: Vec::new(),
@@ -2655,7 +2673,6 @@ mod tests {
                 id: "s1".into(),
                 value: serde_json::json!({}),
                 pending: false,
-                attrs: SessionAttrs::default(),
             },
             entries: (1..=count)
                 .map(|line| Entry {
@@ -2878,25 +2895,24 @@ mod tests {
         assert!(text.contains("While auto mode is active"), "{text}");
     }
 
-    /// The root row shows the session's attributes as the listing
-    /// does: one line per field, the title first, padded like an entry
-    /// body. The row's JSON follows a source banner only when
-    /// the source option is on.
+    /// The root row shows members of the session's row under their own
+    /// names with the values the row holds, one line per member,
+    /// padded like an entry body. The row's JSON follows a source
+    /// banner only when the source option is on.
     #[tokio::test(flavor = "multi_thread")]
     async fn the_root_row_shows_the_session_attributes() {
         let mut doc = doc_with_entries(1);
-        doc.session.value = serde_json::json!({"origin": "claude:abc"});
-        doc.session.attrs = SessionAttrs {
-            title: "Fix the widget".into(),
-            fields: vec![
-                ("Project", "proj".into()),
-                ("Type", "claude".into()),
-                ("Model", "claude-x".into()),
-                ("Size", "1.5 kB".into()),
-                ("Messages", "2".into()),
-                ("Created", "3h ago".into()),
-            ],
-        };
+        doc.session.value = serde_json::json!({
+            "id": "s1",
+            "title": "Fix the widget",
+            "project": "proj",
+            "created": "2026-01-02T03:04:05Z",
+            "session_type": "claude",
+            "origin": "claude:abc",
+            "model": "claude-x",
+            "size": 1536,
+            "message_count": 2,
+        });
         let backend = test_backend().await;
         let mut state = AppState::new(doc, &ViewOptions::default(), DocSource::Backend, false);
         let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
@@ -2909,7 +2925,7 @@ mod tests {
         let body = |row: &str| row.rsplit('│').nth(1).unwrap_or("").to_string();
         let first = rows
             .iter()
-            .position(|r| body(r).starts_with(" Id "))
+            .position(|r| body(r).starts_with(" id "))
             .unwrap_or_else(|| panic!("{text}"));
         assert!(rows[first - 2].contains("┌Session─"), "{text}");
         // One padding row above and one column to the left. The labels
@@ -2917,28 +2933,29 @@ mod tests {
         // a column, and they take the caption style.
         assert!(body(rows[first - 1]).trim().is_empty(), "{text}");
         let expected = [
-            " Id        s1",
-            " Title     Fix the widget",
-            " Project   proj",
-            " Type      claude",
-            " Model     claude-x",
-            " Size      1.5 kB",
-            " Messages  2",
-            " Created   3h ago",
+            " id             s1",
+            " title          Fix the widget",
+            " project        proj",
+            " session_type   claude",
+            " model          claude-x",
+            " size           1536",
+            " message_count  2",
+            " created        2026-01-02T03:04:05Z",
         ];
         for (i, line) in expected.iter().enumerate() {
             assert!(body(rows[first + i]).starts_with(line), "{text}");
         }
         assert!(
-            !cell_modifiers(&terminal, "Title     Fix the widget", 'F').contains(Modifier::BOLD),
+            !cell_modifiers(&terminal, "title          Fix the widget", 'F')
+                .contains(Modifier::BOLD),
             "{text}"
         );
         assert!(
-            cell_modifiers(&terminal, "Project ", 'P').contains(Modifier::DIM),
+            cell_modifiers(&terminal, "session_type ", 's').contains(Modifier::DIM),
             "{text}"
         );
         assert!(
-            !cell_modifiers(&terminal, "Project ", 'p').contains(Modifier::DIM),
+            !cell_modifiers(&terminal, "session_type ", 'c').contains(Modifier::DIM),
             "{text}"
         );
         assert!(!text.contains("--- source ---"), "{text}");
@@ -2963,14 +2980,17 @@ mod tests {
         );
     }
 
-    /// A session without a title keeps its Title row, with no value.
+    /// A member the row lacks keeps its row, with no value. A native
+    /// row shows its `mtime` where a stored row shows `created`.
     #[tokio::test(flavor = "multi_thread")]
-    async fn the_root_row_shows_an_empty_title() {
+    async fn the_root_row_shows_absent_members_blank_and_a_native_mtime() {
         let mut doc = doc_with_entries(1);
-        doc.session.attrs = SessionAttrs {
-            title: String::new(),
-            fields: vec![("Project", "proj".into())],
-        };
+        doc.session.value = serde_json::json!({
+            "id": "s1",
+            "title": null,
+            "mtime": "2026-01-02T03:04:05Z",
+            "session_type": "claude",
+        });
         let mut state = AppState::new(doc, &ViewOptions::default(), DocSource::Backend, false);
         let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
         state.select_first();
@@ -2978,15 +2998,28 @@ mod tests {
         let text = screen(&terminal);
         let rows: Vec<&str> = text.lines().collect();
         let body = |row: &str| row.rsplit('│').nth(1).unwrap_or("").to_string();
-        let project = rows
+        let first = rows
             .iter()
-            .position(|r| body(r).starts_with(" Project  proj"))
+            .position(|r| body(r).starts_with(" id             s1"))
             .unwrap_or_else(|| panic!("{text}"));
-        assert_eq!(body(rows[project - 1]).trim(), "Title", "{text}");
-        assert!(
-            body(rows[project - 2]).starts_with(" Id       s1"),
+        let shown: Vec<String> = (0..8)
+            .map(|i| body(rows[first + i]).trim().to_string())
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                "id             s1",
+                "title",
+                "project",
+                "session_type   claude",
+                "model",
+                "size",
+                "message_count",
+                "mtime          2026-01-02T03:04:05Z",
+            ],
             "{text}"
         );
+        assert!(!text.contains("created"), "{text}");
     }
 
     /// An entry with no rendering shows nothing until the source option

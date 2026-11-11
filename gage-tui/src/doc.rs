@@ -244,20 +244,6 @@ pub struct Session {
     /// A pending publish working tree rather than a stored object; a
     /// note cannot target it
     pub pending: bool,
-    pub attrs: SessionAttrs,
-}
-
-/// The session's attributes as the session listing shows them, each
-/// formatted for display.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct SessionAttrs {
-    /// The title; empty when the session has none
-    pub title: String,
-    /// Label and value pairs in listing order: Project, Type for a
-    /// stored session or Driver for a native one, Model, Size,
-    /// Messages, and Created for a stored session or Modified for a
-    /// native one
-    pub fields: Vec<(&'static str, String)>,
 }
 
 pub struct Entry {
@@ -444,7 +430,6 @@ mod tests {
                 id: "s1".to_string(),
                 value: json!({}),
                 pending: false,
-                attrs: SessionAttrs::default(),
             },
             entries: (1..=5)
                 .map(|line| Entry {

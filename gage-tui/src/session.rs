@@ -18,8 +18,6 @@ use datafusion::arrow::array::{
 };
 use datafusion::arrow::json::ArrayWriter;
 use datafusion::prelude::SessionContext;
-use gage_core::datetime::format_elapsed_ms;
-use gage_core::human::format_size;
 use gage_query::ContextBuilder;
 use gage_registry::driver::DriverRegistry;
 use gage_session::is_system;
@@ -33,7 +31,7 @@ use serde_json::Value;
 
 use crate::doc::{
     AttachmentFile, BodySource, Document, Entry, Note, Redaction, Session, SessionAttachment,
-    SessionAttrs, ToolUse,
+    ToolUse,
 };
 use crate::format;
 
@@ -203,84 +201,10 @@ impl Backend {
             .transpose()?
             .unwrap_or(Value::Null);
         nest_summary(&mut value);
-        let attrs = self.load_attrs(session_id).await?;
         Ok(Session {
             id: session_id.to_string(),
             value,
             pending: self.is_pending(),
-            attrs,
-        })
-    }
-
-    /// The session's attributes as the session listing shows them:
-    /// the same columns, the project and model in the driver's form,
-    /// the size and time in their human forms. The native relation has
-    /// no type and no driver column and shows its mtime; the store
-    /// shows its type and the object's created time.
-    async fn load_attrs(&self, session_id: &str) -> Result<SessionAttrs, Box<dyn Error>> {
-        let (type_col, time_col, driver_col) = match self.kind {
-            Kind::Native { .. } => ("'' AS session_type", "mtime AS time", "'' AS driver"),
-            Kind::Stored { .. } => ("session_type", "created AS time", "driver"),
-        };
-        let sql = format!(
-            "SELECT title, project, {type_col}, model, size, message_count, \
-             {time_col}, {driver_col} \
-             FROM {} WHERE id = '{}'",
-            self.session_rel(),
-            sql_str(session_id)
-        );
-        let batches = self.ctx.sql(&sql).await?.collect().await?;
-        let Some(batch) = batches.iter().find(|b| b.num_rows() > 0) else {
-            return Ok(SessionAttrs::default());
-        };
-        let titles = column::<StringArray>(batch, 0);
-        let projects = column::<StringArray>(batch, 1);
-        let types = column::<StringArray>(batch, 2);
-        let models = column::<StringArray>(batch, 3);
-        let sizes = column::<Int64Array>(batch, 4);
-        let counts = column::<Int64Array>(batch, 5);
-        let times = column::<TimestampMillisecondArray>(batch, 6);
-        let drivers = column::<StringArray>(batch, 7);
-        let driver = self.row_driver(drivers.value(0))?;
-        let project = if projects.is_valid(0) {
-            driver.format_project(projects.value(0), usize::MAX)
-        } else {
-            String::new()
-        };
-        let provenance = match self.kind {
-            Kind::Native { .. } => ("Driver", driver.name().to_string()),
-            Kind::Stored { .. } => ("Type", types.value(0).to_string()),
-        };
-        let model = driver.format_model(&string_or_empty(models, 0));
-        let size = if sizes.is_valid(0) {
-            format_size(sizes.value(0))
-        } else {
-            String::new()
-        };
-        let messages = if counts.is_valid(0) {
-            counts.value(0).to_string()
-        } else {
-            String::new()
-        };
-        let time_label = match self.kind {
-            Kind::Native { .. } => "Modified",
-            Kind::Stored { .. } => "Created",
-        };
-        let time = if times.is_valid(0) {
-            format_elapsed_ms(times.value(0))
-        } else {
-            String::new()
-        };
-        Ok(SessionAttrs {
-            title: string_or_empty(titles, 0),
-            fields: vec![
-                ("Project", project),
-                provenance,
-                ("Model", model),
-                ("Size", size),
-                ("Messages", messages),
-                (time_label, time),
-            ],
         })
     }
 
@@ -1195,21 +1119,17 @@ pub(crate) mod tests {
         assert!(summary.contains_key("message_count"));
         assert!(!doc.session.pending);
         assert!(doc.notes.is_empty());
-        // The attributes are the stored listing's columns: the type
-        // and the created time
-        let attrs = &doc.session.attrs;
-        assert_eq!(attrs.title, "hello there");
-        let labels: Vec<&str> = attrs.fields.iter().map(|(l, _)| *l).collect();
-        assert_eq!(
-            labels,
-            ["Project", "Type", "Model", "Size", "Messages", "Created"]
-        );
-        assert_eq!(attrs.fields[0].1, "-w-proj");
-        assert_eq!(attrs.fields[1].1, "claude");
-        assert_eq!(attrs.fields[2].1, "x");
-        assert!(attrs.fields[3].1.ends_with(" B"), "{:?}", attrs.fields[3]);
-        assert_eq!(attrs.fields[4].1, "2");
-        assert!(attrs.fields[5].1.ends_with(" ago"), "{:?}", attrs.fields[5]);
+        // The row holds the members the root row shows, as the table
+        // has them
+        let row = &doc.session.value;
+        assert_eq!(row["title"], "hello there");
+        assert_eq!(row["project"], "-w-proj");
+        assert_eq!(row["session_type"], "claude");
+        assert!(row["model"].is_string(), "{row}");
+        assert!(row["size"].is_u64(), "{row}");
+        assert_eq!(row["message_count"], 2);
+        assert!(row["created"].is_string(), "{row}");
+        assert!(row.get("mtime").is_none(), "{row}");
 
         let note = backend
             .add_note(
@@ -1328,19 +1248,15 @@ pub(crate) mod tests {
         assert!(doc.session.value.get("path").is_none());
         assert!(doc.notes.is_empty());
         assert!(doc.attachments.is_empty());
-        // The native relation has no type, so the driver's name
-        // stands in its place, and the time is the file's mtime
-        let attrs = &doc.session.attrs;
-        assert_eq!(attrs.title, "hello there");
-        let labels: Vec<&str> = attrs.fields.iter().map(|(l, _)| *l).collect();
-        assert_eq!(
-            labels,
-            ["Project", "Driver", "Model", "Size", "Messages", "Modified"]
-        );
-        assert_eq!(attrs.fields[0].1, "-w-proj");
-        assert_eq!(attrs.fields[1].1, "claude");
-        assert_eq!(attrs.fields[2].1, "x");
-        assert_eq!(attrs.fields[4].1, "2");
+        // The native row names its session type and carries the
+        // file's mtime where a stored row has its created time
+        let row = &doc.session.value;
+        assert_eq!(row["title"], "hello there");
+        assert_eq!(row["project"], "-w-proj");
+        assert_eq!(row["session_type"], "claude");
+        assert_eq!(row["message_count"], 2);
+        assert!(row["mtime"].is_string(), "{row}");
+        assert!(row.get("created").is_none(), "{row}");
         assert!(
             backend
                 .add_note(&f.native_id, None, "comment", "x".into(), "user:t")
