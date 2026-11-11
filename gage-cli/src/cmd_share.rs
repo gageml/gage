@@ -50,9 +50,9 @@ pub enum ShareCommand {
     ///
     /// Without sessions, adds an empty share. With sessions, adds a
     /// share holding those published sessions, each checked against
-    /// --filters before anything is written. With none of
-    /// --description, --filters, and --tag, dialog prompts for each;
-    /// every answer is optional.
+    /// --filters before anything is written. Dialog prompts for each
+    /// of --description, --filters, and --tag that is not given; every
+    /// answer is optional.
     Add(ShareAddArgs),
 
     /// List shares
@@ -114,6 +114,8 @@ pub struct ShareAddArgs {
     force_tag: bool,
 
     /// Skip confirmation prompt
+    ///
+    /// Without --description, --filters, or --tag, none is given.
     #[arg(short, long)]
     yes: bool,
 }
@@ -220,20 +222,11 @@ pub fn add(args: ShareAddArgs) -> Result<(), CliError> {
     let records = resolve_sessions(command, &store, &args.sessions)?;
     dialog::run("Add share", || {
         let tags = TagStore::from(&store);
-        let prompt = !args.yes && given == ShareAttrs::default() && args.tag.is_none();
-        let (attrs, tag) = if prompt {
-            let attrs = ShareAttrs {
-                description: prompt_description()?,
-                filters: prompt_filter_multiselect(&FilterRegistry::load(), false)?,
-            };
-            (attrs, prompt_tag()?)
-        } else {
-            attrs_steps(&given)?;
-            if let Some(name) = &args.tag {
-                dialog::step_value("Tag", name)?;
-            }
-            (given, args.tag.clone())
+        let attrs = ShareAttrs {
+            description: description_step(given.description, args.yes)?,
+            filters: filters_step(given.filters, args.yes)?,
         };
+        let tag = tag_step(args.tag.clone(), args.yes)?;
         // A tag that cannot be added is reported before the share
         // exists, so the failure leaves the store untouched
         if let Some(name) = &tag {
@@ -271,6 +264,63 @@ pub fn add(args: ShareAddArgs) -> Result<(), CliError> {
         }
         .into())
     })
+}
+
+/// The "Description" step.
+fn description_step(given: Option<String>, yes: bool) -> Result<Option<String>, DialogError> {
+    match InputStep::new(given, yes) {
+        InputStep::Show(description) => {
+            dialog::step_value("Description", &description)?;
+            Ok(Some(description))
+        }
+        InputStep::Skip => Ok(None),
+        InputStep::Prompt => prompt_description(),
+    }
+}
+
+/// The "Filters" step. No `--filters` entries is the option not given.
+fn filters_step(given: Vec<String>, yes: bool) -> Result<Vec<String>, DialogError> {
+    match InputStep::new(Some(given).filter(|f| !f.is_empty()), yes) {
+        InputStep::Show(filters) => {
+            dialog::step_list("Filters", filters.iter().cloned())?;
+            Ok(filters)
+        }
+        InputStep::Skip => Ok(Vec::new()),
+        InputStep::Prompt => prompt_filter_multiselect(&FilterRegistry::load(), false),
+    }
+}
+
+/// The "Tag" step.
+fn tag_step(given: Option<String>, yes: bool) -> Result<Option<String>, DialogError> {
+    match InputStep::new(given, yes) {
+        InputStep::Show(name) => {
+            dialog::step_value("Tag", &name)?;
+            Ok(Some(name))
+        }
+        InputStep::Skip => Ok(None),
+        InputStep::Prompt => prompt_tag(),
+    }
+}
+
+/// How the dialog settles one optional input. Each input is settled
+/// on its own: a value given for one leaves the others prompted.
+#[derive(Debug, PartialEq)]
+enum InputStep<T> {
+    /// The value was given: it is shown and not asked for
+    Show(T),
+    /// `--yes` without a value: nothing is asked and none is given
+    Skip,
+    Prompt,
+}
+
+impl<T> InputStep<T> {
+    fn new(given: Option<T>, yes: bool) -> Self {
+        match given {
+            Some(value) => InputStep::Show(value),
+            None if yes => InputStep::Skip,
+            None => InputStep::Prompt,
+        }
+    }
 }
 
 /// The description prompt; `None` when nothing was entered.
@@ -775,6 +825,16 @@ mod tests {
         assert_eq!(args.share, "work");
         assert_eq!(args.sessions, ["a", "b"]);
         assert!(Cli::try_parse_from(["gage", "share", "unlink", "work"]).is_err());
+    }
+
+    /// A value given for one input shows that input alone; the others
+    /// are still prompted, and `--yes` skips only the absent ones.
+    #[test]
+    fn each_add_input_is_settled_on_its_own() {
+        assert_eq!(InputStep::new(Some("x"), false), InputStep::Show("x"));
+        assert_eq!(InputStep::new(Some("x"), true), InputStep::Show("x"));
+        assert_eq!(InputStep::<&str>::new(None, false), InputStep::Prompt);
+        assert_eq!(InputStep::<&str>::new(None, true), InputStep::Skip);
     }
 
     #[test]
