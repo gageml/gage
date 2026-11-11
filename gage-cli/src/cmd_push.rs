@@ -8,7 +8,8 @@
 //! carries the approval digest the store's `pre-push` hook checks, so
 //! the set that leaves is the set that was shown. The destination is
 //! a configured remote or a bare Git URL or path; a push writes
-//! nothing local either way.
+//! nothing local either way. With no argument, the objects are the
+//! ones the remote records as its push default.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
@@ -19,7 +20,7 @@ use cliclack as cli;
 use datafusion::arrow::array::StringArray;
 use gage_query::ContextBuilder;
 use gage_store::{
-    IdMatch, OBJECT_REFS, PushSet, RemoteStore, Store, StoreError, TAG_REFS, TagStore,
+    IdMatch, OBJECT_REFS, PushSet, RemoteStore, Repository, Store, StoreError, TAG_REFS, TagStore,
 };
 
 use crate::cmd_session::run_query;
@@ -37,8 +38,8 @@ pub struct PushArgs {
     ///
     /// Tag names, object IDs, or unique ID prefixes. Everything an
     /// object links is pushed with it: a scan's dataset, sessions,
-    /// notes, issues, and agent sessions
-    #[arg(required = true)]
+    /// notes, issues, and agent sessions. With none, objects that
+    /// remote records as its push default are pushed
     objects: Vec<String>,
 
     /// Also push notes targeting named objects
@@ -62,12 +63,14 @@ pub async fn main(args: PushArgs) -> Result<(), CliError> {
         .resolve(&args.repository)
         .context("gage push")?;
     let remote = repository.name();
+    let named = objects_to_push(&RemoteStore::from(&store), &repository, args.objects)
+        .context("gage push")?;
 
     // Resolve every argument before anything else, so one bad
     // argument leaves nothing half done
     let mut tag_refs: BTreeSet<String> = BTreeSet::new();
-    let mut ids: Vec<String> = Vec::with_capacity(args.objects.len());
-    for object in &args.objects {
+    let mut ids: Vec<String> = Vec::with_capacity(named.len());
+    for object in &named {
         if TagStore::from(&store)
             .resolve(object)
             .context("gage push")?
@@ -143,6 +146,31 @@ pub async fn main(args: PushArgs) -> Result<(), CliError> {
     }
     println!("Pushed {} refs to {remote}", set.len());
     Ok(())
+}
+
+/// The objects a push names: those given, else the push default of
+/// the remote. A URL records no default, and a remote may record
+/// none; either is an error when no object is given.
+fn objects_to_push(
+    remotes: &RemoteStore<'_>,
+    repository: &Repository,
+    given: Vec<String>,
+) -> anyhow::Result<Vec<String>> {
+    if !given.is_empty() {
+        return Ok(given);
+    }
+    if !repository.is_remote() {
+        anyhow::bail!("name objects to push; only a remote records default objects");
+    }
+    let name = repository.name();
+    let default = remotes.get(name)?.push;
+    if default.is_empty() {
+        anyhow::bail!(
+            "name objects to push, or set default objects of {name}: \
+             gage remote edit {name} --push <OBJECT>"
+        );
+    }
+    Ok(default)
 }
 
 /// The named objects and everything they link, transitively.
@@ -238,4 +266,52 @@ fn summary_lines(
         lines.push(format!("{up_to_date} already on the remote"));
     }
     lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A fresh store and the guard keeping its directory alive
+    fn open_store() -> (tempfile::TempDir, Store) {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("store.git");
+        gage_store::init(&path).unwrap();
+        let store = Store::open_with_cache_root(&path, &tmp.path().join("cache")).unwrap();
+        (tmp, store)
+    }
+
+    /// A push with no object takes the remote's push default as it
+    /// was recorded; objects given take its place; a remote with no
+    /// default and a URL both need objects.
+    #[test]
+    fn a_push_with_no_object_takes_the_push_default_of_the_remote() {
+        let (_tmp, store) = open_store();
+        let remotes = RemoteStore::from(&store);
+        remotes.add("up", "/srv/up.git", false).unwrap();
+        remotes.add("bare", "/srv/bare.git", false).unwrap();
+        remotes
+            .set_push("up", &["work".to_string(), "7zzz".to_string()])
+            .unwrap();
+        remotes.set_fetch("bare", &["theirs".to_string()]).unwrap();
+        let objects = |repository: &str, given: &[&str]| {
+            objects_to_push(
+                &remotes,
+                &remotes.resolve(repository).unwrap(),
+                given.iter().map(|o| o.to_string()).collect(),
+            )
+        };
+
+        assert_eq!(objects("up", &[]).unwrap(), ["work", "7zzz"]);
+        assert_eq!(objects("up", &["other"]).unwrap(), ["other"]);
+        assert_eq!(objects("/srv/url.git", &["other"]).unwrap(), ["other"]);
+
+        let err = objects("bare", &[]).unwrap_err().to_string();
+        assert!(err.contains("gage remote edit bare --push"), "{err}");
+        let err = objects("/srv/url.git", &[]).unwrap_err().to_string();
+        assert!(
+            err.contains("only a remote records default objects"),
+            "{err}"
+        );
+    }
 }

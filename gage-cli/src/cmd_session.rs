@@ -22,8 +22,8 @@ use gage_registry::driver::DriverRegistry;
 use gage_session::{Driver, NativeLookupError, SessionLiveError, Source, SourceOptions};
 use gage_store::url::LineSelection;
 use gage_store::{
-    DatasetStore, SESSION_TYPE, SessionOutcome, SessionRecord, SessionStore, Store, StoreError,
-    TagStore,
+    DatasetStore, SESSION_TYPE, SessionOutcome, SessionRecord, SessionStore, ShareStore, Store,
+    StoreError, TagStore,
 };
 use gage_tui::session::{Backend, picker_page_size};
 use gage_tui::{ViewOptions, session_view};
@@ -118,6 +118,13 @@ pub struct SessionListArgs {
     /// member order
     #[arg(short, long, value_name = "DATASET")]
     pub dataset: Option<String>,
+
+    /// List sessions in share (tag, ID, or prefix)
+    ///
+    /// Share tag, ID, or prefix. Implies --stored; rows are in stored
+    /// session order
+    #[arg(long, value_name = "SHARE", conflicts_with = "dataset")]
+    pub share: Option<String>,
 
     #[command(flatten)]
     pub limit: crate::limit::LimitArgs,
@@ -315,6 +322,16 @@ pub async fn list(
             eprintln!("warning: --stored is redundant with --dataset");
         }
         list_dataset(args).await
+    } else if args.share.is_some() {
+        if source.is_some() {
+            return Err(CliError::message(
+                "gage session list: --source does not apply with --share; a share holds stored sessions",
+            ));
+        }
+        if stored {
+            eprintln!("warning: --stored is redundant with --share");
+        }
+        list_share(args).await
     } else if stored {
         list_stored(args).await
     } else {
@@ -376,9 +393,8 @@ async fn list_stored(args: SessionListArgs) -> Result<(), CliError> {
     Ok(())
 }
 
-/// List the member sessions of a dataset, each at the commit the
-/// dataset links, in member order: the `session` table scoped to the
-/// dataset, joined to `dataset_session` for the order.
+/// List the member sessions of a dataset in member order, each at its
+/// current commit: the `session` table joined to `dataset_session`.
 async fn list_dataset(args: SessionListArgs) -> Result<(), CliError> {
     let prefix = args
         .dataset
@@ -408,6 +424,48 @@ async fn list_dataset(args: SessionListArgs) -> Result<(), CliError> {
     render_table(&rows, &drivers, Listing::Dataset, args.full_id);
     args.limit.print_summary(rows.len(), total, "session");
     Ok(())
+}
+
+/// List the member sessions of a share the way the stored listing
+/// lists them, each at its current commit.
+async fn list_share(args: SessionListArgs) -> Result<(), CliError> {
+    let prefix = args
+        .share
+        .as_deref()
+        .expect("list_share is called with --share");
+    let store = Store::open(&gage_store::store_path()).context("gage session list")?;
+    let share = ShareStore::from(&store)
+        .get(prefix)
+        .with_context(|| format!("gage session list: --share {prefix}"))?;
+    let ctx = ContextBuilder::new(Some(Arc::new(Mutex::new(store))))
+        .build()
+        .await;
+    let (rows, total) = progress::busy_async(LIST_LABEL, share_sessions(&ctx, &args, &share.id))
+        .await
+        .context("gage session list")?;
+    if total == 0 {
+        println!("No sessions found");
+        return Ok(());
+    }
+    let registry = source::driver_registry();
+    let drivers = stored_drivers(&registry, &rows).context("gage session list")?;
+    render_table(&rows, &drivers, Listing::Stored, args.full_id);
+    args.limit.print_summary(rows.len(), total, "session");
+    Ok(())
+}
+
+/// The shown rows and the total of the stored listing narrowed to the
+/// members of share `share_id`. The membership join is part of the
+/// relation the limit and the count apply to.
+async fn share_sessions(
+    ctx: &SessionContext,
+    args: &SessionListArgs,
+    share_id: &str,
+) -> anyhow::Result<(Vec<Row>, usize)> {
+    let from = "session JOIN share_session m ON m.session_id = session.id";
+    let mut predicates = vec![format!("m.share_id = '{}'", sql_str(share_id))];
+    predicates.extend(project_predicates(ctx, "session", args.project.as_deref()).await?);
+    Ok(query_sessions(ctx, args, Listing::Stored, from, &predicates).await?)
 }
 
 /// The indicator label while a listing's queries run
@@ -1888,10 +1946,119 @@ mod tests {
     use std::fs;
     use std::path::Path;
 
+    use clap::Parser;
+    use gage_core::uuid::new_uuid;
     use gage_session::SourceOptions;
-    use gage_store::SessionStore;
+    use gage_store::{PublishAttrs, SessionAttrsRecord, SessionDirLayout, ShareAttrs};
+
+    use crate::{Cli, Command};
 
     use super::*;
+
+    fn list_args(argv: &[&str]) -> SessionListArgs {
+        let cli = Cli::try_parse_from([&["gage", "session", "list"], argv].concat()).unwrap();
+        let Command::Session {
+            command: SessionCommand::List(args),
+            ..
+        } = cli.command
+        else {
+            panic!("not a session list command");
+        };
+        args
+    }
+
+    /// Store a published copy of stored session `original_id` and
+    /// return its id.
+    fn add_published(store: &Store, root: &Path, original_id: &str) -> String {
+        let sessions = SessionStore::from(store);
+        let original = sessions.get(original_id).unwrap();
+        let id = new_uuid();
+        let dir = root.join(&id);
+        let layout = SessionDirLayout::new(&dir);
+        fs::create_dir_all(layout.files_dir()).unwrap();
+        let attrs = SessionAttrsRecord {
+            origin: format!("session:{}@{}", original.id, original.commit_sha),
+            summary_version: None,
+            publish: Some(PublishAttrs { filters: vec![] }),
+            ..original.attrs
+        };
+        fs::write(layout.attrs_file(), serde_json::to_vec(&attrs).unwrap()).unwrap();
+        fs::write(layout.changes_file(), "[]\n").unwrap();
+        fs::write(layout.files_dir().join("session.jsonl"), "{}\n").unwrap();
+        sessions.create_from_dir(&dir).unwrap();
+        id
+    }
+
+    /// A share listing holds the share's members and no other stored
+    /// session, and the limit and the total apply to the members.
+    #[tokio::test]
+    async fn share_listing_filters_to_members_before_paging() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("store.git");
+        gage_store::init(&path).unwrap();
+        let store = Store::open_with_cache_root(&path, &tmp.path().join("cache")).unwrap();
+        let claude_root = tmp.path().join("claude");
+        let native_ids = [
+            "11111111-2222-3333-4444-555555555555",
+            "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        ];
+        for id in native_ids {
+            add_stored(&store, &claude_root, "-w-proj", id);
+        }
+        let originals: Vec<String> = SessionStore::from(&store)
+            .iter()
+            .unwrap()
+            .map(|record| record.unwrap().id)
+            .collect();
+        let published_root = tmp.path().join("published");
+        let mut members: Vec<String> = originals
+            .iter()
+            .map(|id| add_published(&store, &published_root, id))
+            .collect();
+        let share_id = ShareStore::from(&store)
+            .create(&ShareAttrs::default(), &members)
+            .unwrap();
+        let ctx = ContextBuilder::new(Some(Arc::new(Mutex::new(store))))
+            .build()
+            .await;
+
+        let (rows, total) = share_sessions(&ctx, &list_args(&["--share", &share_id]), &share_id)
+            .await
+            .unwrap();
+        let mut listed: Vec<String> = rows.into_iter().map(|row| row.id).collect();
+        listed.sort();
+        members.sort();
+        assert_eq!(listed, members);
+        assert_eq!(total, 2);
+
+        let limited = list_args(&["--share", &share_id, "--limit", "1"]);
+        let (rows, total) = share_sessions(&ctx, &limited, &share_id).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(members.contains(&rows[0].id));
+        assert_eq!(total, 2);
+    }
+
+    /// `--share` takes no short form and excludes `--dataset`.
+    #[test]
+    fn share_option_conflicts_with_dataset() {
+        assert_eq!(
+            list_args(&["--share", "work"]).share.as_deref(),
+            Some("work")
+        );
+        let parsed = Cli::try_parse_from([
+            "gage",
+            "session",
+            "list",
+            "--share",
+            "work",
+            "--dataset",
+            "7zzz",
+        ]);
+        let Err(err) = parsed else {
+            panic!("--share parsed with --dataset");
+        };
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
 
     /// Write a one-message Claude session `id` under `project` in
     /// `claude_root` and add it to `store`.

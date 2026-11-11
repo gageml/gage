@@ -3,8 +3,10 @@
 //! The source is a configured remote or a bare Git URL or path. With
 //! objects named, those objects and everything they link are fetched;
 //! with `--all`, every Gage ref the source advertises is fetched into
-//! its tracking refs and decided. One of the two is required, or
-//! `--list` to see what the remote has without fetching. A divergence
+//! its tracking refs and decided. With neither, the objects are the
+//! ones the remote records as its fetch default; a source with none
+//! needs one of the two, or `--list` to see what the remote has
+//! without fetching. A divergence
 //! the type can merge is merged; one it cannot is reported as a
 //! conflict and left, and `--ours` or `--theirs` on a later run of the
 //! named objects resolves it.
@@ -21,8 +23,8 @@ use clap::Args;
 use cliclack as cli;
 use gage_core::uuid::short_uuid;
 use gage_store::{
-    Conflict, FetchReport, FetchSource, KEY_REFS, OBJECT_REFS, Outcome, RemoteStore, Side, Store,
-    StoreError, TAG_REFS,
+    Conflict, FetchReport, FetchSource, KEY_REFS, OBJECT_REFS, Outcome, RemoteStore, Repository,
+    Side, Store, StoreError, TAG_REFS,
 };
 
 use tabled::{
@@ -52,12 +54,14 @@ pub struct FetchArgs {
     ///
     /// Tag names, object IDs, or unique ID prefixes as the remote
     /// has them. Everything an object links is fetched with it. With
-    /// none, pass --all to fetch the whole remote
+    /// none, objects that remote records as its fetch default are
+    /// fetched; pass --all to fetch the whole remote
     objects: Vec<String>,
 
     /// Fetch every object and tag from remote
     ///
-    /// Required when no object is named. The fetch still previews the
+    /// Required when no object is named and remote records no fetch
+    /// default. The fetch still previews the
     /// counts and asks to continue
     #[arg(long, conflicts_with = "objects")]
     all: bool,
@@ -83,15 +87,13 @@ pub struct FetchArgs {
     list: bool,
 }
 
-pub fn main(args: FetchArgs) -> Result<(), CliError> {
-    if args.objects.is_empty() && !args.all && !args.list {
-        return Err(CliError::message(
-            "gage fetch: name objects to fetch, pass --all to fetch the whole remote, or --list to see what it has",
-        ));
-    }
+pub fn main(mut args: FetchArgs) -> Result<(), CliError> {
     let store = Store::open(&gage_store::store_path()).context("gage fetch")?;
     let remotes = RemoteStore::from(&store);
     let source = FetchSource::from(remotes.resolve(&args.repository).context("gage fetch")?);
+    if args.objects.is_empty() && !args.all && !args.list {
+        args.objects = default_objects(&remotes, source.repository()).context("gage fetch")?;
+    }
     if args.list {
         let remote = source.repository().name().to_string();
         return list_remote(&remotes, &source, &store, &remote)
@@ -145,6 +147,26 @@ pub fn main(args: FetchArgs) -> Result<(), CliError> {
         return Err(CliError::exit(1));
     }
     Ok(())
+}
+
+/// The fetch default of `repository`, for a fetch that names no
+/// object. A URL records no default, and a remote may record none;
+/// either is an error.
+fn default_objects(
+    remotes: &RemoteStore<'_>,
+    repository: &Repository,
+) -> anyhow::Result<Vec<String>> {
+    let default = if repository.is_remote() {
+        remotes.get(repository.name())?.fetch
+    } else {
+        Vec::new()
+    };
+    if default.is_empty() {
+        anyhow::bail!(
+            "name objects to fetch, pass --all to fetch the whole remote, or --list to see what it has"
+        );
+    }
+    Ok(default)
 }
 
 /// Print what the remote advertises without fetching: its tags in
@@ -487,6 +509,37 @@ fn print_report(source: &str, report: &FetchReport) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A fresh store and the guard keeping its directory alive
+    fn open_store() -> (tempfile::TempDir, Store) {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("store.git");
+        gage_store::init(&path).unwrap();
+        let store = Store::open_with_cache_root(&path, &tmp.path().join("cache")).unwrap();
+        (tmp, store)
+    }
+
+    /// A fetch with no object takes the remote's fetch default as it
+    /// was recorded. A remote with none and a URL have no default.
+    #[test]
+    fn a_fetch_with_no_object_takes_the_fetch_default_of_the_remote() {
+        let (_tmp, store) = open_store();
+        let remotes = RemoteStore::from(&store);
+        remotes.add("up", "/srv/up.git", false).unwrap();
+        remotes.add("bare", "/srv/bare.git", false).unwrap();
+        remotes
+            .set_fetch("up", &["theirs".to_string(), "7zzz".to_string()])
+            .unwrap();
+        remotes.set_push("bare", &["work".to_string()]).unwrap();
+        let objects =
+            |repository: &str| default_objects(&remotes, &remotes.resolve(repository).unwrap());
+
+        assert_eq!(objects("up").unwrap(), ["theirs", "7zzz"]);
+        for none in ["bare", "/srv/url.git"] {
+            let err = objects(none).unwrap_err().to_string();
+            assert!(err.contains("name objects to fetch"), "{none}: {err}");
+        }
+    }
 
     #[test]
     fn classify_advertised_splits_tags_and_counts_objects_by_state() {

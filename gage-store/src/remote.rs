@@ -7,6 +7,11 @@
 //! and turns tag auto-following off, since Gage tags are not under
 //! `refs/tags/`. A backup target carries `gage-backup = true`, which
 //! the store's `pre-push` hook reads and which `backup` requires.
+//! `gage-push` and `gage-fetch` each hold the objects a push or a
+//! fetch of the remote takes when none is named, one value per object.
+//! They parallel git's `remote.<name>.push` and `remote.<name>.fetch`
+//! and name objects where git's name refs: the refs an object stands
+//! for are its link closure, which changes as the object is edited.
 //! `delete` removes the stanza and the remote-tracking refs with it.
 //!
 //! A fetch does not need a remote. A bare Git URL or path is fetched
@@ -44,6 +49,11 @@ pub struct Remote {
     pub url: String,
     /// True when the remote may receive the whole store (`gage-backup`)
     pub backup: bool,
+    /// The objects a push takes when none is named (`gage-push`), each
+    /// as it was given: a tag, an id, or an id prefix
+    pub push: Vec<String>,
+    /// The objects a fetch takes when none is named (`gage-fetch`)
+    pub fetch: Vec<String>,
 }
 
 /// The refs one push changes on the remote, by what happens to each:
@@ -95,6 +105,9 @@ pub struct RemoteDiff {
     /// On the remote at the local commit.
     pub same: usize,
 }
+
+const PUSH_KEY: &str = "gage-push";
+const FETCH_KEY: &str = "gage-fetch";
 
 /// The remote-tracking prefix of `name`: `refs/remotes/<name>/gage/1/`.
 pub fn tracking_prefix(name: &str) -> String {
@@ -286,14 +299,62 @@ impl RemoteStore<'_> {
             name: name.to_string(),
             url: url.to_string(),
             backup,
+            push: Vec::new(),
+            fetch: Vec::new(),
         })
+    }
+
+    /// Replace the objects a push of remote `name` takes when none is
+    /// named. An empty list leaves the remote with no default. Each
+    /// object is recorded as given and resolved by the push that uses
+    /// it. A name no remote has is [`StoreError::RemoteNotFound`]; an
+    /// object that is empty or holds whitespace is
+    /// [`StoreError::RemoteObject`].
+    pub fn set_push(&self, name: &str, objects: &[String]) -> Result<(), StoreError> {
+        self.set_objects(name, PUSH_KEY, objects)
+    }
+
+    /// Replace the objects a fetch of remote `name` takes when none is
+    /// named, under the rules of [`RemoteStore::set_push`].
+    pub fn set_fetch(&self, name: &str, objects: &[String]) -> Result<(), StoreError> {
+        self.set_objects(name, FETCH_KEY, objects)
+    }
+
+    fn set_objects(&self, name: &str, key: &str, objects: &[String]) -> Result<(), StoreError> {
+        self.get(name)?;
+        validate_objects(objects)?;
+        let path = self.store.path();
+        let key = format!("remote.{name}.{key}");
+        match run(git_in(path, ["config", "--unset-all", &key])) {
+            Ok(_) => {}
+            // Exit 5 is "no such key": the remote had no default
+            Err(StoreError::Git { status, .. }) if status.code() == Some(5) => {}
+            Err(e) => return Err(e),
+        }
+        for object in objects {
+            run(git_in(path, ["config", "--add", &key, object]))?;
+        }
+        Ok(())
+    }
+
+    /// The remote `name`. A name no remote has is
+    /// [`StoreError::RemoteNotFound`].
+    pub fn get(&self, name: &str) -> Result<Remote, StoreError> {
+        self.list()?
+            .into_iter()
+            .find(|r| r.name == name)
+            .ok_or_else(|| StoreError::RemoteNotFound(name.to_string()))
     }
 
     /// Every remote in name order.
     pub fn list(&self) -> Result<Vec<Remote>, StoreError> {
         let output = match run(git_in(
             self.store.path(),
-            ["config", "--get-regexp", r"^remote\..+\.(url|gage-backup)$"],
+            [
+                "config",
+                "--get-regexp",
+                r"^remote\..+\.(url|gage-backup|gage-push|gage-fetch)$",
+            ],
         )) {
             Ok(output) => output,
             // Exit 1 is "no match": a store with no remotes
@@ -316,11 +377,7 @@ impl RemoteStore<'_> {
     /// Remove the remote `name`, its config, and its remote-tracking
     /// refs. A name no remote has is [`StoreError::RemoteNotFound`].
     pub fn delete(&self, name: &str) -> Result<Remote, StoreError> {
-        let remote = self
-            .list()?
-            .into_iter()
-            .find(|r| r.name == name)
-            .ok_or_else(|| StoreError::RemoteNotFound(name.to_string()))?;
+        let remote = self.get(name)?;
         run(git_in(self.store.path(), ["remote", "remove", name]))?;
         Ok(remote)
     }
@@ -543,6 +600,20 @@ impl RemoteStore<'_> {
     }
 }
 
+/// Check `objects` as the default objects of a remote. One that is
+/// empty or holds whitespace is [`StoreError::RemoteObject`]: no tag,
+/// id, or id prefix has that form, and a remote's config is read back
+/// one object per line.
+pub fn validate_objects(objects: &[String]) -> Result<(), StoreError> {
+    match objects
+        .iter()
+        .find(|o| o.is_empty() || o.contains(char::is_whitespace))
+    {
+        Some(bad) => Err(StoreError::RemoteObject(bad.clone())),
+        None => Ok(()),
+    }
+}
+
 /// Run a push or fetch and return git's exit status. Git's output goes
 /// to the terminal as it runs, so progress and a hook's rejection
 /// reason reach the user live. Under the crate's own tests the output
@@ -574,9 +645,10 @@ fn capture_transport(mut cmd: Command) -> Result<(ExitStatus, String), StoreErro
 }
 
 /// Parse `git config --get-regexp` lines of the form
-/// `remote.<name>.url <url>` and `remote.<name>.gage-backup <bool>`
-/// into remotes, in name order. A remote name may hold dots, so the
-/// key is split at its last dot.
+/// `remote.<name>.url <url>`, `remote.<name>.gage-backup <bool>`, and
+/// `remote.<name>.gage-push <object>` into remotes, in name order. A
+/// remote name may hold dots, so the key is split at its last dot. A
+/// default object key has one line per object, in the order set.
 fn parse_remote_config(output: &str) -> Vec<Remote> {
     let mut remotes: BTreeMap<String, Remote> = BTreeMap::new();
     for line in output.lines() {
@@ -593,10 +665,14 @@ fn parse_remote_config(output: &str) -> Vec<Remote> {
             name: name.to_string(),
             url: String::new(),
             backup: false,
+            push: Vec::new(),
+            fetch: Vec::new(),
         });
         match field {
             "url" => remote.url = value.to_string(),
             "gage-backup" => remote.backup = value == "true",
+            PUSH_KEY => remote.push.push(value.to_string()),
+            FETCH_KEY => remote.fetch.push(value.to_string()),
             _ => {}
         }
     }
@@ -641,12 +717,16 @@ mod tests {
                 Remote {
                     name: "offsite".into(),
                     url: "git@host:x.git".into(),
-                    backup: true
+                    backup: true,
+                    push: vec![],
+                    fetch: vec![],
                 },
                 Remote {
                     name: "share".into(),
                     url: "/srv/share.git".into(),
-                    backup: false
+                    backup: false,
+                    push: vec![],
+                    fetch: vec![],
                 },
             ]
         );
@@ -662,6 +742,50 @@ mod tests {
             "{config}"
         );
         assert!(!config.contains("remote.share.gage-backup"), "{config}");
+    }
+
+    /// The default objects of each direction are kept apart, read
+    /// back in the order set, replaced as a whole, and cleared by an
+    /// empty list.
+    #[test]
+    fn set_push_and_set_fetch_replace_the_default_objects() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(dir.path());
+        let remotes = RemoteStore::from(&store);
+        remotes.add("a.b", "/srv/share.git", false).unwrap();
+        let objects = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+
+        remotes
+            .set_push("a.b", &objects(&["work", "7zzz"]))
+            .unwrap();
+        remotes.set_fetch("a.b", &objects(&["theirs"])).unwrap();
+        let remote = remotes.get("a.b").unwrap();
+        assert_eq!(remote.push, ["work", "7zzz"]);
+        assert_eq!(remote.fetch, ["theirs"]);
+        assert_eq!(remote.url, "/srv/share.git");
+
+        remotes.set_push("a.b", &objects(&["other"])).unwrap();
+        remotes.set_fetch("a.b", &[]).unwrap();
+        let remote = remotes.get("a.b").unwrap();
+        assert_eq!(remote.push, ["other"]);
+        assert!(remote.fetch.is_empty());
+        // Clearing a default the remote does not have is not an error
+        remotes.set_fetch("a.b", &[]).unwrap();
+
+        assert!(matches!(
+            remotes.set_push("nope", &objects(&["work"])),
+            Err(StoreError::RemoteNotFound(n)) if n == "nope"
+        ));
+        for bad in ["", "a b", "a\nb"] {
+            assert!(
+                matches!(
+                    remotes.set_push("a.b", &objects(&[bad])),
+                    Err(StoreError::RemoteObject(o)) if o == bad
+                ),
+                "{bad:?}"
+            );
+        }
+        assert_eq!(remotes.get("a.b").unwrap().push, ["other"]);
     }
 
     #[test]
@@ -1143,19 +1267,25 @@ mod tests {
 
     #[test]
     fn parses_remote_config_with_dotted_names() {
-        let output = "remote.a.b.url /x.git\nremote.a.b.gage-backup true\nremote.c.url /y.git\n";
+        let output = "remote.a.b.url /x.git\nremote.a.b.gage-backup true\n\
+                      remote.a.b.gage-push work\nremote.a.b.gage-push 7zzz\n\
+                      remote.c.url /y.git\nremote.c.gage-fetch theirs\n";
         assert_eq!(
             parse_remote_config(output),
             [
                 Remote {
                     name: "a.b".into(),
                     url: "/x.git".into(),
-                    backup: true
+                    backup: true,
+                    push: vec!["work".into(), "7zzz".into()],
+                    fetch: vec![],
                 },
                 Remote {
                     name: "c".into(),
                     url: "/y.git".into(),
-                    backup: false
+                    backup: false,
+                    push: vec![],
+                    fetch: vec!["theirs".into()],
                 },
             ]
         );

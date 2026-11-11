@@ -111,6 +111,7 @@ pub use query::{
 pub use refs::{GENERATION, KEY_REFS, OBJECT_REFS, ROOT as REFS_ROOT, TAG_REFS};
 pub use remote::{
     FetchSource, PushSet, Remote, RemoteDiff, RemoteStore, Repository, tracking_prefix,
+    validate_objects as validate_remote_objects,
 };
 pub use scan::{
     AgentAttrs, AgentRecord, DirFiles, LOG_NAMES, OBJECT_TYPE as SCAN_TYPE, ScanAttrs, ScanContent,
