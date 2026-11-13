@@ -580,7 +580,7 @@ pub async fn run(
     host: Arc<dyn ScanHost>,
 ) -> io::Result<()> {
     let mut terminal = ratatui::try_init()?;
-    let enhanced_keys = push_keyboard_enhancements();
+    let enhanced_keys = push_keyboard_enhancements().inspect_err(|_| ratatui::restore())?;
     let result = event_loop(
         &mut terminal,
         model,
@@ -591,11 +591,9 @@ pub async fn run(
         enhanced_keys,
     )
     .await;
-    if enhanced_keys {
-        pop_keyboard_enhancements();
-    }
+    let popped = pop_keyboard_enhancements(enhanced_keys);
     ratatui::restore();
-    result
+    result.and(popped)
 }
 
 /// Show an already-complete model (a stored scan). `None` opens the
@@ -603,13 +601,11 @@ pub async fn run(
 /// model when the user opens a different scan (`o`, or the picker).
 pub async fn view(model: Option<ScanModel>, host: Arc<dyn ScanHost>) -> io::Result<()> {
     let mut terminal = ratatui::try_init()?;
-    let enhanced_keys = push_keyboard_enhancements();
+    let enhanced_keys = push_keyboard_enhancements().inspect_err(|_| ratatui::restore())?;
     let result = view_inner(&mut terminal, model, host, enhanced_keys).await;
-    if enhanced_keys {
-        pop_keyboard_enhancements();
-    }
+    let popped = pop_keyboard_enhancements(enhanced_keys);
     ratatui::restore();
-    result
+    result.and(popped)
 }
 
 async fn view_inner(
@@ -793,10 +789,9 @@ async fn run_resolve_session(
     // The channel closes when the input thread exits; draining until
     // then keeps buffered keys out of the child's session.
     while input.recv().await.is_some() {}
-    if state.enhanced_keys {
-        pop_keyboard_enhancements();
-    }
+    let popped = pop_keyboard_enhancements(state.enhanced_keys);
     ratatui::restore();
+    popped?;
     // Leaving the alternate screen reveals the base terminal; clear it
     // and show a startup line so shell scrollback isn't visible while
     // claude starts.
@@ -815,7 +810,7 @@ async fn run_resolve_session(
         .start_resolve_session(issue_ids)
         .and_then(|mut session| session.wait());
     *terminal = ratatui::try_init()?;
-    state.enhanced_keys = push_keyboard_enhancements();
+    state.enhanced_keys = push_keyboard_enhancements()?;
     terminal.clear()?;
     *stop_input = Arc::new(AtomicBool::new(false));
     *input = spawn_input_thread(Arc::clone(stop_input));

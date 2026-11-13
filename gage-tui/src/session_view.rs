@@ -27,7 +27,7 @@ pub async fn run(
         None => None,
     };
     let mut terminal = ratatui::try_init()?;
-    let enhanced_keys = push_keyboard_enhancements();
+    let enhanced_keys = push_keyboard_enhancements().inspect_err(|_| ratatui::restore())?;
     let result = app::run(
         &mut terminal,
         document,
@@ -37,11 +37,10 @@ pub async fn run(
         enhanced_keys,
     )
     .await;
-    if enhanced_keys {
-        pop_keyboard_enhancements();
-    }
+    let popped = pop_keyboard_enhancements(enhanced_keys);
     ratatui::restore();
     result?;
+    popped?;
     Ok(())
 }
 
@@ -52,27 +51,30 @@ pub async fn run(
 /// protocol ignores the push sequence rather than rejecting it, so a
 /// successful write proves nothing. The query must run before the
 /// caller starts reading events: it reads the terminal's reply itself.
-pub(crate) fn push_keyboard_enhancements() -> bool {
+/// An error is a failed write to the terminal.
+pub(crate) fn push_keyboard_enhancements() -> io::Result<bool> {
     // A failed query (no tty, or no reply within crossterm's timeout)
     // means the protocol is unusable here, which is the same outcome
     // as an unsupported terminal.
     let supported = matches!(supports_keyboard_enhancement(), Ok(true));
     if !supported {
-        return false;
+        return Ok(false);
     }
-    let push = execute!(
+    execute!(
         io::stdout(),
         PushKeyboardEnhancementFlags(
             KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
                 | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
         )
-    );
-    match push {
-        Ok(()) => true,
-        Err(_) => false,
-    }
+    )?;
+    Ok(true)
 }
 
-pub(crate) fn pop_keyboard_enhancements() {
-    if let Ok(()) = execute!(io::stdout(), PopKeyboardEnhancementFlags) {}
+/// Disables the protocol when `enhanced_keys` says a push enabled it.
+/// Callers restore the terminal before propagating the error.
+pub(crate) fn pop_keyboard_enhancements(enhanced_keys: bool) -> io::Result<()> {
+    if enhanced_keys {
+        execute!(io::stdout(), PopKeyboardEnhancementFlags)?;
+    }
+    Ok(())
 }

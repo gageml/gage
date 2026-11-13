@@ -43,13 +43,11 @@ use crate::tree::{Collapse, Expand, Tree};
 /// opens.
 pub fn run(store: Store, select: Option<&str>) -> io::Result<()> {
     let mut terminal = ratatui::try_init()?;
-    let enhanced_keys = push_keyboard_enhancements();
+    let enhanced_keys = push_keyboard_enhancements().inspect_err(|_| ratatui::restore())?;
     let result = run_inner(&mut terminal, store, select);
-    if enhanced_keys {
-        pop_keyboard_enhancements();
-    }
+    let popped = pop_keyboard_enhancements(enhanced_keys);
     ratatui::restore();
-    result
+    result.and(popped)
 }
 
 fn run_inner(terminal: &mut DefaultTerminal, store: Store, select: Option<&str>) -> io::Result<()> {
