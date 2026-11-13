@@ -340,7 +340,6 @@ pub(crate) fn render_problems(
 pub enum ParseError {
     Syntax(rune::compile::Error),
     MissingConst(&'static str),
-    MissingName(&'static str),
 }
 
 impl ParseError {
@@ -393,7 +392,6 @@ impl fmt::Display for ParseError {
         match self {
             ParseError::Syntax(e) => write!(f, "{e}"),
             ParseError::MissingConst(name) => write!(f, "missing {name} constant"),
-            ParseError::MissingName(name) => write!(f, "{name} missing 'name' field"),
         }
     }
 }
@@ -941,9 +939,9 @@ fn parse_scanner(source: &str, embed_key: &str, path: &Path) -> Result<ScannerDe
         }
     }
 
-    if scanner_name.is_none() {
+    let Some(name) = scanner_name else {
         return Err(ParseError::MissingConst("SCANNER"));
-    }
+    };
 
     let tasks = match tasks_obj {
         Some(obj) => parse_tasks(source, obj, embed_key, &mut problems),
@@ -953,7 +951,7 @@ fn parse_scanner(source: &str, embed_key: &str, path: &Path) -> Result<ScannerDe
     problems.sort_by_key(|p| p.start);
 
     Ok(ScannerDef {
-        name: scanner_name.ok_or(ParseError::MissingName("SCANNER"))?,
+        name,
         description: description.unwrap_or_default(),
         version,
         hidden,
