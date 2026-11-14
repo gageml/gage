@@ -6,9 +6,81 @@ conventions in _[Keep a Changelog]_. Release versions use [semantic versioning].
 [Keep a Changelog]: https://keepachangelog.com/en/1.1.0/
 [semantic versioning]: https://semver.org/spec/v2.0.0.html
 
-## [0.3.0-pre.1]
+## [0.3.0]
 
-Early build of 0.3.0.
+### Enhancements
+
+**Publish**
+
+- `gage publish` writes a shareable copy of a session with secrets, personal
+  information, system details, and unfit language removed
+- Filters select what is removed: `gitleaks`, `secret`, `pii`, `system`,
+  `language`, and `harness`, chosen by name or by group (`public`, `trusted`,
+  `reading`)
+- A pending publish is reviewed before it is written: `gage publish view`,
+  `show`, `edit`, `refresh`, and `apply`
+- `gage publish --batch` publishes without an interactive session and writes a
+  session again only when it changed
+- User defined filters load from the project, `~/.gage/local/filters/`, and
+  `~/.gage/lib/filters/`
+- A `publish` skill drives a publish from a Claude Code session
+
+**Shares**
+
+- `gage share` collects published sessions into a set to push to others
+- A share names the filters every member must have been published with
+- `gage publish --share` adds a published session to a share
+
+**Push and fetch**
+
+- `gage remote edit` records the objects a remote pushes and fetches by default
+- `gage push` and `gage fetch` use those defaults when no object is named
+
+**Store**
+
+- `GAGE_STORE` sets the store location
+- A store opens inside an existing Git repository, where Gage writes only under
+  `refs/gage/`
+
+**Sessions**
+
+- `gage session find` limits a search with `--since`, `--user`, `--assistant`,
+  and `--tool`
+- `gage session move` moves a native session to another project
+- Listings are not truncated when output is piped
+
+**Query**
+
+- `tool_use_file` and `native_tool_use_file` list the files each tool call
+  wrote, read, or cited
+- `session_change` lists what a publish changed in a session
+- A `help` table documents the query surface by topic
+- `session` and `native_session` gain title, session type, and summary columns
+
+**TUI**
+
+- The session view shows attachments
+- The session view shows redacted text for a published session
+- Session entries render with a consistent layout for attributes and body
+  content
+- The native source of an entry is shown as JSON
+
+### Fixes
+
+- Token and cost totals include refused requests, subagent runs, and the title
+  model
+- Invalid JSON lines in a session file no longer fail the read
+- Redraw loops in the scan view and app event handling
+- Continue prompts when `--yes` is given
+- Project filter in `gage session list`
+- Git repository resolution with relative paths
+
+### Other changes
+
+- `query` and `tools` skills removed; the `help` table and the MCP server
+  instructions replace them
+- Release binary optimized for size
+- DataFusion upgraded
 
 ## [0.2.0]
 
