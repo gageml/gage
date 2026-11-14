@@ -1,4 +1,4 @@
-//! `IssueComment`: add a comment to an issue in the store.
+//! `issue_comment`: add a comment to an issue in the store.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -17,14 +17,14 @@ use crate::tool::{
 };
 use crate::tools::issue_update::required_string;
 
-pub const NAME: &str = "IssueComment";
+pub const NAME: &str = "issue_comment";
 
 pub const TOOL: ToolDef = route;
 
-const MD: &str = include_str!("../../config/tools/IssueComment.md");
+const MD: &str = include_str!("../../config/tools/issue_comment.md");
 const _: () = assert!(
     description_byte_len(MD) <= MAX_DESCRIPTION_BYTES,
-    "IssueComment description exceeds Claude Code's 4096-byte cap",
+    "issue_comment description exceeds Claude Code's 4096-byte cap",
 );
 
 fn route() -> ToolRoute<GageServer> {
@@ -41,7 +41,7 @@ fn handle(
         let params = ctx.arguments.unwrap_or_default();
         let Some(config) = &ctx.service.config().issue_comment else {
             return Err(McpError::internal_error(
-                "IssueComment tool is routed but not configured",
+                "issue_comment tool is routed but not configured",
                 None,
             ));
         };

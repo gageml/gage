@@ -924,7 +924,7 @@ fn fault(
     CustomToolOutcome::Fault("internal server error".into())
 }
 
-/// The callback the MCP service runs for an `IssueWrite` call: write
+/// The callback the MCP service runs for an `issue_write` call: write
 /// the issue under the calling task's scan context and output sink,
 /// as a scanner-defined handler runs. The scanner's input error, such
 /// as a cited note that does not exist, is an error result the model
@@ -975,7 +975,7 @@ fn issue_write_callback(
     })
 }
 
-/// The callback the MCP service runs for a `NoteWrite` call: write
+/// The callback the MCP service runs for a `note_write` call: write
 /// the note under the calling task's scan context and output sink, on
 /// the session the call names. A target the model named wrong is an
 /// error result the model reads; a VM error is a fault.
@@ -1760,7 +1760,7 @@ mod tests {
     fn query_with_session_range_takes_session_or_id_and_a_range_pair() {
         let scope = |v: &Value| match &tool_from_value(v).unwrap().kind {
             ToolKind::Gage(GageConfig::Query(q)) => q.scope.clone(),
-            _ => panic!("expected a Query tool"),
+            _ => panic!("expected a query tool"),
         };
         let mut vm = vm(r#"
             use gage::tools::Query;
@@ -1790,7 +1790,7 @@ mod tests {
     }
 
     /// A `Query` value consumes to the query tool over the scan's
-    /// dataset, named `Query` alongside the scanner tools.
+    /// dataset, named `query` alongside the scanner tools.
     #[tokio::test]
     async fn a_gage_query_tool_joins_the_spec_under_its_wire_name() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1807,10 +1807,10 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(names, ["ping", "Query"]);
+        assert_eq!(names, ["ping", "query"]);
         assert_eq!(spec.custom.len(), 1);
         assert_eq!(spec.gage.len(), 1);
-        assert_eq!(spec.gage[0].name(), "Query");
+        assert_eq!(spec.gage[0].name(), "query");
     }
 
     #[tokio::test]
@@ -1823,15 +1823,15 @@ mod tests {
             pub fn main() { [Query::new(), Query::new()] }
             "#)
             .await,
-            "agent: tool 'Query' is declared twice"
+            "agent: tool 'query' is declared twice"
         );
         assert_eq!(
             err(r#"
             use gage::{Tool, tools::Query};
-            pub fn main() { [Tool::new("Query", |i| Ok(1)), Query::new()] }
+            pub fn main() { [Tool::new("query", |i| Ok(1)), Query::new()] }
             "#)
             .await,
-            "agent: tool 'Query' is declared twice"
+            "agent: tool 'query' is declared twice"
         );
     }
 
@@ -1851,7 +1851,7 @@ mod tests {
         let (spec, names) = consume(&list, &scan_ctx(&tmp), None, &no_tool_uses())
             .await
             .unwrap();
-        assert_eq!(names, ["Query", "x"]);
+        assert_eq!(names, ["query", "x"]);
         assert_eq!(spec.gage.len(), 1);
         assert_eq!(spec.custom.len(), 1);
         let empty = tools(
@@ -1915,7 +1915,7 @@ mod tests {
                 | GageTool::IssuePendingResolve(_)
                 | GageTool::IssuesFree(_) => None,
             })
-            .expect("the spec holds the IssueWrite tool");
+            .expect("the spec holds the issue_write tool");
         (config, names)
     }
 
@@ -1939,7 +1939,7 @@ mod tests {
             Some(&sink),
         )
         .await;
-        assert_eq!(names, ["IssueWrite", "Query"]);
+        assert_eq!(names, ["issue_write", "query"]);
         let outcome = (config.callback)(IssueWriteInput {
             title: "Flaky build".into(),
             description: Some("## Summary\nIt flakes.".into()),
@@ -1992,7 +1992,7 @@ mod tests {
                 GageTool::NoteWrite(c) => Some(c),
                 _ => None,
             })
-            .expect("the spec holds the NoteWrite tool")
+            .expect("the spec holds the note_write tool")
     }
 
     #[tokio::test]
@@ -2139,7 +2139,7 @@ mod tests {
                 "#
             )
             .await,
-            "agent: tool 'IssueWrite' is declared twice"
+            "agent: tool 'issue_write' is declared twice"
         );
     }
 

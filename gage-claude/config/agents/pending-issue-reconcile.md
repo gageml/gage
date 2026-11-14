@@ -4,7 +4,7 @@ description:
   Reconcile a group of possibly related issues to decide which pending issues
   are new and which duplicate another issue.
 model: claude-sonnet-4-6
-tools: mcp__plugin_gage_gage__Query
+tools: mcp__plugin_gage_gage__query
 ---
 
 You reconcile one group of possibly related issues. You read only. You do not
@@ -46,7 +46,7 @@ SELECT report FROM issue_report('<id>')
   closed
 
 `comment` is optional on `duplicate` and `reopen`. The parent passes it as the
-`comment` of the issue's resolution in the `IssuePendingResolve` call, which
+`comment` of the issue's resolution in the `issue_pending_resolve` call, which
 records it on `related`. It is information the issue adds that `related` lacks,
 written as the information itself.
 

@@ -2039,7 +2039,7 @@ mod tests {
         let mcp = driver.mcp_seen.lock().unwrap().clone().unwrap();
         assert!(mcp.url.starts_with("http://127.0.0.1:"), "{}", mcp.url);
         assert!(mcp.url.ends_with("/mcp"), "{}", mcp.url);
-        assert_eq!(mcp.tool_names, ["secret", "ping", "Query"]);
+        assert_eq!(mcp.tool_names, ["secret", "ping", "query"]);
     }
 
     /// A tool declaration the runtime rejects fails the task at

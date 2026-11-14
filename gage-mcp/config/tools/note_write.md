@@ -1,5 +1,5 @@
 +++
-name = "NoteWrite"
+name = "note_write"
 
 [parameters.name]
 type = "string"

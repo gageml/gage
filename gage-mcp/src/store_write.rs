@@ -1,4 +1,4 @@
-//! The store-side forms of `IssueWrite` and `NoteWrite`. The runtime's
+//! The store-side forms of `issue_write` and `note_write`. The runtime's
 //! forms write into a scan directory under a task; these write the
 //! store directly, as `gage mcp2` serves an interactive session, with
 //! the writer's author on each object.

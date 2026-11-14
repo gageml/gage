@@ -4,7 +4,7 @@
 //! syntax, and the SQL-dialect limits. A caller sees the topics with
 //! `SELECT topic, short FROM help` and reads one with
 //! `SELECT full FROM help WHERE topic = '<topic>'`. The same topics and
-//! their short lines are listed in the Query tool description; a test in
+//! their short lines are listed in the query tool description; a test in
 //! gage-mcp holds the two in sync.
 
 use std::sync::Arc;
@@ -275,7 +275,7 @@ than describe it. Leave them out of a listing unless a commit is the point."#,
     HelpTopic {
         topic: "scopes",
         short: "what a scan-scoped context restricts",
-        full: r#"A scan-scoped Query tool may also be constrained to specific sessions and, per
+        full: r#"A scan-scoped query tool may also be constrained to specific sessions and, per
 session, to a line range. entry, message, and tool_use then return only in-range
 rows, even though the SQL carries no such predicate. Rows outside the scope do
 not exist from the tool's point of view; do not infer their absence from the

@@ -105,7 +105,7 @@ async fn skip_session(s) {
 }
 
 fn finding_tool() {
-    Tool::new("Finding", write_finding)
+    Tool::new("finding", write_finding)
         .input(Input::string("description").required())
         .input(Input::string("session_id").required())
         .input(

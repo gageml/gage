@@ -2,7 +2,7 @@ use gage::{call_agent, tools::IssueWrite};
 
 pub const SCANNER = #{
     name: "gage-issue-write-tool",
-    description: "IssueWrite tool use",
+    description: "issue_write tool use",
     tasks: #{ main: #{} },
 };
 

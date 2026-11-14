@@ -61,7 +61,7 @@ session IDs.
 The user may want to publish more than one session.
 
 If the user has not provided sessions, ask them what they want to publish. If
-they don't know the IDs, use `mcp__plugin_gage_gage__Query` and in particular
+they don't know the IDs, use `mcp__plugin_gage_gage__query` and in particular
 the `message_text` TVF to find the sessions.
 
 Consult `session` or `native_session('')` tables for recent session titles.
@@ -156,7 +156,7 @@ gage publish edit -y <SESSION> --title "<TEXT>"
 
 ## Review the session
 
-Use `mcp__plugin_gage_gage__Query` with the `publish` flag set to `true` to
+Use `mcp__plugin_gage_gage__query` with the `publish` flag set to `true` to
 review staged sessions. The `session_change` table records what the filters
 and redactions removed:
 

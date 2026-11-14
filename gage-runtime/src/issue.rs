@@ -292,7 +292,7 @@ impl Issue {
 /// The outer error is a VM error; the inner is the scanner's `Result`.
 pub(crate) type Written = Result<Result<Issue, Error>, VmError>;
 
-/// Write an issue on behalf of the `IssueWrite` Gage tool: the call's
+/// Write an issue on behalf of the `issue_write` Gage tool: the call's
 /// title, description, and cited notes under the name and status the
 /// scanner configured. The write is the one `write_issue(..).await`
 /// performs, with no replace key.

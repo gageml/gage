@@ -1,5 +1,5 @@
 +++
-name = "IssuePendingResolve"
+name = "issue_pending_resolve"
 
 [parameters.resolutions]
 type = "array"

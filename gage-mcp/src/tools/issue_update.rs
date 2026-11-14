@@ -1,4 +1,4 @@
-//! `IssueUpdate`: open or close an issue in the store.
+//! `issue_update`: open or close an issue in the store.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -16,14 +16,14 @@ use crate::tool::{
     MAX_DESCRIPTION_BYTES, ToolDef, build_tool_meta, description_byte_len, domain_error, success,
 };
 
-pub const NAME: &str = "IssueUpdate";
+pub const NAME: &str = "issue_update";
 
 pub const TOOL: ToolDef = route;
 
-const MD: &str = include_str!("../../config/tools/IssueUpdate.md");
+const MD: &str = include_str!("../../config/tools/issue_update.md");
 const _: () = assert!(
     description_byte_len(MD) <= MAX_DESCRIPTION_BYTES,
-    "IssueUpdate description exceeds Claude Code's 4096-byte cap",
+    "issue_update description exceeds Claude Code's 4096-byte cap",
 );
 
 fn route() -> ToolRoute<GageServer> {
@@ -40,7 +40,7 @@ fn handle(
         let params = ctx.arguments.unwrap_or_default();
         let Some(config) = &ctx.service.config().issue_update else {
             return Err(McpError::internal_error(
-                "IssueUpdate tool is routed but not configured",
+                "issue_update tool is routed but not configured",
                 None,
             ));
         };
@@ -156,7 +156,7 @@ fn parse_update(params: &JsonObject) -> Result<Update, McpError> {
             Ok(Update::Close(reason.unwrap_or(StatusReason::Completed)))
         }
         (IssueStatus::Assigned, _, _) => Err(McpError::invalid_params(
-            "`status` must be open or closed; an issue is assigned through IssueAssign",
+            "`status` must be open or closed; an issue is assigned through issue_assign",
             None,
         )),
         (IssueStatus::Pending | IssueStatus::Unknown, _, _) => Err(McpError::invalid_params(
@@ -220,7 +220,7 @@ mod tests {
             object(json!({"issue_id": id, "status": "assigned"})),
         )
         .unwrap_err();
-        assert!(err.message.contains("IssueAssign"), "{}", err.message);
+        assert!(err.message.contains("issue_assign"), "{}", err.message);
     }
 
     #[test]

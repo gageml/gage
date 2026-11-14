@@ -227,7 +227,7 @@ async fn project_sections(attachments) {
 }
 
 fn summary_tool() {
-    Tool::new("ProjectSummary", write_summary)
+    Tool::new("project_summary", write_summary)
         .description("Write a project summary note")
         .input(
             Input::string("name")
@@ -374,7 +374,7 @@ async fn session_summaries(session, summary_notes) {
 }
 
 fn finding_tool() {
-    Tool::new("Finding", write_finding)
+    Tool::new("finding", write_finding)
         .description("Write a code quality finding about the session")
         .input(
             Input::string("description")

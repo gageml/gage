@@ -146,9 +146,9 @@ const SCAN_SESSIONS_KEY = ("code-review", "scan-sessions", 1);
 - Agent name (`call_agent(..).name(..)`): the role the agent performs,
   kebab-case. `general-finding`, `summarize-project`, `issue-writer`.
 
-- Tool name (`Tool::new("..", ..)`): a PascalCase noun for the thing the tool
-  produces, because the model reads it as a tool call. `Finding`,
-  `ProjectSummary`.
+- Tool name (`Tool::new("..", ..)`): a snake_case noun for the thing the tool
+  produces, because the model reads it as a tool call. `finding`,
+  `project_summary`.
 
 - Tool input (`Input::string("..")`): snake_case, the field's plain meaning.
   `description`, `session_id`, `lines`.
@@ -319,7 +319,7 @@ while let Some(next) = results.next().await {
 - Many agents run through `AgentRunner`: `.add(agent, meta)`, then `.start()`
   returns a stream whose `.next().await` yields `Ok((result, meta))` or `Err`.
 
-- Tools: `Tool::new("Name", handler)` with `.description(..)` and
+- Tools: `Tool::new("name", handler)` with `.description(..)` and
   `.input(Input::string("field").description(..).required())`.
 
 - The built-in `tools::Query`, `tools::IssueWrite`, and `tools::NoteWrite` give

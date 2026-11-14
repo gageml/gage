@@ -1,4 +1,4 @@
-//! `IssueWrite`: one issue written through the configured callback.
+//! `issue_write`: one issue written through the configured callback.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -12,14 +12,14 @@ use crate::server::GageServer;
 use crate::service::{IssueWriteConfig, IssueWriteInput, call_result};
 use crate::tool::{MAX_DESCRIPTION_BYTES, ToolDef, build_tool_meta, description_byte_len};
 
-pub const NAME: &str = "IssueWrite";
+pub const NAME: &str = "issue_write";
 
 pub const TOOL: ToolDef = route;
 
-const MD: &str = include_str!("../../config/tools/IssueWrite.md");
+const MD: &str = include_str!("../../config/tools/issue_write.md");
 const _: () = assert!(
     description_byte_len(MD) <= MAX_DESCRIPTION_BYTES,
-    "IssueWrite description exceeds Claude Code's 4096-byte cap",
+    "issue_write description exceeds Claude Code's 4096-byte cap",
 );
 
 fn route() -> ToolRoute<GageServer> {
@@ -36,7 +36,7 @@ fn handle(
         let params = ctx.arguments.unwrap_or_default();
         let Some(config) = &ctx.service.config().issue_write else {
             return Err(McpError::internal_error(
-                "IssueWrite tool is routed but not configured",
+                "issue_write tool is routed but not configured",
                 None,
             ));
         };

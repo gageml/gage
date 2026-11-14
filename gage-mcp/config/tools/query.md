@@ -1,5 +1,5 @@
 +++
-name = "Query"
+name = "query"
 
 [parameters.sql]
 type = "string"

@@ -18,10 +18,10 @@ pub async fn simple() {
 }
 
 pub async fn inputs() {
-    let a = call_agent("Greet Joe with the Greet tool")
+    let a = call_agent("Greet Joe with the greet tool")
         .model("small")
         .tool(
-            Tool::new("Greet", greet)
+            Tool::new("greet", greet)
                 .input(Input::string("name").required())
                 .meta_arg(),
         )

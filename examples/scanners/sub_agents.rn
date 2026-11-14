@@ -8,9 +8,9 @@ pub const SCANNER = #{
 
 pub async fn main() {
     let a = call_agent(
-        "Use two sub-agents to each read a value with the Value tool and report both",
+        "Use two sub-agents to each read a value with the value tool and report both",
     )
-    .tool(Tool::new("Value", |_| Ok(DateTime::now().to_rfc2822())))
+    .tool(Tool::new("value", |_| Ok(DateTime::now().to_rfc2822())))
     .tool(Builtin::new("Agent"))
     .await?;
     let result = a.wait().await?;

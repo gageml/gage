@@ -22,12 +22,12 @@ Follow this discipline:
 - Many sessions have nothing worth noting. Do not force observations onto a
   session.
 
-Read the conversation by querying the `message` table via `mcp__gage__Query`,
+Read the conversation by querying the `message` table via `mcp__gage__query`,
 filtering by `session_id = '{{ session_id }}'`. `message` table columns:
 (session_id, line, uuid, type, subtype, text, timestamp, attachments,
 ide_tags, raw)
 
-Write open codes using the `mcp__gage__OpenCode` tool:
+Write open codes using the `mcp__gage__open_code` tool:
 
 - Use a session-level note (no `line`) for observations about the session as a
   whole, and line-level notes (with `line`) to anchor specific chains at the

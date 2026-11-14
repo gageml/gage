@@ -103,7 +103,7 @@ async fn skip_session(s) {
 
 fn open_code_tooldef() {
     #{
-        name: "OpenCode",
+        name: "open_code",
         description: "Write an open code note for the session",
         inputs: #{
             text: #{

@@ -2,7 +2,7 @@
 
 Potential changes to how the `general` scanner presents a session to its finding
 agent. None of this is implemented in the scanner. The scanner sends a short
-prompt naming the session, and the agent reads the session through its Query
+prompt naming the session, and the agent reads the session through its query
 view.
 
 ## Motivation
@@ -30,7 +30,7 @@ Two scanner params:
 One prompt template with one conditional section. When a record is present, the
 prompt explains the record's format and instructs the agent to query specific
 lines rather than page through the session. When it is absent, the prompt
-instructs the agent to read the session through Query.
+instructs the agent to read the session through `query`.
 
 One work key regardless of strategy, or one key per strategy so runs under
 different strategies do not mask each other's work. This is undecided. The
@@ -42,7 +42,7 @@ and a strategy is such a mode.
 Each strategy is a rule set for `Session::compress(budget, rules)`, or no rules
 at all. A message kind no rule matches is excluded from the record.
 
-`none`. No record. The agent reads the session through Query. This is what the
+`none`. No record. The agent reads the session through `query`. This is what the
 scanner does today.
 
 `index`. Header lines only: every message's line number and kind, no content.
@@ -102,11 +102,11 @@ When a record is present the prompt carries this legend:
 > - tool result messages (subtype `tool_result`) show only the result's first
 >   line
 
-and this instruction in place of the read-via-Query instruction:
+and this instruction in place of the read-via-query instruction:
 
 > The record is often evidence enough; when a shortened message looks relevant
 > to a possible finding, read its full text before writing the finding by
-> querying the `message` table via `mcp__gage__Query`, filtering by
+> querying the `message` table via `mcp__gage__query`, filtering by
 > `session_id = '<id>'` and the line numbers of interest. Keep queries targeted
 > at specific lines or narrow ranges. Do not page through the whole session —
 > the record already covers all of it.
@@ -129,7 +129,7 @@ heading.
 - Whether the note records the strategy that wrote it. Tool callbacks run
   without task params in legacy, so the callback cannot read the strategy from
   `params()`.
-- Whether the agent's Query view is clipped to the unseen lines. The watermarks
+- Whether the agent's query view is clipped to the unseen lines. The watermarks
   design says the agent keeps the whole session as context and is directed to
   the new lines rather than blinded to the old ones.
 - Which strategy is the default, and what the evals say about each.

@@ -231,7 +231,7 @@ async fn do_write_note(w: NoteWrite) -> Written {
 
 /// A write with its Rune-held inputs resolved to owned values, so the
 /// write is a `Send` future the MCP service can run for the
-/// `NoteWrite` tool as well as the builder's await.
+/// `note_write` tool as well as the builder's await.
 pub(crate) struct NoteSpec {
     pub(crate) name: String,
     pub(crate) value: NoteValue,

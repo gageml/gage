@@ -11,7 +11,7 @@ Your task is to help the user process Gage issues. There are three phases:
 issues, closing duplicates and promoting novel issues to open. This phase does
 not require user input except where noted below.
 
-**Phase 2 - Free abandoned issues**. Run `IssuesFree` tool to free assigned
+**Phase 2 - Free abandoned issues**. Run `issues_free` tool to free assigned
 issues that have been abandoned. Issue assignment is described below in
 **Concurrency**. This phase does not require user input.
 
@@ -33,7 +33,7 @@ Several sessions may run this skill at once. An issue a session is working on
 has status `assigned`. The status event shows the timestamp and the session
 working on the issue.
 
-A session is assigned an issue when it calls `IssueAssign`.
+A session is assigned an issue when it calls `issue_assign`.
 
 In this way multiple sessions work on open issues concurrently without
 duplicating work or conflict.
@@ -79,7 +79,7 @@ as per step 8 below.
 
 Sub-agents judge groups of related issues and provide recommendations. They do
 not modify issue status. You are the sole writer in this phase and apply the
-resolutions with `mcp__plugin_gage_gage__IssuePendingResolve`.
+resolutions with `mcp__plugin_gage_gage__issue_pending_resolve`.
 
 **Steps**
 
@@ -137,11 +137,11 @@ resolutions with `mcp__plugin_gage_gage__IssuePendingResolve`.
      needs to help decide its status
 
    If provided, `comment` is the `comment` value for the issue in the
-   `IssuePendingResolve` call --- information the issue adds that `related`
+   `issue_pending_resolve` call --- information the issue adds that `related`
    lacks.
 
 7. Apply the automatic batch, every `new` and `duplicate` issue, in one
-   `IssuePendingResolve` call. The tool takes a `resolutions` array with one
+   `issue_pending_resolve` call. The tool takes a `resolutions` array with one
    object per pending issue; it validates the whole plan before writing, and
    orders the writes so each surviving issue is in its final state before a
    duplicate names it. Each object:
@@ -163,14 +163,14 @@ resolutions with `mcp__plugin_gage_gage__IssuePendingResolve`.
      `reopen` returns the closed issue to open before the close
    - Stands on its own - `{issue, action: "open"}`
 
-   Apply the final decisions in a second `IssuePendingResolve` call.
+   Apply the final decisions in a second `issue_pending_resolve` call.
 
 9. Briefly report what was resolved: how many issues were promoted, how many
    closed as duplicates, and against what.
 
 ## Phase 2: Free abandoned issues
 
-Run `mcp__plugin_gage_gage__IssuesFree` with no inputs to free abandoned issues
+Run `mcp__plugin_gage_gage__issues_free` with no inputs to free abandoned issues
 in preparation for phase 3. The tool determines when an assigned issue no longer
 has an active session and changes its status to `open`.
 
@@ -199,7 +199,7 @@ on how to proceed.
    FROM issue WHERE status = 'open' ORDER BY created DESC
    ```
 
-   These issues, in this order, are the pool for `IssueAssign` until the next
+   These issues, in this order, are the pool for `issue_assign` until the next
    listing. An issue opened after this listing is not in the pool.
 
 2. Present the open issues using the table format below. Do not use issue names
@@ -222,7 +222,7 @@ In phases 3b and 3c, you work with the user to resolve issues, one at a time.
 ### 3b: Take up an issue
 
 Before resolving an issue it must be assigned to you via the
-`mcp__plugin_gage_gage__IssueAssign` tool. This ensures that other sessions do
+`mcp__plugin_gage_gage__issue_assign` tool. This ensures that other sessions do
 not also take up the issue and conflict with your work.
 
 If you know the issue ID to take up (e.g. the user has specified a specific
@@ -239,7 +239,7 @@ are no free issues, the tool says so.
 ### Phase 3c: Resolve the issue
 
 Proceed only once the issue is assigned to you via
-`mcp__plugin_gage_gage__IssueAssign`.
+`mcp__plugin_gage_gage__issue_assign`.
 
 **Guidelines**
 
@@ -264,7 +264,7 @@ verified status before getting user input or proceeding with a fix.
    - Can you confirm the issue still exists?
    - Has any work already been done to resolve the issue?
 
-   Use `mcp__plugin_gage_gage__Query` to read referenced notes and session
+   Use `mcp__plugin_gage_gage__query` to read referenced notes and session
    messages. If the issue relates to project files, use tools to get the
    information you need before presenting findings to the user.
 
@@ -351,7 +351,7 @@ verified status before getting user input or proceeding with a fix.
    a command whose output you read, or the user's confirmation. An explanation
    of why the fix should work is not a check. The close message names the check.
 
-   Use `mcp__plugin_gage_gage__IssueUpdate` with `status=closed` and
+   Use `mcp__plugin_gage_gage__issue_update` with `status=closed` and
    `status_reason=completed` to close an issue that's been verified as fixed.
    `message` states what was done; the tool refuses a close without one.
 
@@ -362,5 +362,5 @@ verified status before getting user input or proceeding with a fix.
 4. Release the issue
 
    If the user defers the issue, or stops work on it without closing, release it
-   with `mcp__plugin_gage_gage__IssueUpdate` and `status=open` so another
+   with `mcp__plugin_gage_gage__issue_update` and `status=open` so another
    session can take it up. After a close or a release, return to phase 3a.

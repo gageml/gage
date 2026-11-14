@@ -164,7 +164,7 @@ impl ScanContext {
     /// commits it links, the notes it wrote or carried, the issues it
     /// wrote, and the relations among them, read from the scan
     /// directory and the store on each query. Every scanner-facing
-    /// read and the agent's Query tool run here.
+    /// read and the agent's query tool run here.
     pub(crate) async fn scan_context(&self) -> Result<&SessionContext, VmError> {
         self.scan_query
             .get_or_try_init(|| async {
@@ -199,13 +199,13 @@ impl ScanContext {
         &self,
         scope: &QueryScope,
     ) -> Result<SessionContext, Error> {
-        let agent_err = |e: VmError| Error::agent(format!("Query tool: {e}"));
+        let agent_err = |e: VmError| Error::agent(format!("query tool: {e}"));
         match scope {
             QueryScope::Dataset => Ok(self.scan_context().await.map_err(agent_err)?.clone()),
             QueryScope::Session { id, lines } => {
                 if self.member_commit(id).await.map_err(agent_err)?.is_none() {
                     return Err(Error::agent(format!(
-                        "Query tool: session {id} is not a member of the scan's dataset"
+                        "query tool: session {id} is not a member of the scan's dataset"
                     )));
                 }
                 let ctx = self
@@ -216,7 +216,7 @@ impl ScanContext {
                 if let Some((start, end)) = lines {
                     restrict_lines(&ctx, *start, *end)
                         .await
-                        .map_err(|e| Error::agent(format!("Query tool: {e}")))?;
+                        .map_err(|e| Error::agent(format!("query tool: {e}")))?;
                 }
                 Ok(ctx)
             }

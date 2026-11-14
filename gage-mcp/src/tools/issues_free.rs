@@ -1,4 +1,4 @@
-//! `IssuesFree`: reopen assigned issues whose session is gone.
+//! `issues_free`: reopen assigned issues whose session is gone.
 //!
 //! The tool reads every assigned issue and asks whether the session
 //! holding it, named by the URL on its assignment event, is still a
@@ -27,14 +27,14 @@ use crate::tool::{
     MAX_DESCRIPTION_BYTES, ToolDef, build_tool_meta, description_byte_len, domain_error, success,
 };
 
-pub const NAME: &str = "IssuesFree";
+pub const NAME: &str = "issues_free";
 
 pub const TOOL: ToolDef = route;
 
-const MD: &str = include_str!("../../config/tools/IssuesFree.md");
+const MD: &str = include_str!("../../config/tools/issues_free.md");
 const _: () = assert!(
     description_byte_len(MD) <= MAX_DESCRIPTION_BYTES,
-    "IssuesFree description exceeds Claude Code's description cap",
+    "issues_free description exceeds Claude Code's description cap",
 );
 
 const HOUR_MS: i64 = 60 * 60 * 1000;
@@ -55,7 +55,7 @@ fn handle(
     Box::pin(async move {
         let Some(config) = &ctx.service.config().issues_free else {
             return Err(McpError::internal_error(
-                "IssuesFree tool is routed but not configured",
+                "issues_free tool is routed but not configured",
                 None,
             ));
         };

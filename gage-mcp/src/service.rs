@@ -68,9 +68,9 @@ impl GageTool {
 
 /// The data of the tools that write the store directly, as `gage
 /// mcp2` serves an interactive session: the store, and the author
-/// each write records, in the `user:<name>` form. `IssueUpdate` and
-/// `IssueComment` take it as their configuration; the store-side
-/// forms of `IssueWrite` and `NoteWrite` are built from it.
+/// each write records, in the `user:<name>` form. `issue_update` and
+/// `issue_comment` take it as their configuration; the store-side
+/// forms of `issue_write` and `note_write` are built from it.
 #[derive(Clone)]
 pub struct StoreWriterConfig {
     pub store: Arc<Mutex<Store>>,
@@ -87,7 +87,7 @@ impl StoreWriterConfig {
     }
 }
 
-/// The `IssueAssign` tool's data: the store writer and the URL of the
+/// The `issue_assign` tool's data: the store writer and the URL of the
 /// session the server serves, recorded on each assignment as the
 /// holder. The URL is fixed for the server's lifetime.
 #[derive(Clone)]
@@ -104,7 +104,7 @@ pub struct IssueAssignConfig {
 /// registry.
 pub type SessionLiveFn = Arc<dyn Fn(&str) -> Result<bool, String> + Send + Sync>;
 
-/// The `IssuesFree` tool's data: the store it reopens issues through
+/// The `issues_free` tool's data: the store it reopens issues through
 /// and the probe it asks whether a holding session is still live.
 #[derive(Clone)]
 pub struct IssuesFreeConfig {
@@ -112,7 +112,7 @@ pub struct IssuesFreeConfig {
     pub session_live: SessionLiveFn,
 }
 
-/// The `Query` tool's data: the DataFusion context its SQL runs on,
+/// The `query` tool's data: the DataFusion context its SQL runs on,
 /// and what a `publish` call scopes a fresh context to. `None` where
 /// pending publishes are not readable, as in a scan's tool.
 #[derive(Clone)]
@@ -134,7 +134,7 @@ pub struct PublishConfig {
 /// `Err(reason)` means the listing cannot be read.
 pub type ExternalSessionsFn = Arc<dyn Fn() -> Result<Vec<ExternalSession>, String> + Send + Sync>;
 
-/// The `IssueWrite` tool's data: the callback that writes the issue.
+/// The `issue_write` tool's data: the callback that writes the issue.
 /// The write path belongs to the runtime, which writes issues into the
 /// scan directory, so the tool carries the writer rather than the
 /// data; the route parses the call and hands the callback an
@@ -151,7 +151,7 @@ pub type IssueWriteCallback = Arc<
         + Sync,
 >;
 
-/// One `IssueWrite` call, parsed
+/// One `issue_write` call, parsed
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IssueWriteInput {
     pub title: String,
@@ -161,7 +161,7 @@ pub struct IssueWriteInput {
     pub evidence: Vec<String>,
 }
 
-/// The `NoteWrite` tool's data: the names the model may write, each
+/// The `note_write` tool's data: the names the model may write, each
 /// with the doc the tool shows for it, and the callback that writes
 /// the note. The names are per configuration, so the route appends
 /// them to the tool's description, and a call naming anything else is
@@ -177,7 +177,7 @@ pub type NoteWriteCallback = Arc<
     dyn Fn(NoteWriteInput) -> Pin<Box<dyn Future<Output = CustomToolOutcome> + Send>> + Send + Sync,
 >;
 
-/// One `NoteWrite` call, parsed. The name is one of the configured
+/// One `note_write` call, parsed. The name is one of the configured
 /// names.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NoteWriteInput {

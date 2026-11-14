@@ -1,5 +1,5 @@
 +++
-name = "IssueWrite"
+name = "issue_write"
 
 [parameters.title]
 type = "string"

@@ -1,4 +1,4 @@
-//! `NoteWrite`: one note written through the configured callback,
+//! `note_write`: one note written through the configured callback,
 //! under one of the configured names.
 
 use std::collections::BTreeMap;
@@ -15,12 +15,12 @@ use crate::service::{NoteWriteConfig, NoteWriteInput, call_result};
 use crate::tool::{MAX_DESCRIPTION_BYTES, build_tool_meta, description_byte_len, domain_error};
 use crate::tools::issue_update::{optional_string, required_string};
 
-pub const NAME: &str = "NoteWrite";
+pub const NAME: &str = "note_write";
 
-const MD: &str = include_str!("../../config/tools/NoteWrite.md");
+const MD: &str = include_str!("../../config/tools/note_write.md");
 const _: () = assert!(
     description_byte_len(MD) <= MAX_DESCRIPTION_BYTES,
-    "NoteWrite description exceeds Claude Code's 4096-byte cap",
+    "note_write description exceeds Claude Code's 4096-byte cap",
 );
 
 /// The route for one configuration. The description ends with the
@@ -54,7 +54,7 @@ fn handle(
         let params = ctx.arguments.unwrap_or_default();
         let Some(config) = &ctx.service.config().note_write else {
             return Err(McpError::internal_error(
-                "NoteWrite tool is routed but not configured",
+                "note_write tool is routed but not configured",
                 None,
             ));
         };

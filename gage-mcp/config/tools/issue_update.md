@@ -1,5 +1,5 @@
 +++
-name = "IssueUpdate"
+name = "issue_update"
 
 [parameters.issue_id]
 type = "string"
@@ -43,7 +43,7 @@ close requires `message`, stating what was done or why the issue
 will not be addressed; a close without one is refused. A duplicate close names the
 surviving issue in `duplicate_of`, so the link between the two is data rather
 than prose; record any insight the survivor lacks on the survivor
-with `IssueComment`.
+with `issue_comment`.
 
 An issue already in the requested status is refused. To comment
-without changing status, use `IssueComment`.
+without changing status, use `issue_comment`.

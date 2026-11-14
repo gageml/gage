@@ -1,4 +1,4 @@
-//! `Query`: SQL over the context the service was configured with.
+//! `query`: SQL over the context the service was configured with.
 //!
 //! Every result is written once to the query cache as an Arrow IPC
 //! file named by a cursor, and every call returns one page of it. A
@@ -39,14 +39,14 @@ use crate::tool::{
     MAX_DESCRIPTION_BYTES, ToolDef, build_tool_meta, description_byte_len, domain_error, success,
 };
 
-pub const NAME: &str = "Query";
+pub const NAME: &str = "query";
 
 pub const TOOL: ToolDef = route;
 
-const MD: &str = include_str!("../../config/tools/Query.md");
+const MD: &str = include_str!("../../config/tools/query.md");
 const _: () = assert!(
     description_byte_len(MD) <= MAX_DESCRIPTION_BYTES,
-    "Query description exceeds Claude Code's 4096-byte cap",
+    "query description exceeds Claude Code's 4096-byte cap",
 );
 
 /// The most result text one page holds; a row that alone exceeds it
@@ -78,7 +78,7 @@ fn handle(
         let request = parse_request(&params)?;
         let Some(config) = &ctx.service.config().query else {
             return Err(McpError::internal_error(
-                "Query tool is routed but not configured",
+                "query tool is routed but not configured",
                 None,
             ));
         };
@@ -284,7 +284,7 @@ fn render_page(
     );
     if page < count {
         text.push_str(&format!(
-            "To continue, call Query with cursor {cursor} and page {}.",
+            "To continue, call query with cursor {cursor} and page {}.",
             page + 1
         ));
     }
@@ -566,7 +566,7 @@ mod tests {
             format!(
                 "cursor {cursor}: page 1 of 2, rows 1-1 of 2\n\
                  ```yaml\nline: 1\ntext: hello\n\n```\n\
-                 To continue, call Query with cursor {cursor} and page 2."
+                 To continue, call query with cursor {cursor} and page 2."
             )
         );
 
@@ -726,7 +726,7 @@ mod tests {
     #[test]
     fn help_menu_matches_the_help_table() {
         let meta = build_tool_meta(MD);
-        let body = meta.description.as_deref().expect("Query.md has a body");
+        let body = meta.description.as_deref().expect("query.md has a body");
         let menu: Vec<(&str, &str)> = body
             .lines()
             .filter_map(|line| line.split_once(": "))

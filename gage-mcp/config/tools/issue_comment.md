@@ -1,5 +1,5 @@
 +++
-name = "IssueComment"
+name = "issue_comment"
 
 [parameters.issue_id]
 type = "string"

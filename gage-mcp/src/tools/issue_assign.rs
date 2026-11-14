@@ -1,4 +1,4 @@
-//! `IssueAssign`: assign an open issue to this session.
+//! `issue_assign`: assign an open issue to this session.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -17,14 +17,14 @@ use crate::tool::{
     MAX_DESCRIPTION_BYTES, ToolDef, build_tool_meta, description_byte_len, domain_error, success,
 };
 
-pub const NAME: &str = "IssueAssign";
+pub const NAME: &str = "issue_assign";
 
 pub const TOOL: ToolDef = route;
 
-const MD: &str = include_str!("../../config/tools/IssueAssign.md");
+const MD: &str = include_str!("../../config/tools/issue_assign.md");
 const _: () = assert!(
     description_byte_len(MD) <= MAX_DESCRIPTION_BYTES,
-    "IssueAssign description exceeds Claude Code's 2048-byte cap",
+    "issue_assign description exceeds Claude Code's 2048-byte cap",
 );
 
 fn route() -> ToolRoute<GageServer> {
@@ -41,7 +41,7 @@ fn handle(
         let params = ctx.arguments.unwrap_or_default();
         let Some(config) = &ctx.service.config().issue_assign else {
             return Err(McpError::internal_error(
-                "IssueAssign tool is routed but not configured",
+                "issue_assign tool is routed but not configured",
                 None,
             ));
         };

@@ -470,7 +470,7 @@ async fn run_mcp() -> anyhow::Result<()> {
         store,
         author: author::resolve_author(None),
     };
-    // The server's own session, as IssueAssign records it on each
+    // The server's own session, as issue_assign records it on each
     // assignment: the id Claude Code put in the environment, spelled
     // as a session URL by the default source. Without both the tool
     // is left out of the spec, since it could not name a holder.
@@ -480,7 +480,7 @@ async fn run_mcp() -> anyhow::Result<()> {
     ) {
         (Some(id), Ok(opened)) => Some(opened.session_url(&id.to_string_lossy())),
         (None, _) => {
-            tracing::warn!("IssueAssign unavailable: CLAUDE_CODE_SESSION_ID is not set");
+            tracing::warn!("issue_assign unavailable: CLAUDE_CODE_SESSION_ID is not set");
             None
         }
         (_, Err(e)) => {
@@ -491,11 +491,11 @@ async fn run_mcp() -> anyhow::Result<()> {
                 CliError::Other(err) => format!("{err:#}"),
                 CliError::Usage(err) => err.to_string(),
             };
-            tracing::warn!("IssueAssign unavailable: {reason}");
+            tracing::warn!("issue_assign unavailable: {reason}");
             None
         }
     };
-    // IssuesFree asks whether a holder's session URL is live by
+    // issues_free asks whether a holder's session URL is live by
     // routing it through the driver registry. Any failure along the
     // way is an undetermined verdict with its reason.
     let session_live: SessionLiveFn = {

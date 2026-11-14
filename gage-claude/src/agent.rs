@@ -725,13 +725,13 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         seed_settings(
             tmp.path(),
-            &["mcp__gage__Query".to_string(), "Agent".to_string()],
+            &["mcp__gage__query".to_string(), "Agent".to_string()],
         )
         .unwrap();
         let settings = read_json(&tmp.path().join("settings.json")).unwrap();
         assert_eq!(
             settings["permissions"]["allow"],
-            serde_json::json!(["mcp__gage__Query", "Agent"])
+            serde_json::json!(["mcp__gage__query", "Agent"])
         );
     }
 

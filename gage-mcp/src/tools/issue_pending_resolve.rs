@@ -1,4 +1,4 @@
-//! `IssuePendingResolve`: apply a whole pending-issue resolution plan.
+//! `issue_pending_resolve`: apply a whole pending-issue resolution plan.
 //!
 //! The plan is validated as a unit before any write, so an invalid
 //! plan changes nothing. The store commits each issue independently;
@@ -24,14 +24,14 @@ use crate::tool::{
 };
 use crate::tools::issue_update::optional_string;
 
-pub const NAME: &str = "IssuePendingResolve";
+pub const NAME: &str = "issue_pending_resolve";
 
 pub const TOOL: ToolDef = route;
 
-const MD: &str = include_str!("../../config/tools/IssuePendingResolve.md");
+const MD: &str = include_str!("../../config/tools/issue_pending_resolve.md");
 const _: () = assert!(
     description_byte_len(MD) <= MAX_DESCRIPTION_BYTES,
-    "IssuePendingResolve description exceeds Claude Code's 4096-byte cap",
+    "issue_pending_resolve description exceeds Claude Code's 4096-byte cap",
 );
 
 fn route() -> ToolRoute<GageServer> {
@@ -48,7 +48,7 @@ fn handle(
         let params = ctx.arguments.unwrap_or_default();
         let Some(config) = &ctx.service.config().issue_pending_resolve else {
             return Err(McpError::internal_error(
-                "IssuePendingResolve tool is routed but not configured",
+                "issue_pending_resolve tool is routed but not configured",
                 None,
             ));
         };

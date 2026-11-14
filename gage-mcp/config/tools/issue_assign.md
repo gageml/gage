@@ -1,5 +1,5 @@
 +++
-name = "IssueAssign"
+name = "issue_assign"
 
 [parameters.pool]
 type = "array"
@@ -40,5 +40,5 @@ written.
 session holds it the call is refused unless `force` is set, which
 reassigns it to this session. A pending or closed issue is refused.
 
-Releasing an assigned issue is `IssueUpdate` with `status=open`;
+Releasing an assigned issue is `issue_update` with `status=open`;
 closing it ends the assignment.

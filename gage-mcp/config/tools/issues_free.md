@@ -1,5 +1,5 @@
 +++
-name = "IssuesFree"
+name = "issues_free"
 
 [annotations]
 read_only_hint = false

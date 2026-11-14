@@ -27,7 +27,7 @@ deliberate over it.
    file and a line selection: a line (`42`), a range (`10-20`), or a list
    (`10-20,42`).
 
-2. Run the query through the `mcp__plugin_gage_gage__Query` tool and read
+2. Run the query through the `mcp__plugin_gage_gage__query` tool and read
    the rows:
 
    ```sql
