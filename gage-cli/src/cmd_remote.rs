@@ -32,8 +32,15 @@ pub enum RemoteCommand {
 
     /// Edit a remote
     ///
-    /// Each option given replaces what the remote recorded for it.
+    /// Each option given changes what the remote recorded for it.
+    /// What no option names is left as it is.
     Edit(RemoteEditArgs),
+
+    /// Rename a remote
+    ///
+    /// The remote keeps its URL, its settings, and what it tracked.
+    /// Nothing on the remote is changed.
+    Rename(RemoteRenameArgs),
 
     /// Delete remotes
     ///
@@ -92,26 +99,84 @@ pub struct RemoteAddArgs {
 }
 
 #[derive(Args)]
-#[command(group = ArgGroup::new("remote_edit_attrs").required(true).multiple(true).args(["push", "fetch"]))]
+#[command(group = ArgGroup::new("remote_edit_attrs").required(true).multiple(true).args([
+    "url", "backup", "no_backup",
+    "push", "add_push", "remove_push", "no_push",
+    "fetch", "add_fetch", "remove_fetch", "no_fetch",
+]))]
 pub struct RemoteEditArgs {
     /// Remote to edit
     name: String,
 
-    #[arg(
-        long,
-        value_name = "OBJECT",
-        help = PUSH_SHORT,
-        long_help = format!("{PUSH_SHORT}\n\n{PUSH_HELP}")
-    )]
-    push: Vec<String>,
+    /// Replace remote URL
+    #[arg(long, value_name = "URL")]
+    url: Option<String>,
+
+    /// Mark remote as a backup target
+    ///
+    /// `gage backup` sends the whole store to a backup target and
+    /// refuses any other remote
+    #[arg(long, conflicts_with = "no_backup")]
+    backup: bool,
+
+    /// Clear the backup target mark
+    #[arg(long)]
+    no_backup: bool,
 
     #[arg(
         long,
         value_name = "OBJECT",
-        help = FETCH_SHORT,
-        long_help = format!("{FETCH_SHORT}\n\n{FETCH_HELP}")
+        conflicts_with_all = ["add_push", "remove_push", "no_push"],
+        help = "Replace objects to push (tag, ID, or prefix; repeatable)",
+        long_help = format!("Replace objects to push (tag, ID, or prefix; repeatable)\n\n{PUSH_HELP}")
+    )]
+    push: Vec<String>,
+
+    /// Add an object to push (repeatable)
+    #[arg(long, value_name = "OBJECT", conflicts_with = "no_push")]
+    add_push: Vec<String>,
+
+    /// Remove an object to push (repeatable)
+    #[arg(long, value_name = "OBJECT", conflicts_with = "no_push")]
+    remove_push: Vec<String>,
+
+    /// Clear the objects to push
+    #[arg(long)]
+    no_push: bool,
+
+    #[arg(
+        long,
+        value_name = "OBJECT",
+        conflicts_with_all = ["add_fetch", "remove_fetch", "no_fetch"],
+        help = "Replace objects to fetch (tag, ID, or prefix; repeatable)",
+        long_help = format!("Replace objects to fetch (tag, ID, or prefix; repeatable)\n\n{FETCH_HELP}")
     )]
     fetch: Vec<String>,
+
+    /// Add an object to fetch (repeatable)
+    #[arg(long, value_name = "OBJECT", conflicts_with = "no_fetch")]
+    add_fetch: Vec<String>,
+
+    /// Remove an object to fetch (repeatable)
+    #[arg(long, value_name = "OBJECT", conflicts_with = "no_fetch")]
+    remove_fetch: Vec<String>,
+
+    /// Clear the objects to fetch
+    #[arg(long)]
+    no_fetch: bool,
+
+    /// Skip confirmation prompt
+    #[arg(short, long)]
+    yes: bool,
+}
+
+#[derive(Args)]
+pub struct RemoteRenameArgs {
+    /// Remote to rename
+    name: String,
+
+    /// New remote name
+    new_name: String,
 
     /// Skip confirmation prompt
     #[arg(short, long)]
@@ -228,14 +293,127 @@ pub fn list() -> Result<(), CliError> {
 pub fn edit(args: RemoteEditArgs) -> Result<(), CliError> {
     let store = open_store("gage remote edit")?;
     let remotes = RemoteStore::from(&store);
-    remotes.get(&args.name).context("gage remote edit")?;
+    let remote = remotes.get(&args.name).context("gage remote edit")?;
     dialog::run("Edit remote", || {
+        let failed = DialogError::Failed;
+        let push = edited_objects(
+            &remote.push,
+            &args.push,
+            &args.add_push,
+            &args.remove_push,
+            args.no_push,
+        )
+        .map_err(|o| failed(format!("{} does not push {o} by default", remote.name)))?;
+        let fetch = edited_objects(
+            &remote.fetch,
+            &args.fetch,
+            &args.add_fetch,
+            &args.remove_fetch,
+            args.no_fetch,
+        )
+        .map_err(|o| failed(format!("{} does not fetch {o} by default", remote.name)))?;
+        let backup = match (args.backup, args.no_backup) {
+            (true, _) => Some(true),
+            (_, true) => Some(false),
+            _ => None,
+        };
+
         dialog::step_value("Name", &args.name)?;
-        default_steps(&args.push, &args.fetch)?;
+        if let Some(url) = &args.url {
+            dialog::step_value("URL", url)?;
+        }
+        if let Some(backup) = backup {
+            dialog::step_value("Backup target", if backup { "yes" } else { "no" })?;
+        }
+        edited_step("Push by default", push.as_deref())?;
+        edited_step("Fetch by default", fetch.as_deref())?;
+        // Checked before anything is written, so a bad object leaves
+        // the remote as it was
+        for objects in [&push, &fetch].into_iter().flatten() {
+            validate_remote_objects(objects).map_err(|e| failed(e.to_string()))?;
+        }
         dialog::confirm(args.yes, true)?;
-        set_defaults(&remotes, &args.name, &args.push, &args.fetch)
-            .map_err(|e| DialogError::Failed(e.to_string()))?;
+
+        let apply = || -> Result<(), StoreError> {
+            if let Some(url) = &args.url {
+                remotes.set_url(&args.name, url)?;
+            }
+            if let Some(backup) = backup {
+                remotes.set_backup(&args.name, backup)?;
+            }
+            if let Some(push) = &push {
+                remotes.set_push(&args.name, push)?;
+            }
+            if let Some(fetch) = &fetch {
+                remotes.set_fetch(&args.name, fetch)?;
+            }
+            Ok(())
+        };
+        apply().map_err(|e| failed(e.to_string()))?;
         Ok(format!("Updated remote {}", args.name).into())
+    })
+}
+
+/// The default objects of one direction after an edit, or `None` when
+/// the edit leaves the direction as it is. `clear` empties the list
+/// and `replace` takes its place. Otherwise each of `remove` is taken
+/// out of `current`, then each of `add` it does not hold is appended.
+/// An object to remove that `current` does not hold is the error.
+fn edited_objects(
+    current: &[String],
+    replace: &[String],
+    add: &[String],
+    remove: &[String],
+    clear: bool,
+) -> Result<Option<Vec<String>>, String> {
+    if clear {
+        return Ok(Some(Vec::new()));
+    }
+    if !replace.is_empty() {
+        return Ok(Some(replace.to_vec()));
+    }
+    if add.is_empty() && remove.is_empty() {
+        return Ok(None);
+    }
+    let mut objects = current.to_vec();
+    for object in remove {
+        match objects.iter().position(|o| o == object) {
+            Some(at) => {
+                objects.remove(at);
+            }
+            None => return Err(object.clone()),
+        }
+    }
+    for object in add {
+        if !objects.contains(object) {
+            objects.push(object.clone());
+        }
+    }
+    Ok(Some(objects))
+}
+
+/// Print the default objects an edit leaves a direction with. A
+/// direction the edit does not change prints nothing.
+fn edited_step(label: &str, objects: Option<&[String]>) -> std::io::Result<()> {
+    match objects {
+        None => Ok(()),
+        Some([]) => dialog::step_none(label),
+        Some(objects) => dialog::step_list(label, objects.iter().cloned()),
+    }
+}
+
+pub fn rename(args: RemoteRenameArgs) -> Result<(), CliError> {
+    let store = open_store("gage remote rename")?;
+    let remotes = RemoteStore::from(&store);
+    remotes.get(&args.name).context("gage remote rename")?;
+    dialog::run("Rename remote", || {
+        dialog::step_value("Name", &args.name)?;
+        dialog::step_value("New name", &args.new_name)?;
+        dialog::confirm(args.yes, true)?;
+        let remote = remotes
+            .rename(&args.name, &args.new_name)
+            .map_err(|e| DialogError::Failed(e.to_string()))?;
+        Ok(format!("Renamed remote {} to {}", args.name, remote.name).into())
     })
 }
 
@@ -311,7 +489,7 @@ mod tests {
     }
 
     /// `--push` and `--fetch` repeat on `add` and `edit`, and `edit`
-    /// needs at least one of them.
+    /// needs at least one option.
     #[test]
     fn push_and_fetch_repeat_and_edit_needs_one() {
         let Ok(RemoteCommand::Add(add)) = remote_command(&[
@@ -346,6 +524,104 @@ mod tests {
             panic!("edit parsed with no option");
         };
         assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    }
+
+    /// Every attribute `edit` changes has an option, a replacement
+    /// excludes an addition or removal of the same direction, and a
+    /// mark excludes its clearing.
+    #[test]
+    fn edit_options_parse_and_conflict() {
+        let Ok(RemoteCommand::Edit(edit)) = remote_command(&[
+            "edit",
+            "up",
+            "--url",
+            "/srv/new.git",
+            "--no-backup",
+            "--add-push",
+            "a",
+            "--remove-push",
+            "b",
+            "--no-fetch",
+        ]) else {
+            panic!("not a remote edit");
+        };
+        assert_eq!(edit.url.as_deref(), Some("/srv/new.git"));
+        assert!(edit.no_backup && !edit.backup);
+        assert_eq!(edit.add_push, ["a"]);
+        assert_eq!(edit.remove_push, ["b"]);
+        assert!(edit.no_fetch);
+
+        for only in [&["--backup"][..], &["--no-push"], &["--url", "/x.git"]] {
+            assert!(
+                remote_command(&[&["edit", "up"], only].concat()).is_ok(),
+                "{only:?}"
+            );
+        }
+        for conflict in [
+            &["--backup", "--no-backup"][..],
+            &["--push", "a", "--no-push"],
+            &["--push", "a", "--add-push", "b"],
+            &["--add-fetch", "a", "--no-fetch"],
+            &["--fetch", "a", "--remove-fetch", "b"],
+        ] {
+            let Err(err) = remote_command(&[&["edit", "up"], conflict].concat()) else {
+                panic!("parsed {conflict:?}");
+            };
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::ArgumentConflict,
+                "{conflict:?}"
+            );
+        }
+
+        let Ok(RemoteCommand::Rename(rename)) = remote_command(&["rename", "old", "new", "-y"])
+        else {
+            panic!("not a remote rename");
+        };
+        assert_eq!(
+            (rename.name.as_str(), rename.new_name.as_str()),
+            ("old", "new")
+        );
+        assert!(rename.yes);
+    }
+
+    #[test]
+    fn edited_objects_clears_replaces_removes_then_adds() {
+        let objects = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+        let current = objects(&["a", "b"]);
+        let none: Vec<String> = Vec::new();
+
+        assert_eq!(
+            edited_objects(&current, &none, &none, &none, false),
+            Ok(None)
+        );
+        assert_eq!(
+            edited_objects(&current, &none, &none, &none, true),
+            Ok(Some(none.clone()))
+        );
+        assert_eq!(
+            edited_objects(&current, &objects(&["c"]), &none, &none, false),
+            Ok(Some(objects(&["c"])))
+        );
+        // An object the list holds is not added twice
+        assert_eq!(
+            edited_objects(
+                &current,
+                &none,
+                &objects(&["b", "c"]),
+                &objects(&["a"]),
+                false
+            ),
+            Ok(Some(objects(&["b", "c"])))
+        );
+        assert_eq!(
+            edited_objects(&current, &none, &none, &objects(&["a", "b"]), false),
+            Ok(Some(none.clone()))
+        );
+        assert_eq!(
+            edited_objects(&current, &none, &none, &objects(&["z"]), false),
+            Err("z".to_string())
+        );
     }
 
     /// An edit replaces the default of each direction it names and

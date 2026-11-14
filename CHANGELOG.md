@@ -6,6 +6,27 @@ conventions in _[Keep a Changelog]_. Release versions use [semantic versioning].
 [Keep a Changelog]: https://keepachangelog.com/en/1.1.0/
 [semantic versioning]: https://semver.org/spec/v2.0.0.html
 
+## [0.3.1]
+
+Pending release
+
+### Enhancements
+
+- `gage remote rename` renames a remote and keeps its settings and what it
+  tracked
+- `gage remote edit` changes a remote's URL (`--url`) and backup target mark
+  (`--backup`, `--no-backup`)
+- `gage remote edit` adds, removes, and clears default push and fetch objects
+  (`--add-push`, `--remove-push`, `--no-push`, and the `fetch` equivalents)
+- `gage blame` finds sessions that recorded a file under another path to the
+  same repository: a moved repository, a session from another machine, or a
+  published session
+
+### Fixes
+
+- `gage blame` attributes an edit that was committed after an unrelated commit
+- Files with `[`, `?`, or `*` in their path are recorded as read or written
+
 ## [0.3.0]
 
 ### Enhancements

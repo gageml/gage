@@ -367,6 +367,115 @@ impl RemoteStore<'_> {
         Ok(())
     }
 
+    /// Replace the URL of remote `name`, under the rules `add` has for
+    /// a URL, and return the URL as recorded. A name no remote has is
+    /// [`StoreError::RemoteNotFound`].
+    pub fn set_url(&self, name: &str, url: &str) -> Result<String, StoreError> {
+        self.get(name)?;
+        let url = repository_spec(url)?;
+        run(git_in(
+            self.store.path(),
+            [
+                "config",
+                "--replace-all",
+                &format!("remote.{name}.url"),
+                &url,
+            ],
+        ))?;
+        Ok(url)
+    }
+
+    /// Mark remote `name` as a backup target or clear the mark. A name
+    /// no remote has is [`StoreError::RemoteNotFound`].
+    pub fn set_backup(&self, name: &str, backup: bool) -> Result<(), StoreError> {
+        self.get(name)?;
+        let path = self.store.path();
+        let key = format!("remote.{name}.gage-backup");
+        if backup {
+            run(git_in(path, ["config", "--replace-all", &key, "true"]))?;
+            return Ok(());
+        }
+        match run(git_in(path, ["config", "--unset-all", &key])) {
+            Ok(_) => Ok(()),
+            // Exit 5 is "no such key": the remote was not a backup target
+            Err(StoreError::Git { status, .. }) if status.code() == Some(5) => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Rename remote `old` to `new`. The config moves with every key
+    /// it holds, the fetch refspec is written for the new name, and
+    /// the remote-tracking refs move under the new prefix. A remote
+    /// whose refspec named some other prefix has its tracking refs
+    /// deleted instead: git does not move them, and the next fetch
+    /// writes them under the new prefix. A name no remote has is
+    /// [`StoreError::RemoteNotFound`]; a new name is checked as `add`
+    /// checks a name.
+    pub fn rename(&self, old: &str, new: &str) -> Result<Remote, StoreError> {
+        self.validate_name(new)?;
+        let known = self.list()?;
+        if !known.iter().any(|r| r.name == old) {
+            return Err(StoreError::RemoteNotFound(old.to_string()));
+        }
+        if known.iter().any(|r| r.name == new) {
+            return Err(StoreError::RemoteExists(new.to_string()));
+        }
+        let path = self.store.path();
+
+        // Where the remote's refs are now: its own prefix and whatever
+        // its refspecs name. A prefix another remote owns is not stale.
+        let mut stale = vec![tracking_prefix(old)];
+        let refspecs = match run(git_in(
+            path,
+            ["config", "--get-all", &format!("remote.{old}.fetch")],
+        )) {
+            Ok(output) => output,
+            // Exit 1 is "no such key": the remote has no refspec
+            Err(StoreError::Git { status, .. }) if status.code() == Some(1) => String::new(),
+            Err(e) => return Err(e),
+        };
+        for refspec in refspecs.lines() {
+            let Some((_, dst)) = refspec.rsplit_once(':') else {
+                continue;
+            };
+            let dst = dst.trim_end_matches('*');
+            if dst.starts_with("refs/remotes/") && dst.ends_with('/') {
+                stale.push(dst.to_string());
+            }
+        }
+        let kept: Vec<String> = known
+            .iter()
+            .filter(|r| r.name != old)
+            .map(|r| tracking_prefix(&r.name))
+            .chain([tracking_prefix(new)])
+            .collect();
+        stale.retain(|prefix| !kept.contains(prefix));
+        stale.dedup();
+
+        // Git renames a refspec that names the remote's own prefix and
+        // warns about any other, so the refspec is written for the old
+        // name first and again for the new name after
+        let set_refspec = |name: &str| {
+            let fetch = format!("+{ROOT}*:{}*", tracking_prefix(name));
+            run(git_in(
+                path,
+                [
+                    "config",
+                    "--replace-all",
+                    &format!("remote.{name}.fetch"),
+                    &fetch,
+                ],
+            ))
+        };
+        set_refspec(old)?;
+        run(git_in(path, ["remote", "rename", old, new]))?;
+        set_refspec(new)?;
+        for prefix in &stale {
+            self.delete_refs_under(prefix)?;
+        }
+        self.get(new)
+    }
+
     /// The remote `name`. A name no remote has is
     /// [`StoreError::RemoteNotFound`].
     pub fn get(&self, name: &str) -> Result<Remote, StoreError> {
@@ -915,6 +1024,155 @@ mod tests {
             remotes.delete("share"),
             Err(StoreError::RemoteNotFound(n)) if n == "share"
         ));
+    }
+
+    /// A commit in `store` with ref `name` pointing at it
+    fn tracking_ref(store: &Store, name: &str) {
+        let tree = run(git_in(store.path(), ["mktree"])).unwrap();
+        let commit = run(git_in(
+            store.path(),
+            ["commit-tree", tree.trim(), "-m", "x"],
+        ))
+        .unwrap();
+        run(git_in(store.path(), ["update-ref", name, commit.trim()])).unwrap();
+    }
+
+    #[test]
+    fn set_url_and_set_backup_replace_what_the_remote_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(dir.path());
+        let remotes = RemoteStore::from(&store);
+        remotes.add("share", "/srv/share.git", false).unwrap();
+
+        assert_eq!(
+            remotes.set_url("share", "git@host:x.git").unwrap(),
+            "git@host:x.git"
+        );
+        remotes.set_backup("share", true).unwrap();
+        let remote = remotes.get("share").unwrap();
+        assert_eq!(remote.url, "git@host:x.git");
+        assert!(remote.backup);
+
+        remotes.set_backup("share", false).unwrap();
+        // Clearing a mark the remote does not have is not an error
+        remotes.set_backup("share", false).unwrap();
+        assert!(!remotes.get("share").unwrap().backup);
+        let config = run(git_in(store.path(), ["config", "--list", "--local"])).unwrap();
+        assert!(!config.contains("remote.share.gage-backup"), "{config}");
+
+        assert!(matches!(
+            remotes.set_url("nope", "/x.git"),
+            Err(StoreError::RemoteNotFound(n)) if n == "nope"
+        ));
+        assert!(matches!(
+            remotes.set_backup("nope", true),
+            Err(StoreError::RemoteNotFound(n)) if n == "nope"
+        ));
+    }
+
+    #[test]
+    fn rename_moves_the_config_the_refspec_and_the_tracking_refs() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(dir.path());
+        let remotes = RemoteStore::from(&store);
+        remotes.add("old", "/srv/share.git", true).unwrap();
+        remotes.set_push("old", &["work".to_string()]).unwrap();
+        let old_ref = format!("{}object/x", tracking_prefix("old"));
+        tracking_ref(&store, &old_ref);
+
+        let renamed = remotes.rename("old", "new").unwrap();
+        assert_eq!(
+            renamed,
+            Remote {
+                name: "new".into(),
+                url: "/srv/share.git".into(),
+                backup: true,
+                push: vec!["work".into()],
+                fetch: vec![],
+            }
+        );
+        assert_eq!(remotes.list().unwrap(), [renamed]);
+        let config = run(git_in(store.path(), ["config", "--list", "--local"])).unwrap();
+        assert!(
+            config.contains("remote.new.fetch=+refs/gage/1/*:refs/remotes/new/gage/1/*"),
+            "{config}"
+        );
+        assert!(config.contains("remote.new.tagopt=--no-tags"), "{config}");
+        assert!(!config.contains("remote.old."), "{config}");
+        assert!(store.rev_parse(&old_ref).unwrap().is_none());
+        let new_ref = format!("{}object/x", tracking_prefix("new"));
+        assert!(store.rev_parse(&new_ref).unwrap().is_some());
+    }
+
+    /// A refspec that names a prefix other than the remote's own is
+    /// rewritten for the new name, and the refs under that prefix are
+    /// deleted unless another remote owns it.
+    #[test]
+    fn rename_rewrites_a_refspec_that_names_another_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(dir.path());
+        let remotes = RemoteStore::from(&store);
+        let set_refspec = |name: &str, prefix: &str| {
+            run(git_in(
+                store.path(),
+                [
+                    "config",
+                    "--replace-all",
+                    &format!("remote.{name}.fetch"),
+                    &format!("+refs/gage/1/*:refs/remotes/{prefix}/gage/1/*"),
+                ],
+            ))
+            .unwrap();
+        };
+        remotes.add("github", "/srv/a.git", true).unwrap();
+        set_refspec("github", "backup");
+        let stale = format!("{}object/x", tracking_prefix("backup"));
+        tracking_ref(&store, &stale);
+
+        remotes.rename("github", "offsite").unwrap();
+        let config = run(git_in(store.path(), ["config", "--list", "--local"])).unwrap();
+        assert!(
+            config.contains("remote.offsite.fetch=+refs/gage/1/*:refs/remotes/offsite/gage/1/*"),
+            "{config}"
+        );
+        assert!(!config.contains("refs/remotes/backup/"), "{config}");
+        assert!(store.rev_parse(&stale).unwrap().is_none());
+
+        // The prefix belongs to another remote: its refs are kept
+        remotes.add("other", "/srv/b.git", false).unwrap();
+        set_refspec("offsite", "other");
+        let owned = format!("{}object/y", tracking_prefix("other"));
+        tracking_ref(&store, &owned);
+        remotes.rename("offsite", "third").unwrap();
+        assert!(store.rev_parse(&owned).unwrap().is_some());
+    }
+
+    #[test]
+    fn rename_rejects_an_unknown_remote_and_a_used_or_invalid_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(dir.path());
+        let remotes = RemoteStore::from(&store);
+        remotes.add("a", "/srv/a.git", false).unwrap();
+        remotes.add("b", "/srv/b.git", false).unwrap();
+        assert!(matches!(
+            remotes.rename("nope", "c"),
+            Err(StoreError::RemoteNotFound(n)) if n == "nope"
+        ));
+        assert!(matches!(
+            remotes.rename("a", "b"),
+            Err(StoreError::RemoteExists(n)) if n == "b"
+        ));
+        assert!(matches!(
+            remotes.rename("a", "a"),
+            Err(StoreError::RemoteExists(n)) if n == "a"
+        ));
+        for bad in ["", "-x", "a b"] {
+            assert!(
+                matches!(remotes.rename("a", bad), Err(StoreError::RemoteName(n)) if n == bad),
+                "{bad:?}"
+            );
+        }
+        assert_eq!(remotes.list().unwrap().len(), 2);
     }
 
     /// A push into a working tree repository lands under `refs/gage/`

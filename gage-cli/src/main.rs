@@ -359,6 +359,7 @@ async fn main() -> ExitCode {
                 cmd_remote::RemoteCommand::Add(args) => cmd_remote::add(args),
                 cmd_remote::RemoteCommand::List => cmd_remote::list(),
                 cmd_remote::RemoteCommand::Edit(args) => cmd_remote::edit(args),
+                cmd_remote::RemoteCommand::Rename(args) => cmd_remote::rename(args),
                 cmd_remote::RemoteCommand::Delete(args) => cmd_remote::delete(args),
             },
             Command::Session {
