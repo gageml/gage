@@ -254,16 +254,6 @@ impl BlameTable {
     }
 }
 
-fn distinct_paths(lines: &[BlamedLine]) -> Vec<&Path> {
-    let mut paths: Vec<&Path> = Vec::new();
-    for line in lines {
-        if !paths.contains(&line.path.as_path()) {
-            paths.push(&line.path);
-        }
-    }
-    paths
-}
-
 /// The lines to attribute, each with the window its call must fall in
 /// and the path the file had at its commit. Git supplies both when
 /// the file is in a repository it tracks; otherwise every line's
@@ -294,6 +284,7 @@ fn plain_lines(path: &Path, selection: Option<&LineSelection>) -> Result<Vec<Bla
             number,
             text: line.to_string(),
             path: path.to_path_buf(),
+            suffix: None,
             window_start: None,
             window_end: now,
         })
@@ -314,6 +305,11 @@ struct BlamedLine {
     text: String,
     /// Absolute path of the file at the line's commit
     path: PathBuf,
+    /// `/` and the file's path at the line's commit, relative to the
+    /// repository root: what the path of the same file ends with as
+    /// another checkout of the repository recorded it. `None` for a
+    /// file git does not track.
+    suffix: Option<String>,
     /// Epoch milliseconds, exclusive, or `None` when nothing bounds
     /// the start
     window_start: Option<i64>,
@@ -370,6 +366,7 @@ impl GitFile {
                 number: entry.line,
                 text: entry.text,
                 path: self.root.join(&entry.filename),
+                suffix: Some(format!("/{}", entry.filename)),
                 window_start: window.0,
                 window_end: window.1,
             });
@@ -387,7 +384,11 @@ impl GitFile {
     /// touching the file, through the commit's own time. An
     /// uncommitted line's window runs from the file's last commit to
     /// now. The start is the previous commit's author time and the
-    /// end this commit's committer time. A rewrite of history moves
+    /// end this commit's committer time. The previous commit is the
+    /// last one at or before the entry's parent that changed the file:
+    /// an edit waits in the working tree while unrelated commits land,
+    /// so the parent's own time can follow the edit. A rewrite of
+    /// history moves
     /// committer times later and can stamp consecutive commits with
     /// one committer time, so the author time is the earlier bound,
     /// the committer time the later one, and a rewrite only widens the
@@ -406,9 +407,17 @@ impl GitFile {
         // A commit that added the file has no previous commit, and the
         // window is then open at the start
         let start = match &entry.previous {
-            Some(previous) => {
-                parse_seconds(&git(&self.root, &["log", "-1", "--format=%at", previous])?)
-            }
+            Some(previous) => parse_seconds(&git(
+                &self.root,
+                &[
+                    "log",
+                    "-1",
+                    "--format=%at",
+                    &previous.sha,
+                    "--",
+                    &previous.filename,
+                ],
+            )?),
             None => None,
         };
         Ok((start, end * 1000))
@@ -450,8 +459,16 @@ struct PorcelainEntry {
     committer_time: Option<i64>,
     /// Path of the file at the commit, relative to the repository root
     filename: String,
-    /// The previous commit touching the file, when there is one
-    previous: Option<String>,
+    /// The parent of the commit and the file's path there, when the
+    /// parent has the file
+    previous: Option<Previous>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Previous {
+    sha: String,
+    /// Path of the file at the parent, relative to the repository root
+    filename: String,
 }
 
 /// Parse `git blame --porcelain`. Each line opens with
@@ -464,7 +481,7 @@ fn parse_porcelain(text: &str) -> std::result::Result<Vec<PorcelainEntry>, Strin
     struct Attrs {
         committer_time: Option<i64>,
         filename: Option<String>,
-        previous: Option<String>,
+        previous: Option<Previous>,
     }
     let mut entries = Vec::new();
     let mut known: HashMap<String, Attrs> = HashMap::new();
@@ -495,7 +512,13 @@ fn parse_porcelain(text: &str) -> std::result::Result<Vec<PorcelainEntry>, Strin
             } else if let Some(f) = next.strip_prefix("filename ") {
                 attrs.filename = Some(f.to_string());
             } else if let Some(p) = next.strip_prefix("previous ") {
-                attrs.previous = p.split(' ').next().map(str::to_string);
+                let (sha, filename) = p
+                    .split_once(' ')
+                    .ok_or_else(|| format!("previous {p:?} without a filename"))?;
+                attrs.previous = Some(Previous {
+                    sha: sha.to_string(),
+                    filename: filename.to_string(),
+                });
             }
         };
         let filename = attrs
@@ -557,12 +580,17 @@ struct Candidate {
     /// Epoch milliseconds of the call's result
     timestamp: i64,
     tier: Tier,
+    /// Whether the call recorded the line's own absolute path, not
+    /// only a path with the same repository-relative ending
+    exact: bool,
 }
 
 impl Candidate {
-    /// Ranking key: strongest tier, then earliest call
-    fn rank_key(&self) -> (Tier, i64, i64) {
-        (self.tier, self.timestamp, self.call_line)
+    /// Ranking key: strongest tier, then a call that recorded the
+    /// line's own path over one that recorded the path of another
+    /// checkout, then earliest call
+    fn rank_key(&self) -> (Tier, bool, i64, i64) {
+        (self.tier, !self.exact, self.timestamp, self.call_line)
     }
 
     /// Whether `other` is the same call
@@ -587,14 +615,7 @@ struct OutRow {
 /// call, ranked by evidence; a line between two patch matches of one
 /// call takes that call.
 async fn blame(ctx: &SessionContext, lines: Vec<BlamedLine>) -> Result<Vec<OutRow>> {
-    let paths: Vec<String> = distinct_paths(&lines)
-        .into_iter()
-        .map(|p| {
-            p.to_str()
-                .map(str::to_string)
-                .ok_or_else(|| external_msg(format!("{} is not UTF-8", p.display())))
-        })
-        .collect::<Result<_>>()?;
+    let paths = PathGate::from_lines(&lines)?;
     // An empty file, or a selection off the end of one, has no lines to
     // attribute and no paths to query
     if paths.is_empty() {
@@ -621,18 +642,73 @@ async fn blame(ctx: &SessionContext, lines: Vec<BlamedLine>) -> Result<Vec<OutRo
     Ok(build_rows(found))
 }
 
+/// The recorded paths that name the lines' file: the absolute paths
+/// the file has had in this checkout, and the endings those paths
+/// share with every other checkout of the repository. A session
+/// records the absolute path of its own machine, so a session from a
+/// moved repository, from another machine, or published with its
+/// directories redacted names the file only by the ending.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PathGate {
+    paths: Vec<String>,
+    suffixes: Vec<String>,
+}
+
+impl PathGate {
+    fn from_lines(lines: &[BlamedLine]) -> Result<Self> {
+        let mut gate = Self {
+            paths: Vec::new(),
+            suffixes: Vec::new(),
+        };
+        for line in lines {
+            let path = line
+                .path
+                .to_str()
+                .ok_or_else(|| external_msg(format!("{} is not UTF-8", line.path.display())))?;
+            if !gate.paths.iter().any(|p| p == path) {
+                gate.paths.push(path.to_string());
+            }
+            if let Some(suffix) = &line.suffix
+                && !gate.suffixes.contains(suffix)
+            {
+                gate.suffixes.push(suffix.clone());
+            }
+        }
+        Ok(gate)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.paths.is_empty()
+    }
+
+    /// The SQL predicate on `path`. Its literals and literal suffixes
+    /// reach the native walk, which skips every session whose recorded
+    /// files satisfy none of them before parsing it.
+    fn predicate(&self) -> String {
+        let mut terms = vec![format!("path IN ({})", quoted_list(&self.paths))];
+        terms.extend(
+            self.suffixes
+                .iter()
+                .map(|s| format!("ends_with(path, {})", quote(s))),
+        );
+        format!("({})", terms.join(" OR "))
+    }
+}
+
 /// The sessions with a call that wrote or cited one of `paths`. A
 /// call the record proves did not write a path is no candidate for
-/// it. The literal paths reach the native walk, which skips every
-/// session whose recorded files name none of them before parsing it.
-async fn candidate_sessions(ctx: &SessionContext, paths: &[String]) -> Result<Vec<String>> {
-    let sql = format!(
+/// it.
+async fn candidate_sessions(ctx: &SessionContext, paths: &PathGate) -> Result<Vec<String>> {
+    strings(ctx, &candidate_sessions_sql(paths), &[]).await
+}
+
+fn candidate_sessions_sql(paths: &PathGate) -> String {
+    format!(
         "SELECT DISTINCT session_id FROM tool_use_file \
-         WHERE path IN ({}) AND type IN ('write', 'cite') \
+         WHERE {} AND type IN ('write', 'cite') \
          ORDER BY session_id",
-        quoted_list(paths)
-    );
-    strings(ctx, &sql, &[]).await
+        paths.predicate()
+    )
 }
 
 /// Give an unattributed line the call that added both its neighbors,
@@ -754,7 +830,7 @@ const MIN_MATCH_CHARS: usize = 4;
 async fn match_calls(
     ctx: &SessionContext,
     ids: &[String],
-    paths: &[String],
+    paths: &PathGate,
     lines: &[BlamedLine],
 ) -> Result<BTreeMap<u64, Vec<Candidate>>> {
     // Distinct line texts, each with the lines that carry it
@@ -871,7 +947,7 @@ async fn match_calls(
                     {
                         continue;
                     }
-                    let Some(relation) = line.path.to_str().and_then(|p| files.get(p)) else {
+                    let Some((relation, exact)) = relation(files, line) else {
                         continue;
                     };
                     let tier = if in_patch.contains(&p) {
@@ -896,6 +972,7 @@ async fn match_calls(
                             prompt_line: call_lines.value(i),
                             timestamp,
                             tier,
+                            exact,
                         },
                     );
                 }
@@ -905,21 +982,41 @@ async fn match_calls(
     Ok(found)
 }
 
-/// Add `cand` for `line`, or lower an existing candidate for the same
-/// call to its stronger tier. A line matching one call through both
-/// its patch and its input keeps the patch.
-/// The paths among `paths` each call of `ids` wrote or cited, keyed
-/// by session and call. A call with no such path is absent.
+/// How `files`, one call's recorded paths, relate to `line`: the type
+/// recorded for the line's own path, with `true`, else the strongest
+/// type recorded for a path with the line's repository-relative
+/// ending, with `false`.
+fn relation(files: &HashMap<String, FileType>, line: &BlamedLine) -> Option<(FileType, bool)> {
+    if let Some(type_) = line.path.to_str().and_then(|p| files.get(p)) {
+        return Some((*type_, true));
+    }
+    let suffix = line.suffix.as_deref()?;
+    let mut types = files
+        .iter()
+        .filter(|(path, _)| path.ends_with(suffix))
+        .map(|(_, type_)| *type_);
+    let first = types.next()?;
+    let type_ = if first == FileType::Write || types.any(|t| t == FileType::Write) {
+        FileType::Write
+    } else {
+        first
+    };
+    Some((type_, false))
+}
+
+/// The recorded paths `paths` admits that each call of `ids` wrote or
+/// cited, keyed by session and call. A call with no such path is
+/// absent.
 async fn call_files(
     ctx: &SessionContext,
     ids: &[String],
-    paths: &[String],
+    paths: &PathGate,
 ) -> Result<HashMap<(String, String), HashMap<String, FileType>>> {
     let sql = format!(
         "SELECT session_id, tool_use_id, path, type FROM tool_use_file \
-         WHERE session_id IN ({}) AND path IN ({}) AND type IN ('write', 'cite')",
+         WHERE session_id IN ({}) AND {} AND type IN ('write', 'cite')",
         quoted_list(ids),
-        quoted_list(paths),
+        paths.predicate(),
     );
     let batches = ctx.sql(&sql).await?.collect().await?;
     let mut out: HashMap<(String, String), HashMap<String, FileType>> = HashMap::new();
@@ -941,10 +1038,16 @@ async fn call_files(
     Ok(out)
 }
 
+/// Add `cand` for `line`, or lower an existing candidate for the same
+/// call to its stronger tier. A line matching one call through both
+/// its patch and its input keeps the patch.
 fn record(found: &mut BTreeMap<u64, Vec<Candidate>>, line: u64, cand: Candidate) {
     let cands = found.entry(line).or_default();
     match cands.iter_mut().find(|c| c.same_call(&cand)) {
-        Some(existing) => existing.tier = existing.tier.min(cand.tier),
+        Some(existing) => {
+            existing.tier = existing.tier.min(cand.tier);
+            existing.exact |= cand.exact;
+        }
         None => cands.push(cand),
     }
 }
@@ -1131,7 +1234,10 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::process::Command;
 
+    use datafusion::common::tree_node::{TreeNode, TreeNodeRecursion};
+    use datafusion::logical_expr::LogicalPlan;
     use datafusion::prelude::lit;
+    use gage_session::filter::{LiteralMatch, literal_matches};
     use gage_store::SessionStore;
 
     use super::*;
@@ -1164,8 +1270,11 @@ filename f.rs
         assert_eq!(entries[0].committer_time, Some(1100));
         assert_eq!(entries[0].filename, "f.rs");
         assert_eq!(
-            entries[0].previous.as_deref(),
-            Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+            entries[0].previous,
+            Some(Previous {
+                sha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+                filename: "old/f.rs".to_string(),
+            })
         );
         assert_eq!(entries[1].committer_time, Some(1100));
         assert_eq!(entries[1].filename, "f.rs");
@@ -1675,6 +1784,234 @@ filename f.rs
         );
     }
 
+    /// An edit made before an unrelated commit and committed after it
+    /// falls inside its line's window: the window opens at the last
+    /// commit that changed the file, not at the parent commit.
+    #[tokio::test]
+    async fn native_blame_admits_an_edit_older_than_an_unrelated_parent_commit() {
+        let repo = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(repo.path()).unwrap();
+        git(&root, &["init", "-q"]);
+        // 2025-01-01 and 2025-01-03 for the file; 2025-01-02T12:00:00Z
+        // for the unrelated commit between the edit and its commit
+        let path = commit(&root, "a.rs", "fn one() {}\n", 1_735_689_600, "one");
+        commit(&root, "b.rs", "fn other() {}\n", 1_735_819_200, "unrelated");
+        commit(
+            &root,
+            "a.rs",
+            "fn one() {}\nfn held_in_the_tree() {}\n",
+            1_735_862_400,
+            "two",
+        );
+
+        let mut lines = vec![prompt(1, "add a function", "2025-01-02T00:00:00Z")];
+        lines.extend(edit(
+            2,
+            "t1",
+            &path,
+            "fn one() {}\n",
+            "fn one() {}\nfn held_in_the_tree() {}\n",
+            "2025-01-02T00:00:05Z",
+        ));
+        let claude_root = tempfile::tempdir().unwrap();
+        let spec = write_session(claude_root.path(), &root, NATIVE_ID, &lines);
+
+        let ctx = ContextBuilder::new(None)
+            .cache_root(claude_root.path().join("cache"))
+            .build()
+            .await;
+        let rows = rows(
+            &ctx,
+            &format!("native_blame('{spec}', '{}')", path.display()),
+        )
+        .await;
+        let shape: Vec<_> = rows
+            .iter()
+            .map(|r| (r.line, r.tool_use_id.clone(), r.tier.clone()))
+            .collect();
+        assert_eq!(shape, [(2, some("t1"), some("patch"))], "{rows:?}");
+    }
+
+    /// A session that recorded the file under another checkout's
+    /// absolute path, here one with a redacted directory, is found by
+    /// the path's ending. A session that recorded the file's own path
+    /// ranks above it at the same tier, though its call is later.
+    #[tokio::test]
+    async fn native_blame_finds_a_session_that_recorded_another_checkout() {
+        let repo = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(repo.path()).unwrap();
+        git(&root, &["init", "-q"]);
+        std::fs::create_dir(root.join("src")).unwrap();
+        commit(&root, "src/a.rs", "fn one() {}\n", 1_735_689_600, "one");
+        let path = commit(
+            &root,
+            "src/a.rs",
+            "fn one() {}\nfn from_elsewhere() {}\nfn from_both() {}\n",
+            1_735_862_400,
+            "two",
+        );
+        let foreign_path = Path::new("/home/[REDACTED]/checkout/src/a.rs");
+        let unrelated_path = Path::new("/home/[REDACTED]/checkout/lib/src/a.rs.bak");
+        let foreign = "aaaaaaaa-0000-0000-0000-000000000001";
+        let local = "aaaaaaaa-0000-0000-0000-000000000002";
+        let unrelated = "aaaaaaaa-0000-0000-0000-000000000003";
+        let claude_root = tempfile::tempdir().unwrap();
+
+        let mut lines = vec![prompt(1, "add two functions", "2025-01-02T00:00:00Z")];
+        lines.extend(edit(
+            2,
+            "t1",
+            foreign_path,
+            "fn one() {}\n",
+            "fn one() {}\nfn from_elsewhere() {}\nfn from_both() {}\n",
+            "2025-01-02T00:00:05Z",
+        ));
+        write_session(
+            claude_root.path(),
+            Path::new("/home/[REDACTED]/checkout"),
+            foreign,
+            &lines,
+        );
+        let mut lines = vec![prompt(1, "add it here too", "2025-01-02T01:00:00Z")];
+        lines.extend(edit(
+            2,
+            "t2",
+            &path,
+            "fn one() {}\n",
+            "fn one() {}\nfn from_both() {}\n",
+            "2025-01-02T01:00:05Z",
+        ));
+        write_session(claude_root.path(), &root, local, &lines);
+        let mut lines = vec![prompt(1, "another file", "2025-01-02T00:00:00Z")];
+        lines.extend(edit(
+            2,
+            "t3",
+            unrelated_path,
+            "",
+            "fn from_elsewhere() {}\n",
+            "2025-01-02T00:00:05Z",
+        ));
+        let spec = write_session(claude_root.path(), &root, unrelated, &lines);
+
+        let ctx = ContextBuilder::new(None)
+            .cache_root(claude_root.path().join("cache"))
+            .build()
+            .await;
+        let rows = rows(
+            &ctx,
+            &format!("native_blame('{spec}', '{}')", path.display()),
+        )
+        .await;
+        let shape: Vec<_> = rows
+            .iter()
+            .map(|r| {
+                (
+                    r.line,
+                    r.session.clone(),
+                    r.tool_use_id.clone(),
+                    r.rank,
+                    r.tier.clone(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                (2, some(foreign), some("t1"), 1, some("patch")),
+                (3, some(local), some("t2"), 1, some("patch")),
+                (3, some(foreign), some("t1"), 2, some("patch")),
+            ],
+            "{rows:?}"
+        );
+    }
+
+    /// A published session records the file as a relative path under
+    /// a redacted directory and no working directory. The path is
+    /// kept as recorded and matched by its ending.
+    #[tokio::test]
+    async fn native_blame_finds_a_session_that_recorded_a_redacted_relative_path() {
+        let repo = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(repo.path()).unwrap();
+        git(&root, &["init", "-q"]);
+        std::fs::create_dir(root.join("src")).unwrap();
+        let path = commit(
+            &root,
+            "src/a.rs",
+            "fn published() {}\n",
+            1_735_862_400,
+            "one",
+        );
+        let mut lines = vec![prompt(1, "write it", "2025-01-02T00:00:00Z")];
+        lines.extend(edit(
+            2,
+            "t1",
+            Path::new("[REDACTED]/src/a.rs"),
+            "",
+            "fn published() {}\n",
+            "2025-01-02T00:00:05Z",
+        ));
+        let claude_root = tempfile::tempdir().unwrap();
+        let spec = write_session(claude_root.path(), &root, NATIVE_ID, &lines);
+
+        let ctx = ContextBuilder::new(None)
+            .cache_root(claude_root.path().join("cache"))
+            .build()
+            .await;
+        let rows = rows(
+            &ctx,
+            &format!("native_blame('{spec}', '{}')", path.display()),
+        )
+        .await;
+        let shape: Vec<_> = rows
+            .iter()
+            .map(|r| (r.line, r.tool_use_id.clone(), r.tier.clone()))
+            .collect();
+        assert_eq!(shape, [(1, some("t1"), some("patch"))], "{rows:?}");
+    }
+
+    /// The suffix terms reach the `tool_use_file` scan in a shape the
+    /// session walk prunes on, beside the literal paths.
+    #[tokio::test]
+    async fn the_path_gate_reaches_the_scan_as_literal_matches() {
+        let claude_root = tempfile::tempdir().unwrap();
+        let spec = write_session(claude_root.path(), Path::new("/w/proj"), NATIVE_ID, &[]);
+        let table = BlameTable {
+            scope: Scope::Native { show_agents: false },
+            source: Some(spec),
+            cache_root: Some(claude_root.path().join("cache")),
+            path: PathBuf::from("/w/proj/src/a.rs"),
+            selection: None,
+        };
+        let ctx = table.open().await.unwrap();
+        let gate = PathGate {
+            paths: vec!["/w/proj/src/a.rs".to_string()],
+            suffixes: vec!["/src/a.rs".to_string(), "/src/old_a.rs".to_string()],
+        };
+        let plan = ctx
+            .sql(&candidate_sessions_sql(&gate))
+            .await
+            .unwrap()
+            .into_optimized_plan()
+            .unwrap();
+        let mut pushed = Vec::new();
+        plan.apply(|node| {
+            if let LogicalPlan::TableScan(scan) = node {
+                pushed.extend(scan.filters.iter().cloned());
+            }
+            Ok(TreeNodeRecursion::Continue)
+        })
+        .unwrap();
+        assert_eq!(
+            literal_matches(&pushed, "path"),
+            [[
+                LiteralMatch::Is("/w/proj/src/a.rs".to_string()),
+                LiteralMatch::EndsWith("/src/a.rs".to_string()),
+                LiteralMatch::EndsWith("/src/old_a.rs".to_string()),
+            ]],
+            "{pushed:?}"
+        );
+    }
+
     /// Outside a repository the lines come from the file, every
     /// window open at the start, and the selection applies.
     #[test]
@@ -1845,7 +2182,10 @@ filename f.rs
             selection: None,
         };
         let ctx = table.open().await.unwrap();
-        let paths = vec![file.to_str().unwrap().to_string()];
+        let paths = PathGate {
+            paths: vec![file.to_str().unwrap().to_string()],
+            suffixes: Vec::new(),
+        };
         let found = candidate_sessions(&ctx, &paths).await.unwrap();
         assert_eq!(found, [writer.to_string(), elsewhere.to_string()]);
     }

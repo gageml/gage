@@ -9,10 +9,12 @@ use std::path::{Component, Path, PathBuf};
 use serde_json::Value;
 
 /// The paths `input` refers to, resolved against `cwd` and `home`,
-/// each once, sorted. A Bash command contributes its tokens; any other tool contributes the string values of keys
-/// ending in `path`. A token is path-shaped when it holds a `/`, no
-/// URL scheme, and no glob character. A relative path with no `cwd`
-/// is dropped, as is a `~` path with no `home`.
+/// each once, sorted. A Bash command contributes its path-shaped
+/// tokens; any other tool contributes the string values of keys
+/// ending in `path`, whatever their shape. A shell token that cannot
+/// be resolved, a relative one with no `cwd` or a `~` one with no
+/// `home`, is dropped. A path argument that cannot be resolved is
+/// kept as the record states it.
 pub(crate) fn referenced_paths(
     name: &str,
     input: &Value,
@@ -20,8 +22,8 @@ pub(crate) fn referenced_paths(
     home: Option<&Path>,
 ) -> Vec<PathBuf> {
     let mut out = Vec::new();
-    let mut push = |token: &str| {
-        if let Some(path) = resolve(token, cwd, home)
+    let mut push = |path: Option<PathBuf>| {
+        if let Some(path) = path
             && !out.contains(&path)
         {
             out.push(path);
@@ -30,11 +32,11 @@ pub(crate) fn referenced_paths(
     if name == "Bash" {
         if let Some(command) = input.get("command").and_then(Value::as_str) {
             for token in command_tokens(command) {
-                push(token);
+                push(resolve_token(token, cwd, home));
             }
         }
     } else {
-        path_values(input, &mut |s| push(s));
+        path_values(input, &mut |s| push(resolve(s, cwd, home)));
     }
     out.sort();
     out
@@ -70,8 +72,10 @@ fn command_tokens(command: &str) -> impl Iterator<Item = &str> {
         .filter(|t| !t.is_empty())
 }
 
-/// `token` as a path when it is path-shaped, resolved and normalized.
-pub(crate) fn resolve(token: &str, cwd: Option<&Path>, home: Option<&Path>) -> Option<PathBuf> {
+/// A shell `token` as a path when it is path-shaped, resolved and
+/// normalized. A token is path-shaped when it holds a `/`, no URL
+/// scheme, and no glob character.
+fn resolve_token(token: &str, cwd: Option<&Path>, home: Option<&Path>) -> Option<PathBuf> {
     let token = token.trim_end_matches(['.', ',', ':', ';', ')']);
     if !token.contains('/')
         || token.contains("://")
@@ -81,16 +85,35 @@ pub(crate) fn resolve(token: &str, cwd: Option<&Path>, home: Option<&Path>) -> O
     {
         return None;
     }
-    let path = if let Some(rest) = token.strip_prefix("~/") {
+    absolute(token, cwd, home)
+}
+
+/// `path` resolved and normalized, or as the record states it when
+/// nothing resolves it: a published session records
+/// `[REDACTED]/src/lib.rs` and no working directory. The text is a
+/// path by construction, a path argument or a recorded diff path, so
+/// no shape is required of it: `app/[id]/page.tsx` holds glob
+/// characters and is a file.
+pub(crate) fn resolve(path: &str, cwd: Option<&Path>, home: Option<&Path>) -> Option<PathBuf> {
+    if path.is_empty() {
+        return None;
+    }
+    Some(absolute(path, cwd, home).unwrap_or_else(|| PathBuf::from(path)))
+}
+
+/// `path` as an absolute, normalized path; `None` for a relative path
+/// with no `cwd` and a `~` path with no `home`.
+fn absolute(path: &str, cwd: Option<&Path>, home: Option<&Path>) -> Option<PathBuf> {
+    let resolved = if let Some(rest) = path.strip_prefix("~/") {
         home?.join(rest)
-    } else if let Some(rest) = token.strip_prefix("$HOME/") {
+    } else if let Some(rest) = path.strip_prefix("$HOME/") {
         home?.join(rest)
-    } else if token.starts_with('/') {
-        PathBuf::from(token)
+    } else if path.starts_with('/') {
+        PathBuf::from(path)
     } else {
-        cwd?.join(token)
+        cwd?.join(path)
     };
-    Some(normalize(&path))
+    Some(normalize(&resolved))
 }
 
 /// `path` with `.` removed and `..` applied lexically
@@ -151,6 +174,37 @@ mod tests {
             paths("Edit", input),
             ["/w/proj/a.rs", "/w/proj/nb/x.ipynb"].map(PathBuf::from)
         );
+    }
+
+    /// A path argument is a path whatever characters it holds; the
+    /// same text as a shell token is a glob.
+    #[test]
+    fn a_path_argument_keeps_glob_characters_a_shell_token_does_not() {
+        assert_eq!(
+            paths("Edit", json!({"file_path": "/w/proj/app/[id]/page.tsx"})),
+            [PathBuf::from("/w/proj/app/[id]/page.tsx")]
+        );
+        assert_eq!(
+            paths("Read", json!({"file_path": "[REDACTED]/src/what?.rs"})),
+            [PathBuf::from("/w/proj/[REDACTED]/src/what?.rs")]
+        );
+        assert_eq!(
+            paths("Grep", json!({"pattern": "x", "path": "src"})),
+            [PathBuf::from("/w/proj/src")],
+            "a relative argument without a slash is still a path"
+        );
+        assert!(paths("Read", json!({"file_path": ""})).is_empty());
+        assert_eq!(
+            referenced_paths(
+                "Edit",
+                &json!({"file_path": "[REDACTED]/src/lib.rs"}),
+                None,
+                None
+            ),
+            [PathBuf::from("[REDACTED]/src/lib.rs")],
+            "an argument nothing resolves is kept as recorded"
+        );
+        assert!(paths("Bash", json!({"command": "cat /w/proj/app/[id]/page.tsx"})).is_empty());
     }
 
     #[test]

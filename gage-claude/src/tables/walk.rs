@@ -2,7 +2,6 @@
 //! (`message`, `entry`, `tool_use`, `tool_use_file`, `session`).
 
 use std::collections::HashMap;
-use std::ffi::OsStr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Instant, UNIX_EPOCH};
@@ -19,7 +18,8 @@ use gage_core::style::IdHighlighter;
 use crate::index::ClaudeSessionAttrs;
 use crate::session::SessionInfo;
 use gage_session::filter::{
-    ColumnFilter, IdFilter, TimeBounds, covered_by, literal_members, time_bounds,
+    ColumnFilter, IdFilter, LiteralMatch, TimeBounds, covered_by, literal_matches, literal_members,
+    time_bounds,
 };
 
 /// The columns the walk fills from the directory listing alone,
@@ -84,10 +84,10 @@ pub(crate) struct SummaryPrune {
     pub type_col: Option<&'static str>,
 }
 
-/// The literal sets pushed filters admit for the file columns, one
-/// per term.
+/// What pushed filters admit for the file columns, one set per term:
+/// a path by a literal or a literal suffix, a type by a literal.
 struct FileTerms {
-    paths: Vec<Vec<String>>,
+    paths: Vec<Vec<LiteralMatch>>,
     types: Vec<Vec<String>>,
 }
 
@@ -108,7 +108,7 @@ impl SummaryPrune {
         FileTerms {
             paths: self
                 .path_col
-                .map(|c| literal_members(filters, c))
+                .map(|c| literal_matches(filters, c))
                 .unwrap_or_default(),
             types: self
                 .type_col
@@ -126,10 +126,11 @@ impl SummaryPrune {
         in_span
             && (terms.is_empty()
                 || summary.files.iter().any(|f| {
+                    let path = f.path.to_string_lossy();
                     terms
                         .paths
                         .iter()
-                        .all(|set| set.iter().any(|p| f.path.as_os_str() == OsStr::new(p)))
+                        .all(|set| set.iter().any(|m| m.admits(&path)))
                         && terms
                             .types
                             .iter()
@@ -324,6 +325,10 @@ mod tests {
         ))
     }
 
+    fn ends_with(col: &str, suffix: &str) -> Expr {
+        datafusion::functions::string::expr_fn::ends_with(Expr::Column(col.into()), lit(suffix))
+    }
+
     fn any_of(col: &str, values: &[&str]) -> Expr {
         Expr::Column(col.into()).in_list(values.iter().map(|v| lit(v)).collect(), false)
     }
@@ -386,6 +391,19 @@ mod tests {
             "a path term and a type term must hold of one pair"
         );
         assert_eq!(walked(&[any_of("path", &["/w/a.rs", "/w/b.rs"])]), ids);
+        assert_eq!(
+            walked(&[ends_with("path", "/b.rs")]),
+            [ids[1], ids[3]],
+            "a suffix term keeps the sessions with a path ending in it"
+        );
+        assert_eq!(
+            walked(&[Expr::BinaryExpr(BinaryExpr::new(
+                Box::new(eq("path", "/elsewhere/a.rs")),
+                Operator::Or,
+                Box::new(ends_with("path", "/b.rs")),
+            ))]),
+            [ids[1], ids[3]]
+        );
         assert_eq!(
             walked(&[any_of("type", &["write", "read"])]),
             [ids[0], ids[1], ids[3]]

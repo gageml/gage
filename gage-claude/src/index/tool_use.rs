@@ -458,6 +458,57 @@ mod tests {
         assert_eq!(rows[1].files, []);
     }
 
+    /// A written path that holds glob characters is a `write` row: the
+    /// Edit's own path argument, and a diff path the shell command
+    /// does not name as a token.
+    #[test]
+    fn a_written_path_with_glob_characters_is_a_write() {
+        let mut sed = call(
+            "a2",
+            "2025-01-01T00:00:03Z",
+            "t2",
+            "Bash",
+            json!({"command": "touch '[REDACTED]/app/[id]/page.tsx'"}),
+        );
+        sed["cwd"] = json!("/w");
+        let rows = collect(&[
+            call(
+                "a1",
+                "2025-01-01T00:00:01Z",
+                "t1",
+                "Edit",
+                json!({"file_path": "/w/app/[id]/page.tsx", "old_string": "a", "new_string": "b"}),
+            ),
+            result(
+                "u1",
+                "2025-01-01T00:00:02Z",
+                "t1",
+                json!("ok"),
+                Some(json!({"filePath": "/w/app/[id]/page.tsx", "structuredPatch": []})),
+            ),
+            sed,
+            result(
+                "u2",
+                "2025-01-01T00:00:04Z",
+                "t2",
+                json!(""),
+                Some(json!({
+                    "stdout": "", "stderr": "", "interrupted": false,
+                    "bashEditDiff": {"changedFiles": ["[REDACTED]/app/[id]/page.tsx"]}
+                })),
+            ),
+        ]);
+        assert_eq!(
+            rows[0].files,
+            [file("/w/app/[id]/page.tsx", FileType::Write)]
+        );
+        assert_eq!(
+            rows[1].files,
+            [file("/w/[REDACTED]/app/[id]/page.tsx", FileType::Write)],
+            "a relative diff path resolves against the call's directory"
+        );
+    }
+
     /// A shell command whose result carries no diff is unjudged: every
     /// path its text names is a citation. One whose result carries a
     /// diff is judged: a path the diff lists is a write, and any other

@@ -30,7 +30,7 @@ use super::derive::ClaudeSessionAttrs;
 /// and rebuilt. It is also the `summary_version` of every session the
 /// driver writes to a store, where a stored session with a lower
 /// version is derived again on its next add.
-pub const VERSION: u32 = 10;
+pub const VERSION: u32 = 11;
 
 /// The manifest file beside the session files
 pub(crate) const MANIFEST_FILE: &str = "manifest.json";

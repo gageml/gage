@@ -435,6 +435,77 @@ fn collect_literal_members(expr: &Expr, col: &str, out: &mut Vec<Vec<String>>) {
     }
 }
 
+/// One way a literal admits a column value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LiteralMatch {
+    /// The value is the literal
+    Is(String),
+    /// The value ends with the literal
+    EndsWith(String),
+}
+
+impl LiteralMatch {
+    pub fn admits(&self, value: &str) -> bool {
+        match self {
+            LiteralMatch::Is(literal) => value == literal,
+            LiteralMatch::EndsWith(suffix) => value.ends_with(suffix.as_str()),
+        }
+    }
+}
+
+/// [`literal_members`] with the suffix test beside membership: a term
+/// is literal membership on `col`, `ends_with(col, 'v')`, or an `OR`
+/// whose every side is one of those, and admits a value any of its
+/// matches admits. Any other term admits everything and yields no
+/// set.
+pub fn literal_matches(filters: &[Expr], col: &str) -> Vec<Vec<LiteralMatch>> {
+    let mut out = Vec::new();
+    for f in filters {
+        collect_literal_matches(f, col, &mut out);
+    }
+    out
+}
+
+fn collect_literal_matches(expr: &Expr, col: &str, out: &mut Vec<Vec<LiteralMatch>>) {
+    match expr {
+        Expr::BinaryExpr(b) if b.op == Operator::And => {
+            collect_literal_matches(&b.left, col, out);
+            collect_literal_matches(&b.right, col, out);
+        }
+        _ => {
+            if let Some(matches) = match_set(expr, col) {
+                out.push(matches);
+            }
+        }
+    }
+}
+
+/// The matches `expr` admits for `col`; `None` for any shape
+/// [`literal_matches`] does not read.
+fn match_set(expr: &Expr, col: &str) -> Option<Vec<LiteralMatch>> {
+    if let Some(values) = membership_set(expr, col) {
+        return Some(values.into_iter().map(LiteralMatch::Is).collect());
+    }
+    match expr {
+        Expr::BinaryExpr(b) if b.op == Operator::Or => {
+            let mut matches = match_set(&b.left, col)?;
+            for m in match_set(&b.right, col)? {
+                if !matches.contains(&m) {
+                    matches.push(m);
+                }
+            }
+            Some(matches)
+        }
+        Expr::ScalarFunction(f) if f.name() == "ends_with" => match f.args.as_slice() {
+            [value, suffix] if is_column(value, col) => {
+                Some(vec![LiteralMatch::EndsWith(utf8_literal(suffix)?)])
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// `value` when `column` is `col` and `value` is a string literal.
 fn literal_eq(column: &Expr, value: &Expr, col: &str) -> Option<String> {
     is_column(column, col)
@@ -812,6 +883,39 @@ mod tests {
             ]
         );
         assert_eq!(literal_members(&filters, "type"), [["write"]]);
+    }
+
+    #[test]
+    fn literal_matches_unite_membership_and_suffix_terms() {
+        let ends_with = |suffix: &str| {
+            datafusion::functions::string::expr_fn::ends_with(col("path"), lit_str(suffix))
+        };
+        let is = |v: &str| LiteralMatch::Is(v.to_string());
+        let ends = |v: &str| LiteralMatch::EndsWith(v.to_string());
+        let filters = [
+            cmp(
+                col("path").in_list(vec![lit_str("/w/a.rs"), lit_str("/w/b.rs")], false),
+                Operator::Or,
+                cmp(ends_with("/a.rs"), Operator::Or, ends_with("/b.rs")),
+            ),
+            cmp(
+                ends_with("/c.rs"),
+                Operator::And,
+                cmp(col("type"), Operator::Eq, lit_str("write")),
+            ),
+            cmp(ends_with("/d.rs"), Operator::Or, col("path").is_null()),
+            datafusion::functions::string::expr_fn::ends_with(lit_str("/e.rs"), col("path")),
+        ];
+        assert_eq!(
+            literal_matches(&filters, "path"),
+            [
+                vec![is("/w/a.rs"), is("/w/b.rs"), ends("/a.rs"), ends("/b.rs")],
+                vec![ends("/c.rs")],
+            ]
+        );
+        assert_eq!(literal_matches(&filters, "type"), [[is("write")]]);
+        assert!(ends("/a.rs").admits("/w/a.rs") && !ends("/a.rs").admits("/w/aa.rs"));
+        assert!(is("/w/a.rs").admits("/w/a.rs") && !is("/w/a.rs").admits("/x/w/a.rs"));
     }
 
     #[test]
