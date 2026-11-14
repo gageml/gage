@@ -84,7 +84,7 @@ session is already stored."#,
     },
     HelpTopic {
         topic: "message_text",
-        short: "full-text message search and its query syntax",
+        short: "full-text message search, its query syntax, and message kinds",
         full: r#"message_text(query [, snippet_len]) searches the text of every stored session's
 messages; native_message_text(source, query [, snippet_len]) searches a source's
 sessions, with source as the native functions take it. Each returns (url,
@@ -99,6 +99,15 @@ literal values, reaches the search too, so the cap counts admitted hits alone.
 The search
 reconciles its index first, so a message written since the last query is found.
 message_text is absent from a scan-scoped context.
+
+Message kinds: type is user, assistant, or system, and subtype narrows it.
+Typed conversation is subtype text under type user or assistant. A tool call
+is (assistant, tool_use) and its result is (user, tool_result), so
+type = 'user' alone admits tool output. Model reasoning is
+(assistant, thinking). With no term on type or subtype the search covers
+every kind, and tool calls and results are most messages. To search only what
+the user and the assistant wrote, add WHERE subtype = 'text' or the field
+term +subtype:text.
 
 Query syntax:
 - Plain terms: refactor cache matches either term
@@ -116,7 +125,11 @@ ORDER BY t.score DESC LIMIT 20;
 
 Sessions ranked by hits:
 SELECT session_id, count(*) AS hits FROM message_text('telemetry')
-GROUP BY session_id ORDER BY hits DESC;"#,
+GROUP BY session_id ORDER BY hits DESC;
+
+Conversation text only:
+SELECT session_id, line, type, snippet FROM message_text('prepared plan')
+WHERE subtype = 'text' LIMIT 20;"#,
     },
     HelpTopic {
         topic: "blame",

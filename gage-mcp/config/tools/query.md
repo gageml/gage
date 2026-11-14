@@ -36,7 +36,7 @@ syntax, and the dialect limits. Read a topic with
 `SELECT full FROM help WHERE topic = '<topic>'`. The topics:
 
 native: session functions that read a source directly, for sessions not in the store
-message_text: full-text message search and its query syntax
+message_text: full-text message search, its query syntax, and message kinds
 blame: the session call that wrote each line of a file
 json: reading raw, input_raw, result_raw, and content_schema
 summary: the summary JSON fields and token totals
