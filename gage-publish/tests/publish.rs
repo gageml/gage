@@ -187,7 +187,10 @@ fn staged_attrs(root: &std::path::Path, id: &str) -> Value {
 }
 
 fn staged_summary(root: &std::path::Path, id: &str) -> Value {
-    staged_attrs(root, id)["summary"].clone()
+    staged_attrs(root, id)
+        .get("summary")
+        .cloned()
+        .unwrap_or_default()
 }
 
 fn changes(root: &std::path::Path, id: &str) -> Vec<ChangeRecord> {
@@ -1590,7 +1593,10 @@ async fn a_derived_publish_is_found_again_and_rewritten_only_when_stale() {
     );
     assert_eq!(state(&raised, &grown), PublishedState::Stale);
     let third = publish(&raised, &grown).await;
-    assert_eq!(f.store.walk_parent_chain(&third).unwrap(), [third.clone()]);
+    assert_eq!(
+        f.store.walk_parent_chain(&third).unwrap(),
+        std::slice::from_ref(&third)
+    );
     assert!(!content(&third).contains("sk-ant-api03"));
     assert_eq!(state(&raised, &grown), PublishedState::Current);
     assert_eq!(sessions.get(&id).unwrap().commit_sha, third);

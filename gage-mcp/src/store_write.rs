@@ -154,8 +154,7 @@ mod tests {
             panic!("unexpected outcome {outcome:?}");
         };
         assert!(text.starts_with("Wrote open issue "), "{text}");
-        let store = writer.store();
-        let issues: Vec<_> = IssueStore::from(&*store)
+        let issues: Vec<_> = IssueStore::from(&*writer.store())
             .iter()
             .unwrap()
             .collect::<Result<_, _>>()
@@ -165,7 +164,6 @@ mod tests {
         assert_eq!(issues[0].title, "Flaky build");
         assert_eq!(issues[0].author, "user:t");
         assert_eq!(issues[0].status, IssueStatus::Open);
-        drop(store);
 
         let outcome = (tool.callback)(IssueWriteInput {
             title: "Cites nothing real".into(),

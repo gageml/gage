@@ -187,7 +187,8 @@ fn plain_prefix(pattern: &str) -> Option<String> {
         if let Some(after) = rest.strip_prefix("[*]") {
             prefix.push_str("/*");
             rest = after;
-        } else if let Some(after) = rest.strip_prefix('.') {
+        } else {
+            let after = rest.strip_prefix('.')?;
             if after.starts_with('.') {
                 return None;
             }
@@ -206,8 +207,6 @@ fn plain_prefix(pattern: &str) -> Option<String> {
             prefix.push('/');
             prefix.push_str(&name.replace('~', "~0").replace('/', "~1"));
             rest = &after[end..];
-        } else {
-            return None;
         }
     }
     Some(prefix)
