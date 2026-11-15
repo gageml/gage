@@ -28,8 +28,9 @@ use gage_session::{
     Derivation, Driver, DriverError, DriverStatus, DriverTables, Entry, EntryBody, EntryCodec,
     EntryValue, Field, HarnessInfo, HarnessSession, HostContext, InstallInfo, InstallReport,
     InstallUi, MaintenanceOutcome, MaintenanceStatus, MessageTextFilter, MessageTextHit,
-    ModelSizes, NativeLookupError, NativeSession, SessionAttrs, SessionLiveError, SkillSession,
-    Source, SourceOptions, StoredSession, SummaryAttrs, ToolUse, WrittenContent, split_scheme,
+    ModelChoices, ModelSizes, NativeLookupError, NativeSession, SessionAttrs, SessionLiveError,
+    SkillSession, Source, SourceOptions, StoredSession, SummaryAttrs, ToolUse, WrittenContent,
+    split_scheme,
 };
 use serde::Deserialize;
 use serde_json::{Map, Value};
@@ -42,7 +43,7 @@ use crate::index::{
     ClaudeSessionAttrs, Fingerprint, IndexStore, LockMode, SUMMARY_VERSION, ToolUseCollector,
     derive_entry, derive_session, derive_session_from, project_of,
 };
-use crate::model::{default_sizes, resolve_model};
+use crate::model::{default_sizes, model_choices, resolve_model};
 use crate::plugin;
 use crate::preflight;
 use crate::proc::find_claude;
@@ -153,6 +154,10 @@ impl Driver for ClaudeDriver {
 
     fn model_sizes(&self) -> ModelSizes {
         self.models.clone()
+    }
+
+    fn model_choices(&self) -> ModelChoices {
+        model_choices()
     }
 
     /// Drops the `claude-` vendor prefix every Claude model name carries

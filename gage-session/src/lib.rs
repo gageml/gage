@@ -28,6 +28,7 @@ pub mod codec;
 pub mod content_schema;
 pub mod filter;
 pub mod host;
+pub mod model_choice;
 pub mod model_size;
 pub mod progress;
 pub mod status;
@@ -46,6 +47,7 @@ pub use content_schema::{
     ContentField, ContentSchema, content_schema_batch, content_schema_schema,
 };
 pub use host::HostContext;
+pub use model_choice::{ModelChoice, ModelChoices};
 pub use model_size::{MODEL_SIZES, ModelSizes};
 pub use status::{AuthInfo, DriverStatus, Field, HarnessInfo, InstallInfo};
 pub use summary_columns::{SummaryArrays, SummaryColumns};
@@ -167,6 +169,12 @@ pub trait Driver: Send + Sync {
     /// default is none, for a driver that resolves no size names.
     fn model_sizes(&self) -> ModelSizes {
         ModelSizes::default()
+    }
+
+    /// The models a dialog offers for a session this driver starts.
+    /// The default offers none, and the dialog asks for a model name.
+    fn model_choices(&self) -> ModelChoices {
+        ModelChoices::default()
     }
 
     /// The display form of a model name from this driver's sessions.

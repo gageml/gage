@@ -7,7 +7,7 @@
 //! family. Family aliases and concrete model ids pass through
 //! unchanged.
 
-use gage_session::ModelSizes;
+use gage_session::{ModelChoice, ModelChoices, ModelSizes};
 
 /// Size used when a spec does not set a model. Every child claude
 /// gets `--model`; an unset model never falls through to the user's
@@ -20,6 +20,27 @@ pub fn default_sizes() -> ModelSizes {
         small: Some("claude-haiku-4-5".to_string()),
         medium: Some("claude-sonnet-4-6".to_string()),
         large: Some("claude-opus-4-8".to_string()),
+    }
+}
+
+/// The models a dialog offers for a Claude Code session, best first.
+/// Each is a name Claude Code resolves itself.
+pub fn model_choices() -> ModelChoices {
+    let choice = ModelChoice::new;
+    ModelChoices {
+        choices: vec![
+            choice("fable", "Fable", ""),
+            choice("opus[1m]", "Opus (1M context)", ""),
+            choice("opus", "Opus", "latest Opus"),
+            choice(
+                "opusplan",
+                "Opus plan",
+                "Opus for planning, Sonnet for execution",
+            ),
+            choice("sonnet[1m]", "Sonnet (1M context)", ""),
+            choice("sonnet", "Sonnet", "latest Sonnet"),
+        ],
+        example: Some("claude-sonnet-4-6".to_string()),
     }
 }
 
@@ -39,6 +60,28 @@ pub fn resolve_model<'a>(input: &'a str, sizes: &'a ModelSizes) -> &'a str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn choices_run_best_first_and_pass_through_resolution() {
+        let offered = model_choices();
+        let models: Vec<&str> = offered.choices.iter().map(|c| c.model.as_str()).collect();
+        assert_eq!(
+            models,
+            [
+                "fable",
+                "opus[1m]",
+                "opus",
+                "opusplan",
+                "sonnet[1m]",
+                "sonnet"
+            ]
+        );
+        assert_eq!(offered.example.as_deref(), Some("claude-sonnet-4-6"));
+        let sizes = default_sizes();
+        for model in models {
+            assert_eq!(resolve_model(model, &sizes), model);
+        }
+    }
 
     #[test]
     fn resolves_sizes_to_their_defaults() {
