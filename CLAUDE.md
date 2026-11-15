@@ -1,8 +1,10 @@
 ## General rules
 
-- Do NOT every commit to this Git repository. Each human contributor is
-  responsible for their own commits. This is an important part of the
-  contribution policy and must not be violated.
+- Push changes to a topic branch only. Never push to `main`, `gar1t-dev`, or
+  `release`.
+
+- Do not push without the user's approval. Approval covers the push it was
+  given for and does not carry over to later pushes.
 
 ## Design rules
 
