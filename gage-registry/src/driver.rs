@@ -311,6 +311,34 @@ mod tests {
         assert_eq!(registry.current_session(&host).unwrap(), None);
     }
 
+    /// Each harness names its session where only its own driver
+    /// looks, so a session goes to the driver whose harness hosts it.
+    #[test]
+    fn a_claude_session_goes_to_claude_and_a_codex_session_to_codex() {
+        let registry = bundled_with(&HashMap::new())
+            .into_iter()
+            .fold(DriverRegistry::new(), DriverRegistry::add);
+
+        let vars = [("CLAUDE_CODE_SESSION_ID", "c1")];
+        let url = registry
+            .current_session(&HostContext::with_vars(&vars))
+            .unwrap()
+            .unwrap();
+        assert!(url.starts_with("claude:") && url.ends_with("/c1"), "{url}");
+
+        let meta = serde_json::json!({"x-codex-turn-metadata": {"thread_id": "t1"}});
+        let host = HostContext::with_vars(&[]).serving_call(meta.as_object().unwrap());
+        let url = registry.current_session(&host).unwrap().unwrap();
+        assert!(url.starts_with("codex:") && url.ends_with("/t1"), "{url}");
+
+        let vars = [("CODEX_THREAD_ID", "t2")];
+        let url = registry
+            .current_session(&HostContext::with_vars(&vars))
+            .unwrap()
+            .unwrap();
+        assert!(url.starts_with("codex:") && url.ends_with("/t2"), "{url}");
+    }
+
     #[test]
     fn current_session_passes_over_a_failing_driver() {
         let registry = DriverRegistry::new()

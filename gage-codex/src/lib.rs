@@ -16,7 +16,9 @@ mod harness;
 mod home;
 mod model;
 mod patch;
+mod plugin;
 mod rollout;
+mod skill;
 mod text_descriptor;
 mod tool_use;
 

@@ -14,9 +14,11 @@
 use std::cell::OnceCell;
 use std::cmp::Ordering;
 use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::process::Child;
 use std::sync::{Arc, OnceLock};
 use std::time::SystemTime;
 
@@ -26,12 +28,14 @@ use gage_corpus::{
     CorpusSessionAttrs, Fingerprint, IndexStore, LockMode, SessionInfo, SessionReader,
     decoded_entries, format_project_slug, project_slug, write_derived,
 };
+use gage_plugin::{MARKETPLACE_NAME, MCP_SERVER_NAME, PLUGIN_ID, write_mcp_json, write_plugin};
 use gage_session::{
     AgentSession, AgentSpec, ContentSink, ContentSource, DecodedEntry, Derivation, Driver,
     DriverError, DriverStatus, DriverTables, Entry, EntryBody, EntryCodec, EntryValue, Field,
-    MaintenanceOutcome, MaintenanceStatus, MessageTextFilter, MessageTextHit, ModelChoices,
-    ModelSizes, NativeLookupError, NativeSession, PatchHunk, SessionAttrs, Source, SourceOptions,
-    StoredSession, SummaryAttrs, ToolUse, WrittenContent, split_scheme,
+    HarnessSession, HostContext, InstallReport, InstallUi, MaintenanceOutcome, MaintenanceStatus,
+    MessageTextFilter, MessageTextHit, ModelChoices, ModelSizes, NativeLookupError, NativeSession,
+    PatchHunk, SessionAttrs, SkillSession, Source, SourceOptions, StoredSession, SummaryAttrs,
+    ToolUse, WrittenContent, split_scheme,
 };
 use serde_json::Value;
 
@@ -43,13 +47,21 @@ use crate::harness;
 use crate::home::codex_home;
 use crate::model::{default_sizes, model_choices};
 use crate::patch;
+use crate::plugin;
 use crate::rollout::read_meta;
+use crate::skill::{gage_writable_dirs, skill_command};
 use crate::tool_use::ToolUseCollector;
 
 pub(crate) const NAME: &str = "codex";
 const SCHEMES: &[&str] = &["codex"];
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub(crate) const SESSION_TYPE: &str = "codex";
+/// The environment variable in which Codex names the session to the
+/// shell commands it runs
+const THREAD_ID_VAR: &str = "CODEX_THREAD_ID";
+/// The member of an MCP tool call's `_meta` in which Codex describes
+/// the turn the call belongs to; its `thread_id` is the session
+const TURN_METADATA_KEY: &str = "x-codex-turn-metadata";
 /// `content_format` value returned by `write_native` and expected by
 /// `read_stored`. The name identifies the byte layout under
 /// `files.d/`; the trailing digit is its version.
@@ -165,20 +177,119 @@ impl Driver for CodexDriver {
         harness::check_auth().map_err(DriverError::Other)
     }
 
-    /// The CLI and its sign-in. Gage installs nothing into Codex yet,
-    /// so the install is not reported. A CLI that is not installed is
-    /// absent, and nothing more is asked of it.
+    /// Codex names the session in the `_meta` of each MCP tool call
+    /// it makes, and in the environment of each shell command it
+    /// runs. An MCP server it starts gets neither in its own
+    /// environment. The session is one in the default location.
+    fn current_session(&self, host: &HostContext<'_>) -> Result<Option<String>, DriverError> {
+        let Some(id) = current_thread_id(host) else {
+            return Ok(None);
+        };
+        Ok(Some(session_url(&resolve_home("")?, &id)))
+    }
+
+    /// Start the skill session. The plugin must be installed at this
+    /// build's version and the user signed in. A batch session's
+    /// `gage` commands may write under Gage's directories and the
+    /// working directory, and nowhere else.
+    fn start_skill_session(
+        &self,
+        session: &SkillSession<'_>,
+    ) -> Result<Box<dyn HarnessSession>, DriverError> {
+        let codex = harness::require_codex().map_err(DriverError::Other)?;
+        plugin::check_plugin(&codex).map_err(DriverError::Other)?;
+        harness::check_auth().map_err(DriverError::Other)?;
+        let child = skill_command(&codex, session, &self.models, &gage_writable_dirs())
+            .spawn()
+            .map_err(DriverError::Io)?;
+        Ok(Box::new(CodexHarnessSession(child)))
+    }
+
+    fn harness_name(&self) -> &'static str {
+        harness::HARNESS_NAME
+    }
+
+    fn harness_path(&self) -> Option<PathBuf> {
+        harness::find_codex()
+    }
+
+    /// The CLI, its sign-in, and the Gage plugin. A CLI that is not
+    /// installed is absent, and nothing more is asked of it.
     fn status(&self) -> Result<DriverStatus, DriverError> {
         let harness = harness::harness_status();
-        let auth = match &harness {
-            Field::Ok(info) => harness::auth_status(&info.path),
-            _ => Field::Unsupported,
+        let (auth, install) = match &harness {
+            Field::Ok(info) => (
+                harness::auth_status(&info.path),
+                plugin::install_status(&info.path),
+            ),
+            _ => (Field::Unsupported, Field::Unsupported),
         };
         Ok(DriverStatus {
             harness,
             auth,
-            install: Field::Unsupported,
+            install,
         })
+    }
+
+    /// Render the plugin for Codex and install it from there. A
+    /// marketplace or plugin Codex already holds under Gage's names is
+    /// removed first: Codex keeps the files of an installed plugin in
+    /// its own cache and does not copy them again for a plugin it
+    /// already has, and a marketplace of the same name may point at
+    /// another directory.
+    fn system_init(
+        &self,
+        mcp_cmd: &[&str],
+        ui: &mut dyn InstallUi,
+    ) -> Result<InstallReport, DriverError> {
+        if mcp_cmd.is_empty() {
+            return Err(DriverError::Other(
+                "system_init: mcp_cmd must name an executable".into(),
+            ));
+        }
+        let codex = harness::require_codex().map_err(DriverError::Other)?;
+        let dir = plugin::plugin_dir();
+        let mut notes = Vec::new();
+
+        ui.step("Writing Codex plugin files");
+        write_plugin(&dir, &plugin::target()).map_err(DriverError::Io)?;
+        write_mcp_json(&dir, mcp_cmd, plugin::mcp_settings()).map_err(DriverError::Io)?;
+        notes.push(format!("plugin materialized at {}", dir.display()));
+        ui.step_done();
+
+        ui.step("Registering Codex plugin marketplace");
+        remove_installed(&codex)?;
+        plugin::run_strict(
+            &codex,
+            &[
+                OsStr::new("plugin"),
+                OsStr::new("marketplace"),
+                OsStr::new("add"),
+                dir.as_os_str(),
+            ],
+        )?;
+        notes.push(format!("marketplace '{MARKETPLACE_NAME}' registered"));
+        ui.step_done();
+
+        ui.step("Installing Codex plugin");
+        plugin::run_strict(&codex, &["plugin", "add", PLUGIN_ID].map(OsStr::new))?;
+        notes.push(format!("plugin {PLUGIN_ID} installed"));
+        ui.step_done();
+
+        Ok(InstallReport {
+            registered_as: MCP_SERVER_NAME.to_string(),
+            notes,
+        })
+    }
+
+    fn system_remove(&self, ui: &mut dyn InstallUi) -> Result<(), DriverError> {
+        let codex = harness::require_codex().map_err(DriverError::Other)?;
+        ui.step("Uninstalling Codex plugin");
+        for failure in remove_installed(&codex)? {
+            ui.warn(&failure);
+        }
+        ui.step_done();
+        Ok(())
     }
 
     /// The rollout is stored as it is read here. A change to the file
@@ -524,6 +635,54 @@ fn expand_tilde(s: &str) -> PathBuf {
 }
 
 /// `codex:<absolute home>/<id>`, the URL of one session under `home`
+/// The skill session's `codex` process.
+struct CodexHarnessSession(Child);
+
+impl HarnessSession for CodexHarnessSession {
+    fn wait(&mut self) -> io::Result<i32> {
+        Ok(self.0.wait()?.code().unwrap_or(-1))
+    }
+
+    fn kill(&mut self) -> io::Result<()> {
+        self.0.kill()
+    }
+}
+
+/// Remove the Gage plugin and its marketplace from Codex. Each
+/// removal that Codex refuses is returned as what it said: before a
+/// first install nothing is there to remove, which is the refusal an
+/// install expects and a removal reports.
+fn remove_installed(codex: &Path) -> Result<Vec<String>, DriverError> {
+    let commands = [
+        ["plugin", "remove", PLUGIN_ID].map(OsStr::new).to_vec(),
+        ["plugin", "marketplace", "remove", MARKETPLACE_NAME]
+            .map(OsStr::new)
+            .to_vec(),
+    ];
+    let mut refused = Vec::new();
+    for args in commands {
+        if let Err(said) = plugin::run_lenient(codex, &args)? {
+            refused.push(said);
+        }
+    }
+    Ok(refused)
+}
+
+/// The id of the session `host` runs in: the thread of the tool call
+/// being served, else the thread named in the environment.
+fn current_thread_id(host: &HostContext<'_>) -> Option<String> {
+    let from_call = host.call_meta().and_then(|meta| {
+        let turn = meta
+            .get(TURN_METADATA_KEY)
+            .and_then(|turn| turn.get("thread_id"));
+        turn.or_else(|| meta.get("threadId"))?.as_str()
+    });
+    from_call
+        .filter(|id| !id.is_empty())
+        .map(String::from)
+        .or_else(|| host.var(THREAD_ID_VAR))
+}
+
 fn session_url(home: &Path, session_id: &str) -> String {
     format!("{NAME}:{}/{session_id}", home.display())
 }
@@ -1056,6 +1215,42 @@ mod tests {
                 .entry_body("other 1", &codec.decode(b"{}").unwrap())
                 .blocks
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn current_session_is_the_calls_thread_or_the_environments() {
+        let driver = CodexDriver::new();
+        let home = resolve_home("").unwrap();
+        let none = driver
+            .current_session(&HostContext::with_vars(&[]))
+            .unwrap();
+        assert_eq!(none, None);
+
+        let meta = serde_json::json!({
+            "callId": "exec-1",
+            "x-codex-turn-metadata": {"thread_id": "t-call", "session_id": "t-root"},
+            "threadId": "t-other",
+        });
+        let vars = [(THREAD_ID_VAR, "t-env")];
+        let host = HostContext::with_vars(&vars).serving_call(meta.as_object().unwrap());
+        let url = driver.current_session(&host).unwrap().unwrap();
+        assert_eq!(url, session_url(&home, "t-call"));
+        let (source, id) = driver.split_session_url(&url).unwrap();
+        assert_eq!(source, format!("codex:{}", home.display()));
+        assert_eq!(id, "t-call");
+
+        let meta = serde_json::json!({"threadId": "t-other"});
+        let host = HostContext::with_vars(&[]).serving_call(meta.as_object().unwrap());
+        assert_eq!(
+            driver.current_session(&host).unwrap(),
+            Some(session_url(&home, "t-other"))
+        );
+
+        let host = HostContext::with_vars(&vars);
+        assert_eq!(
+            driver.current_session(&host).unwrap(),
+            Some(session_url(&home, "t-env"))
         );
     }
 }

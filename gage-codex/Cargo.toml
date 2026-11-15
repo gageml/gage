@@ -11,6 +11,7 @@ async-trait = { workspace = true }
 chrono = { workspace = true }
 gage-core = { path = "../gage-core" }
 gage-corpus = { path = "../gage-corpus" }
+gage-plugin = { path = "../gage-plugin" }
 gage-session = { path = "../gage-session" }
 libc = "0.2"
 regex = { workspace = true }

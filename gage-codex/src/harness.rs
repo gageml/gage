@@ -21,6 +21,12 @@ pub(crate) fn find_codex() -> Option<PathBuf> {
         .find(|candidate| candidate.is_file())
 }
 
+/// The `codex` binary on PATH, or why there is none, worded for the
+/// user.
+pub(crate) fn require_codex() -> Result<PathBuf, String> {
+    find_codex().ok_or_else(|| NOT_FOUND.to_string())
+}
+
 /// What `codex login status` says. It exits 0 when signed in and
 /// prints one line naming how, `Logged in using ChatGPT`, on stderr.
 #[derive(Debug, PartialEq, Eq)]
@@ -57,7 +63,7 @@ fn login_method(said: &str) -> Option<String> {
 /// Whether an agent can start: `codex` is on PATH and signed in. The
 /// error is the reason, worded for the user.
 pub(crate) fn check_auth() -> Result<(), String> {
-    let codex = find_codex().ok_or_else(|| NOT_FOUND.to_string())?;
+    let codex = require_codex()?;
     match login(&codex)? {
         Login::SignedIn(_) => Ok(()),
         Login::SignedOut => Err(NOT_SIGNED_IN.to_string()),
