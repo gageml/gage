@@ -6,12 +6,19 @@
 use std::path::PathBuf;
 
 /// One status field. A `Problem` carries what the driver could still
-/// read, a user-facing message, and what the user does about it.
+/// read, a user-facing message, and what the user does about it. An
+/// `Absent` field is a thing that is not there and need not be: a
+/// harness the user has not installed. It carries what to show for it
+/// and what the user would do to have it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Field<T> {
     Ok(T),
     Problem {
         info: Option<T>,
+        message: String,
+        remedy: String,
+    },
+    Absent {
         message: String,
         remedy: String,
     },
@@ -25,7 +32,15 @@ impl<T> Field<T> {
             Field::Problem {
                 message, remedy, ..
             } => Some((message, remedy)),
-            Field::Ok(_) | Field::Unsupported => None,
+            Field::Ok(_) | Field::Absent { .. } | Field::Unsupported => None,
+        }
+    }
+
+    /// The message and remedy of an `Absent` field; `None` otherwise.
+    pub fn absent(&self) -> Option<(&str, &str)> {
+        match self {
+            Field::Absent { message, remedy } => Some((message, remedy)),
+            Field::Ok(_) | Field::Problem { .. } | Field::Unsupported => None,
         }
     }
 }
@@ -77,4 +92,31 @@ pub struct InstallInfo {
     pub expected_version: String,
     pub enabled: bool,
     pub path: Option<PathBuf>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_absent_field_is_not_a_problem() {
+        let absent: Field<HarnessInfo> = Field::Absent {
+            message: "Codex not installed".to_string(),
+            remedy: "Install Codex".to_string(),
+        };
+        assert_eq!(absent.problem(), None);
+        assert_eq!(
+            absent.absent(),
+            Some(("Codex not installed", "Install Codex"))
+        );
+
+        let problem: Field<HarnessInfo> = Field::Problem {
+            info: None,
+            message: "broken".to_string(),
+            remedy: "fix it".to_string(),
+        };
+        assert_eq!(problem.problem(), Some(("broken", "fix it")));
+        assert_eq!(problem.absent(), None);
+        assert_eq!(Field::<HarnessInfo>::Unsupported.absent(), None);
+    }
 }

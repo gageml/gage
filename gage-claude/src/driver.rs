@@ -324,9 +324,19 @@ impl Driver for ClaudeDriver {
         Ok(Box::new(ClaudeHarnessSession(child)))
     }
 
+    /// A CLI that is not installed is absent, and nothing more is
+    /// asked of it: its login and plugin are not reported.
     fn status(&self) -> Result<DriverStatus, DriverError> {
+        let harness = harness_status();
+        if harness.absent().is_some() {
+            return Ok(DriverStatus {
+                harness,
+                auth: Field::Unsupported,
+                install: Field::Unsupported,
+            });
+        }
         Ok(DriverStatus {
-            harness: harness_status(),
+            harness,
             auth: auth_status(),
             install: install_status(),
         })
@@ -417,9 +427,8 @@ fn harness_status() -> Field<HarnessInfo> {
     let path = match find_claude() {
         Ok(path) => path,
         Err(_) => {
-            return Field::Problem {
-                info: None,
-                message: format!("{HARNESS_NAME} not found on PATH"),
+            return Field::Absent {
+                message: format!("{HARNESS_NAME} not installed"),
                 remedy: format!("Install {HARNESS_NAME}"),
             };
         }
