@@ -686,10 +686,7 @@ fn turn_result_of(v: &Json) -> TurnResult {
         turns: int_field(v, "num_turns"),
         duration_ms: int_field(v, "duration_ms"),
         duration_api_ms: int_field(v, "duration_api_ms"),
-        cost_usd: v
-            .get("total_cost_usd")
-            .and_then(Json::as_f64)
-            .unwrap_or(0.0),
+        cost_usd: v.get("total_cost_usd").and_then(Json::as_f64),
         usage: json_field("usage"),
         model_usage: json_field("modelUsage"),
         permission_denials: json_field("permission_denials"),
@@ -819,7 +816,7 @@ mod tests {
         let o = turn_result_of(&v);
         assert_eq!(o.text, "done");
         assert_eq!(o.turns, 3);
-        assert_eq!(o.cost_usd, 0.02);
+        assert_eq!(o.cost_usd, Some(0.02));
         assert_eq!(o.usage, r#"{"input_tokens":5}"#);
         assert_eq!(o.session_id, "S");
         assert!(o.raw.contains("\"uuid\":\"U\""));

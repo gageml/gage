@@ -112,7 +112,9 @@ pub struct TurnResult {
     pub turns: i64,
     pub duration_ms: i64,
     pub duration_api_ms: i64,
-    pub cost_usd: f64,
+    /// Spend in USD; `None` when the harness reports no cost, which is
+    /// not a cost of zero
+    pub cost_usd: Option<f64>,
     /// Token counts, JSON
     pub usage: String,
     /// Per-model token and cost breakdown, JSON

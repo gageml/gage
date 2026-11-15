@@ -210,7 +210,7 @@ pub struct AgentAttrs {
     #[serde(default)]
     pub duration_ms: i64,
     /// Spend in USD as the harness reported it; absent when the
-    /// harness reported no result
+    /// harness reported no result or no cost
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_usd: Option<f64>,
 }

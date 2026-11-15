@@ -2298,7 +2298,8 @@ mod tests {
                     stop_reason: "end_turn".into(),
                     turns: 1,
                     duration_ms: 0,
-                    cost_usd: Some(0.0),
+                    // The scripted harness reports no cost
+                    cost_usd: None,
                 }),
             }]
         );

@@ -186,13 +186,50 @@ pub struct ScanModel {
     pub log_key: Option<String>,
 }
 
-/// Agent spend in USD. `incomplete` marks a total that understates
-/// true spend (an agent's cost is unrecorded) and renders as a
-/// trailing `+`.
-#[derive(Debug, Clone, Copy)]
+/// Agent spend in USD. `usd` sums the costs agents reported and is
+/// `None` when no agent reported one. `incomplete` marks a total that
+/// leaves an agent out: its cost is not recorded yet, or its harness
+/// reports no cost.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct ScanCost {
-    pub usd: f64,
+    pub usd: Option<f64>,
     pub incomplete: bool,
+}
+
+impl ScanCost {
+    /// Count one agent's cost, `None` when it has none recorded.
+    pub fn add(&mut self, usd: Option<f64>) {
+        match usd {
+            Some(usd) => self.usd = Some(self.usd.unwrap_or(0.0) + usd),
+            None => self.incomplete = true,
+        }
+    }
+
+    /// Count the agents `other` counted.
+    pub fn merge(&mut self, other: ScanCost) {
+        if other.usd.is_some() {
+            self.add(other.usd);
+        }
+        self.incomplete |= other.incomplete;
+    }
+
+    /// The spend as shown. `settled` says the agents are done, so a
+    /// cost that is missing will not arrive.
+    ///
+    /// - `$0.75`: every agent reported a cost
+    /// - `$1.00+`: the total leaves an agent out
+    /// - `unknown`: settled, and no agent reported a cost
+    /// - `$0.00+`: not settled, and no cost is recorded yet
+    /// - `$0.00`: no agent ran
+    pub fn label(&self, settled: bool) -> String {
+        match (self.usd, self.incomplete) {
+            (Some(usd), true) => format!("${usd:.2}+"),
+            (Some(usd), false) => format!("${usd:.2}"),
+            (None, true) if settled => "unknown".to_string(),
+            (None, true) => "$0.00+".to_string(),
+            (None, false) => "$0.00".to_string(),
+        }
+    }
 }
 
 /// A task's recorded agent spend.
@@ -3038,13 +3075,12 @@ fn draw_progress(frame: &mut Frame, area: Rect, state: &mut ViewState) {
     // No cost data reads as $0.00+ while running (spend not yet
     // recorded) and $0.00 once finished, so the entry never appears
     // or disappears mid-scan
-    let (usd, incomplete) = match model.cost {
-        Some(cost) => (cost.usd, cost.incomplete),
-        None => (0.0, !model.finished),
-    };
-    let suffix = if incomplete { "+" } else { "" };
+    let cost = model.cost.unwrap_or(ScanCost {
+        usd: None,
+        incomplete: !model.finished,
+    });
     count_spans.push(Span::styled("  Cost ", styles::Text::dim()));
-    count_spans.push(Span::raw(format!("${usd:.2}{suffix}")));
+    count_spans.push(Span::raw(cost.label(model.finished)));
     let counts = Line::from(count_spans);
     let [tasks, badges] = Layout::horizontal([
         Constraint::Fill(1),
@@ -3196,13 +3232,10 @@ fn draw_tasks(frame: &mut Frame, area: Rect, state: &mut ViewState) {
     let costs: Vec<String> = flat
         .iter()
         .map(|row| match row {
-            TaskRow::Task(t) => match t.cost {
-                Some(c) => {
-                    let suffix = if c.incomplete { "+" } else { "" };
-                    format!("${:.2}{suffix}", c.usd)
-                }
-                None => String::new(),
-            },
+            TaskRow::Task(t) => {
+                let settled = !matches!(t.state, TaskState::Pending | TaskState::Running);
+                t.cost.map(|c| c.label(settled)).unwrap_or_default()
+            }
             TaskRow::Agent(_, a) => match a.cost {
                 Some(usd) => format!("${usd:.2}"),
                 None => String::new(),
@@ -3685,6 +3718,32 @@ mod tests {
     use gage_store::Store;
 
     use super::*;
+
+    #[test]
+    fn scan_cost_sums_reported_costs_and_marks_what_it_leaves_out() {
+        let mut all_known = ScanCost::default();
+        all_known.add(Some(0.5));
+        all_known.add(Some(0.25));
+        assert_eq!(all_known.label(true), "$0.75");
+
+        let mut some_unknown = all_known;
+        some_unknown.add(None);
+        assert_eq!(some_unknown.label(true), "$0.75+");
+        assert_eq!(some_unknown.label(false), "$0.75+");
+
+        let mut none_known = ScanCost::default();
+        none_known.add(None);
+        assert_eq!(none_known.label(true), "unknown");
+        assert_eq!(none_known.label(false), "$0.00+");
+
+        assert_eq!(ScanCost::default().label(true), "$0.00");
+
+        let mut total = ScanCost::default();
+        total.merge(none_known);
+        assert_eq!(total, none_known);
+        total.merge(all_known);
+        assert_eq!(total.label(true), "$0.75+");
+    }
     use crate::doc::{BodySource, Document, Session};
 
     /// A host with nothing behind it, for views the tests drive
