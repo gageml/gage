@@ -2455,9 +2455,12 @@ mod tests {
         assert_eq!(args.group, ["public", "reading"]);
         assert!(args.yes && !args.stored);
         assert_eq!(check_init_args(&args), Ok(()));
-        let args = init_args(&["-S", "--days", "7", "-f", "secret"]);
+        let args = init_args(&["-S", "--since", "7d", "-f", "secret"]);
         assert!(args.stored);
-        assert_eq!(args.select.days, Some(7));
+        assert_eq!(
+            args.select.since,
+            Some(std::time::Duration::from_secs(7 * 86_400))
+        );
         assert_eq!(args.filter, ["secret"]);
         assert_eq!(check_init_args(&args), Ok(()));
         let args = init_args(&["-s", "claude:/tmp/claude", "--all"]);
@@ -2471,7 +2474,7 @@ mod tests {
         // A list flag stands alone
         Cli::try_parse_from(["gage", "publish", "init", "--list-filters"]).unwrap();
         for argv in [
-            vec!["init", "abc", "--days", "7"],
+            vec!["init", "abc", "--since", "7d"],
             vec!["init", "-s", "claude:/tmp/claude", "-S", "abc"],
             vec!["init", "abc", "--list-filters"],
         ] {
@@ -2654,9 +2657,12 @@ mod tests {
         assert_eq!(args.model.as_deref(), Some("opus"));
         assert_eq!(args.extra_args, ["--verbose"]);
         assert!(args.batch && args.yes && !args.stored);
-        let args = run_args(&["-S", "--days", "7", "--filter", "secret"]);
+        let args = run_args(&["-S", "--since", "7d", "--filter", "secret"]);
         assert!(args.stored);
-        assert_eq!(args.select.days, Some(7));
+        assert_eq!(
+            args.select.since,
+            Some(std::time::Duration::from_secs(7 * 86_400))
+        );
         let args = run_args(&["--source", "claude:/tmp/claude", "--all"]);
         assert_eq!(args.source.as_deref(), Some("claude:/tmp/claude"));
         assert!(args.select.all);
@@ -2664,7 +2670,7 @@ mod tests {
         run_args(&[]);
         Cli::try_parse_from(["gage", "publish", "init", "-g", "public", "abc"]).unwrap();
         for argv in [
-            vec!["abc", "--days", "7"],
+            vec!["abc", "--since", "7d"],
             vec!["--source", "claude:/tmp/claude", "--stored", "abc"],
             vec!["--list-filters", "abc"],
             vec!["-a", "public", "abc"],
@@ -2694,8 +2700,8 @@ mod tests {
         let args = run_args(&[
             "--source",
             "claude:/tmp/c",
-            "--days",
-            "7",
+            "--since",
+            "7d",
             "-g",
             "public",
             "-f",
@@ -2738,8 +2744,8 @@ mod tests {
             "--source",
             "claude:/tmp/c",
             "-b",
-            "--days",
-            "7",
+            "--since",
+            "7d",
             "-f",
             "pii",
         ]);
@@ -2774,7 +2780,10 @@ mod tests {
         };
         assert_eq!(check(&["-b", "abc", "-f", "pii"]), Ok(()));
         assert_eq!(check(&["-b", "abc", "-g", "public"]), Ok(()));
-        assert_eq!(check(&["-b", "--days", "7", "-t", "The question"]), Ok(()));
+        assert_eq!(
+            check(&["-b", "--since", "7d", "-t", "The question"]),
+            Ok(())
+        );
         assert_eq!(check(&[]), Ok(()));
         assert_eq!(check(&["abc"]), Ok(()));
         assert_eq!(check(&["-f", "pii"]), Ok(()));
@@ -2787,7 +2796,7 @@ mod tests {
             Err("--batch requires a group, filter, or segment".to_string())
         );
         assert_eq!(
-            check(&["-b", "--days", "7"]),
+            check(&["-b", "--since", "7d"]),
             Err("--batch requires a group, filter, or segment".to_string())
         );
     }

@@ -32,8 +32,7 @@ linked into the new dataset in a single step.
 | ------------------------- | ------------------------------------------------------------ |
 | `-s, --source <SOURCE>`   | Session source, as described in [`gage session`](/docs/commands/session) |
 | `-p, --project <PROJECT>` | Limit sessions to a project path or name                     |
-| `--days <N>`              | Select sessions modified in past N days                      |
-| `--today`                 | Select sessions modified since midnight local time           |
+| `--since <SINCE>`         | Select sessions modified within a duration (e.g. `1h`, `30m`, `7d`) |
 | `-a, --all`               | Select every available session                               |
 | `-n, --limit <N>`         | Select the latest N sessions                                 |
 | `-r, --sample <N>`        | Select N sessions at random                                  |

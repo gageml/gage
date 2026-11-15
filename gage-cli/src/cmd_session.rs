@@ -1008,8 +1008,7 @@ pub(crate) async fn add_all(
     let filter = SessionFilterArgs {
         project: None,
         touches: None,
-        days: None,
-        today: false,
+        since: None,
         all: true,
         limit: None,
         sample: None,
@@ -2450,8 +2449,7 @@ mod tests {
         let no_filter = || SessionFilterArgs {
             project: None,
             touches: None,
-            days: None,
-            today: false,
+            since: None,
             all: false,
             limit: None,
             sample: None,

@@ -66,7 +66,7 @@ use crate::scanner_attach;
 use crate::scanner_spec::{self, ResolvedSpec};
 use crate::session_filter::{
     FILTER_ARG_NAMES, SessionFilterArgs, SessionSelect, SessionSelectError, native_session_lines,
-    preview_sessions, select_sessions, stored_session_lines,
+    preview_sessions, select_sessions, since_local_midnight, stored_session_lines,
 };
 use crate::source;
 use crate::style::{self as s, IdKind};
@@ -2085,8 +2085,8 @@ fn prompt_session_axis(filter: &mut SessionFilterArgs) -> Result<(), DialogError
         .initial_value(Window::Days(30))
         .interact()?;
     match window {
-        Window::Today => filter.today = true,
-        Window::Days(n) => filter.days = Some(n),
+        Window::Today => filter.since = Some(since_local_midnight()),
+        Window::Days(n) => filter.since = Some(Duration::from_secs(u64::from(n) * 86_400)),
         Window::All => {
             // "All available" implies no session cap; the limit
             // prompt is skipped.
@@ -2355,9 +2355,9 @@ mod tests {
         let args = run_args(&["--stored", "abc", "def"]);
         assert!(args.stored);
         assert_eq!(args.sessions, ["abc", "def"]);
-        let args = run_args(&["--source", "claude:/tmp/claude", "--days", "7"]);
+        let args = run_args(&["--source", "claude:/tmp/claude", "--since", "7d"]);
         assert_eq!(args.source.as_deref(), Some("claude:/tmp/claude"));
-        assert_eq!(args.filter.days, Some(7));
+        assert_eq!(args.filter.since, Some(Duration::from_secs(7 * 86_400)));
         let args = run_args(&["-S", "--all"]);
         assert!(args.stored && args.filter.all);
         Cli::try_parse_from(["gage", "scan", "list"]).unwrap();

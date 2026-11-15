@@ -34,9 +34,7 @@ use crate::source;
 /// help layout shows them. A wrapping args struct uses this list to
 /// make its positional session list conflict with every filter, and
 /// to build an `ArgGroup` when at least one selection is required.
-pub const FILTER_ARG_NAMES: &[&str] = &[
-    "project", "touches", "days", "today", "all", "limit", "sample",
-];
+pub const FILTER_ARG_NAMES: &[&str] = &["project", "touches", "since", "all", "limit", "sample"];
 
 #[derive(Args)]
 pub struct SessionFilterArgs {
@@ -54,13 +52,11 @@ pub struct SessionFilterArgs {
     #[arg(long, value_name = "DIR")]
     pub touches: Option<PathBuf>,
 
-    /// Select sessions modified in past N days
-    #[arg(long, value_name = "N", conflicts_with = "all")]
-    pub days: Option<u32>,
-
-    /// Select sessions modified since 00:00 today
-    #[arg(long, conflicts_with_all = ["days", "all"])]
-    pub today: bool,
+    /// Select sessions modified within SINCE
+    ///
+    /// SINCE is a duration such as 1h, 30m, or 7d.
+    #[arg(long, value_parser = crate::parse_duration, conflicts_with = "all")]
+    pub since: Option<Duration>,
 
     /// Select every available session
     #[arg(short, long)]
@@ -68,8 +64,8 @@ pub struct SessionFilterArgs {
 
     /// Select latest N sessions
     ///
-    /// Combines with --days or --today to cap the sessions selected
-    /// from the window.
+    /// Combines with --since to cap the sessions selected from the
+    /// window.
     #[arg(
         short = 'n',
         long,
@@ -81,7 +77,7 @@ pub struct SessionFilterArgs {
     /// Select N sessions at random
     ///
     /// Samples from sessions modified in the past 30 days, or the
-    /// window given with --days or --today.
+    /// window given with --since.
     #[arg(short = 'r', long, value_name = "N", conflicts_with = "all")]
     pub sample: Option<usize>,
 }
@@ -160,8 +156,7 @@ impl SessionFilterArgs {
             && self.touches.is_none()
             && self.limit.is_none()
             && self.sample.is_none()
-            && self.days.is_none()
-            && !self.today
+            && self.since.is_none()
             && !self.all
     }
 }
@@ -241,12 +236,8 @@ pub async fn select_sessions(
 
     let since = if filter.all {
         None
-    } else if filter.today {
-        Some(since_local_midnight())
-    } else if let Some(days) = filter.days {
-        Some(Duration::from_secs(u64::from(days) * 86_400))
     } else {
-        Some(Duration::from_secs(30 * 86_400))
+        Some(filter.since.unwrap_or(Duration::from_secs(30 * 86_400)))
     };
     if let Some(d) = since {
         let cutoff_ms = (SystemTime::now() - d)
@@ -258,7 +249,7 @@ pub async fn select_sessions(
         ));
     }
 
-    let window_pinned = filter.all || filter.today || filter.days.is_some();
+    let window_pinned = filter.all || filter.since.is_some();
     let limit = if filter.all || filter.sample.is_some() {
         None
     } else if let Some(n) = filter.limit {
@@ -653,6 +644,7 @@ mod tests {
     use std::collections::HashSet;
     use std::fs;
     use std::path::{Path, PathBuf};
+    use std::time::Duration;
 
     use console::style;
     use gage_core::style::IdKind;
@@ -1001,8 +993,7 @@ mod tests {
         let no_filter = || SessionFilterArgs {
             project: None,
             touches: None,
-            days: None,
-            today: false,
+            since: None,
             all: false,
             limit: None,
             sample: None,
@@ -1045,7 +1036,7 @@ mod tests {
         assert_eq!(select(no_filter()).await, every);
         assert_eq!(
             select(SessionFilterArgs {
-                days: Some(1),
+                since: Some(Duration::from_secs(86_400)),
                 ..no_filter()
             })
             .await,
@@ -1119,8 +1110,7 @@ mod tests {
         let filter = SessionFilterArgs {
             project: None,
             touches: Some(dir),
-            days: None,
-            today: false,
+            since: None,
             all: false,
             limit: None,
             sample: None,

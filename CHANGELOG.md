@@ -30,6 +30,12 @@ Pending release
   target or a quoted string in an inline script
 - Files with `[`, `?`, or `*` in their path are recorded as read or written
 
+### Other changes
+
+- `--since <SINCE>` replaces `--days` and `--today` on `gage scan`,
+  `gage session add`, `gage dataset add`, and `gage publish`. It takes a
+  duration such as `1h`, `30m`, or `7d`, as `gage session list --since` does.
+
 ## [0.3.0]
 
 ### Enhancements

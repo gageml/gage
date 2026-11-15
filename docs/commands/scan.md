@@ -28,8 +28,7 @@ scanner group, and sessions from the past 30 days capped at 20.
 | `-g, --group <NAME>`            | Scanner group to run (repeatable)                                   |
 | `-d, --dataset <DATASET>`       | Scan an existing dataset (ID or prefix)                             |
 | `-p, --project <PROJECT>`       | Limit sessions to a project, given as a directory path or a project slug as shown by `gage session list` |
-| `--days <N>`                    | Select sessions modified in past N days                             |
-| `--today`                       | Select sessions modified since midnight local time                  |
+| `--since <SINCE>`               | Select sessions modified within a duration (e.g. `1h`, `30m`, `7d`) |
 | `-a, --all`                     | Select every available session                                      |
 | `-n, --limit <N>`               | Select the latest N sessions                                        |
 | `-r, --sample <N>`              | Select N sessions at random                                         |
@@ -48,9 +47,9 @@ scanner group, and sessions from the past 30 days capped at 20.
 path to a directory holding a `scanner.rn` or to a scanner file. A `#{...}`
 suffix overrides the scanner's params.
 
-`--limit` combines with `--days` or `--today` to cap the sessions selected from
-the window. `--sample` draws from sessions modified in the past 30 days, or the
-window given with `--days` or `--today`.
+`--limit` combines with `--since` to cap the sessions selected from the window.
+`--sample` draws from sessions modified in the past 30 days, or the window given
+with `--since`.
 
 A scan runs the attach tasks of the selected scanners on a dataset it creates.
 An existing dataset passed with `--dataset` is scanned as it is; use
