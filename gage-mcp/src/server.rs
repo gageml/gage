@@ -80,6 +80,18 @@ mod tests {
         note_write, query,
     };
 
+    /// The instructions reach every host, so they name no one
+    /// harness and none of its tools.
+    #[test]
+    fn instructions_name_no_harness() {
+        for word in ["Claude", "ToolSearch", "Codex"] {
+            assert!(
+                !INSTRUCTIONS.contains(word),
+                "server instructions name {word}"
+            );
+        }
+    }
+
     #[test]
     fn instructions_name_every_tool() {
         let names = [

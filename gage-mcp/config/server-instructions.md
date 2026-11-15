@@ -1,6 +1,6 @@
-Gage is a Claude Code session analysis tool. It stores sessions, the notes
-written about them, and the issues those notes support. Load a Gage tool
-with ToolSearch before calling it.
+Gage is a coding-agent session analysis tool. It stores sessions, the notes
+written about them, and the issues those notes support. Where the host lists a
+Gage tool without its schema, load the tool before calling it.
 
 `query` runs SQL over Gage data. The tables hold sessions, session messages
 and tool calls, notes, issues, scans, and datasets. The `note_doc` table says
