@@ -64,4 +64,4 @@ is created with default values before the editor opens.
 | `issues.related_threshold` | `0.2`      | Similarity score at or above which `gage issue show` lists an issue as related.                                                                                 |
 | `storage.max_session_size` | `"256MB"`  | Largest total content a single session may write to the store. Accepts a byte count or a `KB`, `MB`, or `GB` suffix. `--max-size` overrides it for one command. |
 | `backup.sources`           | `[]`       | Session sources whose sessions `gage backup` adds to the store before each backup. `gage backup --source` replaces the list for one run.                        |
-| `drivers.default`          | `"claude"` | Driver that a session source with no scheme goes to. `gage init` writes it when the config file does not set it.                                                |
+| `drivers.default`          | `"claude"` | Driver that a session source with no scheme and a scanner agent model with no scheme go to. `gage init` writes it when the config file does not set it.         |

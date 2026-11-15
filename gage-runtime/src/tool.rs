@@ -1183,6 +1183,7 @@ fn render(v: &Value) -> Result<JsonValue, String> {
 
 #[cfg(test)]
 mod tests {
+    use gage_registry::driver::DriverRegistry;
     use gage_session::{
         ContentSink, ContentSource, Driver, DriverError, NativeSession, Source, SourceOptions,
         StoredSession, WrittenContent,
@@ -1243,7 +1244,7 @@ mod tests {
             &store,
             Some(cache_root),
             paths,
-            Arc::new(NoDriver),
+            Arc::new(DriverRegistry::new().add_default(Arc::new(NoDriver))),
         )
         .unwrap();
         ctx.scanner = "demo".into();

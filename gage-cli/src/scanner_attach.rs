@@ -11,28 +11,29 @@ use gage_core::uuid::short_uuid;
 use gage_runtime::{Level, Output, TaskOutput};
 use gage_scan::CompiledScanner;
 use gage_scan::attach::{AttachEvent, attach};
-use gage_session::Driver;
 use gage_store::Store;
 
 use crate::dialog::{self, DialogError};
+use crate::source::driver_registry;
 
 /// Run every attach task of `scanners` against the dataset
 /// `dataset_id`. What the tasks print and log becomes info lines,
 /// each declaration warning a warning line, and the attachments they
 /// write one `Attachments` step. The first failing task ends the
 /// phase with its error; attachments linked before it stay linked.
-/// Returns the number of attachments the tasks placed.
+/// A task reopens a session's native source through the session's
+/// own driver. Returns the number of attachments the tasks placed.
 pub(crate) async fn attach_for_scanners(
     store: &Store,
     dataset_id: &str,
     scanners: &[CompiledScanner],
-    driver: Arc<dyn Driver>,
 ) -> Result<usize, DialogError> {
+    let drivers = Arc::new(driver_registry());
     let mut lines: Vec<String> = Vec::new();
     // The first terminal write failure, surfaced after the tasks end;
     // later events are not rendered
     let mut write: io::Result<()> = Ok(());
-    attach(store, dataset_id, scanners, driver, None, |event| {
+    attach(store, dataset_id, scanners, drivers, None, |event| {
         if write.is_err() {
             return;
         }

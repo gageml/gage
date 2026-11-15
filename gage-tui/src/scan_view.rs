@@ -1838,7 +1838,7 @@ impl ViewState {
     /// restored when the session was viewed before.
     fn open_session_dialog(&mut self, item: &SessionItem, nav: SessionNav) {
         let backend = match &item.native_id {
-            Some(_) => live_agent_backend(),
+            Some(native_id) => live_agent_backend(native_id),
             None => self.host.session_backend(),
         };
         let backend = match backend {
@@ -2792,12 +2792,13 @@ fn issue_session_lines(sessions: &[IssueSessionItem], width: usize) -> Vec<Line<
 /// session's issues, session-level notes (targets with no line
 /// number), and an optional trailing notice (truncation or read
 /// error).
-/// A backend over the harness's default native source that reads the
-/// runtime's own in-flight agent sessions, which the store backend
-/// cannot serve until the agent has ended.
-fn live_agent_backend() -> io::Result<Backend> {
+/// A backend over the native source of the driver running the agent
+/// session `native_id`, which reads the runtime's own in-flight agent
+/// sessions; the store backend cannot serve one until the agent has
+/// ended.
+fn live_agent_backend(native_id: &str) -> io::Result<Backend> {
     tokio::task::block_in_place(|| {
-        tokio::runtime::Handle::current().block_on(Backend::native("").show_agents().open())
+        tokio::runtime::Handle::current().block_on(Backend::live_agent(native_id))
     })
     .map_err(|e| io::Error::other(e.to_string()))
 }

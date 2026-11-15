@@ -2645,6 +2645,7 @@ dependencies = [
  "gage-core",
  "gage-mcp",
  "gage-query",
+ "gage-registry",
  "gage-session",
  "gage-store",
  "minijinja",

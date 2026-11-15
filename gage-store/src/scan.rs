@@ -53,6 +53,8 @@ const AGENTS_LINK: &str = "agents.link";
 const AGENTS_DIR: &str = "agents";
 /// The native session id of an agent still running, in its `agents/<id>/`
 const NATIVE_ID_FILE: &str = "native_id";
+/// The name of the driver running an agent, beside its `native_id`
+const DRIVER_FILE: &str = "driver";
 const STDERR_FILE: &str = "stderr";
 const RESULT_FILE: &str = "result";
 /// The blobs an `agents/<id>/` directory may hold
@@ -173,13 +175,18 @@ pub struct TaskAgent {
     pub record: AgentRecord,
 }
 
-/// What an agent's directory holds: the native session id alone while
-/// the agent runs, its result once it has ended. The runtime writes
-/// the running form at agent start and replaces it at stop. A stored
-/// scan holds ended records only.
+/// What an agent's directory holds: the native session id and the
+/// driver running it while the agent runs, its result once it has
+/// ended. The runtime writes the running form at agent start and
+/// replaces it at stop. A stored scan holds ended records only.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AgentRecord {
-    Running { native_id: String },
+    Running {
+        native_id: String,
+        /// The name of the driver running the agent; `None` in a
+        /// record that names none, whose agent the default driver runs
+        driver: Option<String>,
+    },
     Ended(AgentAttrs),
 }
 
@@ -743,7 +750,10 @@ fn read_agent_record(files: &dyn ScanFiles, dir: &str) -> Result<AgentRecord, St
             "scan file {native_path} is empty"
         )));
     }
-    Ok(AgentRecord::Running { native_id })
+    let driver = files
+        .read(&format!("{dir}/{DRIVER_FILE}"))?
+        .map(|bytes| String::from_utf8_lossy(&bytes).trim().to_string());
+    Ok(AgentRecord::Running { native_id, driver })
 }
 
 fn read_link(files: &dyn ScanFiles, name: &str) -> Result<Option<Vec<String>>, StoreError> {
@@ -1489,6 +1499,10 @@ mod tests {
             &scan_dir.join("scan/tasks/hello/greet/agents/zzz-running/native_id"),
             "native-2\n",
         );
+        write(
+            &scan_dir.join("scan/tasks/hello/greet/agents/zzz-running/driver"),
+            "fake\n",
+        );
         let ended = TaskAgent {
             id: added.id.clone(),
             // An earlier runtime's record: every field after the
@@ -1510,7 +1524,8 @@ mod tests {
                 TaskAgent {
                     id: "zzz-running".into(),
                     record: AgentRecord::Running {
-                        native_id: "native-2".into()
+                        native_id: "native-2".into(),
+                        driver: Some("fake".into()),
                     },
                 }
             ]

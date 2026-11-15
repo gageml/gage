@@ -4,7 +4,8 @@
 //! facility that needs it (the CLI, the MCP server, ...). No lazy
 //! module-level init.
 //!
-//! The default driver is the one a source with no scheme goes to. A process names it once at startup with
+//! The default driver is the one a source or an agent model with no
+//! scheme goes to. A process names it once at startup with
 //! [`set_default_driver`], from the user's config; a process that
 //! names none gets [`DEFAULT_DRIVER`].
 
@@ -126,6 +127,28 @@ impl DriverRegistry {
         }
     }
 
+    /// The driver that runs an agent whose model is `model`, and the
+    /// model that driver is given. A model is `<scheme>:<model>` under
+    /// a registered scheme, which names the driver and leaves it the
+    /// rest, or a model with no such scheme, which goes to the default
+    /// driver whole. A scheme alone, `<scheme>:`, is that driver's own
+    /// choice of model, as no model is the default driver's.
+    pub fn agent_driver(
+        &self,
+        model: Option<&str>,
+    ) -> Result<(Arc<dyn Driver>, Option<String>), DriverError> {
+        if let Some((scheme, rest)) = model.and_then(split_scheme)
+            && let Some(driver) = self.for_scheme(scheme)
+        {
+            let model = (!rest.is_empty()).then(|| rest.to_string());
+            return Ok((driver, model));
+        }
+        let driver = self
+            .default()
+            .ok_or_else(|| DriverError::Other("no default session driver registered".into()))?;
+        Ok((driver, model.map(str::to_string)))
+    }
+
     /// Route the source `options` names to its driver and open it. The
     /// empty source is the default driver's default location.
     pub fn open_source(&self, options: &SourceOptions) -> Result<Box<dyn Source>, DriverError> {
@@ -211,6 +234,44 @@ mod tests {
             .add(Arc::new(Fake("two", &["b"])));
         assert_eq!(registry.for_name("two").unwrap().name(), "two");
         assert!(registry.for_name("three").is_none());
+    }
+
+    #[test]
+    fn agent_model_scheme_names_the_driver_and_leaves_it_the_rest() {
+        let registry = DriverRegistry::new()
+            .add_default(Arc::new(Fake("one", &["a"])))
+            .add(Arc::new(Fake("two", &["b"])));
+        let (driver, model) = registry.agent_driver(Some("b:medium")).unwrap();
+        assert_eq!(driver.name(), "two");
+        assert_eq!(model.as_deref(), Some("medium"));
+        let (driver, model) = registry.agent_driver(Some("a:x:y")).unwrap();
+        assert_eq!(driver.name(), "one");
+        assert_eq!(model.as_deref(), Some("x:y"));
+        let (driver, model) = registry.agent_driver(Some("b:")).unwrap();
+        assert_eq!(driver.name(), "two");
+        assert_eq!(model, None);
+    }
+
+    #[test]
+    fn agent_model_without_a_driver_scheme_goes_to_default_whole() {
+        let registry = DriverRegistry::new()
+            .add_default(Arc::new(Fake("one", &["a"])))
+            .add(Arc::new(Fake("two", &["b"])));
+        for model in ["medium", "llama3:8b", "ft:gpt-4o:org::id", "sonnet[1m]"] {
+            let (driver, given) = registry.agent_driver(Some(model)).unwrap();
+            assert_eq!(driver.name(), "one");
+            assert_eq!(given.as_deref(), Some(model));
+        }
+        let (driver, model) = registry.agent_driver(None).unwrap();
+        assert_eq!(driver.name(), "one");
+        assert_eq!(model, None);
+    }
+
+    #[test]
+    fn agent_model_needs_a_default_driver_when_it_names_none() {
+        let registry = DriverRegistry::new().add(Arc::new(Fake("two", &["b"])));
+        assert!(registry.agent_driver(Some("medium")).is_err());
+        assert!(registry.agent_driver(Some("b:medium")).is_ok());
     }
 
     #[test]
