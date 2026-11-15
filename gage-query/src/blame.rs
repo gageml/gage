@@ -1,5 +1,5 @@
-//! `blame(file [, lines])` and `native_blame(source, file [, lines])`
-//! --- the session tool calls that wrote the lines of a file.
+//! `blame(file [, lines])` --- the session tool calls that wrote the
+//! lines of a file, over the stored sessions or over a driver source.
 //!
 //! Each line of the file is attributed to the earliest `tool_use`
 //! call, among the calls to the file in the line's window, whose
@@ -42,15 +42,14 @@ use datafusion::datasource::{MemTable, TableProvider, TableType};
 use datafusion::error::{DataFusionError, Result};
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::prelude::{Expr, SessionContext};
-use gage_registry::driver::DriverRegistry;
-use gage_session::{FileType, SourceOptions};
+use gage_session::FileType;
 use gage_store::Store;
 use gage_store::url::LineSelection;
 
-use crate::native::string_literal;
 use crate::new_context;
 use crate::patch;
 use crate::scope::SessionSet;
+use crate::source::{SourceSpec, string_literal};
 use crate::stored_rows::{RowKind, StoredRowsTable};
 
 /// `blame(file [, lines])` over the stored sessions. The context it
@@ -66,15 +65,11 @@ pub fn blame_fn(
     })
 }
 
-/// `native_blame(source, file [, lines])` over a native source, whose
-/// derived state is kept under `cache_root`, or the default root when
-/// it is `None`.
-pub fn native_blame_fn(
-    show_agents: bool,
-    cache_root: Option<PathBuf>,
-) -> Arc<dyn TableFunctionImpl> {
+/// `blame(file [, lines])` over the sessions of a driver source.
+pub(crate) fn source_blame_fn(source: SourceSpec) -> Arc<dyn TableFunctionImpl> {
+    let cache_root = source.cache_root.clone();
     Arc::new(BlameFn {
-        scope: Scope::Native { show_agents },
+        scope: Scope::Source(source),
         cache_root,
     })
 }
@@ -94,11 +89,11 @@ pub fn blame_schema() -> SchemaRef {
     ]))
 }
 
-/// Which sessions a blame reads. The native scope's source is an
-/// argument of the call; the stored scope reads every stored session.
+/// Which sessions a blame reads: every session of a driver source, or
+/// every stored session.
 #[derive(Debug, Clone)]
 enum Scope {
-    Native { show_agents: bool },
+    Source(SourceSpec),
     Stored(Arc<Mutex<Store>>),
 }
 
@@ -116,31 +111,17 @@ impl TableFunctionImpl for BlameFn {
 
 impl BlameFn {
     fn provider(&self, args: &[Expr]) -> Result<Arc<dyn TableProvider>> {
-        let (name, usage) = match self.scope {
-            Scope::Native { .. } => ("native_blame", "native_blame(source, file [, lines])"),
-            Scope::Stored(_) => ("blame", "blame(file [, lines])"),
-        };
-        let plan = |msg: String| DataFusionError::Plan(format!("{name}: {msg}"));
-        let (source, rest) = match (&self.scope, args) {
-            (Scope::Native { .. }, [source, rest @ ..]) => {
-                let source = string_literal(source)
-                    .ok_or_else(|| plan("source must be a string literal".into()))?;
-                (Some(source), rest)
-            }
-            (Scope::Stored(_), rest) => (None, rest),
-            _ => return Err(plan(format!("usage {usage}"))),
-        };
-        let (file, selection) = match rest {
+        let plan = |msg: String| DataFusionError::Plan(format!("blame: {msg}"));
+        let (file, selection) = match args {
             [file] => (file, None),
             [file, lines] => (file, Some(line_selection(lines).map_err(plan)?)),
-            _ => return Err(plan(format!("usage {usage}"))),
+            _ => return Err(plan("usage blame(file [, lines])".into())),
         };
         let file =
             string_literal(file).ok_or_else(|| plan("file must be a string literal".into()))?;
         let path = std::fs::canonicalize(&file).map_err(|e| plan(format!("{file}: {e}")))?;
         Ok(Arc::new(BlameTable {
             scope: self.scope.clone(),
-            source,
             cache_root: self.cache_root.clone(),
             path,
             selection,
@@ -163,8 +144,6 @@ fn line_selection(e: &Expr) -> std::result::Result<LineSelection, String> {
 #[derive(Debug)]
 struct BlameTable {
     scope: Scope,
-    /// The native source spec; `None` in the stored scope
-    source: Option<String>,
     cache_root: Option<PathBuf>,
     path: PathBuf,
     selection: Option<LineSelection>,
@@ -200,23 +179,13 @@ impl BlameTable {
     /// A context with the scope's `tool_use_file`, `tool_use`, and
     /// `message` tables.
     async fn open(&self) -> Result<SessionContext> {
-        let show_agents = match self.scope {
-            Scope::Native { show_agents } => show_agents,
-            Scope::Stored(_) => false,
-        };
-        let ctx = new_context(false, show_agents, self.cache_root.clone());
+        let ctx = new_context(self.cache_root.clone());
         let tables: [(&str, Arc<dyn TableProvider>); 3] = match &self.scope {
-            Scope::Native { .. } => {
-                let spec = self.source.clone().unwrap_or_default();
-                let mut options = SourceOptions::new(&spec);
-                options.show_agents(show_agents);
-                if let Some(root) = &self.cache_root {
-                    options.cache_root(root);
-                }
-                let source = DriverRegistry::builtin()
-                    .open_source(&options)
+            Scope::Source(source) => {
+                let tables = source
+                    .open()
+                    .and_then(|opened| opened.tables())
                     .map_err(external)?;
-                let tables = source.tables().map_err(external)?;
                 [
                     ("tool_use_file", tables.tool_use_file),
                     ("tool_use", tables.tool_use),
@@ -1237,6 +1206,8 @@ mod tests {
     use datafusion::common::tree_node::{TreeNode, TreeNodeRecursion};
     use datafusion::logical_expr::LogicalPlan;
     use datafusion::prelude::lit;
+    use gage_registry::driver::DriverRegistry;
+    use gage_session::SourceOptions;
     use gage_session::filter::{LiteralMatch, literal_matches};
     use gage_store::SessionStore;
 
@@ -1327,24 +1298,24 @@ filename f.rs
         let file = dir.path().join("f.txt");
         std::fs::write(&file, "x\n").unwrap();
         let file = file.to_str().unwrap();
-        let native = BlameFn {
-            scope: Scope::Native { show_agents: false },
+        let blame = BlameFn {
+            scope: Scope::Source(SourceSpec {
+                source: String::new(),
+                show_agents: false,
+                cache_root: None,
+            }),
             cache_root: None,
         };
-        let err = native.provider(&[lit(file)]).err().unwrap();
+        let err = blame.provider(&[]).err().unwrap();
         assert!(
-            err.to_string()
-                .contains("usage native_blame(source, file [, lines])"),
+            err.to_string().contains("usage blame(file [, lines])"),
             "{err}"
         );
-        let err = native
-            .provider(&[lit(""), lit("/nonexistent/f.txt")])
-            .err()
-            .unwrap();
+        let err = blame.provider(&[lit("/nonexistent/f.txt")]).err().unwrap();
         assert!(err.to_string().contains("/nonexistent/f.txt"), "{err}");
-        assert!(native.provider(&[lit(""), lit(file), lit(1i64)]).is_ok());
-        let err = native
-            .provider(&[lit(""), lit(file), lit(1i64), lit(2i64)])
+        assert!(blame.provider(&[lit(file), lit(1i64)]).is_ok());
+        let err = blame
+            .provider(&[lit(file), lit(1i64), lit(2i64)])
             .err()
             .unwrap();
         assert!(err.to_string().contains("usage"), "{err}");
@@ -1614,13 +1585,13 @@ filename f.rs
     }
 
     #[tokio::test]
-    async fn native_blame_attributes_lines_to_the_earliest_call_carrying_them() {
+    async fn source_blame_attributes_lines_to_the_earliest_call_carrying_them() {
         let (_repo, claude_root, path, spec) = fixture();
         let ctx = ContextBuilder::new(None)
             .cache_root(claude_root.path().join("cache"))
-            .build()
-            .await;
-        let from = format!("native_blame('{spec}', '{}')", path.display());
+            .build_source(&spec)
+            .unwrap();
+        let from = format!("blame('{}')", path.display());
         let all = rows(&ctx, &from).await;
         assert!(
             all.iter().all(|r| r.session.as_deref() == Some(NATIVE_ID)),
@@ -1736,7 +1707,7 @@ filename f.rs
     /// A line committed under the file's old name is matched against
     /// the calls that wrote the old path.
     #[tokio::test]
-    async fn native_blame_follows_a_rename() {
+    async fn source_blame_follows_a_rename() {
         let repo = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(repo.path()).unwrap();
         git(&root, &["init", "-q"]);
@@ -1765,13 +1736,9 @@ filename f.rs
 
         let ctx = ContextBuilder::new(None)
             .cache_root(claude_root.path().join("cache"))
-            .build()
-            .await;
-        let rows = rows(
-            &ctx,
-            &format!("native_blame('{spec}', '{}')", new.display()),
-        )
-        .await;
+            .build_source(&spec)
+            .unwrap();
+        let rows = rows(&ctx, &format!("blame('{}')", new.display())).await;
         assert_eq!(rows.len(), 1);
         assert_eq!(
             (
@@ -1789,7 +1756,7 @@ filename f.rs
     /// falls inside its line's window: the window opens at the last
     /// commit that changed the file, not at the parent commit.
     #[tokio::test]
-    async fn native_blame_admits_an_edit_older_than_an_unrelated_parent_commit() {
+    async fn source_blame_admits_an_edit_older_than_an_unrelated_parent_commit() {
         let repo = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(repo.path()).unwrap();
         git(&root, &["init", "-q"]);
@@ -1819,13 +1786,9 @@ filename f.rs
 
         let ctx = ContextBuilder::new(None)
             .cache_root(claude_root.path().join("cache"))
-            .build()
-            .await;
-        let rows = rows(
-            &ctx,
-            &format!("native_blame('{spec}', '{}')", path.display()),
-        )
-        .await;
+            .build_source(&spec)
+            .unwrap();
+        let rows = rows(&ctx, &format!("blame('{}')", path.display())).await;
         let shape: Vec<_> = rows
             .iter()
             .map(|r| (r.line, r.tool_use_id.clone(), r.tier.clone()))
@@ -1838,7 +1801,7 @@ filename f.rs
     /// the path's ending. A session that recorded the file's own path
     /// ranks above it at the same tier, though its call is later.
     #[tokio::test]
-    async fn native_blame_finds_a_session_that_recorded_another_checkout() {
+    async fn source_blame_finds_a_session_that_recorded_another_checkout() {
         let repo = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(repo.path()).unwrap();
         git(&root, &["init", "-q"]);
@@ -1896,13 +1859,9 @@ filename f.rs
 
         let ctx = ContextBuilder::new(None)
             .cache_root(claude_root.path().join("cache"))
-            .build()
-            .await;
-        let rows = rows(
-            &ctx,
-            &format!("native_blame('{spec}', '{}')", path.display()),
-        )
-        .await;
+            .build_source(&spec)
+            .unwrap();
+        let rows = rows(&ctx, &format!("blame('{}')", path.display())).await;
         let shape: Vec<_> = rows
             .iter()
             .map(|r| {
@@ -1930,7 +1889,7 @@ filename f.rs
     /// a redacted directory and no working directory. The path is
     /// kept as recorded and matched by its ending.
     #[tokio::test]
-    async fn native_blame_finds_a_session_that_recorded_a_redacted_relative_path() {
+    async fn source_blame_finds_a_session_that_recorded_a_redacted_relative_path() {
         let repo = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(repo.path()).unwrap();
         git(&root, &["init", "-q"]);
@@ -1956,13 +1915,9 @@ filename f.rs
 
         let ctx = ContextBuilder::new(None)
             .cache_root(claude_root.path().join("cache"))
-            .build()
-            .await;
-        let rows = rows(
-            &ctx,
-            &format!("native_blame('{spec}', '{}')", path.display()),
-        )
-        .await;
+            .build_source(&spec)
+            .unwrap();
+        let rows = rows(&ctx, &format!("blame('{}')", path.display())).await;
         let shape: Vec<_> = rows
             .iter()
             .map(|r| (r.line, r.tool_use_id.clone(), r.tier.clone()))
@@ -1977,8 +1932,11 @@ filename f.rs
         let claude_root = tempfile::tempdir().unwrap();
         let spec = write_session(claude_root.path(), Path::new("/w/proj"), NATIVE_ID, &[]);
         let table = BlameTable {
-            scope: Scope::Native { show_agents: false },
-            source: Some(spec),
+            scope: Scope::Source(SourceSpec {
+                source: spec,
+                show_agents: false,
+                cache_root: Some(claude_root.path().join("cache")),
+            }),
             cache_root: Some(claude_root.path().join("cache")),
             path: PathBuf::from("/w/proj/src/a.rs"),
             selection: None,
@@ -2044,13 +2002,9 @@ filename f.rs
         let spec = write_session(claude_root.path(), dir.path(), NATIVE_ID, &[]);
         let ctx = ContextBuilder::new(None)
             .cache_root(claude_root.path().join("cache"))
-            .build()
-            .await;
-        let rows = rows(
-            &ctx,
-            &format!("native_blame('{spec}', '{}')", file.display()),
-        )
-        .await;
+            .build_source(&spec)
+            .unwrap();
+        let rows = rows(&ctx, &format!("blame('{}')", file.display())).await;
         assert!(rows.is_empty());
     }
 
@@ -2071,13 +2025,9 @@ filename f.rs
 
         let ctx = ContextBuilder::new(None)
             .cache_root(claude_root.path().join("cache"))
-            .build()
-            .await;
-        let rows = rows(
-            &ctx,
-            &format!("native_blame('{spec}', '{}')", file.display()),
-        )
-        .await;
+            .build_source(&spec)
+            .unwrap();
+        let rows = rows(&ctx, &format!("blame('{}')", file.display())).await;
         let shape: Vec<_> = rows
             .iter()
             .map(|r| (r.line, r.tool_use_id.clone(), r.tier.clone()))
@@ -2121,13 +2071,9 @@ filename f.rs
 
         let ctx = ContextBuilder::new(None)
             .cache_root(claude_root.path().join("cache"))
-            .build()
-            .await;
-        let rows = rows(
-            &ctx,
-            &format!("native_blame('{spec}', '{}')", file.display()),
-        )
-        .await;
+            .build_source(&spec)
+            .unwrap();
+        let rows = rows(&ctx, &format!("blame('{}')", file.display())).await;
         let shape: Vec<_> = rows
             .iter()
             .map(|r| {
@@ -2187,14 +2133,10 @@ filename f.rs
 
         let ctx = ContextBuilder::new(None)
             .cache_root(claude_root.path().join("cache"))
-            .build()
-            .await;
+            .build_source(&spec)
+            .unwrap();
         for (name, call) in [("redirect.py", "t1"), ("script.py", "t2")] {
-            let rows = rows(
-                &ctx,
-                &format!("native_blame('{spec}', '{}')", work.join(name).display()),
-            )
-            .await;
+            let rows = rows(&ctx, &format!("blame('{}')", work.join(name).display())).await;
             let shape: Vec<_> = rows
                 .iter()
                 .map(|r| (r.line, r.tool_use_id.clone(), r.tier.clone()))
@@ -2232,8 +2174,11 @@ filename f.rs
         let spec = session(writer, &proj_a, &file);
 
         let table = BlameTable {
-            scope: Scope::Native { show_agents: false },
-            source: Some(spec),
+            scope: Scope::Source(SourceSpec {
+                source: spec,
+                show_agents: false,
+                cache_root: Some(claude_root.path().join("cache")),
+            }),
             cache_root: Some(claude_root.path().join("cache")),
             path: file.clone(),
             selection: None,

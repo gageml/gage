@@ -721,6 +721,7 @@ pub(crate) async fn consume(
                 spec.gage.push(GageTool::Query(QueryConfig {
                     context: Arc::new(context),
                     publish: None,
+                    source: None,
                 }));
             }
             ToolKind::Gage(GageConfig::IssueWrite(config)) => {

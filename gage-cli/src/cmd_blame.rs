@@ -1,5 +1,5 @@
 //! `gage blame`: the sessions that wrote the lines of a file, read
-//! through the `native_blame` and `blame` table functions.
+//! through the `blame` table function of a source or of the store.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -83,30 +83,21 @@ async fn blame(args: &BlameArgs) -> Result<Blamed, CliError> {
         .as_ref()
         .map(|l| format!(", {}", quote(&l.to_string())))
         .unwrap_or_default();
-    // `sessions` names the table of every session in the source, the
-    // peer set a shown id's unique prefix must distinguish it from
-    let (ctx, from, sessions) = if args.stored {
+    let ctx = if args.stored {
         let store = Store::open(&gage_store::store_path()).context("gage blame")?;
-        let ctx = ContextBuilder::new(Some(Arc::new(Mutex::new(store))))
+        ContextBuilder::new(Some(Arc::new(Mutex::new(store))))
             .build()
-            .await;
-        (
-            ctx,
-            format!("blame({}{lines})", quote(path_str)),
-            "session".to_string(),
-        )
+            .await
     } else {
         let registry = source::driver_registry();
         let spec = source::resolve_source(&registry, args.source.as_deref())
             .map_err(|e| anyhow::anyhow!("gage blame: {e}"))?
             .1;
-        let ctx = ContextBuilder::new(None).build().await;
-        (
-            ctx,
-            format!("native_blame({}, {}{lines})", quote(&spec), quote(path_str)),
-            format!("native_session({})", quote(&spec)),
-        )
+        ContextBuilder::new(None)
+            .build_source(&spec)
+            .with_context(|| format!("gage blame: {spec}"))?
     };
+    let from = format!("blame({}{lines})", quote(path_str));
     // JSON emits every candidate; the text form shows the first-ranked
     // attribution per line, in git-blame shape
     let projection = "line, line_end, session_id, session_lines, \
@@ -126,7 +117,7 @@ async fn blame(args: &BlameArgs) -> Result<Blamed, CliError> {
     let peers = if args.json {
         Vec::new()
     } else {
-        session_ids(&ctx, &sessions).await?
+        session_ids(&ctx).await?
     };
     Ok(Blamed {
         path,
@@ -137,9 +128,9 @@ async fn blame(args: &BlameArgs) -> Result<Blamed, CliError> {
 
 /// Every session id in the source, the peer set for prefix
 /// disambiguation.
-async fn session_ids(ctx: &SessionContext, from: &str) -> Result<Vec<String>, CliError> {
+async fn session_ids(ctx: &SessionContext) -> Result<Vec<String>, CliError> {
     let batches = ctx
-        .sql(&format!("SELECT id FROM {from}"))
+        .sql("SELECT id FROM session")
         .await
         .context("gage blame")?
         .collect()

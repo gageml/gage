@@ -583,8 +583,8 @@ pub struct Derivation {
 }
 
 /// The attributes of a native session: the normalized view every
-/// driver provides, and the columns of the `session` and
-/// `native_session` tables. An implementation decides how and when it
+/// driver provides, and the columns of the `session` table of a
+/// store and of a source. An implementation decides how and when it
 /// reads them; for the optional ones, `None` means the harness has no
 /// such fact, or that the session could not be read and the driver
 /// reports the failure in [`SessionAttrs::extra_attrs`].

@@ -75,7 +75,8 @@ const ATTRS_COLS: &[&str] = &[
 const MODIFIED_COL: &str = "modified";
 
 fn stored_session_schema() -> SchemaRef {
-    // Column order is shared with the driver `native_session` table:
+    // The columns and their order are shared with a driver's
+    // `session` table:
     // identity, location, timestamps, provenance, content, summary,
     // system. A new column joins the category it belongs to.
     Arc::new(Schema::new(vec![

@@ -23,10 +23,11 @@ use gage_session::filter::{
 };
 
 /// The columns the walk fills from the directory listing alone,
-/// besides the id column: the project slug, the file mtime, and the
+/// besides the id column: the project slug, the file mtime as
+/// `modified`, and the
 /// file size. A filter over these and the id is applied in the walk,
 /// before any session is parsed.
-pub(crate) const WALK_COLS: &[&str] = &["project", "mtime", "size"];
+pub(crate) const WALK_COLS: &[&str] = &["project", "modified", "size"];
 
 /// The schema of the walk's own columns, with the id column named as
 /// the table names it. Types match the `session` table's.
@@ -35,7 +36,7 @@ fn walk_schema(id_col: &str) -> SchemaRef {
         Field::new(id_col, DataType::Utf8, false),
         Field::new("project", DataType::Utf8, true),
         Field::new(
-            "mtime",
+            "modified",
             DataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into())),
             false,
         ),

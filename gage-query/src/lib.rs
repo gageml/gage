@@ -24,13 +24,13 @@
 //! `share` are one row per live container object, with `dataset_session`
 //! and `share_session` their memberships.
 //!
-//! Native session data is reached through driver-provided functions,
-//! present on every context: `native_session`, `native_message`,
-//! `native_entry`, and `native_tool_use` ([`native`]) return a
-//! source's native tables, and
-//! the [`project`] `project_for_path` UDF maps a directory to its
-//! project name for filtering. These are how a user discovers
-//! sessions to add to the store; none is a named table.
+//! Native session data is reached through a source-scoped context
+//! ([`ContextBuilder::build_source`]): `session`, `entry`, `message`,
+//! `tool_use`, and `tool_use_file` are then the driver's tables over
+//! one source, with the columns the store tables have, and no other
+//! store table is present. This is how a user discovers sessions to
+//! add to the store. The [`project`] `project_for_path` UDF, on every
+//! context, maps a directory to its project name for filtering.
 //! `content_schema` is on every context too: each builtin driver's
 //! description of what it writes into `raw`, `input_raw`, and
 //! `result_raw`, per content format. `help` is on every context as
@@ -46,7 +46,6 @@ mod age;
 mod blame;
 pub mod help;
 mod json;
-mod native;
 mod patch;
 mod print_format;
 mod project;
@@ -54,6 +53,7 @@ mod repl;
 pub mod rows;
 pub mod scope;
 pub mod session_change;
+mod source;
 pub mod stored_rows;
 pub mod system_cols;
 pub mod text;
@@ -66,7 +66,7 @@ use datafusion::execution::session_state::SessionStateBuilder;
 use datafusion::prelude::{SessionConfig, SessionContext};
 use gage_registry::driver::DriverRegistry;
 use gage_registry::scanner::ScannerRegistry;
-use gage_session::{ContentSchema, content_schema_batch, content_schema_schema};
+use gage_session::{ContentSchema, DriverError, content_schema_batch, content_schema_schema};
 use gage_store::{
     ExternalSession, LinkKind, NoteDocRow, Store, StoredNoteTable, StoredSessionTable,
     attachment_file_table, attachment_table, dataset_table, issue_event_table, issue_report_fn,
@@ -76,10 +76,9 @@ use gage_store::{
 };
 
 use crate::age::age_udf;
-use crate::blame::{blame_fn, blame_schema, native_blame_fn};
+use crate::blame::{blame_fn, blame_schema, source_blame_fn};
 use crate::help::help_table;
 use crate::json::json_extract_udf;
-use crate::native::{NativeTable, NativeTableFn};
 use crate::patch::patch_lines_udf;
 pub use crate::print_format::{PrintFormat, write_yaml, write_yaml_capped};
 use crate::project::project_for_path_udf;
@@ -87,16 +86,16 @@ pub use crate::repl::{TvfInfo, exec_command, run_repl};
 use crate::rows::RowCache;
 pub use crate::scope::ScanScope;
 use crate::scope::SessionSet;
+pub use crate::source::QuerySource;
+use crate::source::SourceSpec;
 use crate::stored_rows::{RowKind, StoredRowsTable};
 use crate::system_cols::SkipSystemCols;
-use crate::text::{
-    MESSAGE_TEXT_ARGS, MessageTextFn, NATIVE_MESSAGE_TEXT_ARGS, NativeMessageTextFn,
-    StoreTextIndex, message_text_schema,
-};
+use crate::text::{MESSAGE_TEXT_ARGS, MessageTextFn, StoreTextIndex, message_text_schema};
 
 /// Composes a query context. `store` backs the store tables when
-/// present; without it, they are absent and only the native discovery
-/// functions are available. A store-backed context has store scope,
+/// present; without it, they are absent, and
+/// [`build_source`](Self::build_source) composes a context over a
+/// driver source instead. A store-backed context has store scope,
 /// every live object, unless a [`ScanScope`] narrows it to one scan
 /// or [`external`](Self::external) narrows it to given session
 /// directories.
@@ -122,8 +121,8 @@ impl ContextBuilder {
     }
 
     /// Keep the derived state of every source the context opens under
-    /// `root`. The native table functions, `native_blame`, `blame`,
-    /// and `project_for_path` open sources. Without this, a context
+    /// `root`. A source-scoped context, `blame`, and
+    /// `project_for_path` open sources. Without this, a context
     /// over a store uses the store's cache root, and one without a
     /// store uses the default.
     pub fn cache_root(mut self, root: impl Into<PathBuf>) -> Self {
@@ -157,7 +156,7 @@ impl ContextBuilder {
         self
     }
 
-    /// Let the native table functions read the runtime's own in-flight
+    /// Let a source-scoped context read the runtime's own in-flight
     /// agent sessions, which every other context leaves out. The live
     /// scan view reads a running agent through such a context.
     pub fn show_agents(mut self) -> Self {
@@ -183,9 +182,8 @@ impl ContextBuilder {
                     .to_path_buf()
             })
         });
-        let ctx = new_context(self.skip_system_cols, self.show_agents, cache_root.clone());
+        let ctx = new_context(cache_root.clone());
         let Some(store) = self.store else {
-            register_blame_functions(&ctx, None, self.show_agents, cache_root);
             return ctx;
         };
         if let Some(sessions) = self.external {
@@ -263,7 +261,7 @@ impl ContextBuilder {
         ctx.register_table("note_doc", registry_note_doc_table())
             .expect("register the note doc table on a fresh context");
         register_issue_functions(&ctx, &store);
-        register_blame_functions(&ctx, Some(&store), self.show_agents, cache_root);
+        ctx.register_udtf("blame", blame_fn(Arc::clone(&store), cache_root));
         // Views are planned over the raw providers, so they survive the
         // user-facing context hiding what they read
         for (name, sql) in VIEWS {
@@ -292,6 +290,47 @@ impl ContextBuilder {
             }
         }
         ctx
+    }
+
+    /// Build a context over the driver source `source` in place of a
+    /// store: `''` names the default source and `'claude:/path'` names
+    /// one. `session`, `entry`, `message`, `tool_use`, and
+    /// `tool_use_file` are the driver's tables over the source's
+    /// sessions, keyed on the native id, and `blame` and
+    /// `message_text` read the same sessions. No other store table is
+    /// present, whatever store the builder was given.
+    pub fn build_source(self, source: &str) -> Result<SessionContext, DriverError> {
+        let spec = SourceSpec {
+            source: source.to_string(),
+            show_agents: self.show_agents,
+            cache_root: self.cache_root,
+        };
+        // Each provider holds its own handle to the driver's index; the
+        // opened source may drop once the tables are taken.
+        let tables = spec.open()?.tables()?;
+        let ctx = new_context(spec.cache_root.clone());
+        let tables: [(&str, Arc<dyn TableProvider>); 5] = [
+            ("session", tables.session),
+            ("entry", tables.entry),
+            ("message", tables.message),
+            ("tool_use", tables.tool_use),
+            ("tool_use_file", tables.tool_use_file),
+        ];
+        for (name, table) in tables {
+            let table: Arc<dyn TableProvider> = if self.skip_system_cols {
+                Arc::new(SkipSystemCols::new(table))
+            } else {
+                table
+            };
+            ctx.register_table(name, table)
+                .expect("register source tables on a fresh context");
+        }
+        ctx.register_udtf(
+            "message_text",
+            Arc::new(MessageTextFn::with_source(spec.clone())),
+        );
+        ctx.register_udtf("blame", source_blame_fn(spec));
+        Ok(ctx)
     }
 }
 
@@ -436,23 +475,6 @@ fn register_issue_functions(ctx: &SessionContext, store: &Arc<Mutex<Store>>) {
     ctx.register_udtf("related_issue", related_issue_fn(Arc::clone(store)));
 }
 
-/// The blame functions are for a store-wide or a native context. A
-/// scan-scoped context does not register them.
-fn register_blame_functions(
-    ctx: &SessionContext,
-    store: Option<&Arc<Mutex<Store>>>,
-    show_agents: bool,
-    cache_root: Option<PathBuf>,
-) {
-    ctx.register_udtf(
-        "native_blame",
-        native_blame_fn(show_agents, cache_root.clone()),
-    );
-    if let Some(store) = store {
-        ctx.register_udtf("blame", blame_fn(Arc::clone(store), cache_root));
-    }
-}
-
 /// The `note_doc` table of the store scope: every `writes` declaration
 /// of every registered scanner, read once when the context is built.
 fn registry_note_doc_table() -> Arc<dyn TableProvider> {
@@ -532,60 +554,29 @@ const VIEWS: &[(&str, &str)] = &[
 ];
 
 /// The table functions this crate's contexts expose, for the repl's
-/// `\df`. A native table's columns depend on the source's driver, so
-/// none advertises a fixed schema.
+/// `\df`.
 pub fn repl_functions() -> Vec<TvfInfo> {
-    NATIVE_TABLES
-        .iter()
-        .map(|t| TvfInfo {
-            name: t.function_name(),
-            args: "source text",
-            schema: None,
-        })
-        .chain([
-            TvfInfo {
-                name: "blame",
-                args: "file text [, lines text]",
-                schema: Some(blame_schema()),
-            },
-            TvfInfo {
-                name: "native_blame",
-                args: "source text, file text [, lines text]",
-                schema: Some(blame_schema()),
-            },
-            TvfInfo {
-                name: "message_text",
-                args: MESSAGE_TEXT_ARGS,
-                schema: Some(message_text_schema()),
-            },
-            TvfInfo {
-                name: "native_message_text",
-                args: NATIVE_MESSAGE_TEXT_ARGS,
-                schema: Some(message_text_schema()),
-            },
-        ])
-        .collect()
+    vec![
+        TvfInfo {
+            name: "blame",
+            args: "file text [, lines text]",
+            schema: Some(blame_schema()),
+        },
+        TvfInfo {
+            name: "message_text",
+            args: MESSAGE_TEXT_ARGS,
+            schema: Some(message_text_schema()),
+        },
+    ]
 }
-
-const NATIVE_TABLES: [NativeTable; 5] = [
-    NativeTable::Session,
-    NativeTable::Message,
-    NativeTable::Entry,
-    NativeTable::ToolUse,
-    NativeTable::ToolUseFile,
-];
 
 /// A context carrying the shared configuration --- the `RowCache`
 /// extension, the PostgreSQL SQL dialect, `information_schema`, the
-/// native table functions, the JSON functions, the `project_for_path`
-/// UDF, and the `content_schema` and `help` tables --- with no store
-/// tables registered. Sources the functions open keep their derived
+/// JSON functions, the `project_for_path` UDF, and the
+/// `content_schema` and `help` tables --- with no session tables
+/// registered. Sources `project_for_path` opens keep their derived
 /// state under `cache_root`, or the default root when it is `None`.
-pub(crate) fn new_context(
-    skip_system_cols: bool,
-    show_agents: bool,
-    cache_root: Option<PathBuf>,
-) -> SessionContext {
+pub(crate) fn new_context(cache_root: Option<PathBuf>) -> SessionContext {
     let config = SessionConfig::new()
         .with_information_schema(true)
         .with_extension(Arc::new(RowCache::new()))
@@ -597,24 +588,6 @@ pub(crate) fn new_context(
     let mut ctx = SessionContext::new_with_state(state);
     datafusion_functions_json::register_all(&mut ctx).unwrap();
     ctx.register_udf(json_extract_udf());
-    for table in NATIVE_TABLES {
-        ctx.register_udtf(
-            table.function_name(),
-            Arc::new(NativeTableFn {
-                table,
-                skip_system_cols,
-                show_agents,
-                cache_root: cache_root.clone(),
-            }),
-        );
-    }
-    ctx.register_udtf(
-        "native_message_text",
-        Arc::new(NativeMessageTextFn {
-            show_agents,
-            cache_root: cache_root.clone(),
-        }),
-    );
     ctx.register_udf(project_for_path_udf(cache_root));
     ctx.register_udf(age_udf());
     ctx.register_udf(patch_lines_udf());
@@ -932,18 +905,110 @@ mod tests {
         assert_eq!(events, [survivor]);
     }
 
-    /// `native_blame` is on every context outside a scan scope; `blame`
-    /// needs the store.
+    /// `blame` reads the context's sessions: it needs a store or a
+    /// driver source.
     #[tokio::test]
-    async fn blame_functions_follow_the_context_scope() {
+    async fn blame_follows_the_context_scope() {
         let ctx = ContextBuilder::new(None).build().await;
-        assert!(ctx.table_function("native_blame").is_ok());
         assert!(ctx.table_function("blame").is_err());
 
-        let (_tmp, store) = open_store();
+        let (tmp, store) = open_store();
         let ctx = ContextBuilder::new(Some(store)).build().await;
-        assert!(ctx.table_function("native_blame").is_ok());
         assert!(ctx.table_function("blame").is_ok());
+
+        let spec = format!("claude:{}", tmp.path().join("claude").display());
+        let ctx = ContextBuilder::new(None)
+            .cache_root(tmp.path().join("cache"))
+            .build_source(&spec)
+            .unwrap();
+        assert!(ctx.table_function("blame").is_ok());
+    }
+
+    /// A source-scoped context serves the driver's tables under the
+    /// store tables' names and no other store table, whatever store
+    /// the builder was given. Its `session` columns are the store
+    /// table's, in the store table's order.
+    #[tokio::test]
+    async fn source_scope_serves_the_session_tables_alone() {
+        let (tmp, store) = open_store();
+        let spec = format!("claude:{}", tmp.path().join("claude").display());
+        let stored = ContextBuilder::new(Some(Arc::clone(&store))).build().await;
+        let source = ContextBuilder::new(Some(store))
+            .cache_root(tmp.path().join("cache"))
+            .build_source(&spec)
+            .unwrap();
+        let tables = "SELECT table_name FROM information_schema.tables \
+                      WHERE table_schema = 'public' ORDER BY 1";
+        assert_eq!(
+            strings(&source, tables).await,
+            [
+                "content_schema",
+                "entry",
+                "help",
+                "message",
+                "session",
+                "tool_use",
+                "tool_use_file",
+            ]
+        );
+        for table in ["session", "entry", "message", "tool_use", "tool_use_file"] {
+            let columns = format!(
+                "SELECT column_name || ' ' || data_type FROM information_schema.columns \
+                 WHERE table_name = '{table}' ORDER BY ordinal_position"
+            );
+            assert_eq!(
+                strings(&source, &columns).await,
+                strings(&stored, &columns).await,
+                "{table}"
+            );
+        }
+    }
+
+    /// The `session` columns a native source cannot fill are null, the
+    /// driver names itself, and the locator is the session file.
+    #[tokio::test]
+    async fn source_session_fills_the_store_columns_it_can() {
+        let claude_root = tempfile::tempdir().unwrap();
+        let dir = claude_root.path().join("projects").join("-w-proj");
+        std::fs::create_dir_all(&dir).unwrap();
+        let id = "eeeeeeee-0000-0000-0000-000000000001";
+        let file = dir.join(format!("{id}.jsonl"));
+        std::fs::write(
+            &file,
+            concat!(
+                r#"{"type":"user","uuid":"u1","timestamp":"2025-01-01T00:00:00Z","message":{"role":"user","content":"hi"}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        let spec = format!("claude:{}", claude_root.path().display());
+        let ctx = ContextBuilder::new(None)
+            .cache_root(claude_root.path().join("cache"))
+            .build_source(&spec)
+            .unwrap();
+        assert_eq!(
+            strings(
+                &ctx,
+                "SELECT driver || ' ' || locator FROM session \
+                 WHERE created IS NULL AND origin IS NULL AND modified IS NOT NULL"
+            )
+            .await,
+            [format!("claude file:{}", file.display())]
+        );
+    }
+
+    /// A source that cannot be opened fails the build: here its cache
+    /// root is a file, so its derived state has nowhere to go.
+    #[test]
+    fn source_scope_refuses_a_source_it_cannot_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("not-a-dir");
+        std::fs::write(&file, "").unwrap();
+        let spec = format!("claude:{}", dir.path().display());
+        let result = ContextBuilder::new(None)
+            .cache_root(&file)
+            .build_source(&spec);
+        assert!(result.is_err());
     }
 
     /// A store-backed context registers `session` and exposes it
@@ -962,7 +1027,7 @@ mod tests {
 
     /// `entry` and `message` serve a stored session's rows through
     /// the driver that wrote it, keyed by the Gage session id so they
-    /// `project` and `mtime` predicates and the limit reach the
+    /// `project` and `modified` predicates and the limit reach the
     /// driver's walk: the plan carries no filter of its own, and the
     /// rows are the walk's answer.
     #[tokio::test]
@@ -1003,12 +1068,12 @@ mod tests {
         assert!(empty.is_empty(), "{empty:?}");
     }
 
-    /// `native_tool_use_file` lists one row per call per path it
+    /// A source's `tool_use_file` lists one row per call per path it
     /// names: a judged write is `write`, and a path a shell command
     /// names with no recorded outcome is `cite`, resolved against the
-    /// entry's cwd. The path lists are gone from `native_session`.
+    /// entry's cwd. The path lists are gone from `session`.
     #[tokio::test]
-    async fn native_tool_use_file_lists_the_paths_each_call_names() {
+    async fn source_tool_use_file_lists_the_paths_each_call_names() {
         let claude_root = tempfile::tempdir().unwrap();
         let dir = claude_root.path().join("projects").join("-w-proj");
         std::fs::create_dir_all(&dir).unwrap();
@@ -1028,9 +1093,9 @@ mod tests {
         let spec = format!("claude:{}", claude_root.path().display());
         let ctx = ContextBuilder::new(None)
             .cache_root(claude_root.path().join("cache"))
-            .build()
-            .await;
-        let from = format!("native_tool_use_file('{spec}')");
+            .build_source(&spec)
+            .unwrap();
+        let from = "tool_use_file";
         assert_eq!(
             strings(
                 &ctx,
@@ -1059,21 +1124,19 @@ mod tests {
             [id]
         );
         let err = ctx
-            .sql(&format!(
-                "SELECT files_changed FROM native_session('{spec}')"
-            ))
+            .sql("SELECT files_changed FROM session")
             .await
             .err()
             .unwrap();
         assert!(err.to_string().contains("files_changed"), "{err}");
     }
 
-    /// `native_session` carries the driver's normalized attributes as
+    /// A source's `session` carries the driver's normalized attributes as
     /// typed columns and again in the same `summary` JSON the stored
     /// `session` table carries, with the driver's extra members beside
     /// them.
     #[tokio::test]
-    async fn native_session_carries_the_summary_json() {
+    async fn source_session_carries_the_summary_json() {
         let claude_root = tempfile::tempdir().unwrap();
         let dir = claude_root.path().join("projects").join("-w-proj");
         std::fs::create_dir_all(&dir).unwrap();
@@ -1093,9 +1156,9 @@ mod tests {
         let spec = format!("claude:{}", claude_root.path().display());
         let ctx = ContextBuilder::new(None)
             .cache_root(claude_root.path().join("cache"))
-            .build()
-            .await;
-        let from = format!("native_session('{spec}')");
+            .build_source(&spec)
+            .unwrap();
+        let from = "session";
         let cols = strings(
             &ctx,
             &format!(
@@ -1157,11 +1220,11 @@ mod tests {
         );
     }
 
-    /// Every `native_session` row names its session type, the value a
+    /// Every source `session` row names its session type, the value a
     /// stored session carries after `add`, whether or not its
     /// transcript holds anything.
     #[tokio::test]
-    async fn native_session_names_its_session_type() {
+    async fn source_session_names_its_session_type() {
         let claude_root = tempfile::tempdir().unwrap();
         let dir = claude_root.path().join("projects").join("-w-proj");
         std::fs::create_dir_all(&dir).unwrap();
@@ -1177,14 +1240,10 @@ mod tests {
         let spec = format!("claude:{}", claude_root.path().display());
         let ctx = ContextBuilder::new(None)
             .cache_root(claude_root.path().join("cache"))
-            .build()
-            .await;
+            .build_source(&spec)
+            .unwrap();
         assert_eq!(
-            strings(
-                &ctx,
-                &format!("SELECT session_type FROM native_session('{spec}') ORDER BY id")
-            )
-            .await,
+            strings(&ctx, "SELECT session_type FROM session ORDER BY id").await,
             ["claude", "claude"]
         );
     }
@@ -1194,7 +1253,7 @@ mod tests {
     /// and whose derived columns are null, so `--empty` never selects
     /// it and a count of the source still includes it.
     #[tokio::test]
-    async fn native_session_lists_an_unreadable_transcript_with_its_read_error() {
+    async fn source_session_lists_an_unreadable_transcript_with_its_read_error() {
         let claude_root = tempfile::tempdir().unwrap();
         let dir = claude_root.path().join("projects").join("-w-proj");
         std::fs::create_dir_all(&dir).unwrap();
@@ -1216,9 +1275,9 @@ mod tests {
         let spec = format!("claude:{}", claude_root.path().display());
         let ctx = ContextBuilder::new(None)
             .cache_root(claude_root.path().join("cache"))
-            .build()
-            .await;
-        let from = format!("native_session('{spec}')");
+            .build_source(&spec)
+            .unwrap();
+        let from = "session";
 
         assert_eq!(
             strings(&ctx, &format!("SELECT COUNT(*) FROM {from}")).await,
@@ -1262,7 +1321,7 @@ mod tests {
     }
 
     /// The session listing's SQL shape, columns only under `ORDER BY
-    /// mtime DESC LIMIT n`, hands the limit to the walk: the walk cuts
+    /// modified DESC LIMIT n`, hands the limit to the walk: the walk cuts
     /// the source to n sessions by mtime before any file is parsed,
     /// which the summary cache shows as n files written.
     #[tokio::test]
@@ -1287,14 +1346,14 @@ mod tests {
         let spec = format!("claude:{}", claude_root.path().display());
         let ctx = ContextBuilder::new(None)
             .cache_root(cache_root.clone())
-            .build()
-            .await;
-        let from = format!("native_session('{spec}')");
+            .build_source(&spec)
+            .unwrap();
+        let from = "session";
 
         let listing = format!(
             "SELECT id, id_display, id_prefix, project, title, session_type, model, size, \
-                    message_count, mtime AS time, '' AS driver \
-             FROM {from} ORDER BY mtime DESC LIMIT 2"
+                    message_count, modified AS time, driver \
+             FROM {from} ORDER BY modified DESC LIMIT 2"
         );
         assert_eq!(
             strings(&ctx, &listing).await,
@@ -1333,7 +1392,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn native_session_pushes_project_and_mtime_filters_into_the_walk() {
+    async fn source_session_pushes_project_and_modified_filters_into_the_walk() {
         use std::time::{Duration, UNIX_EPOCH};
 
         let claude_root = tempfile::tempdir().unwrap();
@@ -1368,12 +1427,12 @@ mod tests {
         let spec = format!("claude:{}", claude_root.path().display());
         let ctx = ContextBuilder::new(None)
             .cache_root(claude_root.path().join("cache"))
-            .build()
-            .await;
-        let from = format!("native_session('{spec}')");
+            .build_source(&spec)
+            .unwrap();
+        let from = "session";
 
         let newest_in_a =
-            format!("SELECT id FROM {from} WHERE project = '-w-a' ORDER BY mtime DESC LIMIT 1");
+            format!("SELECT id FROM {from} WHERE project = '-w-a' ORDER BY modified DESC LIMIT 1");
         assert_eq!(
             strings(&ctx, &newest_in_a).await,
             ["aaaaaaaa-0000-0000-0000-000000000002"]
@@ -1386,7 +1445,7 @@ mod tests {
         );
 
         let after = format!(
-            "SELECT id FROM {from} WHERE mtime > to_timestamp_seconds(1700000050) ORDER BY mtime"
+            "SELECT id FROM {from} WHERE modified > to_timestamp_seconds(1700000050) ORDER BY modified"
         );
         assert_eq!(
             strings(&ctx, &after).await,
@@ -1513,11 +1572,11 @@ mod tests {
             "the stored tool_use_file rows come from the same derivation"
         );
 
-        let native_rows = strings(
-            &ctx,
-            &format!("SELECT name FROM native_tool_use('{spec}') ORDER BY line"),
-        )
-        .await;
+        let native = ContextBuilder::new(None)
+            .cache_root(claude_root.path().join("cache"))
+            .build_source(&spec)
+            .unwrap();
+        let native_rows = strings(&native, "SELECT name FROM tool_use ORDER BY line").await;
         assert_eq!(native_rows, ["Edit", "Read"]);
     }
 
@@ -2047,8 +2106,8 @@ mod tests {
             .build()
             .await;
         assert!(
-            ctx.table_function("native_blame").is_err() && ctx.table_function("blame").is_err(),
-            "a scan-scoped context has no blame functions"
+            ctx.table_function("blame").is_err(),
+            "a scan-scoped context has no blame function"
         );
         assert_eq!(
             strings(&ctx, "SELECT task FROM scan_task ORDER BY num").await,
@@ -2289,11 +2348,11 @@ mod tests {
         std::fs::write(dir.join(format!("{id}.jsonl")), lines.join("\n") + "\n").unwrap();
     }
 
-    /// `native_message_text` searches a source's index: one row per
+    /// A source's `message_text` searches the source's index: one row per
     /// matching message, best match first, named by session URL, with
     /// `LIMIT` pushed into the search.
     #[tokio::test]
-    async fn native_message_text_searches_a_source() {
+    async fn source_message_text_searches_a_source() {
         let claude_root = tempfile::tempdir().unwrap();
         let a = "aaaaaaaa-0000-0000-0000-000000000001";
         let b = "bbbbbbbb-0000-0000-0000-000000000002";
@@ -2306,9 +2365,9 @@ mod tests {
         let spec = format!("claude:{}", claude_root.path().display());
         let ctx = ContextBuilder::new(None)
             .cache_root(claude_root.path().join("cache"))
-            .build()
-            .await;
-        let from = format!("native_message_text('{spec}', 'quokka')");
+            .build_source(&spec)
+            .unwrap();
+        let from = "message_text('quokka')";
 
         let urls = strings(&ctx, &format!("SELECT url FROM {from} ORDER BY session_id")).await;
         assert_eq!(
@@ -2338,17 +2397,13 @@ mod tests {
         assert!(
             strings(
                 &ctx,
-                &format!(
-                    "SELECT CAST(line AS VARCHAR) FROM native_message_text('{spec}', 'wallaby')"
-                )
+                "SELECT CAST(line AS VARCHAR) FROM message_text('wallaby')"
             )
             .await
             .is_empty()
         );
         let err = ctx
-            .sql(&format!(
-                "SELECT line FROM native_message_text('{spec}', '\"open')"
-            ))
+            .sql("SELECT line FROM message_text('\"open')")
             .await
             .unwrap()
             .collect()
@@ -2441,8 +2496,8 @@ mod tests {
     }
 
     /// `gage session find` looks up the timestamps of its shown hits
-    /// with literal `session_id` and `line` lists against `message`
-    /// and `native_message`. Both tables apply the lists in the scan,
+    /// with literal `session_id` and `line` lists against `message`,
+    /// stored or of a source. Both tables apply the lists in the scan,
     /// so the plan has no filter step over the parsed rows.
     #[tokio::test]
     async fn message_timestamps_resolve_by_literal_keys() {
@@ -2473,11 +2528,15 @@ mod tests {
 
         let native_sql = format!(
             "SELECT session_id || ' ' || CAST(line AS VARCHAR) || ' ' || CAST(timestamp AS VARCHAR) \
-             FROM native_message('{spec}') \
+             FROM message \
              WHERE session_id IN ('{a}') AND line IN (2)"
         );
+        let native = ContextBuilder::new(None)
+            .cache_root(tmp.path().join("cache"))
+            .build_source(&spec)
+            .unwrap();
         assert_eq!(
-            strings(&ctx, &native_sql).await,
+            strings(&native, &native_sql).await,
             [format!("{a} 2 2025-01-01T00:00:01Z")]
         );
         let stored_sql = format!(
@@ -2489,8 +2548,8 @@ mod tests {
             strings(&ctx, &stored_sql).await,
             [format!("{stored_id} 2 2025-01-01T00:00:01Z")]
         );
-        for sql in [&native_sql, &stored_sql] {
-            let plan = explain(&ctx, sql).await.physical;
+        for (ctx, sql) in [(&native, &native_sql), (&ctx, &stored_sql)] {
+            let plan = explain(ctx, sql).await.physical;
             assert!(
                 !plan.contains("FilterExec"),
                 "the key lists are applied by the scan: {plan}"
@@ -2498,8 +2557,8 @@ mod tests {
         }
     }
 
-    /// A literal `session_id` set on `message_text` or
-    /// `native_message_text` restricts the search itself, so a `LIMIT`
+    /// A literal `session_id` set on `message_text`, over a store or
+    /// over a source, restricts the search itself, so a `LIMIT`
     /// counts hits in those sessions alone: a session whose best match
     /// ranks below every hit of a session outside the set is still
     /// found. The set is applied in the scan, so the plan has no
@@ -2535,21 +2594,24 @@ mod tests {
             .build()
             .await;
 
-        let unrestricted =
-            format!("SELECT session_id FROM native_message_text('{spec}', 'quokka') LIMIT 1");
-        assert_eq!(strings(&ctx, &unrestricted).await, [strong]);
+        let native = ContextBuilder::new(None)
+            .cache_root(tmp.path().join("cache"))
+            .build_source(&spec)
+            .unwrap();
+        let unrestricted = "SELECT session_id FROM message_text('quokka') LIMIT 1";
+        assert_eq!(strings(&native, unrestricted).await, [strong]);
         let native_sql = format!(
-            "SELECT session_id FROM native_message_text('{spec}', 'quokka') \
+            "SELECT session_id FROM message_text('quokka') \
              WHERE session_id IN ('{weak}', 'cccccccc-0000-0000-0000-000000000003') LIMIT 1"
         );
-        assert_eq!(strings(&ctx, &native_sql).await, [weak]);
+        assert_eq!(strings(&native, &native_sql).await, [weak]);
         let stored_sql = format!(
             "SELECT session_id FROM message_text('quokka') \
              WHERE session_id = '{stored_weak}' LIMIT 1"
         );
         assert_eq!(strings(&ctx, &stored_sql).await, [stored_weak.as_str()]);
-        for sql in [&native_sql, &stored_sql] {
-            let plan = explain(&ctx, sql).await.physical;
+        for (ctx, sql) in [(&native, &native_sql), (&ctx, &stored_sql)] {
+            let plan = explain(ctx, sql).await.physical;
             assert!(
                 !plan.contains("FilterExec"),
                 "the session set is applied by the search: {plan}"
@@ -2558,30 +2620,24 @@ mod tests {
         // The type and subtype columns are raw terms too, so their
         // literal sets reach the search alongside the session set
         let typed_sql = format!(
-            "SELECT session_id FROM native_message_text('{spec}', 'quokka') \
+            "SELECT session_id FROM message_text('quokka') \
              WHERE session_id = '{weak}' AND type = 'user' AND subtype = 'text' LIMIT 1"
         );
-        assert_eq!(strings(&ctx, &typed_sql).await, [weak]);
-        let plan = explain(&ctx, &typed_sql).await.physical;
+        assert_eq!(strings(&native, &typed_sql).await, [weak]);
+        let plan = explain(&native, &typed_sql).await.physical;
         assert!(!plan.contains("FilterExec"), "{plan}");
         assert!(
             strings(
-                &ctx,
-                &format!(
-                    "SELECT session_id FROM native_message_text('{spec}', 'quokka') \
-                     WHERE type = 'assistant'"
-                )
+                &native,
+                "SELECT session_id FROM message_text('quokka') WHERE type = 'assistant'"
             )
             .await
             .is_empty()
         );
         // A filter the search cannot apply stays a filter step
         let plan = explain(
-            &ctx,
-            &format!(
-                "SELECT session_id FROM native_message_text('{spec}', 'quokka') \
-                 WHERE session_id LIKE 'b%'"
-            ),
+            &native,
+            "SELECT session_id FROM message_text('quokka') WHERE session_id LIKE 'b%'",
         )
         .await
         .physical;

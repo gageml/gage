@@ -62,7 +62,7 @@ pub(crate) const PLUGIN_NAME: &str = "gage";
 /// Plugin identifier Claude Code uses: `<plugin>@<marketplace>`.
 const PLUGIN_ID: &str = "gage@gage";
 
-const NAME: &str = "claude";
+pub(crate) const NAME: &str = "claude";
 /// The harness's display name
 const HARNESS_NAME: &str = "Claude Code";
 const SCHEMES: &[&str] = &["claude"];

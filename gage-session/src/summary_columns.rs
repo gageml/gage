@@ -1,6 +1,6 @@
 //! The Arrow builders for the derived columns of a session table.
 //!
-//! The `session` and `native_session` tables carry the normalized
+//! The `session` table of a store and of a source carry the normalized
 //! attributes of [`SummaryAttrs`] as typed columns and the whole
 //! object as the `summary` JSON column. One builder fills all of them
 //! from one value, so a column and its `summary` field always agree

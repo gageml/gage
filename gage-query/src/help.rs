@@ -61,39 +61,40 @@ fn help_schema() -> SchemaRef {
 
 const HELP: &[HelpTopic] = &[
     HelpTopic {
-        topic: "native",
-        short: "session functions that read a source directly, for sessions not in the store",
-        full: r#"The session, entry, message, tool_use, and tool_use_file tables hold stored
-sessions only. A session named by its native UUID may not be stored.
-native_session(source), native_message(source), native_entry(source),
-native_tool_use(source), and native_tool_use_file(source) read the source
-directly. The argument is required: '' names the default source, 'claude:' the
-default Claude Code source, 'claude:/path' a projects directory.
+        topic: "source",
+        short: "reading another store or a native source in place of the main store",
+        full: r#"A query reads one source. With no source named it is the main store. The query
+tool's source parameter, or --source on gage query, names another, and the query
+then reads that source and nothing of the main store:
 
-native_session returns (id, title, project, mtime, session_type, content_format,
-size, model, message_count, line_count, input_tokens, output_tokens,
-cached_tokens, cost_usd, summary, is_empty): mtime and size are the session file's, where the stored
-session table has created, modified, and the stored content size; the derived
-columns and summary are the same as the stored table's. The other four return
-their stored tables' columns and key on the native UUID: id in native_session,
-session_id in the rest.
+gage:<path>     the Gage store at <path>, with every store table
+claude:<path>   the Claude Code sessions under <path>/projects
+claude:         the Claude Code sessions in the default location
+
+A named source is read only. The write tools write the main store alone, and an
+id read from another source is not a target for them.
+
+A native source such as claude: holds sessions whether or not they are stored.
+It has session, entry, message, tool_use, and tool_use_file, with the stored
+tables' columns, and blame and message_text over the same sessions; no other
+table is present. Its rows key on the native UUID: id in session, session_id in
+the rest. In its session table modified is the session file's modification time,
+size is the file's size, and created and origin are NULL.
 
 A stored session's origin ends in its native UUID, so
-SELECT id FROM session WHERE origin LIKE '%/3fefde6c%' tells whether a native
-session is already stored."#,
+SELECT id FROM session WHERE origin LIKE '%/3fefde6c%' on the main store tells
+whether a native session is already stored."#,
     },
     HelpTopic {
         topic: "message_text",
         short: "full-text message search, its query syntax, and message kinds",
         full: r#"message_text(query [, snippet_len]) searches the text of every stored session's
-messages; native_message_text(source, query [, snippet_len]) searches a source's
-sessions, with source as the native functions take it. Each returns (url,
+messages, or every session of the native source the query names. It returns (url,
 session_id, line, type, subtype, score, snippet), one row per matching message,
 best match first. url names the session across every source and store
 (claude:<root>/<native id>, gage:<store>/<id>); session_id is the id the corpus
-uses, so a row joins to message or to native_message(source) on (session_id,
-line). Matched terms in snippet are wrapped in «guillemets»; snippet_len caps
-its length, default 200. LIMIT n reaches the search; without one the cap is 100
+uses, so a row joins to message on (session_id, line). Matched terms in snippet
+are wrapped in «guillemets»; snippet_len caps its length, default 200. LIMIT n reaches the search; without one the cap is 100
 rows. A WHERE term on session_id, type, or subtype alone, as = or IN with
 literal values, reaches the search too, so the cap counts admitted hits alone.
 The search
@@ -134,11 +135,10 @@ WHERE subtype = 'text' LIMIT 20;"#,
     HelpTopic {
         topic: "blame",
         short: "the session call that wrote each line of a file",
-        full: r#"native_blame(source, file [, lines]) and blame(file [, lines]) return one row per
-contiguous line range and candidate call: (line, line_end, session_id,
+        full: r#"blame(file [, lines]) returns one row per contiguous line range and candidate call: (line, line_end, session_id,
 session_lines, tool_use_id, tool_name, timestamp, rank, match). line_end is null
-for a single line. native_blame reads a native source and blame the stored
-sessions. file is a path; lines is optional and selects lines as a number (42)
+for a single line. It reads the stored sessions, or the sessions of the native
+source the query names. file is a path; lines is optional and selects lines as a number (42)
 or as text ('10-20,42'). A line may have several candidate calls; rank 1 is the
 strongest, and match names the evidence: patch (the call's recorded patch added
 the line), input (its input carries the line and the driver judged it wrote the
@@ -148,19 +148,18 @@ row. session_lines is the selection to read, from the human prompt before the
 call through the call. Filter WHERE rank = 1 for one attribution per line.
 
 SELECT line, line_end, session_id, session_lines, tool_name, match
-FROM native_blame('', '/path/to/file.rs', '10-20') WHERE rank = 1;"#,
+FROM blame('/path/to/file.rs', '10-20') WHERE rank = 1;"#,
     },
     HelpTopic {
         topic: "json",
         short: "reading raw, input_raw, result_raw, and content_schema",
-        full: r#"raw on entry and message, and input_raw and result_raw on tool_use (and their
-native forms), are JSON text in the driver's native shape. content_schema
+        full: r#"raw on entry and message, and input_raw and result_raw on tool_use, are JSON text in the driver's native shape. content_schema
 (content_format, name, schema) describes that shape as a JSON Schema, one row per
 content format and native field. Read it before reading into raw:
 SELECT name, schema FROM content_schema WHERE content_format = 'claude-jsonl 1';
 
 A path is valid for one content format. Scope rows through session.content_format
-(or native_session.content_format) first; on rows of another format the path
+first; on rows of another format the path
 yields NULL without an error.
 
 json_extract(json, path) returns one value as text: the path is $ then .key and
@@ -175,15 +174,14 @@ In claude-jsonl 1, one API response is written as one row per content block and
 every row repeats the response's usage. Sum usage per response, not per row:
 SELECT sum(out) AS output_tokens FROM
  (SELECT max(CAST(json_extract(raw, '$.message.usage.output_tokens') AS BIGINT)) AS out
-  FROM native_message('claude:')
-  WHERE session_id = '<NATIVE_ID>' AND type = 'assistant'
+  FROM message
+  WHERE session_id = '<ID>' AND type = 'assistant'
   GROUP BY json_extract(raw, '$.message.id'));"#,
     },
     HelpTopic {
         topic: "summary",
         short: "the summary JSON fields and token totals",
-        full: r#"The derived attributes of a session are typed columns on session and on
-native_session's result: title, model, message_count, line_count, is_empty,
+        full: r#"The derived attributes of a session are typed columns on session: title, model, message_count, line_count, is_empty,
 input_tokens, output_tokens, cached_tokens, and cost_usd. Each is NULL when the
 driver has no such fact or the session could not be read. The summary JSON
 column carries the same values again, with whatever else the driver derived;

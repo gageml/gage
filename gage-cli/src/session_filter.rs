@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use anyhow::Context;
 use clap::Args;
 use cliclack as cli;
 use console::{Term, style, truncate_str};
@@ -167,20 +168,21 @@ impl SessionFilterArgs {
 ///
 /// A non-empty `sessions` list is resolved prefix by prefix through
 /// the source or the store. Otherwise the filter axes become one
-/// query over the source's `native_session` table, which the driver
-/// answers from its listing without parsing a session, or over the
-/// store's `session` table: a missing window defaults to the past 30
+/// query over the `session` table of the source, which the driver
+/// answers from its listing without parsing a session, or of the
+/// store: a missing window defaults to the past 30
 /// days, and a missing limit defaults to 20 unless a window or
 /// `--project` was pinned (in which case the full filtered set is
-/// returned). The window is the native modification time for a
-/// source and the store's `modified` marker for the store. `--touches`
+/// returned). The window is on `modified`: the session file's
+/// modification time for a source and the store's marker for the
+/// store. `--touches`
 /// counts as `--project` does for the default limit.
 pub async fn select_sessions(
     select: SessionSelect<'_>,
     sessions: &[String],
     filter: &SessionFilterArgs,
 ) -> Result<Vec<String>, SessionSelectError> {
-    let (ctx, from, files, modified_col) = match select {
+    let ctx = match select {
         SessionSelect::Native(source) => {
             let registry = source::driver_registry();
             let (driver, spec) =
@@ -195,10 +197,9 @@ pub async fn select_sessions(
                     .map_err(|e| SessionSelectError::Setup(format!("{spec}: {e}")))?;
                 return ids;
             }
-            let ctx = ContextBuilder::new(None).build().await;
-            let from = format!("native_session('{}')", sql_str(&spec));
-            let files = format!("native_tool_use_file('{}')", sql_str(&spec));
-            (ctx, from, files, "mtime")
+            ContextBuilder::new(None)
+                .build_source(&spec)
+                .map_err(|e| SessionSelectError::Setup(format!("{spec}: {e}")))?
         }
         SessionSelect::Stored(store) => {
             if !sessions.is_empty() {
@@ -212,26 +213,20 @@ pub async fn select_sessions(
             let store = store
                 .reopen()
                 .map_err(|e| SessionSelectError::Setup(e.to_string()))?;
-            let ctx = ContextBuilder::new(Some(Arc::new(Mutex::new(store))))
+            ContextBuilder::new(Some(Arc::new(Mutex::new(store))))
                 .build()
-                .await;
-            (
-                ctx,
-                "session".to_string(),
-                "tool_use_file".to_string(),
-                "modified",
-            )
+                .await
         }
     };
     let mut predicates = Vec::new();
 
     if let Some(value) = &filter.project {
-        let slug = resolve_project_in(&ctx, &from, value).await?;
+        let slug = resolve_project_in(&ctx, value).await?;
         predicates.push(format!("project = '{}'", sql_str(&slug)));
     }
 
     if let Some(dir) = &filter.touches {
-        predicates.push(touches_predicate(&ctx, &files, dir).await?);
+        predicates.push(touches_predicate(&ctx, dir).await?);
     }
 
     let since = if filter.all {
@@ -244,9 +239,7 @@ pub async fn select_sessions(
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis();
-        predicates.push(format!(
-            "{modified_col} >= to_timestamp_millis({cutoff_ms})"
-        ));
+        predicates.push(format!("modified >= to_timestamp_millis({cutoff_ms})"));
     }
 
     let window_pinned = filter.all || filter.since.is_some();
@@ -260,12 +253,12 @@ pub async fn select_sessions(
         Some(20)
     };
 
-    let mut sql = format!("SELECT id FROM {from}");
+    let mut sql = "SELECT id FROM session".to_string();
     if !predicates.is_empty() {
         sql.push_str(" WHERE ");
         sql.push_str(&predicates.join(" AND "));
     }
-    sql.push_str(&format!(" ORDER BY {modified_col} DESC"));
+    sql.push_str(" ORDER BY modified DESC");
     if let Some(n) = limit {
         sql.push_str(&format!(" LIMIT {n}"));
     }
@@ -283,11 +276,7 @@ pub async fn select_sessions(
 /// wrote or read a file at or below `dir` according to the `files`
 /// table, or its project is the one the driver names for `dir`. A
 /// citation of a path is not a touch.
-async fn touches_predicate(
-    ctx: &SessionContext,
-    files: &str,
-    dir: &Path,
-) -> Result<String, SessionSelectError> {
+async fn touches_predicate(ctx: &SessionContext, dir: &Path) -> Result<String, SessionSelectError> {
     let setup = |e: &dyn fmt::Display| SessionSelectError::Setup(e.to_string());
     let cwd = std::env::current_dir().map_err(|e| setup(&e))?;
     let dir = cwd.join(dir);
@@ -295,7 +284,7 @@ async fn touches_predicate(
     let slug = project_for_path(ctx, &dir).await.map_err(|e| setup(&e))?;
     let path = sql_str(dir.to_string_lossy().trim_end_matches('/'));
     Ok(format!(
-        "(project = '{}' OR id IN (SELECT session_id FROM {files} \
+        "(project = '{}' OR id IN (SELECT session_id FROM tool_use_file \
          WHERE type IN ('write', 'read') \
          AND (path = '{path}' OR starts_with(path, '{path}/'))))",
         sql_str(&slug)
@@ -436,7 +425,7 @@ fn listed_count(selected: usize) -> usize {
 }
 
 /// The preview lines for native sessions `ids` in `source`, in the
-/// order of `ids`. Titles are read through the `native_session`
+/// order of `ids`. Titles are read through the source's `session`
 /// table for the sessions the preview lists by name and for no
 /// other: a title is derived from the transcript, and a selection can
 /// hold thousands of sessions the preview only counts.
@@ -449,8 +438,10 @@ pub async fn native_session_lines(
     }
     let registry = source::driver_registry();
     let (_, spec) = source::resolve_source(&registry, source).map_err(anyhow::Error::msg)?;
-    let ctx = ContextBuilder::new(None).build().await;
-    let sql = title_query(&spec, ids);
+    let ctx = ContextBuilder::new(None)
+        .build_source(&spec)
+        .with_context(|| spec.clone())?;
+    let sql = title_query(ids);
     let batches = ctx.sql(&sql).await?.collect().await?;
     let mut titles: HashMap<String, Option<String>> = HashMap::with_capacity(ids.len());
     for batch in &batches {
@@ -472,15 +463,14 @@ pub async fn native_session_lines(
 
 /// The query for the titles of the sessions of `ids` a preview lists
 /// by name.
-fn title_query(spec: &str, ids: &[String]) -> String {
+fn title_query(ids: &[String]) -> String {
     let in_list: Vec<String> = ids
         .iter()
         .take(listed_count(ids.len()))
         .map(|id| format!("'{}'", sql_str(id)))
         .collect();
     format!(
-        "SELECT id, title FROM native_session('{}') WHERE id IN ({})",
-        sql_str(spec),
+        "SELECT id, title FROM session WHERE id IN ({})",
         in_list.join(", ")
     )
 }
@@ -508,10 +498,9 @@ fn utf8_column<'a>(
 /// path through the driver's `project_for_path`.
 pub(crate) async fn resolve_project_in(
     ctx: &SessionContext,
-    from: &str,
     value: &str,
 ) -> Result<String, SessionSelectError> {
-    let projects = known_projects(ctx, from)
+    let projects = known_projects(ctx)
         .await
         .map_err(|e| SessionSelectError::Setup(e.to_string()))?;
     let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
@@ -534,16 +523,11 @@ pub(crate) async fn resolve_project_in(
 }
 
 /// Every distinct `project` slug recorded in the source.
-pub(crate) async fn known_projects(
-    ctx: &SessionContext,
-    from: &str,
-) -> anyhow::Result<HashSet<String>> {
-    Ok(
-        string_column(ctx, &format!("SELECT DISTINCT project FROM {from}"))
-            .await?
-            .into_iter()
-            .collect(),
-    )
+pub(crate) async fn known_projects(ctx: &SessionContext) -> anyhow::Result<HashSet<String>> {
+    Ok(string_column(ctx, "SELECT DISTINCT project FROM session")
+        .await?
+        .into_iter()
+        .collect())
 }
 
 /// The driver's project name for `path`, through the `project_for_path`
@@ -770,10 +754,10 @@ mod tests {
         let ids = |n: usize| -> Vec<String> { (0..n).map(|i| format!("id-{i}")).collect() };
         let named = |sql: &str| sql.matches("'id-").count();
 
-        let fits = title_query("claude:", &ids(PREVIEW_SESSIONS + 1));
+        let fits = title_query(&ids(PREVIEW_SESSIONS + 1));
         assert_eq!(named(&fits), PREVIEW_SESSIONS + 1);
 
-        let capped = title_query("claude:", &ids(PREVIEW_SESSIONS + 3));
+        let capped = title_query(&ids(PREVIEW_SESSIONS + 3));
         assert_eq!(named(&capped), PREVIEW_SESSIONS);
         assert!(capped.contains(&format!("'id-{}'", PREVIEW_SESSIONS - 1)));
         assert!(!capped.contains(&format!("'id-{PREVIEW_SESSIONS}'")));

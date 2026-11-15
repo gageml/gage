@@ -13,7 +13,7 @@ argument-hint: "FILE[:LINES] [question]"
 
 The Claude Code sessions that wrote a project's code are a record of how the
 code came to be: the discussion before each change, the model's thinking, and
-the edits themselves. The `native_blame` table function maps lines of a file
+the edits themselves. The `blame` table function maps lines of a file
 to the session and the tool call that wrote them, and to the lines of that
 session to read. Consult it with the same instinct as `git log` and code
 comments. The record is the primary source for rationale; git history is the
@@ -27,18 +27,20 @@ deliberate over it.
    file and a line selection: a line (`42`), a range (`10-20`), or a list
    (`10-20,42`).
 
-2. Run the query through the `mcp__plugin_gage_gage__query` tool and read
-   the rows:
+2. Run the query through the `mcp__plugin_gage_gage__query` tool with its
+   `source` parameter set to `claude:`, and read the rows. `claude:` names
+   the native Claude Code sessions in the default location. Every query in
+   steps 2 to 4 takes the same `source`.
 
    ```sql
    SELECT line, line_end, session_id, session_lines, tool_use_id, match
-   FROM native_blame('', '<FILE>', '<LINES>')
+   FROM blame('<FILE>', '<LINES>')
    WHERE rank = 1
    ORDER BY line;
    ```
 
-   `<FILE>` is the file's path. The third argument is optional; without it
-   the whole file is blamed. `''` names the default session source.
+   `<FILE>` is the file's path. The second argument is optional; without it
+   the whole file is blamed.
 
    Each row is one contiguous line range attributed to one call. `line_end`
    is null for a single line. `session_id` names the session, `tool_use_id`
@@ -56,14 +58,14 @@ deliberate over it.
 
    ```sql
    SELECT line, type, subtype, substr(text, 1, 1200) AS text
-   FROM native_message('')
+   FROM message
    WHERE session_id = '<session_id>' AND line BETWEEN <start> AND <end>
    ORDER BY line;
    ```
 
    Rows with subtype `thinking` are the model's reasoning. Rows with subtype
    `tool_use` are the edits; the full edit is `input_raw` in
-   `native_tool_use('')` at the row's `tool_use_id`. Read full `text` for the
+   `tool_use` at the row's `tool_use_id`. Read full `text` for the
    rows that matter.
 
 4. Widen when the selection's prompt is an approval such as "go ahead" or
@@ -73,7 +75,7 @@ deliberate over it.
 
    ```sql
    SELECT line, substr(text, 1, 400) AS text
-   FROM native_message('')
+   FROM message
    WHERE session_id = '<session_id>' AND type = 'user' AND subtype = 'text'
      AND line < <start>
    ORDER BY line DESC LIMIT 8;
@@ -83,9 +85,8 @@ deliberate over it.
    and the selection.
 
 5. If a session is not in the native source, which happens once Claude Code
-   has pruned it, repeat step 2 with `blame('<FILE>', '<LINES>')`, which
-   reads the stored sessions, and read with the `message` and `tool_use`
-   tables in place of the native functions.
+   has pruned it, repeat steps 2 to 4 without the `source` parameter. The
+   same queries then read the stored sessions.
 
 6. Answer from the record. State the rationale as the record gives it, and
    quote where the wording matters. Cite each source as

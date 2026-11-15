@@ -9,6 +9,7 @@
 use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::future::Future;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -113,12 +114,24 @@ pub struct IssuesFreeConfig {
 }
 
 /// The `query` tool's data: the DataFusion context its SQL runs on,
-/// and what a `publish` call scopes a fresh context to. `None` where
-/// pending publishes are not readable, as in a scan's tool.
+/// what a `publish` call scopes a fresh context to, and what a
+/// `source` call reads another source with. `publish` is `None` where
+/// pending publishes are not readable, and `source` is `None` where
+/// the tool reads its configured scope alone, both as in a scan's
+/// tool.
 #[derive(Clone)]
 pub struct QueryConfig {
     pub context: Arc<SessionContext>,
     pub publish: Option<PublishConfig>,
+    pub source: Option<SourceConfig>,
+}
+
+/// What a `source` call needs to read a source other than the main
+/// store: where that source's derived state is kept. Nothing here
+/// writes the source itself.
+#[derive(Clone)]
+pub struct SourceConfig {
+    pub cache_root: PathBuf,
 }
 
 /// What a `publish` call reads: the store the context is built on and
@@ -409,6 +422,7 @@ mod tests {
             gage: vec![GageTool::Query(QueryConfig {
                 context: Arc::new(SessionContext::new()),
                 publish: None,
+                source: None,
             })],
             custom: vec![CustomToolDef {
                 name: "secret".into(),

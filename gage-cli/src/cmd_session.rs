@@ -352,13 +352,14 @@ async fn list_native(source: Option<String>, args: SessionListArgs) -> Result<()
     let (driver, spec) = source::resolve_source(&registry, source.as_deref())
         .map_err(|e| anyhow!("gage session list: {e}"))?;
     // The native session rows and the project filter reach the source
-    // through SQL: `native_session` opens it. The command holds no
-    // source handle.
-    let ctx = ContextBuilder::new(None).build().await;
-    let from = format!("native_session('{}')", sql_str(&spec));
+    // through SQL: the context's `session` table is the source's. The
+    // command holds no source handle.
+    let ctx = ContextBuilder::new(None)
+        .build_source(&spec)
+        .with_context(|| format!("gage session list: {spec}"))?;
     let (rows, total) = progress::busy_async(LIST_LABEL, async {
-        let predicates = project_predicates(&ctx, &from, args.project.as_deref()).await?;
-        let listed = query_sessions(&ctx, &args, Listing::Native, &from, &predicates).await?;
+        let predicates = project_predicates(&ctx, args.project.as_deref()).await?;
+        let listed = query_sessions(&ctx, &args, Listing::Native, "session", &predicates).await?;
         anyhow::Ok(listed)
     })
     .await
@@ -384,7 +385,7 @@ async fn list_stored(args: SessionListArgs) -> Result<(), CliError> {
         .build()
         .await;
     let (rows, total) = progress::busy_async(LIST_LABEL, async {
-        let predicates = project_predicates(&ctx, "session", args.project.as_deref()).await?;
+        let predicates = project_predicates(&ctx, args.project.as_deref()).await?;
         let listed = query_sessions(&ctx, &args, Listing::Stored, "session", &predicates).await?;
         anyhow::Ok(listed)
     })
@@ -417,7 +418,7 @@ async fn list_dataset(args: SessionListArgs) -> Result<(), CliError> {
     let from = "session JOIN dataset_session m ON m.session_id = session.id";
     let (rows, total) = progress::busy_async(LIST_LABEL, async {
         let mut predicates = vec![format!("m.dataset_id = '{}'", dataset.id)];
-        predicates.extend(project_predicates(&ctx, "session", args.project.as_deref()).await?);
+        predicates.extend(project_predicates(&ctx, args.project.as_deref()).await?);
         let listed = query_sessions(&ctx, &args, Listing::Dataset, from, &predicates).await?;
         anyhow::Ok(listed)
     })
@@ -472,7 +473,7 @@ async fn share_sessions(
 ) -> anyhow::Result<(Vec<Row>, usize)> {
     let from = "session JOIN share_session m ON m.session_id = session.id";
     let mut predicates = vec![format!("m.share_id = '{}'", sql_str(share_id))];
-    predicates.extend(project_predicates(ctx, "session", args.project.as_deref()).await?);
+    predicates.extend(project_predicates(ctx, args.project.as_deref()).await?);
     Ok(query_sessions(ctx, args, Listing::Stored, from, &predicates).await?)
 }
 
@@ -480,19 +481,18 @@ async fn share_sessions(
 const LIST_LABEL: &str = "Reading sessions";
 
 /// The `project` predicate for a `--project` value, or none without
-/// one. The value resolves against the projects `from` records the way
-/// every session filter resolves it: a slug as given, the home-relative
+/// one. The value resolves against the projects `session` records the
+/// way every session filter resolves it: a slug as given, the home-relative
 /// name the listing shows, or a path. A value naming no recorded
 /// project is an error.
 async fn project_predicates(
     ctx: &SessionContext,
-    from: &str,
     project: Option<&str>,
 ) -> anyhow::Result<Vec<String>> {
     let Some(value) = project else {
         return Ok(Vec::new());
     };
-    let slug = resolve_project_in(ctx, from, value).await?;
+    let slug = resolve_project_in(ctx, value).await?;
     Ok(vec![format!("project = '{}'", sql_str(&slug))])
 }
 
@@ -524,21 +524,11 @@ enum Listing {
 }
 
 impl Listing {
-    /// The column `--since` filters on: the native mtime for a
-    /// source, the store's `modified` marker for the store
-    fn since_col(self) -> &'static str {
-        match self {
-            Listing::Native => "mtime",
-            Listing::Stored | Listing::Dataset => "modified",
-        }
-    }
-
     /// The `ORDER BY` clause: newest first for a source and the store,
     /// member order for a dataset
     fn order_clause(self) -> &'static str {
         match self {
-            Listing::Native => "mtime DESC",
-            Listing::Stored => "modified DESC",
+            Listing::Native | Listing::Stored => "modified DESC",
             Listing::Dataset => "m.session_num ASC",
         }
     }
@@ -547,11 +537,11 @@ impl Listing {
 /// Run one SQL query for the shown rows and a second for the total
 /// count under the same filter. The count is needed for the summary
 /// line; DataFusion's `LIMIT` truncates the shown rows and does not
-/// report a total. Both bindings select the same column list; the
-/// native binding has no type or driver and fills them with an empty
-/// literal; its time column is `mtime` where the store's is
-/// `created`; and rows order and `--since` filter on `mtime` where
-/// the store's do on `modified`. The list names columns only: a
+/// report a total. Both bindings select the same column list, but for
+/// the time shown: `modified`, the session file's modification time,
+/// for a native listing, which has no `created`, and `created` for the
+/// store. Rows order and `--since` filters on `modified` in both. The
+/// list names columns only: a
 /// function in the projection makes DataFusion repartition the scan,
 /// which keeps the limit from reaching the walk.
 async fn query_sessions(
@@ -561,20 +551,20 @@ async fn query_sessions(
     from: &str,
     predicates: &[String],
 ) -> datafusion::error::Result<(Vec<Row>, usize)> {
-    let where_clause = build_where_clause(args, listing, predicates);
+    let where_clause = build_where_clause(args, predicates);
     let limit_clause = match args.limit.fetch_limit() {
         Some(n) => format!(" LIMIT {n}"),
         None => String::new(),
     };
-    let (time_col, driver_col) = match listing {
-        Listing::Native => ("mtime AS time", "'' AS driver"),
-        Listing::Stored | Listing::Dataset => ("created AS time", "driver"),
+    let time_col = match listing {
+        Listing::Native => "modified AS time",
+        Listing::Stored | Listing::Dataset => "created AS time",
     };
     let order_clause = listing.order_clause();
     let sql = format!(
         "SELECT id, id_display, id_prefix, project, \
          title, session_type, model, size, message_count, \
-         {time_col}, {driver_col} \
+         {time_col}, driver \
          FROM {from}{where_clause} \
          ORDER BY {order_clause}{limit_clause}",
     );
@@ -591,10 +581,10 @@ async fn query_sessions(
     Ok((rows, total))
 }
 
-fn build_where_clause(args: &SessionListArgs, listing: Listing, predicates: &[String]) -> String {
+fn build_where_clause(args: &SessionListArgs, predicates: &[String]) -> String {
     let mut clauses: Vec<String> = predicates.to_vec();
     if let Some(d) = args.since {
-        clauses.push(since_predicate(listing.since_col(), since_cutoff_ms(d)));
+        clauses.push(since_predicate("modified", since_cutoff_ms(d)));
     }
     if args.empty {
         clauses.push("is_empty IS TRUE".to_string());
@@ -631,16 +621,14 @@ struct Row {
     /// The driver's project name; empty when the row has none
     project: String,
     title: String,
-    /// The session type; empty for a native listing
     session_type: String,
     model: String,
     size: Option<i64>,
     message_count: Option<i64>,
-    /// `mtime` for a native listing, `created` for the store
+    /// `modified` for a native listing, `created` for the store
     time_ms: Option<i64>,
-    /// The name of the driver that wrote a stored row; empty for a
-    /// native listing, whose driver is the one the source was opened
-    /// with
+    /// The name of the driver that wrote a stored row, or that reads
+    /// a native one
     driver_name: String,
 }
 
@@ -1154,7 +1142,14 @@ pub async fn find(args: SessionFindArgs) -> Result<(), CliError> {
         ))),
         false => None,
     };
-    let ctx = ContextBuilder::new(store).build().await;
+    let mut contexts = Vec::with_capacity(corpora.len());
+    for corpus in &corpora {
+        let ctx = corpus
+            .context(store.as_ref())
+            .await
+            .with_context(|| format!("gage session find: {}", corpus.describe()))?;
+        contexts.push(ctx);
+    }
     let fetch = args.limit.fetch_limit().unwrap_or(FIND_ALL_LIMIT);
     let registry = source::driver_registry();
 
@@ -1168,11 +1163,10 @@ pub async fn find(args: SessionFindArgs) -> Result<(), CliError> {
     let kind_predicates = kind_predicates(args.user, args.assistant, args.tool);
     let mut hits = progress::busy_async(FIND_LABEL, async {
         let mut tasks = JoinSet::new();
-        for (order, corpus) in corpora.iter().enumerate() {
+        for (order, (corpus, ctx)) in corpora.iter().zip(&contexts).enumerate() {
             let mut predicates = kind_predicates.clone();
             if let Some(ms) = cutoff_ms {
-                let sessions = corpus
-                    .sessions_since(&ctx, ms)
+                let sessions = sessions_since(ctx, ms)
                     .await
                     .with_context(|| format!("gage session find: {}", corpus.describe()))?;
                 if sessions.is_empty() {
@@ -1181,7 +1175,7 @@ pub async fn find(args: SessionFindArgs) -> Result<(), CliError> {
                 predicates.push(in_list_predicate("session_id", &sessions));
             }
             let ctx = ctx.clone();
-            let sql = corpus.sql(&args.query, &predicates, fetch);
+            let sql = hits_sql(&args.query, &predicates, fetch);
             let corpus = corpus.clone();
             tasks.spawn(async move {
                 let batches = run_query(&ctx, &sql).await;
@@ -1210,7 +1204,11 @@ pub async fn find(args: SessionFindArgs) -> Result<(), CliError> {
         println!("No matches found");
         return Ok(());
     }
-    progress::busy_async(FIND_LABEL, attach_timestamps(&ctx, &corpora, &mut hits)).await?;
+    progress::busy_async(
+        FIND_LABEL,
+        attach_timestamps(&contexts, &corpora, &mut hits),
+    )
+    .await?;
     if args.by_date {
         sort_hits_by_date(&mut hits);
     }
@@ -1263,93 +1261,75 @@ enum Corpus {
     Stored,
 }
 
+/// The hits of a corpus for `query`, each joined to its session row
+/// for the id's display forms, best match first. The search itself is
+/// capped at `fetch` inside the function call, where the limit reaches
+/// the index. `predicates` on the hit's raw-term columns go inside the
+/// same call, ahead of the cap, so the cap counts admitted hits alone.
+fn hits_sql(query: &str, predicates: &[String], fetch: usize) -> String {
+    let query = sql_str(query);
+    let restrict = match predicates.is_empty() {
+        true => String::new(),
+        false => format!(" WHERE {}", predicates.join(" AND ")),
+    };
+    format!(
+        "SELECT t.session_id, s.id_display, s.id_prefix, t.line, t.type, t.snippet, \
+         t.score, s.driver \
+         FROM (SELECT * FROM message_text('{query}'){restrict} LIMIT {fetch}) t \
+         JOIN session s ON s.id = t.session_id \
+         ORDER BY t.score DESC"
+    )
+}
+
+/// The ids of a corpus's sessions modified at or after `cutoff_ms`:
+/// the column `gage session list --since` filters on, the session
+/// file's modification time for a source and the store's `modified`
+/// marker for the store.
+async fn sessions_since(ctx: &SessionContext, cutoff_ms: i64) -> anyhow::Result<Vec<String>> {
+    let sql = sessions_since_sql(cutoff_ms);
+    let batches = run_query(ctx, &sql).await?;
+    let mut ids = Vec::new();
+    for batch in &batches {
+        let col = column::<StringArray>(batch, 0);
+        ids.extend((0..batch.num_rows()).map(|i| col.value(i).to_string()));
+    }
+    Ok(ids)
+}
+
+fn sessions_since_sql(cutoff_ms: i64) -> String {
+    format!(
+        "SELECT id FROM session WHERE {}",
+        since_predicate("modified", cutoff_ms)
+    )
+}
+
+/// The timestamps of the messages behind `hits`, which all belong to
+/// one corpus. Each key is a literal list, so the scan opens only the
+/// hit sessions and masks to the hit lines; the cross product of the
+/// two lists is matched back to hits by `(session_id, line)`.
+fn timestamp_sql(hits: &[&Hit]) -> String {
+    let ids = unique_literals(
+        hits.iter()
+            .map(|h| format!("'{}'", h.id.replace('\'', "''"))),
+    );
+    let lines = unique_literals(hits.iter().map(|h| h.line.to_string()));
+    format!(
+        "SELECT session_id, line, timestamp FROM message \
+         WHERE session_id IN ({ids}) AND line IN ({lines})"
+    )
+}
+
 impl Corpus {
-    /// The hits of this corpus for `query`, each joined to its
-    /// session row for the id's display forms, best match first. The
-    /// search itself is capped at `fetch` inside the function call,
-    /// where the limit reaches the index. `predicates` on the hit's
-    /// raw-term columns go inside the same call, ahead of the cap, so
-    /// the cap counts admitted hits alone.
-    fn sql(&self, query: &str, predicates: &[String], fetch: usize) -> String {
-        let query = sql_str(query);
-        let restrict = match predicates.is_empty() {
-            true => String::new(),
-            false => format!(" WHERE {}", predicates.join(" AND ")),
-        };
+    /// A context whose session tables and `message_text` hold this
+    /// corpus: the source's, or those of `store`.
+    async fn context(&self, store: Option<&Arc<Mutex<Store>>>) -> anyhow::Result<SessionContext> {
         match self {
-            Corpus::Native(spec) => {
-                let spec = sql_str(spec);
-                format!(
-                    "SELECT t.session_id, s.id_display, s.id_prefix, t.line, t.type, t.snippet, \
-                     t.score, '' AS driver \
-                     FROM (SELECT * FROM native_message_text('{spec}', '{query}'){restrict} \
-                     LIMIT {fetch}) t \
-                     JOIN native_session('{spec}') s ON s.id = t.session_id \
-                     ORDER BY t.score DESC"
-                )
+            Corpus::Native(spec) => Ok(ContextBuilder::new(None).build_source(spec)?),
+            Corpus::Stored => {
+                let store = store.expect("the store is opened when a stored corpus is searched");
+                Ok(ContextBuilder::new(Some(Arc::clone(store))).build().await)
             }
-            Corpus::Stored => format!(
-                "SELECT t.session_id, s.id_display, s.id_prefix, t.line, t.type, t.snippet, \
-                 t.score, s.driver \
-                 FROM (SELECT * FROM message_text('{query}'){restrict} LIMIT {fetch}) t \
-                 JOIN session s ON s.id = t.session_id \
-                 ORDER BY t.score DESC"
-            ),
         }
-    }
-
-    /// The ids of this corpus's sessions modified at or after
-    /// `cutoff_ms`: the column `gage session list --since` filters
-    /// on, the native mtime for a source and the store's `modified`
-    /// marker for the store.
-    async fn sessions_since(
-        &self,
-        ctx: &SessionContext,
-        cutoff_ms: i64,
-    ) -> anyhow::Result<Vec<String>> {
-        let sql = self.sessions_since_sql(cutoff_ms);
-        let batches = run_query(ctx, &sql).await?;
-        let mut ids = Vec::new();
-        for batch in &batches {
-            let col = column::<StringArray>(batch, 0);
-            ids.extend((0..batch.num_rows()).map(|i| col.value(i).to_string()));
-        }
-        Ok(ids)
-    }
-
-    fn sessions_since_sql(&self, cutoff_ms: i64) -> String {
-        match self {
-            Corpus::Native(spec) => format!(
-                "SELECT id FROM native_session('{}') WHERE {}",
-                sql_str(spec),
-                since_predicate("mtime", cutoff_ms)
-            ),
-            Corpus::Stored => format!(
-                "SELECT id FROM session WHERE {}",
-                since_predicate("modified", cutoff_ms)
-            ),
-        }
-    }
-
-    /// The timestamps of the messages behind `hits`, which all belong
-    /// to this corpus. Each key is a literal list, so the scan opens
-    /// only the hit sessions and masks to the hit lines; the cross
-    /// product of the two lists is matched back to hits by
-    /// `(session_id, line)`.
-    fn timestamp_sql(&self, hits: &[&Hit]) -> String {
-        let table = match self {
-            Corpus::Native(spec) => format!("native_message('{}')", spec.replace('\'', "''")),
-            Corpus::Stored => "message".to_string(),
-        };
-        let ids = unique_literals(
-            hits.iter()
-                .map(|h| format!("'{}'", h.id.replace('\'', "''"))),
-        );
-        let lines = unique_literals(hits.iter().map(|h| h.line.to_string()));
-        format!(
-            "SELECT session_id, line, timestamp FROM {table} \
-             WHERE session_id IN ({ids}) AND line IN ({lines})"
-        )
     }
 
     /// The corpus as the Source column names it
@@ -1450,16 +1430,16 @@ fn hits_from_batches(
 /// search index carries no timestamp, so the shown hits are looked up
 /// after the cut, one query per corpus with hits.
 async fn attach_timestamps(
-    ctx: &SessionContext,
+    contexts: &[SessionContext],
     corpora: &[Corpus],
     hits: &mut [Hit],
 ) -> anyhow::Result<()> {
-    for (order, corpus) in corpora.iter().enumerate() {
+    for (order, (corpus, ctx)) in corpora.iter().zip(contexts).enumerate() {
         let in_corpus: Vec<&Hit> = hits.iter().filter(|h| h.corpus_order == order).collect();
         if in_corpus.is_empty() {
             continue;
         }
-        let sql = corpus.timestamp_sql(&in_corpus);
+        let sql = timestamp_sql(&in_corpus);
         let batches = run_query(ctx, &sql)
             .await
             .with_context(|| format!("gage session find: {}", corpus.describe()))?;
@@ -1685,18 +1665,16 @@ async fn delete_dialog(
     spec: &str,
 ) -> Result<DialogResult, DialogError> {
     // The empty-session and id-resolution queries run against the
-    // native session rows through the `native_session` table function;
-    // the source handle stays only for the driver deletes below.
-    let ctx = ContextBuilder::new(None).build().await;
-    let from = format!("native_session('{}')", spec.replace('\'', "''"));
+    // source's `session` table; the source handle stays only for the
+    // driver deletes below.
+    let ctx = ContextBuilder::new(None)
+        .build_source(spec)
+        .map_err(|e| DialogError::Other(anyhow!("{spec}: {e}")))?;
 
     let targets = if args.empty {
         progress::busy_async(
             "Looking for empty sessions",
-            delete_targets(
-                &ctx,
-                &format!("SELECT id, title FROM {from} WHERE is_empty IS TRUE"),
-            ),
+            delete_targets(&ctx, "SELECT id, title FROM session WHERE is_empty IS TRUE"),
         )
         .await
         .map_err(|e| DialogError::Other(e.into()))?
@@ -1709,7 +1687,7 @@ async fn delete_dialog(
             .map(|id| format!("'{}'", id.replace('\'', "''")))
             .collect::<Vec<_>>()
             .join(", ");
-        let sql = format!("SELECT id, title FROM {from} WHERE id IN ({in_list})");
+        let sql = format!("SELECT id, title FROM session WHERE id IN ({in_list})");
         progress::busy_async(RESOLVE_LABEL, delete_targets(&ctx, &sql))
             .await
             .map_err(|e| DialogError::Other(e.into()))?
@@ -2195,7 +2173,7 @@ mod tests {
         let ctx = ContextBuilder::new(Some(Arc::new(Mutex::new(store))))
             .build()
             .await;
-        let predicates = |value| project_predicates(&ctx, "session", value);
+        let predicates = |value| project_predicates(&ctx, value);
         assert_eq!(
             predicates(Some("-w-proj")).await.unwrap(),
             ["project = '-w-proj'"]
@@ -2297,33 +2275,17 @@ mod tests {
             in_list_predicate("session_id", &ids),
             in_list_predicate("type", &["user".to_string()]),
         ];
-        let native = Corpus::Native("claude:/r".into()).sql("q", &predicates, 5);
+        let restricted = hits_sql("q", &predicates, 5);
         assert!(
-            native.contains(
-                "FROM (SELECT * FROM native_message_text('claude:/r', 'q') \
-                 WHERE session_id IN ('a''', 'b') AND type IN ('user') LIMIT 5) t"
-            ),
-            "{native}"
-        );
-        let stored = Corpus::Stored.sql("q", &predicates, 5);
-        assert!(
-            stored.contains(
+            restricted.contains(
                 "FROM (SELECT * FROM message_text('q') \
                  WHERE session_id IN ('a''', 'b') AND type IN ('user') LIMIT 5) t"
             ),
-            "{stored}"
+            "{restricted}"
         );
-        assert!(
-            Corpus::Stored
-                .sql("q", &[], 5)
-                .contains("FROM (SELECT * FROM message_text('q') LIMIT 5) t")
-        );
+        assert!(hits_sql("q", &[], 5).contains("FROM (SELECT * FROM message_text('q') LIMIT 5) t"));
         assert_eq!(
-            Corpus::Native("claude:/r".into()).sessions_since_sql(1_000),
-            "SELECT id FROM native_session('claude:/r') WHERE mtime >= to_timestamp_millis(1000)"
-        );
-        assert_eq!(
-            Corpus::Stored.sessions_since_sql(1_000),
+            sessions_since_sql(1_000),
             "SELECT id FROM session WHERE modified >= to_timestamp_millis(1000)"
         );
     }

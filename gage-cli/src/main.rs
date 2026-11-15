@@ -6,9 +6,11 @@ use std::time::Duration;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
+use gage_core::config::default_cache_root;
 use gage_mcp::{
     GageTool, IssueAssignConfig, IssueWriteConfig, IssuesFreeConfig, NoteWriteConfig,
-    PublishConfig, QueryConfig, SessionLiveFn, StoreWriterConfig, ToolSpec, serve_stdio,
+    PublishConfig, QueryConfig, SessionLiveFn, SourceConfig, StoreWriterConfig, ToolSpec,
+    serve_stdio,
 };
 use gage_publish::Staging;
 use gage_query::ContextBuilder;
@@ -530,6 +532,9 @@ async fn run_mcp() -> anyhow::Result<()> {
                             Staging::from(&*store).external().map_err(|e| e.to_string())
                         })
                     },
+                }),
+                source: Some(SourceConfig {
+                    cache_root: default_cache_root(),
                 }),
             }),
             GageTool::IssueWrite(IssueWriteConfig::with_store(

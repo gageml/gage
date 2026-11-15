@@ -2051,12 +2051,12 @@ fn source_banner(width: u16) -> Section {
 
 /// The session's attributes as the root row shows them: members of
 /// the session's row under their own names, as caption/value rows. A
-/// native row has no `created` and shows the session file's `mtime`.
+/// native row has no `created` and shows the session file's
+/// `modified` time.
 fn session_lines(session: &Session, width: u16) -> Vec<Line<'static>> {
-    let time = if session.value.get("mtime").is_some() {
-        "mtime"
-    } else {
-        "created"
+    let time = match session.value.get("created") {
+        Some(Value::Null) | None => "modified",
+        Some(_) => "created",
     };
     let names = [
         "id",
@@ -2981,14 +2981,15 @@ mod tests {
     }
 
     /// A member the row lacks keeps its row, with no value. A native
-    /// row shows its `mtime` where a stored row shows `created`.
+    /// row shows its `modified` where a stored row shows `created`.
     #[tokio::test(flavor = "multi_thread")]
-    async fn the_root_row_shows_absent_members_blank_and_a_native_mtime() {
+    async fn the_root_row_shows_absent_members_blank_and_a_native_modified() {
         let mut doc = doc_with_entries(1);
         doc.session.value = serde_json::json!({
             "id": "s1",
             "title": null,
-            "mtime": "2026-01-02T03:04:05Z",
+            "modified": "2026-01-02T03:04:05Z",
+            "created": null,
             "session_type": "claude",
         });
         let mut state = AppState::new(doc, &ViewOptions::default(), DocSource::Backend, false);
@@ -3015,7 +3016,7 @@ mod tests {
                 "model",
                 "size",
                 "message_count",
-                "mtime          2026-01-02T03:04:05Z",
+                "modified       2026-01-02T03:04:05Z",
             ],
             "{text}"
         );

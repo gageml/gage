@@ -5,14 +5,32 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
 use clap::Args;
+use datafusion::prelude::SessionContext;
+use gage_core::config::default_cache_root;
 use gage_publish::Staging;
-use gage_query::{ContextBuilder, PrintFormat, ScanScope, exec_command, run_repl};
+use gage_query::{ContextBuilder, PrintFormat, QuerySource, ScanScope, exec_command, run_repl};
 use gage_store::{ScanStore, Store};
 
 use crate::error::CliError;
+use crate::source::SOURCE_HELP;
 
 #[derive(Args)]
 pub struct QueryArgs {
+    /// Source to query in place of store
+    #[arg(
+        short,
+        long,
+        value_name = "SOURCE",
+        long_help = format!(
+            "Source to query in place of store\n\n\
+             A source is read and never written. The value gage:PATH names \
+             another store at PATH, which has every table. Any other value \
+             names a session directory, which has session tables alone, as \
+             its sessions are whether or not they are stored.\n\n{SOURCE_HELP}"
+        )
+    )]
+    source: Option<String>,
+
     /// Query within scan (ID or prefix)
     ///
     /// Scan ID (or prefix). The session tables hold the scan's
@@ -70,7 +88,22 @@ pub struct QueryRunArgs {
 }
 
 pub async fn main(args: QueryArgs) -> Result<(), CliError> {
-    let store = Store::open(&gage_store::store_path()).context("gage query")?;
+    let store = match args.source.as_deref().map(QuerySource::from_spec) {
+        None => Store::open(&gage_store::store_path()).context("gage query")?,
+        Some(QuerySource::Store(path)) => Store::open_read_only(path, &default_cache_root())
+            .with_context(|| format!("gage query: --source {}", path.display()))?,
+        Some(QuerySource::Driver(spec)) => {
+            if args.scan.is_some() {
+                return Err(CliError::message(format!(
+                    "gage query: --scan reads a store, and --source {spec} is a session directory"
+                )));
+            }
+            let ctx = builder(None, &args.run)
+                .build_source(spec)
+                .with_context(|| format!("gage query: --source {spec}"))?;
+            return run("gage query", &ctx, &args.run).await;
+        }
+    };
     let scope = match &args.scan {
         Some(prefix) => {
             let record = ScanStore::from(&store)
@@ -80,11 +113,11 @@ pub async fn main(args: QueryArgs) -> Result<(), CliError> {
         }
         None => None,
     };
-    let mut builder = ContextBuilder::new(Some(Arc::new(Mutex::new(store))));
+    let mut builder = builder(Some(store), &args.run);
     if let Some(scope) = scope {
         builder = builder.scope(scope);
     }
-    run("gage query", builder, &args.run).await
+    run("gage query", &builder.build().await, &args.run).await
 }
 
 /// Query the pending publish sessions. The context holds the session
@@ -94,24 +127,26 @@ pub async fn publish(args: QueryRunArgs) -> Result<(), CliError> {
     let sessions = Staging::from(&store)
         .external()
         .context("gage publish query")?;
-    let builder = ContextBuilder::new(Some(Arc::new(Mutex::new(store)))).external(sessions);
-    run("gage publish query", builder, &args).await
+    let builder = builder(Some(store), &args).external(sessions);
+    run("gage publish query", &builder.build().await, &args).await
 }
 
-/// Build the context `builder` describes and run the statements, or
-/// the REPL when there are none.
-async fn run(
-    command: &str,
-    mut builder: ContextBuilder,
-    args: &QueryRunArgs,
-) -> Result<(), CliError> {
-    if !args.system {
-        builder = builder.skip_system_cols();
+/// A context builder over `store`, with the system columns hidden
+/// unless `args` asks for them.
+fn builder(store: Option<Store>, args: &QueryRunArgs) -> ContextBuilder {
+    let builder = ContextBuilder::new(store.map(|store| Arc::new(Mutex::new(store))));
+    if args.system {
+        builder
+    } else {
+        builder.skip_system_cols()
     }
-    let ctx = builder.build().await;
+}
+
+/// Run the statements on `ctx`, or the REPL when there are none.
+async fn run(command: &str, ctx: &SessionContext, args: &QueryRunArgs) -> Result<(), CliError> {
     let result = if args.sql.is_empty() {
         run_repl(
-            &ctx,
+            ctx,
             gage_query::repl_functions(),
             args.format,
             args.quiet,
@@ -123,7 +158,7 @@ async fn run(
         let statements = statements(&args.sql).context(command.to_string())?;
         let mut result = Ok(());
         for sql in &statements {
-            result = exec_command(&ctx, sql, args.format).await;
+            result = exec_command(ctx, sql, args.format).await;
             if result.is_err() {
                 break;
             }

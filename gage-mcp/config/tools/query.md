@@ -13,6 +13,10 @@ description = "Cursor of a result an earlier call returned, to read one of its p
 type = "integer"
 description = "Page of the cursor's result to return, starting at 1 (default 1). Goes with cursor."
 
+[parameters.source]
+type = "string"
+description = "Run sql over this source instead of the main store, read only: gage:<path> is the Gage store at <path>, claude:<path> the Claude Code sessions under <path>/projects, claude: those in the default location. Goes with sql."
+
 [parameters.publish]
 type = "boolean"
 description = "Run sql over pending publish sessions instead: sessions staged by gage publish and not yet applied. session, entry, message, tool_use, tool_use_file, and session_change hold them and nothing else; no other table is present. Goes with sql."
@@ -35,7 +39,7 @@ functions' call signatures, the column and table semantics, the full-text query
 syntax, and the dialect limits. Read a topic with
 `SELECT full FROM help WHERE topic = '<topic>'`. The topics:
 
-native: session functions that read a source directly, for sessions not in the store
+source: reading another store or a native source in place of the main store
 message_text: full-text message search, its query syntax, and message kinds
 blame: the session call that wrote each line of a file
 json: reading raw, input_raw, result_raw, and content_schema

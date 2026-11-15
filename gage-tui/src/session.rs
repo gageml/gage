@@ -2,9 +2,7 @@
 //!
 //! A [`Backend`] is a gage-query context over a native source or
 //! over the store. Session and entry rows come from the context's
-//! `session` and `entry` relations in either case; the native
-//! relations are the `native_session(src)` and `native_entry(src)`
-//! table functions. Notes and attachments target stored sessions, so
+//! `session` and `entry` tables in either case. Notes and attachments target stored sessions, so
 //! only the store backend reads them.
 
 use std::collections::HashMap;
@@ -45,11 +43,7 @@ pub struct Backend {
 #[derive(Clone)]
 enum Kind {
     /// A driver source: sessions are native and carry no notes
-    Native {
-        /// The `--source` value; empty is the default location
-        spec: String,
-        driver: Arc<dyn Driver>,
-    },
+    Native { driver: Arc<dyn Driver> },
     /// The store: sessions are objects and notes target them. With
     /// `pending`, the sessions are the pending publish working trees,
     /// which are not objects and take no notes.
@@ -189,11 +183,7 @@ impl Backend {
     /// The session row without its system columns, as the `<Session>`
     /// pane shows it.
     async fn load_session(&self, session_id: &str) -> Result<Session, Box<dyn Error>> {
-        let sql = format!(
-            "SELECT * FROM {} WHERE id = '{}'",
-            self.session_rel(),
-            sql_str(session_id)
-        );
+        let sql = format!("SELECT * FROM session WHERE id = '{}'", sql_str(session_id));
         let batches = self.ctx.sql(&sql).await?.collect().await?;
         let row = batches.iter().find(|b| b.num_rows() > 0);
         let mut value = row
@@ -225,10 +215,8 @@ impl Backend {
         let id = sql_str(session_id);
         let sql = format!(
             "SELECT e.line, e.uuid, e.type, m.subtype, e.raw \
-             FROM {} e LEFT JOIN {} m ON m.session_id = '{id}' AND m.line = e.line \
-             WHERE e.session_id = '{id}' ORDER BY e.line",
-            self.entry_rel(),
-            self.message_rel(),
+             FROM entry e LEFT JOIN message m ON m.session_id = '{id}' AND m.line = e.line \
+             WHERE e.session_id = '{id}' ORDER BY e.line"
         );
         let batches = self.ctx.sql(&sql).await?.collect().await?;
         let mut entries = Vec::new();
@@ -271,12 +259,11 @@ impl Backend {
         let id = sql_str(session_id);
         let sql = format!(
             "WITH a AS (SELECT line, json_extract(raw, '$.message.id') AS mid \
-                        FROM {} WHERE session_id = '{id}' AND type = 'assistant'), \
+                        FROM entry WHERE session_id = '{id}' AND type = 'assistant'), \
                   f AS (SELECT mid, MIN(line) AS first_line FROM a \
                         WHERE mid IS NOT NULL GROUP BY mid), \
                   t AS (SELECT mid, DENSE_RANK() OVER (ORDER BY first_line) AS turn FROM f) \
-             SELECT a.line, t.turn FROM a JOIN t ON a.mid = t.mid",
-            self.entry_rel(),
+             SELECT a.line, t.turn FROM a JOIN t ON a.mid = t.mid"
         );
         let batches = self.ctx.sql(&sql).await?.collect().await?;
         let mut by_line: HashMap<u32, usize> = HashMap::new();
@@ -360,8 +347,7 @@ impl Backend {
     async fn load_tool_uses(&self, session_id: &str) -> Result<Vec<ToolUse>, Box<dyn Error>> {
         let sql = format!(
             "SELECT line, result_line, name, input_raw, output, is_error \
-             FROM {} WHERE session_id = '{}'",
-            self.tool_use_rel(),
+             FROM tool_use WHERE session_id = '{}'",
             sql_str(session_id),
         );
         let batches = self.ctx.sql(&sql).await?.collect().await?;
@@ -538,15 +524,9 @@ impl Backend {
         limit: usize,
         offset: usize,
     ) -> Result<Vec<SessionListItem>, Box<dyn Error>> {
-        let (time_col, driver_col) = match self.kind {
-            Kind::Native { .. } => ("mtime", "'' AS driver"),
-            Kind::Stored { .. } => ("modified", "driver"),
-        };
         let sql = format!(
-            "SELECT id, id_display, project, title, \
-             {time_col}, {driver_col} \
-             FROM {} ORDER BY {time_col} DESC LIMIT {limit} OFFSET {offset}",
-            self.session_rel()
+            "SELECT id, id_display, project, title, modified, driver \
+             FROM session ORDER BY modified DESC LIMIT {limit} OFFSET {offset}"
         );
         let batches = self.ctx.sql(&sql).await?.collect().await?;
         let mut items = Vec::new();
@@ -668,34 +648,6 @@ impl Backend {
             Kind::Native { .. } => Err("notes require a stored session".into()),
         }
     }
-
-    fn session_rel(&self) -> String {
-        match &self.kind {
-            Kind::Native { spec, .. } => format!("native_session('{}')", sql_str(spec)),
-            Kind::Stored { .. } => "session".to_string(),
-        }
-    }
-
-    fn entry_rel(&self) -> String {
-        match &self.kind {
-            Kind::Native { spec, .. } => format!("native_entry('{}')", sql_str(spec)),
-            Kind::Stored { .. } => "entry".to_string(),
-        }
-    }
-
-    fn message_rel(&self) -> String {
-        match &self.kind {
-            Kind::Native { spec, .. } => format!("native_message('{}')", sql_str(spec)),
-            Kind::Stored { .. } => "message".to_string(),
-        }
-    }
-
-    fn tool_use_rel(&self) -> String {
-        match &self.kind {
-            Kind::Native { spec, .. } => format!("native_tool_use('{}')", sql_str(spec)),
-            Kind::Stored { .. } => "tool_use".to_string(),
-        }
-    }
 }
 
 /// A native backend before it is opened: the source, whether the
@@ -735,11 +687,8 @@ impl NativeBackend {
             ctx = ctx.cache_root(root);
         }
         Ok(Backend {
-            ctx: ctx.build().await,
-            kind: Kind::Native {
-                spec: self.spec,
-                driver,
-            },
+            ctx: ctx.build_source(&self.spec)?,
+            kind: Kind::Native { driver },
             registry: Arc::new(registry),
         })
     }
@@ -753,8 +702,8 @@ pub struct SessionListItem {
     /// The project as the driver displays it; empty when unrecorded
     pub project: String,
     pub title: String,
-    /// The native mtime for a source, the store's `modified` marker
-    /// for the store
+    /// The session file's modification time for a source, the
+    /// store's `modified` marker for the store
     pub time_ms: i64,
 }
 
@@ -1129,7 +1078,6 @@ pub(crate) mod tests {
         assert!(row["size"].is_u64(), "{row}");
         assert_eq!(row["message_count"], 2);
         assert!(row["created"].is_string(), "{row}");
-        assert!(row.get("mtime").is_none(), "{row}");
 
         let note = backend
             .add_note(
@@ -1245,18 +1193,18 @@ pub(crate) mod tests {
         );
         assert_eq!(doc.entries.len(), 2);
         assert_eq!(doc.session.value["id"], f.native_id);
-        assert!(doc.session.value.get("path").is_none());
+        assert!(doc.session.value.get("locator").is_none());
         assert!(doc.notes.is_empty());
         assert!(doc.attachments.is_empty());
         // The native row names its session type and carries the
-        // file's mtime where a stored row has its created time
+        // file's modification time, with no created time
         let row = &doc.session.value;
         assert_eq!(row["title"], "hello there");
         assert_eq!(row["project"], "-w-proj");
         assert_eq!(row["session_type"], "claude");
         assert_eq!(row["message_count"], 2);
-        assert!(row["mtime"].is_string(), "{row}");
-        assert!(row.get("created").is_none(), "{row}");
+        assert!(row["modified"].is_string(), "{row}");
+        assert!(row.get("created").is_none_or(Value::is_null), "{row}");
         assert!(
             backend
                 .add_note(&f.native_id, None, "comment", "x".into(), "user:t")

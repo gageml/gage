@@ -31,7 +31,7 @@ use gage_session::{SummaryAttrs, SummaryColumns};
 
 use super::cache::SessionCache;
 use super::walk::{SummaryPrune, WALK_COLS, walk_sessions};
-use crate::driver::{CONTENT_FORMAT, ClaudeNativeSession, SESSION_TYPE};
+use crate::driver::{CONTENT_FORMAT, ClaudeNativeSession, NAME, SESSION_TYPE};
 use crate::session::SessionInfo;
 use gage_core::uuid::short_uuid;
 use gage_session::filter;
@@ -55,8 +55,12 @@ const SUMMARY_COLS: &[&str] = &[
     "is_empty",
 ];
 
+/// The session file's modification time, which the walk orders by
+const MODIFIED_COL: &str = "modified";
+
 fn session_schema() -> SchemaRef {
-    // Column order is shared with the store's `session` table:
+    // The columns and their order are shared with the store's
+    // `session` table:
     // identity, location, timestamps, provenance, content, summary,
     // derived flags, system. A new column joins the category it
     // belongs to.
@@ -69,19 +73,30 @@ fn session_schema() -> SchemaRef {
         // Location
         Field::new("project", DataType::Utf8, true),
         // Timestamps
+        // The session file's modification time
         Field::new(
-            "mtime",
+            MODIFIED_COL,
             DataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into())),
             false,
         ),
+        // Null: a native session has no store object to carry a
+        // `created` marker
+        Field::new(
+            "created",
+            DataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into())),
+            true,
+        ),
         // Provenance
         Field::new("session_type", DataType::Utf8, false),
+        Field::new("driver", DataType::Utf8, false),
         // The content format whose codec renders `raw`; a reader of
         // `raw` checks it
         Field::new("content_format", DataType::Utf8, false),
         // Content
         // The byte size of the session file
         Field::new("size", DataType::Int64, false),
+        // Null: a native session was made from no other session
+        Field::new("origin", DataType::Utf8, true),
         // The normalized attributes the driver derives, each also
         // carried in `summary`. Null when the session could not be
         // read.
@@ -108,7 +123,8 @@ fn session_schema() -> SchemaRef {
         // The shortest prefix of `id` unique among every session in
         // the source
         system(Field::new("id_prefix", DataType::Utf8, false)),
-        system(Field::new("path", DataType::Utf8, false)),
+        // `file:<path>` of the session file
+        system(Field::new("locator", DataType::Utf8, false)),
     ]))
 }
 
@@ -209,7 +225,7 @@ impl SessionExec {
         filters: Vec<Expr>,
         limit: Option<usize>,
     ) -> Self {
-        let eq_properties = mtime_desc_eq_properties(&projected_schema);
+        let eq_properties = modified_desc_eq_properties(&projected_schema);
         let properties = Arc::new(PlanProperties::new(
             eq_properties,
             Partitioning::UnknownPartitioning(1),
@@ -241,19 +257,20 @@ impl SessionExec {
     }
 }
 
-/// Build `EquivalenceProperties` advertising `[mtime DESC]` when the
-/// projection retains the `mtime` column. `SessionListBuilder::build`
-/// already sorts by mtime descending, so this is the natural order.
-/// Advertising it lets DataFusion push `LIMIT N` past `ORDER BY mtime
+/// Build `EquivalenceProperties` advertising `[modified DESC]` when
+/// the projection retains the `modified` column.
+/// `SessionListBuilder::build` already sorts by file mtime descending,
+/// so this is the natural order. Advertising it lets DataFusion push
+/// `LIMIT N` past `ORDER BY modified
 /// DESC`, which we honor by capping the directory walk at N entries.
-fn mtime_desc_eq_properties(projected_schema: &SchemaRef) -> EquivalenceProperties {
-    match col("mtime", projected_schema) {
-        Ok(mtime_expr) => {
-            // SQL `ORDER BY mtime DESC` in DataFusion defaults to NULLS
+fn modified_desc_eq_properties(projected_schema: &SchemaRef) -> EquivalenceProperties {
+    match col(MODIFIED_COL, projected_schema) {
+        Ok(modified_expr) => {
+            // SQL `ORDER BY modified DESC` in DataFusion defaults to NULLS
             // FIRST; advertise the same so EnforceSorting can elide the
             // SortExec and LimitPushdown can pass `fetch` to scan().
             let sort = PhysicalSortExpr {
-                expr: mtime_expr,
+                expr: modified_expr,
                 options: SortOptions {
                     descending: true,
                     nulls_first: true,
@@ -304,8 +321,8 @@ impl ExecutionPlan for SessionExec {
     }
 
     /// Accept a fetch from DataFusion's LimitPushdown. Combined with
-    /// our advertised `[mtime DESC]` ordering, this is what lets
-    /// `ORDER BY mtime DESC LIMIT N` open at most N session files.
+    /// our advertised `[modified DESC]` ordering, this is what lets
+    /// `ORDER BY modified DESC LIMIT N` open at most N session files.
     fn with_fetch(&self, limit: Option<usize>) -> Option<Arc<dyn ExecutionPlan>> {
         Some(Arc::new(SessionExec::new(
             self.store.clone(),
@@ -366,7 +383,10 @@ impl SessionExec {
         let mut id_displays = StringBuilder::with_capacity(len, len * 8);
         let mut id_prefixes = StringBuilder::with_capacity(len, len * 4);
         let mut projects = StringBuilder::with_capacity(len, len * 32);
-        let mut paths = StringBuilder::with_capacity(len, len * 64);
+        let mut locators = StringBuilder::with_capacity(len, len * 64);
+        let mut createds = TimestampMillisecondBuilder::with_capacity(len);
+        let mut drivers = StringBuilder::with_capacity(len, len * NAME.len());
+        let mut origins = StringBuilder::new();
         let mut mtimes = TimestampMillisecondBuilder::with_capacity(len);
         let mut sizes = Int64Builder::with_capacity(len);
         let mut session_types = StringBuilder::with_capacity(len, len * SESSION_TYPE.len());
@@ -398,7 +418,10 @@ impl SessionExec {
                 .expect("walk computed a prefix for every walked id");
             id_prefixes.append_value(s.id.chars().take(prefix_len).collect::<String>());
             projects.append_value(s.project_name().as_ref());
-            paths.append_value(s.src.to_string_lossy().as_ref());
+            locators.append_value(format!("file:{}", s.src.display()));
+            createds.append_null();
+            drivers.append_value(NAME);
+            origins.append_null();
             let millis = s
                 .mtime
                 .duration_since(UNIX_EPOCH)
@@ -445,9 +468,12 @@ impl SessionExec {
                 derived.title,
                 Arc::new(projects.finish()),
                 Arc::new(mtimes.finish().with_timezone("UTC")),
+                Arc::new(createds.finish().with_timezone("UTC")),
                 Arc::new(session_types.finish()),
+                Arc::new(drivers.finish()),
                 Arc::new(content_formats.finish()),
                 Arc::new(sizes.finish()),
+                Arc::new(origins.finish()),
                 derived.model,
                 derived.message_count,
                 derived.line_count,
@@ -459,7 +485,7 @@ impl SessionExec {
                 derived.is_empty,
                 Arc::new(id_displays.finish()),
                 Arc::new(id_prefixes.finish()),
-                Arc::new(paths.finish()),
+                Arc::new(locators.finish()),
             ],
         )?;
 
@@ -492,10 +518,13 @@ mod tests {
         let listing = [
             "id",
             "project",
-            "mtime",
+            "modified",
+            "created",
             "size",
             "session_type",
+            "driver",
             "content_format",
+            "origin",
         ];
         let mut derived: Vec<String> = session_schema()
             .fields()

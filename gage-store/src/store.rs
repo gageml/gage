@@ -139,6 +139,20 @@ impl Store {
     /// As [`Store::open`], with the object index kept under
     /// `cache_root`.
     pub fn open_with_cache_root(path: &Path, cache_root: &Path) -> Result<Store, StoreError> {
+        Store::open_as(path, cache_root, Access::Write)
+    }
+
+    /// Open the store at `path` without writing its repository, for a
+    /// reader of a store that some other Gage owns. An owned store
+    /// behind this build's version is refused with
+    /// [`StoreError::VersionMismatch`] where [`Store::open`] migrates
+    /// it, and its hooks are left as they are. The object index, kept
+    /// under `cache_root`, is written as on any open.
+    pub fn open_read_only(path: &Path, cache_root: &Path) -> Result<Store, StoreError> {
+        Store::open_as(path, cache_root, Access::Read)
+    }
+
+    fn open_as(path: &Path, cache_root: &Path, access: Access) -> Result<Store, StoreError> {
         let path = &locate(path);
         if !exists(path) {
             return Err(StoreError::NotFound(path.to_path_buf()));
@@ -150,7 +164,7 @@ impl Store {
         }
         let (version, owned) = match read_config_u32(path, "gage.version")? {
             Some(found) => {
-                let version = if found < STORE_VERSION {
+                let version = if found < STORE_VERSION && access == Access::Write {
                     migrate(path, found)?
                 } else {
                     found
@@ -165,7 +179,7 @@ impl Store {
                 supported: STORE_VERSION,
             });
         }
-        if owned {
+        if owned && access == Access::Write {
             refresh_hooks(path)?;
         }
         let corpus_dir = store_corpus_dir(cache_root, path);
@@ -239,6 +253,15 @@ impl Store {
     }
 }
 
+/// What an open may do to the repository
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Access {
+    /// Migrate an older store and bring its hooks up to date
+    Write,
+    /// Leave the repository as it is
+    Read,
+}
+
 /// The generation of an unstamped repository: the one its `refs/gage/`
 /// namespace holds, or this build's when it holds none. A namespace
 /// at another generation is reported as that generation, which the
@@ -291,7 +314,7 @@ pub(crate) fn read_config_u32(path: &Path, key: &str) -> Result<Option<u32>, Sto
 mod tests {
     use super::*;
     use crate::admin::{HOOK_VERSION, UPDATE_HOOK, UPDATE_HOOK_PATH};
-    use crate::test_support::{init_for_test, open};
+    use crate::test_support::{cache_root_for, init_for_test, open};
 
     #[test]
     fn open_reads_version() {
@@ -565,5 +588,36 @@ mod tests {
         fs::write(&hook, stale).unwrap();
         drop(open(&path).unwrap());
         assert_eq!(fs::read_to_string(&hook).unwrap(), stale);
+    }
+
+    /// A read-only open leaves stale hooks and their missing version
+    /// record as they are, and refuses an older store that a writing
+    /// open would try to migrate.
+    #[test]
+    fn open_read_only_writes_nothing_to_the_repository() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("store.git");
+        init_for_test(&path);
+        let hook = path.join(UPDATE_HOOK_PATH);
+        let stale = "#!/bin/sh\nexit 0\n";
+        fs::write(&hook, stale).unwrap();
+        run(git_in(&path, ["config", "--unset", "gage.hookVersion"])).unwrap();
+
+        drop(Store::open_read_only(&path, &cache_root_for(&path)).unwrap());
+        assert_eq!(fs::read_to_string(&hook).unwrap(), stale);
+        assert!(run(git_in(&path, ["config", "--get", "gage.hookVersion"])).is_err());
+
+        run(git_in(&path, ["config", "gage.version", "0"])).unwrap();
+        let err = Store::open_read_only(&path, &cache_root_for(&path)).unwrap_err();
+        assert!(
+            matches!(err, StoreError::VersionMismatch { found: 0, .. }),
+            "{err}"
+        );
+        assert_eq!(
+            run(git_in(&path, ["config", "--get", "gage.version"]))
+                .unwrap()
+                .trim(),
+            "0"
+        );
     }
 }

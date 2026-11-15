@@ -1,12 +1,11 @@
-//! `native_message_text(source, query [, snippet_len])` and
 //! `message_text(query [, snippet_len])` --- full-text search over
 //! message text.
 //!
-//! Each returns `(url, session_id, line, type, subtype, score,
-//! snippet)`, best match first, one row per matching message. The
-//! native function searches a source's own index through its driver;
-//! `message_text` searches the store's index, which this module
-//! maintains over the live sessions at their tips: a session whose tip
+//! It returns `(url, session_id, line, type, subtype, score,
+//! snippet)`, best match first, one row per matching message. Over a
+//! driver source it searches the source's own index through its
+//! driver; over a store it searches the store's index, which this
+//! module maintains over the live sessions at their tips: a session whose tip
 //! moved is re-read through its driver and re-indexed, and a session
 //! gone from the store is dropped. A search reconciles first under a
 //! try-lock, and on contention searches the committed index as it
@@ -34,15 +33,14 @@ use datafusion::prelude::Expr;
 use gage_core::cache::{STORE_SCHEME, ensure_corpus_dir, store_corpus_dir};
 use gage_core::config::default_cache_root;
 use gage_index::{LockMode, MessageRow, TextIndex};
-use gage_registry::driver::DriverRegistry;
 use gage_session::filter::{is_literal_membership, literal_members};
 use gage_session::progress;
-use gage_session::{MessageTextFilter, MessageTextHit, SourceOptions};
+use gage_session::{MessageTextFilter, MessageTextHit};
 use gage_store::Store;
 
-use crate::native::string_literal;
 use crate::rows::{RowCache, message_rows};
 use crate::scope::SessionSet;
+use crate::source::{SourceSpec, string_literal};
 
 /// Default cap when no `LIMIT` is supplied. An explicit limit passes
 /// through verbatim.
@@ -56,7 +54,6 @@ const SUBTYPE_COL: &str = "subtype";
 const FILTER_COLS: [&str; 3] = [SESSION_ID_COL, TYPE_COL, SUBTYPE_COL];
 
 /// Argument-list display strings for `\df` in the repl
-pub const NATIVE_MESSAGE_TEXT_ARGS: &str = "source text, query text [, snippet_len integer]";
 pub const MESSAGE_TEXT_ARGS: &str = "query text [, snippet_len integer]";
 
 /// The scheme of a stored session's URL: `gage:<store path>/<id>`
@@ -78,47 +75,10 @@ static MESSAGE_TEXT_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
     ]))
 });
 
-/// `native_message_text(source, query [, snippet_len])`
-#[derive(Debug)]
-pub struct NativeMessageTextFn {
-    /// Read the runtime's own in-flight agent sessions too
-    pub show_agents: bool,
-    /// Where the opened source keeps its derived state; `None` is the
-    /// driver's default root
-    pub cache_root: Option<PathBuf>,
-}
-
-impl TableFunctionImpl for NativeMessageTextFn {
-    fn call_with_args(&self, args: TableFunctionArgs) -> Result<Arc<dyn TableProvider>> {
-        self.provider(args.exprs())
-    }
-}
-
-impl NativeMessageTextFn {
-    fn provider(&self, args: &[Expr]) -> Result<Arc<dyn TableProvider>> {
-        let usage = "native_message_text(source, query [, snippet_len])";
-        let [source, rest @ ..] = args else {
-            return Err(DataFusionError::Plan(format!("usage {usage}")));
-        };
-        let source = string_literal(source).ok_or_else(|| {
-            DataFusionError::Plan(format!("{usage}: source must be a string literal"))
-        })?;
-        let (query, snippet_len) = query_args(usage, rest)?;
-        Ok(Arc::new(MessageTextTable {
-            query,
-            snippet_len,
-            backend: Backend::Native {
-                source,
-                show_agents: self.show_agents,
-                cache_root: self.cache_root.clone(),
-            },
-        }))
-    }
-}
-
-/// `message_text(query [, snippet_len])` over the store
+/// `message_text(query [, snippet_len])` over the store or over a
+/// driver source
 pub struct MessageTextFn {
-    index: Arc<StoreTextIndex>,
+    backend: Backend,
 }
 
 impl fmt::Debug for MessageTextFn {
@@ -129,7 +89,15 @@ impl fmt::Debug for MessageTextFn {
 
 impl MessageTextFn {
     pub fn new(index: Arc<StoreTextIndex>) -> Self {
-        Self { index }
+        Self {
+            backend: Backend::Store(index),
+        }
+    }
+
+    pub(crate) fn with_source(source: SourceSpec) -> Self {
+        Self {
+            backend: Backend::Source(source),
+        }
     }
 }
 
@@ -145,12 +113,12 @@ impl MessageTextFn {
         Ok(Arc::new(MessageTextTable {
             query,
             snippet_len,
-            backend: Backend::Store(Arc::clone(&self.index)),
+            backend: self.backend.clone(),
         }))
     }
 }
 
-/// The query and snippet length of a call, after any leading source.
+/// The query and snippet length of a call.
 fn query_args(usage: &str, args: &[Expr]) -> Result<(String, usize)> {
     let plan = |msg: String| DataFusionError::Plan(format!("{usage}: {msg}"));
     let (query, rest) = match args {
@@ -177,11 +145,7 @@ fn query_args(usage: &str, args: &[Expr]) -> Result<(String, usize)> {
 
 #[derive(Clone)]
 enum Backend {
-    Native {
-        source: String,
-        show_agents: bool,
-        cache_root: Option<PathBuf>,
-    },
+    Source(SourceSpec),
     Store(Arc<StoreTextIndex>),
 }
 
@@ -197,20 +161,11 @@ impl Backend {
         snippet_len: usize,
     ) -> Result<Vec<MessageTextHit>> {
         match self {
-            Backend::Native {
-                source,
-                show_agents,
-                cache_root,
-            } => {
-                let mut options = SourceOptions::new(source);
-                options.show_agents(*show_agents);
-                if let Some(root) = cache_root {
-                    options.cache_root(root);
-                }
+            Backend::Source(source) => {
                 // The driver's error is one message with no cause chain
                 // worth preserving; a wrapped error would print twice.
-                let opened = DriverRegistry::builtin()
-                    .open_source(&options)
+                let opened = source
+                    .open()
                     .map_err(|e| DataFusionError::Execution(e.to_string()))?;
                 opened
                     .message_text(query, filter, snippet_len, limit)

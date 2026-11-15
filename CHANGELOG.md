@@ -35,6 +35,7 @@ Pending release
 - `--since <SINCE>` replaces `--days` and `--today` on `gage scan`,
   `gage session add`, `gage dataset add`, and `gage publish`. It takes a
   duration such as `1h`, `30m`, or `7d`, as `gage session list --since` does.
+- Support reading sessions from different stores via query cmd/tools.
 
 ## [0.3.0]
 

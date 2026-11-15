@@ -4,7 +4,7 @@
 //! Every provider here is registered on a gage-query `SessionContext`
 //! by [`crate::driver::ClaudeDriver::tables`]. The providers implement
 //! DataFusion's pushdown surface (filter, sort, limit, projection) so
-//! a query like `SELECT ... FROM session ORDER BY mtime DESC LIMIT 20`
+//! a query like `SELECT ... FROM session ORDER BY modified DESC LIMIT 20`
 //! opens only 20 metadata reads out of the whole corpus.
 
 pub mod cache;

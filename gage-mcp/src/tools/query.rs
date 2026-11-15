@@ -1,4 +1,5 @@
-//! `query`: SQL over the context the service was configured with.
+//! `query`: SQL over the context the service was configured with,
+//! or over a source the call names, which is read and never written.
 //!
 //! Every result is written once to the query cache as an Arrow IPC
 //! file named by a cursor, and every call returns one page of it. A
@@ -16,7 +17,7 @@ use std::io;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use datafusion::arrow::datatypes::Schema;
@@ -26,7 +27,8 @@ use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::prelude::SessionContext;
 use gage_core::config::default_cache_root;
 use gage_core::uuid::new_uuid;
-use gage_query::{ContextBuilder, write_yaml_capped};
+use gage_query::{ContextBuilder, QuerySource, write_yaml_capped};
+use gage_store::Store;
 use rmcp::ErrorData as McpError;
 use rmcp::handler::server::router::tool::ToolRoute;
 use rmcp::handler::server::tool::ToolCallContext;
@@ -34,7 +36,7 @@ use rmcp::model::{CallToolResult, JsonObject};
 use serde_json::json;
 
 use crate::server::GageServer;
-use crate::service::QueryConfig;
+use crate::service::{QueryConfig, SourceConfig};
 use crate::tool::{
     MAX_DESCRIPTION_BYTES, ToolDef, build_tool_meta, description_byte_len, domain_error, success,
 };
@@ -87,17 +89,53 @@ fn handle(
     })
 }
 
-/// The context `request` runs on: the configured one, or for a
-/// `publish` call a fresh one scoped to the pending publishes, listed
-/// on each call so the set is current. A `publish` call where the
-/// configuration names no publish listing is refused.
+/// The context `request` runs on: the configured one, for a `source`
+/// call a fresh one over the named source, or for a `publish` call a
+/// fresh one scoped to the pending publishes, listed on each call so
+/// the set is current. A `publish` or `source` call where the
+/// configuration does not provide for it is refused.
 async fn context_for(
     config: &QueryConfig,
     request: &QueryRequest<'_>,
 ) -> Result<Arc<SessionContext>, McpError> {
-    if !matches!(request, QueryRequest::PublishSql(_)) {
-        return Ok(Arc::clone(&config.context));
+    match request {
+        QueryRequest::Sql(_) | QueryRequest::Page { .. } => Ok(Arc::clone(&config.context)),
+        QueryRequest::SourceSql { source, .. } => {
+            let Some(config) = &config.source else {
+                return Err(McpError::invalid_params(
+                    "`source` does not apply here: this tool reads its own scope alone",
+                    None,
+                ));
+            };
+            source_context(config, source).await.map(Arc::new)
+        }
+        QueryRequest::PublishSql(_) => publish_context(config).await.map(Arc::new),
     }
+}
+
+/// A context over `source` in place of the main store. A store is
+/// opened read only, so nothing in its repository is written; a
+/// driver source has no write path. A source that cannot be opened is
+/// an invalid request naming why.
+async fn source_context(config: &SourceConfig, source: &str) -> Result<SessionContext, McpError> {
+    let refused =
+        |reason: String| McpError::invalid_params(format!("source {source}: {reason}"), None);
+    match QuerySource::from_spec(source) {
+        QuerySource::Store(path) => {
+            let store = Store::open_read_only(path, &config.cache_root)
+                .map_err(|e| refused(e.to_string()))?;
+            Ok(ContextBuilder::new(Some(Arc::new(Mutex::new(store))))
+                .build()
+                .await)
+        }
+        QuerySource::Driver(spec) => ContextBuilder::new(None)
+            .cache_root(&config.cache_root)
+            .build_source(spec)
+            .map_err(|e| refused(e.to_string())),
+    }
+}
+
+async fn publish_context(config: &QueryConfig) -> Result<SessionContext, McpError> {
     let Some(publish) = &config.publish else {
         return Err(McpError::invalid_params(
             "`publish` does not apply here: pending publish sessions are not readable in this \
@@ -108,33 +146,48 @@ async fn context_for(
     let sessions = (publish.sessions)().map_err(|reason| {
         McpError::internal_error(format!("pending publish sessions: {reason}"), None)
     })?;
-    let context = ContextBuilder::new(Some(Arc::clone(&publish.store)))
+    Ok(ContextBuilder::new(Some(Arc::clone(&publish.store)))
         .external(sessions)
         .skip_system_cols()
         .build()
-        .await;
-    Ok(Arc::new(context))
+        .await)
 }
 
-/// One call: run new SQL over the sessions in scope or over the
-/// pending publishes, or read a page of a written result.
+/// One call: run new SQL over the sessions in scope, over a named
+/// source, or over the pending publishes, or read a page of a written
+/// result.
 #[derive(Debug, PartialEq, Eq)]
 pub enum QueryRequest<'a> {
     Sql(&'a str),
+    SourceSql { source: &'a str, sql: &'a str },
     PublishSql(&'a str),
     Page { cursor: &'a str, page: usize },
 }
 
 /// Exactly one of `sql` and `cursor` is given; `page` goes with
-/// `cursor` and defaults to 1; `publish` goes with `sql`.
+/// `cursor` and defaults to 1; `publish` and `source` go with `sql`,
+/// one or the other.
 pub fn parse_request(params: &JsonObject) -> Result<QueryRequest<'_>, McpError> {
     let sql = params.get("sql").and_then(|v| v.as_str());
     let cursor = params.get("cursor").and_then(|v| v.as_str());
     let page = params.get("page").and_then(|v| v.as_u64());
     let publish = params.get("publish").and_then(|v| v.as_bool());
+    let source = params.get("source").and_then(|v| v.as_str());
     if publish.is_some() && sql.is_none() {
         return Err(McpError::invalid_params(
             "`publish` applies to `sql`, not `cursor`",
+            None,
+        ));
+    }
+    if source.is_some() && sql.is_none() {
+        return Err(McpError::invalid_params(
+            "`source` applies to `sql`, not `cursor`",
+            None,
+        ));
+    }
+    if source.is_some() && publish == Some(true) {
+        return Err(McpError::invalid_params(
+            "give `source` or `publish`, not both",
             None,
         ));
     }
@@ -150,7 +203,10 @@ pub fn parse_request(params: &JsonObject) -> Result<QueryRequest<'_>, McpError> 
                 None,
             )),
             None if publish == Some(true) => Ok(QueryRequest::PublishSql(sql)),
-            None => Ok(QueryRequest::Sql(sql)),
+            None => Ok(match source {
+                Some(source) => QueryRequest::SourceSql { source, sql },
+                None => QueryRequest::Sql(sql),
+            }),
         },
         (None, Some(cursor)) => match page {
             Some(0) => Err(McpError::invalid_params("`page` starts at 1", None)),
@@ -185,7 +241,9 @@ async fn execute_with_cap(
 ) -> Result<CallToolResult, McpError> {
     cache.sweep();
     match request {
-        QueryRequest::Sql(sql) | QueryRequest::PublishSql(sql) => {
+        QueryRequest::Sql(sql)
+        | QueryRequest::SourceSql { sql, .. }
+        | QueryRequest::PublishSql(sql) => {
             let df = match context.sql(sql).await {
                 Ok(df) => df,
                 Err(e) => return Ok(domain_error(format!("SQL error: {e}"))),
@@ -464,7 +522,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::service::PublishConfig;
+    use crate::service::{PublishConfig, SourceConfig};
 
     fn context() -> SessionContext {
         let schema = Arc::new(Schema::new(vec![
@@ -719,6 +777,7 @@ mod tests {
         assert_eq!(properties["cursor"]["type"], "string");
         assert_eq!(properties["page"]["type"], "integer");
         assert_eq!(properties["publish"]["type"], "boolean");
+        assert_eq!(properties["source"]["type"], "string");
     }
 
     /// The help menu embedded in the description stays in sync with the
@@ -779,6 +838,7 @@ mod tests {
                 store,
                 sessions: Arc::new(|| Ok(Vec::new())),
             }),
+            source: None,
         };
 
         let same = context_for(&config, &QueryRequest::Sql("SELECT 1"))
@@ -817,6 +877,7 @@ mod tests {
         let without = QueryConfig {
             context: configured,
             publish: None,
+            source: None,
         };
         let refused = context_for(&without, &QueryRequest::PublishSql("SELECT 1"))
             .await
@@ -825,5 +886,175 @@ mod tests {
             panic!("a publish call without a store was accepted");
         };
         assert_eq!(e.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+    }
+
+    /// `source` goes with `sql` and names what the SQL reads; with a
+    /// cursor or beside `publish` it is an invalid request.
+    #[test]
+    fn parse_request_reads_source_with_sql() {
+        let object = |v: serde_json::Value| match v {
+            serde_json::Value::Object(o) => o,
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            parse_request(&object(json!({"sql": "SELECT 1", "source": "gage:/s"}))).unwrap(),
+            QueryRequest::SourceSql {
+                source: "gage:/s",
+                sql: "SELECT 1"
+            }
+        );
+        assert_eq!(
+            parse_request(&object(
+                json!({"sql": "SELECT 1", "source": "claude:", "publish": false})
+            ))
+            .unwrap(),
+            QueryRequest::SourceSql {
+                source: "claude:",
+                sql: "SELECT 1"
+            }
+        );
+        for bad in [
+            json!({"cursor": "c", "source": "gage:/s"}),
+            json!({"sql": "SELECT 1", "source": "gage:/s", "publish": true}),
+        ] {
+            let e = parse_request(&object(bad.clone())).unwrap_err();
+            assert_eq!(e.code, rmcp::model::ErrorCode::INVALID_PARAMS, "{bad}");
+        }
+    }
+
+    /// A `source` call naming a store reads that store and not the
+    /// configured one, and writes nothing to its repository: hooks
+    /// behind this build stay as they are. A source that cannot be
+    /// opened, and a `source` call on a tool not configured for one,
+    /// are refused.
+    #[tokio::test]
+    async fn source_calls_read_the_named_store_without_writing_it() {
+        use gage_store::{NoteInput, NoteStore, NoteValue};
+
+        let dir = tempfile::tempdir().unwrap();
+        let cache_root = dir.path().join("cache");
+        let other = dir.path().join("other.git");
+        gage_store::init(&other).unwrap();
+        {
+            let store = Store::open_with_cache_root(&other, &cache_root).unwrap();
+            NoteStore::from(&store)
+                .create(NoteInput {
+                    name: "comment",
+                    value: NoteValue::Text("from the other store".into()),
+                    author: "user:t",
+                    target: None,
+                    metadata: None,
+                    work_id: None,
+                })
+                .unwrap();
+        }
+        let hook = other.join("hooks").join("update");
+        let stale = "#!/bin/sh\nexit 0\n";
+        std::fs::write(&hook, stale).unwrap();
+        let unset = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&other)
+            .args(["config", "--unset", "gage.hookVersion"])
+            .status()
+            .unwrap();
+        assert!(unset.success());
+
+        let configured = Arc::new(context());
+        let config = QueryConfig {
+            context: Arc::clone(&configured),
+            publish: None,
+            source: Some(SourceConfig {
+                cache_root: cache_root.clone(),
+            }),
+        };
+        let source = format!("gage:{}", other.display());
+        let request = QueryRequest::SourceSql {
+            source: &source,
+            sql: "SELECT value FROM note",
+        };
+        let named = context_for(&config, &request).await.unwrap();
+        assert!(!Arc::ptr_eq(&named, &configured));
+        let (_cache_dir, cache) = cache();
+        let result = execute(&named, &cache, request).await.unwrap();
+        assert!(
+            text_of(&result).contains("from the other store"),
+            "{}",
+            text_of(&result)
+        );
+        drop(named);
+        assert_eq!(std::fs::read_to_string(&hook).unwrap(), stale);
+
+        let missing = format!("gage:{}", dir.path().join("absent.git").display());
+        let refused = context_for(
+            &config,
+            &QueryRequest::SourceSql {
+                source: &missing,
+                sql: "SELECT 1",
+            },
+        )
+        .await
+        .map(|_| ());
+        let Err(e) = refused else {
+            panic!("a source naming no store was accepted");
+        };
+        assert_eq!(e.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+        assert!(e.message.contains("absent.git"), "{}", e.message);
+
+        let without = QueryConfig {
+            context: configured,
+            publish: None,
+            source: None,
+        };
+        let refused = context_for(
+            &without,
+            &QueryRequest::SourceSql {
+                source: &source,
+                sql: "SELECT 1",
+            },
+        )
+        .await
+        .map(|_| ());
+        let Err(e) = refused else {
+            panic!("a source call on a scoped tool was accepted");
+        };
+        assert_eq!(e.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+    }
+
+    /// A `source` call naming a driver source serves that source's
+    /// sessions under the session tables, with no store table.
+    #[tokio::test]
+    async fn source_calls_read_a_driver_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("claude").join("projects").join("-w-proj");
+        std::fs::create_dir_all(&project).unwrap();
+        let id = "aaaaaaaa-0000-0000-0000-000000000001";
+        std::fs::write(
+            project.join(format!("{id}.jsonl")),
+            concat!(
+                r#"{"type":"user","uuid":"u1","timestamp":"2025-01-01T00:00:00Z","message":{"role":"user","content":"hi"}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        let config = QueryConfig {
+            context: Arc::new(context()),
+            publish: None,
+            source: Some(SourceConfig {
+                cache_root: dir.path().join("cache"),
+            }),
+        };
+        let source = format!("claude:{}", dir.path().join("claude").display());
+        let request = QueryRequest::SourceSql {
+            source: &source,
+            sql: "SELECT id FROM session",
+        };
+        let named = context_for(&config, &request).await.unwrap();
+        let (_cache_dir, cache) = cache();
+        let result = execute(&named, &cache, request).await.unwrap();
+        assert!(text_of(&result).contains(id), "{}", text_of(&result));
+        let absent = execute(&named, &cache, QueryRequest::Sql("SELECT id FROM note"))
+            .await
+            .unwrap();
+        assert_eq!(absent.is_error, Some(true));
     }
 }

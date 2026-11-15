@@ -64,14 +64,12 @@ If the user has not provided sessions, ask them what they want to publish. If
 they don't know the IDs, use `mcp__plugin_gage_gage__query` and in particular
 the `message_text` TVF to find the sessions.
 
-Consult `session` or `native_session('')` tables for recent session titles.
+Consult the `session` table for recent session titles. Without a `source`
+parameter the query reads the stored sessions; with `source` set to `claude:`
+it reads the native Claude Code sessions.
 
 ```sql
-select id, title from session limit 20
-```
-
-```sql
-select id, title, from native_session('') limit 20
+select id, title from session order by modified desc limit 20
 ```
 
 ### Filter groups

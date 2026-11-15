@@ -14,8 +14,7 @@ use crate::print_format::PrintFormat;
 
 /// Static descriptor for a table-valued function surfaced in the repl
 /// by `\df`. `schema` is the function's fixed result columns, or `None`
-/// when the columns depend on the arguments (as `native_session`'s do
-/// on the source's driver).
+/// when the columns depend on the arguments.
 pub struct TvfInfo {
     pub name: &'static str,
     pub args: &'static str,
