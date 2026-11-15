@@ -9,11 +9,14 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use gage_corpus::shell_paths::{referenced_paths, resolve};
 use gage_session::{FileType, ToolUse, ToolUseFile};
 use serde_json::Value;
 
 use super::derive::{entry_timestamp_ms, tool_result_text};
-use super::paths::{referenced_paths, resolve};
+
+/// The tool whose `command` input is a shell command
+const SHELL_TOOL: &str = "Bash";
 
 #[derive(Default)]
 pub struct ToolUseCollector {
@@ -78,7 +81,13 @@ impl ToolUseCollector {
         };
         let input = block.get("input").cloned().unwrap_or(Value::Null);
         let cwd = entry.get("cwd").and_then(Value::as_str).map(PathBuf::from);
-        let named = referenced_paths(name, &input, cwd.as_deref(), self.home.as_deref());
+        let named = referenced_paths(
+            SHELL_TOOL,
+            name,
+            &input,
+            cwd.as_deref(),
+            self.home.as_deref(),
+        );
         self.by_id.insert(id.to_string(), self.rows.len());
         self.named.push((named, cwd));
         self.judged.push(None);
@@ -218,7 +227,7 @@ fn judged_writes(
     if NON_WRITERS.contains(&name) {
         return Some(vec![]);
     }
-    if name == "Bash" {
+    if name == SHELL_TOOL {
         let diff = sidecar?.get("bashEditDiff")?;
         let paths: Vec<&str> = match diff.get("changedFiles").and_then(Value::as_array) {
             Some(list) => list.iter().filter_map(Value::as_str).collect(),

@@ -11,7 +11,7 @@ use std::path::Path;
 use chrono::DateTime;
 use serde_json::Value;
 
-use crate::session_reader::SessionReader;
+use crate::session_reader;
 
 #[derive(Debug, Clone, Default)]
 pub struct SessionStats {
@@ -41,7 +41,7 @@ pub struct SessionStats {
 
 /// Walk the session JSONL once and compute all three stats.
 pub fn compute_session_stats(path: &Path) -> io::Result<SessionStats> {
-    let reader = SessionReader::open(path)?;
+    let reader = session_reader::open(path)?;
     let mut turns = TurnCounter::new();
     let mut input_tokens: i64 = 0;
     let mut output_tokens: i64 = 0;

@@ -16,5 +16,4 @@ pub mod session;
 pub mod session_reader;
 mod skill;
 pub mod stats;
-pub mod tables;
 mod text_descriptor;

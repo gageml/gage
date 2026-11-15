@@ -15,46 +15,13 @@ use std::time::{Duration, SystemTime};
 
 use crate::codec::codec;
 use gage_core::config::gage_home;
+pub use gage_corpus::SessionInfo;
 use gage_session::{DriverError, EntryCodec, EntryValue};
 use regex::Regex;
-use serde::{Serialize, Serializer};
 
 pub static SESSION_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.jsonl$").unwrap()
 });
-
-#[derive(Clone, Debug, Serialize)]
-pub struct SessionInfo {
-    pub id: String,
-    #[serde(skip)]
-    pub src: PathBuf,
-    #[serde(serialize_with = "serialize_system_time")]
-    pub mtime: SystemTime,
-    pub size: u64,
-}
-
-impl SessionInfo {
-    /// The encoded directory name under `~/.claude/projects/` that
-    /// holds this session's JSONL. This is *not* a stable project
-    /// identity — the encoding is lossy and multiple cwds can collide
-    /// onto the same encoded name. Use it only as an index into the
-    /// session-storage layout.
-    pub fn project_name(&self) -> std::borrow::Cow<'_, str> {
-        self.src
-            .parent()
-            .unwrap()
-            .file_name()
-            .unwrap()
-            .to_string_lossy()
-    }
-}
-
-fn serialize_system_time<S: Serializer>(time: &SystemTime, s: S) -> Result<S::Ok, S::Error> {
-    let duration = time
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default();
-    s.serialize_f64(duration.as_secs_f64())
-}
 
 pub struct SessionList {
     sessions: Vec<SessionInfo>,
@@ -222,6 +189,7 @@ impl SessionListBuilder {
                     src: path,
                     mtime,
                     size,
+                    project: dir_name.clone(),
                 });
             }
         }
@@ -339,6 +307,7 @@ pub fn find_session(id_prefix: &str) -> Vec<SessionInfo> {
                 src: path,
                 mtime,
                 size,
+                project: slug.into_owned(),
             });
         }
     }
@@ -606,20 +575,14 @@ mod tests {
         .unwrap();
 
         let sessions = SessionListBuilder::new().root(root.path()).build();
-        let slugs: Vec<String> = sessions
-            .iter()
-            .map(|s| s.project_name().into_owned())
-            .collect();
+        let slugs: Vec<String> = sessions.iter().map(|s| s.project.clone()).collect();
         assert_eq!(slugs, vec![real_slug.clone()]);
 
         let shown = SessionListBuilder::new()
             .root(root.path())
             .show_agents(true)
             .build();
-        let mut slugs: Vec<String> = shown
-            .iter()
-            .map(|s| s.project_name().into_owned())
-            .collect();
+        let mut slugs: Vec<String> = shown.iter().map(|s| s.project.clone()).collect();
         slugs.sort();
         let mut expected = vec![real_slug, tmp_slug];
         expected.sort();

@@ -2437,16 +2437,12 @@ dependencies = [
  "arrow",
  "async-trait",
  "chrono",
- "datafusion",
- "fs4 1.1.0",
- "futures",
  "gage-core",
- "gage-index",
+ "gage-corpus",
  "gage-session",
  "jsonschema",
  "libc",
  "regex",
- "rmp-serde",
  "rust-embed",
  "serde",
  "serde_json",
@@ -2510,6 +2506,27 @@ dependencies = [
  "toml 0.8.23",
  "twox-hash",
  "uuid",
+]
+
+[[package]]
+name = "gage-corpus"
+version = "0.3.2"
+dependencies = [
+ "arrow",
+ "async-trait",
+ "datafusion",
+ "fs4 1.1.0",
+ "futures",
+ "gage-core",
+ "gage-index",
+ "gage-session",
+ "regex",
+ "rmp-serde",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

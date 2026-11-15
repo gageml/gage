@@ -1,92 +1,24 @@
-//! Derived data layer for Claude session files.
-//!
-//! Two artifacts shadow the session corpus, maintained by one
-//! reconcile pass: a per-session summary cache at `summary/` and a
-//! full-text index over message text at `text/`, both inside the
-//! corpus directory `<cache root>/driver/claude/<digest>` that
-//! `gage_core::cache` lays out. Every source is keyed the same way;
-//! the default Claude location is not special. Both are ephemeral:
-//! deleting either is a complete reset of it.
+//! Derivation of Claude session files, for the derived data layer
+//! `gage_corpus` keeps over them: the summary cache, the full-text
+//! index, and the DataFusion table providers.
 //!
 //! Layering: [`crate::session`] and [`crate::entry`] (source reading)
-//! feed this module (derived artifacts); the DataFusion table
-//! providers in [`crate::tables`] read through it.
+//! feed this module, which the corpus the driver hands to
+//! `gage_corpus` derives through.
 
+mod corpus;
 mod derive;
-mod paths;
-mod reconcile;
-mod summary_cache;
 mod tool_use;
 
-use std::fmt;
-
-use crate::session_reader::ReadError;
-
+pub use corpus::{ClaudeCorpus, index_store};
 pub use derive::{
-    COL_ATTACHMENTS, COL_IDE_TAGS, COL_LINE, COL_MESSAGE_SUBTYPE, COL_RAW, COL_SESSION_ID,
-    COL_SUBTYPE, COL_TEXT, COL_TIMESTAMP, COL_TYPE, COL_UUID, ClaudeSessionAttrs, DerivedSession,
-    Fingerprint, derive_entry, derive_session, derive_session_from, derived_schema, entry_text,
-    is_message_row, project_of,
+    ClaudeSessionAttrs, SUMMARY_VERSION, derive_entry, derive_session, derive_session_from,
+    entry_text, is_message_row, project_of,
 };
-pub use gage_index::LockMode;
-pub use reconcile::{IndexStore, ReconcileOutcome, Status};
-pub use summary_cache::VERSION as SUMMARY_VERSION;
+pub use gage_corpus::{
+    COL_ATTACHMENTS, COL_IDE_TAGS, COL_LINE, COL_MESSAGE_SUBTYPE, COL_MESSAGE_TYPE, COL_RAW,
+    COL_SESSION_ID, COL_SUBTYPE, COL_TEXT, COL_TIMESTAMP, COL_TYPE, COL_UUID, DerivedSession,
+    Fingerprint, IndexError, IndexStore, LockMode, ReconcileOutcome, Result, Status,
+    derived_schema,
+};
 pub use tool_use::ToolUseCollector;
-
-#[derive(Debug)]
-pub enum IndexError {
-    Io(std::io::Error),
-    Arrow(arrow::error::ArrowError),
-    Json(serde_json::Error),
-    Text(gage_index::Error),
-    /// A transcript line that does not read or decode. The session is
-    /// not derived: a line in a shape the codec does not recognize is
-    /// a session the build knows nothing about.
-    Read(ReadError),
-}
-
-impl fmt::Display for IndexError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            IndexError::Io(e) => write!(f, "io error: {e}"),
-            IndexError::Arrow(e) => write!(f, "arrow error: {e}"),
-            IndexError::Json(e) => write!(f, "json error: {e}"),
-            IndexError::Text(e) => write!(f, "{e}"),
-            IndexError::Read(e) => write!(f, "{e}"),
-        }
-    }
-}
-
-impl std::error::Error for IndexError {}
-
-impl From<std::io::Error> for IndexError {
-    fn from(e: std::io::Error) -> Self {
-        IndexError::Io(e)
-    }
-}
-
-impl From<arrow::error::ArrowError> for IndexError {
-    fn from(e: arrow::error::ArrowError) -> Self {
-        IndexError::Arrow(e)
-    }
-}
-
-impl From<serde_json::Error> for IndexError {
-    fn from(e: serde_json::Error) -> Self {
-        IndexError::Json(e)
-    }
-}
-
-impl From<gage_index::Error> for IndexError {
-    fn from(e: gage_index::Error) -> Self {
-        IndexError::Text(e)
-    }
-}
-
-impl From<ReadError> for IndexError {
-    fn from(e: ReadError) -> Self {
-        IndexError::Read(e)
-    }
-}
-
-pub type Result<T> = std::result::Result<T, IndexError>;

@@ -4,6 +4,7 @@ members = [
     "gage-cli",
     "gage-claude",
     "gage-core",
+    "gage-corpus",
     "gage-index",
     "gage-log",
     "gage-publish",

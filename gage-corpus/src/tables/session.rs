@@ -1,9 +1,8 @@
 use std::fmt::{self, Formatter};
-use std::path::Path;
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
-use crate::index::{ClaudeSessionAttrs, IndexStore};
+use crate::{CorpusSessionAttrs, IndexStore, SessionInfo};
 use async_trait::async_trait;
 use datafusion::arrow::array::{Int64Builder, StringBuilder, TimestampMillisecondBuilder};
 use datafusion::arrow::compute::SortOptions;
@@ -31,8 +30,6 @@ use gage_session::{SummaryAttrs, SummaryColumns};
 
 use super::cache::SessionCache;
 use super::walk::{SummaryPrune, WALK_COLS, walk_sessions};
-use crate::driver::{CONTENT_FORMAT, ClaudeNativeSession, NAME, SESSION_TYPE};
-use crate::session::SessionInfo;
 use gage_core::uuid::short_uuid;
 use gage_session::filter;
 use gage_session::system;
@@ -361,13 +358,12 @@ impl SessionExec {
         let sessions: Vec<SessionInfo> = outcome.sessions;
 
         let needs_summary = self.projection_needs_summary();
-        // The Claude root the projects dir sits under, for session URLs
-        let root = self
-            .store
-            .root()
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| self.store.root().to_path_buf());
+        let corpus = self.store.corpus();
+        let (driver, session_type, content_format) = (
+            corpus.driver(),
+            corpus.session_type(),
+            corpus.content_format(),
+        );
         tracing::debug!(
             target: "gage_query::session",
             walked = outcome.walked,
@@ -385,17 +381,17 @@ impl SessionExec {
         let mut projects = StringBuilder::with_capacity(len, len * 32);
         let mut locators = StringBuilder::with_capacity(len, len * 64);
         let mut createds = TimestampMillisecondBuilder::with_capacity(len);
-        let mut drivers = StringBuilder::with_capacity(len, len * NAME.len());
+        let mut drivers = StringBuilder::with_capacity(len, len * driver.len());
         let mut origins = StringBuilder::new();
         let mut mtimes = TimestampMillisecondBuilder::with_capacity(len);
         let mut sizes = Int64Builder::with_capacity(len);
-        let mut session_types = StringBuilder::with_capacity(len, len * SESSION_TYPE.len());
-        let mut content_formats = StringBuilder::with_capacity(len, len * CONTENT_FORMAT.len());
+        let mut session_types = StringBuilder::with_capacity(len, len * session_type.len());
+        let mut content_formats = StringBuilder::with_capacity(len, len * content_format.len());
         let mut derived = SummaryColumns::with_capacity(len);
 
         // The cached summaries, read once here; the sessions without
         // one are derived in the loop and reported as progress.
-        let cached: Vec<Option<ClaudeSessionAttrs>> = sessions
+        let cached: Vec<Option<CorpusSessionAttrs>> = sessions
             .iter()
             .map(|s| {
                 needs_summary
@@ -417,10 +413,10 @@ impl SessionExec {
                 .copied()
                 .expect("walk computed a prefix for every walked id");
             id_prefixes.append_value(s.id.chars().take(prefix_len).collect::<String>());
-            projects.append_value(s.project_name().as_ref());
+            projects.append_value(&s.project);
             locators.append_value(format!("file:{}", s.src.display()));
             createds.append_null();
-            drivers.append_value(NAME);
+            drivers.append_value(driver);
             origins.append_null();
             let millis = s
                 .mtime
@@ -429,32 +425,20 @@ impl SessionExec {
                 .as_millis() as i64;
             mtimes.append_value(millis);
             sizes.append_value(s.size as i64);
-            session_types.append_value(SESSION_TYPE);
-            content_formats.append_value(CONTENT_FORMAT);
+            session_types.append_value(session_type);
+            content_formats.append_value(content_format);
 
-            // The native session is the authority on a session's
-            // attributes; the table is one consumer of it. A summary
-            // not needed, or a file the driver could not stat, leaves
-            // every derived column null. A transcript the driver could
-            // not read is a row like any other: its summary carries
-            // `read_error` and its derived columns are null.
-            let summary = match cached {
-                Some(attrs) => Some(SummaryAttrs::from_attrs(&attrs)),
-                None if !needs_summary => None,
-                None => {
-                    let opened = ClaudeNativeSession::open(
-                        &s.id,
-                        &s.src,
-                        s.mtime,
-                        s.size,
-                        &root,
-                        &self.store,
-                    );
+            // A summary not needed leaves every derived column null.
+            // A session file the driver could not read is a row like
+            // any other: its summary carries `read_error` and its
+            // derived columns are null.
+            let summary = needs_summary.then(|| {
+                if cached.is_none() {
                     read += 1;
                     progress::advance(&span, read);
-                    Some(SummaryAttrs::from_attrs(opened.claude_attrs()))
                 }
-            };
+                SummaryAttrs::from_attrs(&self.store.attrs_with(s, cached))
+            });
             derived
                 .append(summary.as_ref())
                 .map_err(|e| DataFusionError::External(Box::new(e)))?;

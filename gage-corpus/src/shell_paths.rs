@@ -1,8 +1,8 @@
 //! The paths a tool call refers to, read from its input: every
 //! argument the harness names as a path, and every path a shell
 //! command names. A write the harness did not record, such as a
-//! heredoc, is found through these; the collector types each path by
-//! what the call's result proves about it.
+//! heredoc, is found through these; a driver's collector types each
+//! path by what the call's result proves about it.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -13,14 +13,16 @@ use std::sync::LazyLock;
 use regex::Regex;
 use serde_json::Value;
 
-/// The paths `input` refers to, resolved against `cwd` and `home`,
-/// each once, sorted. A Bash command contributes the paths it names;
-/// any other tool contributes the string values of keys ending in
-/// `path`, whatever their shape. A shell token that cannot be
-/// resolved, a relative one with no `cwd` or a `~` one with no
-/// `home`, is dropped. A path argument that cannot be resolved is
-/// kept as the record states it.
-pub(crate) fn referenced_paths(
+/// The paths the input of the tool `name` refers to, resolved against
+/// `cwd` and `home`, each once, sorted. `shell_tool` is the harness's
+/// tool whose `command` argument is a shell command: it contributes
+/// the paths the command names; any other tool contributes the string
+/// values of keys ending in `path`, whatever their shape. A shell
+/// token that cannot be resolved, a relative one with no `cwd` or a
+/// `~` one with no `home`, is dropped. A path argument that cannot be
+/// resolved is kept as the record states it.
+pub fn referenced_paths(
+    shell_tool: &str,
     name: &str,
     input: &Value,
     cwd: Option<&Path>,
@@ -34,7 +36,7 @@ pub(crate) fn referenced_paths(
             out.push(path);
         }
     };
-    if name == "Bash" {
+    if name == shell_tool {
         if let Some(command) = input.get("command").and_then(Value::as_str) {
             for path in command_paths(command, cwd, home) {
                 push(Some(path));
@@ -82,7 +84,94 @@ fn path_values(value: &Value, f: &mut dyn FnMut(&str)) {
 /// extension, which is how an inline script names the file it opens.
 /// Any other bare word is not: the text of a script is mostly dotted
 /// names that are not files.
-fn command_paths(command: &str, cwd: Option<&Path>, home: Option<&Path>) -> Vec<PathBuf> {
+pub fn command_paths(command: &str, cwd: Option<&Path>, home: Option<&Path>) -> Vec<PathBuf> {
+    command_words(command, cwd, home, false)
+        .into_iter()
+        .map(|word| word.path)
+        .collect()
+}
+
+/// The paths a shell command writes by its own text, resolved and
+/// normalized, each once: the target of an output redirect, and the
+/// files an in-place `sed` edits. A redirect to a device, such as
+/// `/dev/null`, is not a file written. Whether the command ran and
+/// succeeded is the caller's to judge from the record.
+pub fn command_writes(command: &str, cwd: Option<&Path>, home: Option<&Path>) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    for word in command_words(command, cwd, home, true) {
+        if word.written && !word.path.starts_with("/dev") && !out.contains(&word.path) {
+            out.push(word.path);
+        }
+    }
+    out
+}
+
+/// One path a shell command names
+struct PathWord {
+    path: PathBuf,
+    /// The command's text says it writes the path
+    written: bool,
+}
+
+/// What the words of an in-place `sed` are so far, to the end of the
+/// command it is a word of
+#[derive(Default)]
+struct InPlaceEdit {
+    /// The command word is `sed`
+    sed: bool,
+    /// An `-i` option was read
+    in_place: bool,
+    /// The script was read, or is given by `-e` or `-f`
+    scripted: bool,
+    /// The previous word was `-e` or `-f`, whose argument is next
+    takes_arg: bool,
+}
+
+impl InPlaceEdit {
+    /// Read the next word of the command; whether the word is a file
+    /// the command edits in place.
+    fn edits(&mut self, text: &str, starts_command: bool) -> bool {
+        if starts_command {
+            *self = Self {
+                sed: text == "sed",
+                ..Self::default()
+            };
+            return false;
+        }
+        if !self.sed {
+            return false;
+        }
+        if self.takes_arg {
+            self.takes_arg = false;
+            return false;
+        }
+        if text.starts_with('-') {
+            if text == "-i" || text.starts_with("-i.") || text == "--in-place" {
+                self.in_place = true;
+            }
+            if matches!(text, "-e" | "-f" | "--expression" | "--file") {
+                self.scripted = true;
+                self.takes_arg = true;
+            }
+            return false;
+        }
+        if !self.scripted {
+            self.scripted = true;
+            return false;
+        }
+        self.in_place
+    }
+}
+
+/// The paths `command` names, in order. With `with_edits`, a file an
+/// in-place `sed` edits is named whatever its shape; without, it is
+/// named only when it is path-shaped, as any other word is.
+fn command_words(
+    command: &str,
+    cwd: Option<&Path>,
+    home: Option<&Path>,
+    with_edits: bool,
+) -> Vec<PathWord> {
     let scripts = heredoc_bodies(command);
     let in_script = |at: usize| scripts.iter().any(|body| body.contains(&at));
     let tokens = command_tokens(command);
@@ -91,9 +180,14 @@ fn command_paths(command: &str, cwd: Option<&Path>, home: Option<&Path>) -> Vec<
     // The directory a `cd` enters, held until its target is read: the
     // target is itself a path in the directory the `cd` runs in.
     let mut entering: Option<Option<PathBuf>> = None;
+    let mut edit = InPlaceEdit::default();
     for (i, token) in tokens.iter().enumerate() {
         let entered = entering.take();
         let scripted = in_script(token.start);
+        let starts_command = i == 0 || token.gap.contains(COMMAND_ENDS);
+        let redirected = !scripted && token.gap.trim_end().ends_with('>');
+        let edited =
+            with_edits && !scripted && !redirected && edit.edits(token.text, starts_command);
         if !scripted {
             for (at, c) in token.gap.char_indices() {
                 if !in_script(token.start - token.gap.len() + at) {
@@ -119,11 +213,14 @@ fn command_paths(command: &str, cwd: Option<&Path>, home: Option<&Path>) -> Vec<
             let names_file = if text.contains('/') {
                 is_path_shaped(text)
             } else {
-                (!scripted && token.gap.trim_end().ends_with('>') && is_file_word(text))
+                ((redirected || edited) && is_file_word(text))
                     || (token.is_quoted() && has_extension(text))
             };
             if names_file && let Some(path) = absolute(text, shell.cwd.as_deref(), home) {
-                out.push(path);
+                out.push(PathWord {
+                    path,
+                    written: redirected || edited,
+                });
             }
         }
         if let Some(cwd) = entered {
@@ -367,7 +464,7 @@ fn is_file_name_char(c: char) -> bool {
 /// path by construction, a path argument or a recorded diff path, so
 /// no shape is required of it: `app/[id]/page.tsx` holds glob
 /// characters and is a file.
-pub(crate) fn resolve(path: &str, cwd: Option<&Path>, home: Option<&Path>) -> Option<PathBuf> {
+pub fn resolve(path: &str, cwd: Option<&Path>, home: Option<&Path>) -> Option<PathBuf> {
     if path.is_empty() {
         return None;
     }
@@ -411,6 +508,7 @@ mod tests {
 
     fn paths(name: &str, input: Value) -> Vec<PathBuf> {
         referenced_paths(
+            "Bash",
             name,
             &input,
             Some(Path::new("/w/proj")),
@@ -576,6 +674,7 @@ mod tests {
         assert!(paths("Read", json!({"file_path": ""})).is_empty());
         assert_eq!(
             referenced_paths(
+                "Bash",
                 "Edit",
                 &json!({"file_path": "[REDACTED]/src/lib.rs"}),
                 None,
@@ -590,12 +689,55 @@ mod tests {
     #[test]
     fn unresolvable_and_shapeless_tokens_are_dropped() {
         assert!(
-            referenced_paths("Bash", &json!({"command": "cat a/b ~/c"}), None, None).is_empty()
+            referenced_paths(
+                "Bash",
+                "Bash",
+                &json!({"command": "cat a/b ~/c"}),
+                None,
+                None
+            )
+            .is_empty()
         );
         assert!(paths("Bash", json!({"command": "echo / // --x/y a*b/c"})).is_empty());
         assert_eq!(
             paths("Bash", json!({"command": "see /a/b/c."})),
             [PathBuf::from("/a/b/c")]
         );
+    }
+
+    fn writes(command: &str) -> Vec<PathBuf> {
+        command_writes(
+            command,
+            Some(Path::new("/w/proj")),
+            Some(Path::new("/home/u")),
+        )
+    }
+
+    #[test]
+    fn a_redirect_target_is_written_and_an_input_is_not() {
+        assert_eq!(
+            writes("printf 'a\\nb\\n' > hello.txt; cat < in.txt >> logs/out.log 2>/dev/null"),
+            ["/w/proj/hello.txt", "/w/proj/logs/out.log"].map(PathBuf::from)
+        );
+        assert!(writes("cat a.txt | grep x 2>&1").is_empty());
+        assert_eq!(
+            writes("cd sub && echo hi > note.md"),
+            [PathBuf::from("/w/proj/sub/note.md")],
+            "a redirect resolves against the directory a cd entered"
+        );
+    }
+
+    #[test]
+    fn an_in_place_sed_writes_its_files_and_not_its_script() {
+        assert_eq!(
+            writes("sed -i '1s/^hello$/goodbye/' hello.txt src/b.rs"),
+            ["/w/proj/hello.txt", "/w/proj/src/b.rs"].map(PathBuf::from)
+        );
+        assert_eq!(
+            writes("sed -i.bak -e s/a/b/ -e s/c/d/ notes.txt && sed s/a/b/ other.txt"),
+            [PathBuf::from("/w/proj/notes.txt")],
+            "a sed without -i edits nothing"
+        );
+        assert!(writes("grep -i hello hello.txt").is_empty());
     }
 }

@@ -8,23 +8,16 @@
 //! object and fails to parse. It decodes to an invalid entry whose
 //! `raw` is the line, and encodes back to the line.
 
-use std::str;
 use std::sync::{Arc, LazyLock};
 
-use gage_session::{DriverError, EntryCodec, EntryValue, TextDescriptor};
-use serde_json::error::Category;
+use gage_corpus::JsonlCodec;
 
 use crate::text_descriptor::text_descriptor;
 
-pub struct ClaudeCodec {
-    descriptor: TextDescriptor,
-}
+pub type ClaudeCodec = JsonlCodec;
 
-static CODEC: LazyLock<Arc<ClaudeCodec>> = LazyLock::new(|| {
-    Arc::new(ClaudeCodec {
-        descriptor: text_descriptor(),
-    })
-});
+static CODEC: LazyLock<Arc<ClaudeCodec>> =
+    LazyLock::new(|| Arc::new(JsonlCodec::new(text_descriptor())));
 
 /// The one codec of the format this build writes. The descriptor is
 /// compiled once per process.
@@ -32,46 +25,11 @@ pub fn codec() -> Arc<ClaudeCodec> {
     Arc::clone(&CODEC)
 }
 
-impl EntryCodec for ClaudeCodec {
-    fn decode(&self, raw: &[u8]) -> Result<EntryValue, DriverError> {
-        let text = str::from_utf8(raw)
-            .map_err(|e| DriverError::Other(format!("entry is not UTF-8: {e}")))?;
-        match serde_json::from_str(text) {
-            Ok(value) => Ok(value),
-            Err(e) if is_torn_object(text, &e) => {
-                Ok(EntryValue::invalid_entry(&e.to_string(), text))
-            }
-            Err(e) => Err(DriverError::Other(format!("entry does not decode: {e}"))),
-        }
-    }
-
-    fn encode(&self, value: &EntryValue) -> Result<Vec<u8>, DriverError> {
-        if value.get("type").and_then(EntryValue::as_str) == Some(gage_session::INVALID_ENTRY_TYPE)
-        {
-            return value
-                .invalid_entry_raw()
-                .map(|raw| raw.as_bytes().to_vec())
-                .ok_or_else(|| DriverError::Other("invalid entry has no raw text".into()));
-        }
-        serde_json::to_vec(value)
-            .map_err(|e| DriverError::Other(format!("entry does not encode: {e}")))
-    }
-
-    fn descriptor(&self) -> &TextDescriptor {
-        &self.descriptor
-    }
-}
-
-/// Whether `text` starts an object and `error` is a failure to finish
-/// it: a syntax error inside, or the end of the text before the close.
-/// Any other failure is not a torn write.
-fn is_torn_object(text: &str, error: &serde_json::Error) -> bool {
-    text.starts_with('{') && matches!(error.classify(), Category::Syntax | Category::Eof)
-}
-
 #[cfg(test)]
 mod tests {
     use std::fs;
+
+    use gage_session::{EntryCodec, EntryValue};
 
     use super::*;
 

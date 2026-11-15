@@ -1,16 +1,10 @@
-use std::collections::HashMap;
 use std::fmt::{self, Formatter};
 use std::path::PathBuf;
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 
-use crate::index::{
-    COL_ATTACHMENTS, COL_IDE_TAGS, COL_LINE, COL_MESSAGE_SUBTYPE, COL_RAW, COL_SESSION_ID,
-    COL_TEXT, COL_TIMESTAMP, COL_TYPE, COL_UUID, IndexStore,
-};
+use crate::IndexStore;
 use async_trait::async_trait;
-use datafusion::arrow::array::{Array, BooleanArray, StringArray};
-use datafusion::arrow::compute::filter_record_batch;
-use datafusion::arrow::datatypes::{Field, Schema, SchemaRef};
+use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::catalog::Session;
 use datafusion::common::tree_node::TreeNodeRecursion;
@@ -28,93 +22,38 @@ use datafusion::physical_plan::{
 use datafusion::prelude::*;
 use futures::StreamExt;
 
-use super::SessionSource;
-use super::cache::SessionCache;
-use super::walk::{SummaryPrune, lookup_paths, session_paths};
-use gage_session::filter;
+use super::cache::CorpusCache;
+use super::walk::{SummaryPrune, session_paths};
+use gage_session::{filter, tool_use_file_schema};
 
 /// The pushed filters the walk prunes sessions on through the summary
-/// cache
+/// cache: a session is read only when one of its recorded `(path,
+/// type)` pairs satisfies the pushed `path` and `type` terms.
 const PRUNE: SummaryPrune = SummaryPrune {
-    time_col: Some("timestamp"),
-    path_col: None,
-    type_col: None,
+    time_col: None,
+    path_col: Some("path"),
+    type_col: Some("type"),
 };
 
-/// The derived columns serving the `message` table, in table-column
-/// order. `text` is non-null exactly for message rows: user/assistant
-/// entries with well-formed `message.content`, plus system entries
-/// whose subtype is promoted into the message flow (see
-/// `is_message_row` in gage-index).
-pub(crate) const PROJECTION: &[usize] = &[
-    COL_SESSION_ID,
-    COL_LINE,
-    COL_UUID,
-    COL_TYPE,
-    COL_MESSAGE_SUBTYPE,
-    COL_TEXT,
-    COL_TIMESTAMP,
-    COL_ATTACHMENTS,
-    COL_IDE_TAGS,
-    COL_RAW,
-];
-
-/// Index into the projected (message-table) schema of the column the
-/// derived batch supplies as `message_subtype` and the message table
-/// exposes as `subtype`.
-const PROJECTED_SUBTYPE: usize = 4;
-
-static MESSAGE_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
-    let projected = crate::index::derived_schema()
-        .project(PROJECTION)
-        .expect("derived schema serves message projection");
-    let fields: Vec<Field> = projected
-        .fields()
-        .iter()
-        .enumerate()
-        .map(|(i, f)| {
-            if i == PROJECTED_SUBTYPE {
-                Field::new("subtype", f.data_type().clone(), f.is_nullable())
-            } else {
-                f.as_ref().clone()
-            }
-        })
-        .collect();
-    Arc::new(Schema::new(fields))
-});
-
-pub fn message_schema() -> SchemaRef {
-    MESSAGE_SCHEMA.clone()
-}
-
+/// The `tool_use_file` table over a corpus: one row per tool call per
+/// path it names.
 #[derive(Debug, Clone)]
-pub struct MessageTable {
-    source: SessionSource,
+pub struct ToolUseFileTable {
+    store: Arc<IndexStore>,
     schema: SchemaRef,
 }
 
-impl MessageTable {
+impl ToolUseFileTable {
     pub fn new(store: Arc<IndexStore>) -> Self {
         Self {
-            source: SessionSource::Corpus(store),
-            schema: message_schema(),
-        }
-    }
-
-    /// Build a `MessageTable` over an explicit `session_id` -> path
-    /// map. Used by gage-scan: the cohort is known up front and the
-    /// table resolves ids through the map. No `IndexStore`, no
-    /// reconcile.
-    pub fn with_lookup(sessions: Arc<HashMap<String, PathBuf>>) -> Self {
-        Self {
-            source: SessionSource::Lookup(sessions),
-            schema: message_schema(),
+            store,
+            schema: tool_use_file_schema(),
         }
     }
 }
 
 #[async_trait]
-impl TableProvider for MessageTable {
+impl TableProvider for ToolUseFileTable {
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }
@@ -123,15 +62,16 @@ impl TableProvider for MessageTable {
         TableType::Base
     }
 
+    /// A filter over `session_id` alone is applied in the walk. A
+    /// filter over `path` or `type` prunes the walk and is then
+    /// applied by DataFusion to the rows, so it is inexact.
     fn supports_filters_pushdown(
         &self,
         filters: &[&Expr],
     ) -> Result<Vec<datafusion::logical_expr::TableProviderFilterPushDown>> {
-        // Pushdowns limited to session_id (path pruning) and line
-        // (row masking); everything else needs the parsed columns
         Ok(filters
             .iter()
-            .map(|f| filter::pushdown_lines(f, "session_id"))
+            .map(|f| filter::pushdown(f, "session_id"))
             .collect())
     }
 
@@ -142,57 +82,49 @@ impl TableProvider for MessageTable {
         filters: &[Expr],
         limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        let paths = match &self.source {
-            SessionSource::Corpus(store) => session_paths(store, filters, "session_id", PRUNE)?,
-            SessionSource::Lookup(sessions) => lookup_paths(sessions, filters)?,
-        };
-        let row_filter = filter::RowFilter::new(filters, "session_id")?;
-        let cache = SessionCache::shared();
+        let paths = session_paths(&self.store, filters, "session_id", PRUNE)?;
         let projected_schema = match projection {
             Some(indices) => Arc::new(self.schema.project(indices)?),
             None => self.schema.clone(),
         };
-        Ok(Arc::new(MessageExec::new(
+        Ok(Arc::new(ToolUseFileExec::new(
             paths,
-            cache,
+            CorpusCache::shared(&self.store),
             projected_schema,
             projection.cloned(),
-            row_filter,
             limit,
         )))
     }
 }
 
-/// Streaming plan: pulls one session at a time, parses it on a
-/// blocking thread, emits a single batch of its message rows, and
-/// drops the parsed `DerivedSession` before pulling the next.
+/// Streaming plan: pulls one session at a time and emits its
+/// `tool_use_file` batch. Honors `limit` so the stream stops opening
+/// sessions once enough rows have been produced.
 #[derive(Clone)]
-struct MessageExec {
+struct ToolUseFileExec {
     paths: Arc<Vec<(String, PathBuf)>>,
-    cache: Arc<SessionCache>,
+    cache: CorpusCache,
     projected_schema: SchemaRef,
     projection: Option<Vec<usize>>,
-    row_filter: Option<filter::RowFilter>,
     limit: Option<usize>,
     properties: Arc<PlanProperties>,
 }
 
-impl fmt::Debug for MessageExec {
+impl fmt::Debug for ToolUseFileExec {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        f.debug_struct("MessageExec")
+        f.debug_struct("ToolUseFileExec")
             .field("sessions", &self.paths.len())
             .field("limit", &self.limit)
             .finish()
     }
 }
 
-impl MessageExec {
+impl ToolUseFileExec {
     fn new(
         paths: Vec<(String, PathBuf)>,
-        cache: Arc<SessionCache>,
+        cache: CorpusCache,
         projected_schema: SchemaRef,
         projection: Option<Vec<usize>>,
-        row_filter: Option<filter::RowFilter>,
         limit: Option<usize>,
     ) -> Self {
         let properties = Arc::new(PlanProperties::new(
@@ -206,22 +138,21 @@ impl MessageExec {
             cache,
             projected_schema,
             projection,
-            row_filter,
             limit,
             properties,
         }
     }
 }
 
-impl DisplayAs for MessageExec {
+impl DisplayAs for ToolUseFileExec {
     fn fmt_as(&self, _t: DisplayFormatType, f: &mut Formatter) -> fmt::Result {
-        write!(f, "MessageExec")
+        write!(f, "ToolUseFileExec")
     }
 }
 
-impl ExecutionPlan for MessageExec {
+impl ExecutionPlan for ToolUseFileExec {
     fn name(&self) -> &'static str {
-        "MessageExec"
+        "ToolUseFileExec"
     }
 
     fn properties(&self) -> &Arc<PlanProperties> {
@@ -265,7 +196,6 @@ impl ExecutionPlan for MessageExec {
         let paths = (*self.paths).clone();
         let cache = self.cache.clone();
         let projection = self.projection.clone();
-        let row_filter = self.row_filter.clone();
         let schema = self.projected_schema.clone();
         let limit = self.limit;
 
@@ -288,11 +218,7 @@ impl ExecutionPlan for MessageExec {
             })
             .map(move |res| {
                 res.and_then(|derived| {
-                    let mut batch = message_rows(&derived.batch)?;
-                    // session_id / line sit at indices 0 / 1 of PROJECTION
-                    if let Some(f) = &row_filter {
-                        batch = f.filter_batch(&batch, 0, 1)?;
-                    }
+                    let batch = derived.tool_use_files.clone();
                     match &projection {
                         Some(p) => batch.project(p).map_err(DataFusionError::from),
                         None => Ok(batch),
@@ -325,35 +251,4 @@ impl ExecutionPlan for MessageExec {
 
         Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)))
     }
-}
-
-/// Filter a derived batch to message rows (text non-null) and project
-/// to the message schema.
-fn message_rows(batch: &RecordBatch) -> Result<RecordBatch> {
-    let texts = batch
-        .column(COL_TEXT)
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .ok_or_else(|| DataFusionError::Internal("derived text column type".into()))?;
-    let mask: BooleanArray = (0..batch.num_rows())
-        .map(|i| Some(texts.is_valid(i)))
-        .collect();
-    let filtered = filter_record_batch(batch, &mask)?;
-    into_message_batch(&filtered)
-}
-
-/// Project a derived batch to the message-table columns and reconcile
-/// the result with [`message_schema`]. The derived schema names its
-/// subtype column `message_subtype`; `message_schema` renames it to
-/// `subtype`. Returning the unmodified `project` output would yield a
-/// batch whose schema disagrees with the table's declared schema,
-/// which DataFusion rejects at scan time with "Mismatch between schema
-/// and batches". Always route message-shaped output through this
-/// helper.
-pub fn into_message_batch(batch: &RecordBatch) -> Result<RecordBatch> {
-    let projected = batch.project(PROJECTION)?;
-    Ok(RecordBatch::try_new(
-        message_schema(),
-        projected.columns().to_vec(),
-    )?)
 }

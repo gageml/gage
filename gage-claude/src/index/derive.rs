@@ -1,172 +1,49 @@
 //! Derivation: session JSONL → derived rows and session aggregates.
 //!
-//! One pass over a session file produces a `RecordBatch` in the
+//! One pass over a session file produces the session's rows in the
 //! derived schema (a superset serving both the `entry` and `message`
 //! tables) plus the session-level aggregates. JSONL is parsed only
-//! here; the in-memory cache in `gage-query` holds the results.
+//! here; the shared layer's caches hold the results.
 
 use std::collections::HashSet;
-use std::fmt;
 use std::path::Path;
-use std::sync::{Arc, LazyLock};
-use std::time::UNIX_EPOCH;
 
 use crate::entry::{
     entry_attachment_blocks, entry_subtype, entry_to_text, message_subtype, split_ide_tags,
 };
-use crate::session_reader::SessionReader;
-use arrow::array::{Int64Builder, StringBuilder, TimestampMillisecondBuilder};
-use arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
-use arrow::record_batch::RecordBatch;
+use crate::session_reader::{self, SessionReader};
 use chrono::DateTime;
-use gage_session::{Entry, Message, ToolUseBatch, ToolUseFile, ToolUseFileBatch};
-use serde::{Deserialize, Serialize};
+use gage_corpus::{CorpusSessionAttrs, DerivedRows, DerivedSession, Fingerprint, Result};
+use gage_session::{Entry, Message};
 
-use super::Result;
 use super::tool_use::ToolUseCollector;
 
-// Derived column indices. The derived schema is a superset serving
-// two tables: `entry` is a projection of every row; `message` is a
-// filter (`type IN ('user','assistant') AND text IS NOT NULL`) plus
-// the message-derived columns. `text` is non-null (possibly empty)
-// exactly for the rows the `message` table contains.
-pub const COL_SESSION_ID: usize = 0;
-pub const COL_LINE: usize = 1;
-pub const COL_UUID: usize = 2;
-pub const COL_TYPE: usize = 3;
-pub const COL_SUBTYPE: usize = 4;
-pub const COL_TIMESTAMP: usize = 5;
-pub const COL_RAW: usize = 6;
-pub const COL_TEXT: usize = 7;
-pub const COL_ATTACHMENTS: usize = 8;
-pub const COL_IDE_TAGS: usize = 9;
-pub const COL_MESSAGE_SUBTYPE: usize = 10;
+/// The attributes of one native Claude session, as the shared layer
+/// caches them per transcript file.
+///
+/// The model is that of the first assistant row the API produced, else
+/// the model the first API request named. Claude Code writes the rows
+/// it generates itself, such as API error text, with the model
+/// `<synthetic>`; those never name the model.
+///
+/// The token totals are those of the last `cost-state` record when the
+/// session has one, else the sum over the assistant rows with each API
+/// response counted once. A refused request leaves no assistant row
+/// but is counted in `cost-state`, as are subagent runs and the title
+/// model; the totals then match `cost_usd`, the running total of the
+/// last `cost-state` record, which Claude Code writes for sessions
+/// started from its CLI.
+pub type ClaudeSessionAttrs = CorpusSessionAttrs;
 
-static DERIVED_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
-    Arc::new(Schema::new(vec![
-        Field::new("session_id", DataType::Utf8, false),
-        Field::new("line", DataType::Int64, false),
-        Field::new("uuid", DataType::Utf8, true),
-        Field::new("type", DataType::Utf8, true),
-        Field::new("subtype", DataType::Utf8, true),
-        Field::new(
-            "timestamp",
-            DataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into())),
-            true,
-        ),
-        Field::new("raw", DataType::Utf8, false),
-        Field::new("text", DataType::Utf8, true),
-        Field::new("attachments", DataType::Utf8, true),
-        Field::new("ide_tags", DataType::Utf8, true),
-        Field::new("message_subtype", DataType::Utf8, true),
-    ]))
-});
-
-pub fn derived_schema() -> SchemaRef {
-    DERIVED_SCHEMA.clone()
-}
-
-/// Source-file identity: the JSONL's `(mtime, size)` stat'd when
-/// derivation opened it. Recorded in the in-memory cache and in the
-/// index manifest; equality means "absorbed".
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Fingerprint {
-    pub mtime_ms: i64,
-    pub size: u64,
-}
-
-impl Fingerprint {
-    pub fn stat(path: &Path) -> std::io::Result<Self> {
-        let meta = path.metadata()?;
-        let mtime_ms = meta
-            .modified()?
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as i64;
-        Ok(Self {
-            mtime_ms,
-            size: meta.len(),
-        })
-    }
-}
-
-/// The attributes of one native session: the `session` table columns
-/// and the facts the store records when the session is added, computed
-/// in one derivation pass and cached per transcript file.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct ClaudeSessionAttrs {
-    /// The transcript file's mtime at derivation, epoch milliseconds
-    #[serde(default)]
-    pub native_mtime_ms: i64,
-    /// The transcript file's size at derivation
-    #[serde(default)]
-    pub native_size: u64,
-    /// The project slug: the name of the directory holding the
-    /// transcript, unless a caller recorded another
-    #[serde(default)]
-    pub project: String,
-    pub title: Option<String>,
-    /// The model of the first assistant row the API produced, else the
-    /// model the first API request named. Claude Code writes the rows
-    /// it generates itself, such as API error text, with the model
-    /// `<synthetic>`; those never name the model.
-    pub model: Option<String>,
-    pub message_count: i64,
-    /// The token totals of the last `cost-state` record when the
-    /// session has one, else the sum over the assistant rows with each
-    /// API response counted once. A refused request leaves no assistant
-    /// row but is counted in `cost-state`, as are subagent runs and the
-    /// title model; the totals then match `cost_usd`.
-    pub input_tokens: i64,
-    pub output_tokens: i64,
-    pub cache_read_input_tokens: i64,
-    pub cache_creation_input_tokens: i64,
-    /// The running total of the last `cost-state` record, which Claude
-    /// Code writes for sessions started from its CLI
-    #[serde(default)]
-    pub cost_usd: Option<f64>,
-    pub is_empty: bool,
-    /// The line number of the last parsed entry; a trailing line the
-    /// reader could not parse is not counted
-    #[serde(default)]
-    pub line_count: u64,
-    /// The earliest entry timestamp, epoch milliseconds
-    #[serde(default)]
-    pub first_timestamp_ms: Option<i64>,
-    /// The latest entry timestamp, epoch milliseconds
-    #[serde(default)]
-    pub last_timestamp_ms: Option<i64>,
-    /// Every path a tool call names with what the record proves about
-    /// the call and the path, each pair once, sorted: the session's
-    /// `tool_use_file` rows without the call. The walk prunes on it.
-    #[serde(default)]
-    pub files: Vec<ToolUseFile>,
-    /// Why the transcript could not be derived, when it could not. A
-    /// session with a read error has none of the derived values; the
-    /// walk still lists it.
-    #[serde(default)]
-    pub read_error: Option<String>,
-}
-
-impl ClaudeSessionAttrs {
-    /// The attributes of a transcript that failed to derive: the facts
-    /// the walk supplies and the error, cached against `fingerprint`
-    /// like a derived session so the file is read again only when it
-    /// changes.
-    pub fn with_read_error(
-        path: &Path,
-        fingerprint: Fingerprint,
-        error: impl fmt::Display,
-    ) -> Self {
-        Self {
-            native_mtime_ms: fingerprint.mtime_ms,
-            native_size: fingerprint.size,
-            project: project_of(path),
-            read_error: Some(error.to_string()),
-            ..Default::default()
-        }
-    }
-}
+/// The generation of the attributes [`derive_session`] produces.
+/// Bumped on any schema or semantic change to them (new field,
+/// changed title heuristic, fixed token accounting, ...). It is
+/// recorded in the summary cache's manifest, and a cache whose
+/// manifest records another version is discarded and rebuilt. It is
+/// also the `summary_version` of every session the driver writes to a
+/// store, where a stored session with a lower version is derived
+/// again on its next add.
+pub const SUMMARY_VERSION: u32 = 12;
 
 /// The project slug of a transcript: the name of the directory
 /// holding it.
@@ -175,17 +52,6 @@ pub fn project_of(path: &Path) -> String {
         .and_then(|p| p.file_name())
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default()
-}
-
-pub struct DerivedSession {
-    pub session_id: String,
-    pub batch: RecordBatch,
-    /// The session's `tool_use` rows
-    pub tool_uses: RecordBatch,
-    /// The session's `tool_use_file` rows.
-    pub tool_use_files: RecordBatch,
-    pub attrs: ClaudeSessionAttrs,
-    pub fingerprint: Fingerprint,
 }
 
 /// Maximum number of characters of source text to include when
@@ -384,75 +250,6 @@ pub(crate) fn tool_result_text(block: &serde_json::Value) -> String {
     }
 }
 
-struct RowBuilders {
-    session_ids: StringBuilder,
-    lines: Int64Builder,
-    uuids: StringBuilder,
-    types: StringBuilder,
-    subtypes: StringBuilder,
-    timestamps: TimestampMillisecondBuilder,
-    raws: StringBuilder,
-    texts: StringBuilder,
-    attachments: StringBuilder,
-    ide_tags: StringBuilder,
-    message_subtypes: StringBuilder,
-}
-
-impl RowBuilders {
-    fn new() -> Self {
-        Self {
-            session_ids: StringBuilder::new(),
-            lines: Int64Builder::new(),
-            uuids: StringBuilder::new(),
-            types: StringBuilder::new(),
-            subtypes: StringBuilder::new(),
-            timestamps: TimestampMillisecondBuilder::new(),
-            raws: StringBuilder::new(),
-            texts: StringBuilder::new(),
-            attachments: StringBuilder::new(),
-            ide_tags: StringBuilder::new(),
-            message_subtypes: StringBuilder::new(),
-        }
-    }
-
-    fn push(&mut self, session_id: &str, e: &Entry) {
-        self.session_ids.append_value(session_id);
-        self.lines.append_value(e.line as i64);
-        self.uuids.append_option(e.uuid.as_deref());
-        self.types.append_value(&e.entry_type);
-        self.subtypes.append_option(e.subtype.as_deref());
-        self.timestamps.append_option(e.timestamp_ms);
-        self.raws.append_option(e.raw.as_deref());
-        let m = e.message.as_ref();
-        self.texts.append_option(m.map(|m| m.text.as_str()));
-        self.attachments
-            .append_option(m.and_then(|m| m.attachments.as_deref()));
-        self.ide_tags
-            .append_option(m.and_then(|m| m.ide_tags.as_deref()));
-        self.message_subtypes
-            .append_option(m.and_then(|m| m.subtype.as_deref()));
-    }
-
-    fn finish(mut self) -> Result<RecordBatch> {
-        Ok(RecordBatch::try_new(
-            derived_schema(),
-            vec![
-                Arc::new(self.session_ids.finish()),
-                Arc::new(self.lines.finish()),
-                Arc::new(self.uuids.finish()),
-                Arc::new(self.types.finish()),
-                Arc::new(self.subtypes.finish()),
-                Arc::new(self.timestamps.finish().with_timezone("UTC")),
-                Arc::new(self.raws.finish()),
-                Arc::new(self.texts.finish()),
-                Arc::new(self.attachments.finish()),
-                Arc::new(self.ide_tags.finish()),
-                Arc::new(self.message_subtypes.finish()),
-            ],
-        )?)
-    }
-}
-
 /// Whether an entry qualifies as a `message` table row: a user or
 /// assistant entry whose `message.content` is an array or a string,
 /// or a system entry whose subtype is promoted to the message flow
@@ -479,7 +276,7 @@ pub fn derive_session(session_id: &str, path: &Path) -> Result<DerivedSession> {
     let fingerprint = Fingerprint::stat(path)?;
     derive_session_from(
         session_id,
-        SessionReader::open(path)?,
+        session_reader::open(path)?,
         fingerprint,
         project_of(path),
     )
@@ -494,7 +291,7 @@ pub fn derive_session_from<R: std::io::Read>(
     fingerprint: Fingerprint,
     project: String,
 ) -> Result<DerivedSession> {
-    let mut b = RowBuilders::new();
+    let mut b = DerivedRows::new();
     let mut tool_uses = ToolUseCollector::new();
     let mut attrs = ClaudeSessionAttrs {
         native_mtime_ms: fingerprint.mtime_ms,
@@ -607,15 +404,6 @@ pub fn derive_session_from<R: std::io::Read>(
         tool_uses.push(line_num, &entry);
     }
 
-    let mut tool_use_batch = ToolUseBatch::new();
-    let mut tool_use_file_batch = ToolUseFileBatch::new();
-    for t in tool_uses.finish() {
-        tool_use_batch.push(session_id, &t);
-        tool_use_file_batch.push(session_id, &t);
-        attrs.files.extend(t.files.iter().cloned());
-    }
-    attrs.files.sort();
-    attrs.files.dedup();
     if attrs.model.is_none() {
         attrs.model = requested_model;
     }
@@ -626,14 +414,7 @@ pub fn derive_session_from<R: std::io::Read>(
         attrs.cache_creation_input_tokens = usage.cache_creation;
     }
 
-    Ok(DerivedSession {
-        session_id: session_id.to_string(),
-        batch: b.finish()?,
-        tool_uses: tool_use_batch.finish()?,
-        tool_use_files: tool_use_file_batch.finish()?,
-        attrs,
-        fingerprint,
-    })
+    DerivedSession::new(session_id, b, tool_uses.finish(), attrs, fingerprint)
 }
 
 /// The model Claude Code writes on an assistant row it generated
@@ -762,7 +543,9 @@ mod tests {
 
     use super::*;
     use arrow::array::{Array, StringArray};
+    use gage_corpus::{COL_IDE_TAGS, COL_MESSAGE_SUBTYPE, COL_RAW, COL_TEXT, COL_TYPE};
     use gage_session::FileType;
+    use gage_session::ToolUseFile;
     use serde_json::json;
 
     /// The attrs carry the distinct `(path, type)` pairs of the
