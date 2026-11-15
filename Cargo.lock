@@ -2495,6 +2495,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "gage-codex"
+version = "0.3.2"
+dependencies = [
+ "arrow",
+ "chrono",
+ "gage-core",
+ "gage-corpus",
+ "gage-session",
+ "regex",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "tracing",
+]
+
+[[package]]
 name = "gage-core"
 version = "0.3.2"
 dependencies = [
@@ -2640,6 +2657,7 @@ dependencies = [
  "codespan-reporting",
  "fs4 1.1.0",
  "gage-claude",
+ "gage-codex",
  "gage-core",
  "gage-session",
  "rune",

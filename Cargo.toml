@@ -3,6 +3,7 @@ members = [
     "gage-bench",
     "gage-cli",
     "gage-claude",
+    "gage-codex",
     "gage-core",
     "gage-corpus",
     "gage-index",

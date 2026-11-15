@@ -30,6 +30,7 @@ pub mod filter;
 pub mod host;
 pub mod model_choice;
 pub mod model_size;
+pub mod patch;
 pub mod progress;
 pub mod status;
 pub mod summary_columns;
@@ -49,6 +50,7 @@ pub use content_schema::{
 pub use host::HostContext;
 pub use model_choice::{ModelChoice, ModelChoices};
 pub use model_size::{MODEL_SIZES, ModelSizes};
+pub use patch::PatchHunk;
 pub use status::{AuthInfo, DriverStatus, Field, HarnessInfo, InstallInfo};
 pub use summary_columns::{SummaryArrays, SummaryColumns};
 pub use system_col::{SYSTEM_META_KEY, is_system, system};
@@ -222,6 +224,14 @@ pub trait Driver: Send + Sync {
     /// entry the driver has nothing to show for.
     fn entry_body(&self, _content_format: &str, _entry: &EntryValue) -> EntryBody {
         EntryBody::default()
+    }
+
+    /// The hunks of the patch a tool call's result record carries:
+    /// `result_raw`, a `tool_use` row's `result_raw` as this driver
+    /// writes it. The default is none, for a driver whose records
+    /// carry no patch and for a record that is not this driver's.
+    fn patch_hunks(&self, _result_raw: &str) -> Vec<PatchHunk> {
+        Vec::new()
     }
 
     /// Start an agent on this driver's harness and return the handle
@@ -759,10 +769,36 @@ pub struct Entry {
 /// The message-derived columns of an entry. Every message has a type
 /// and a text, which may be empty; the rest is present when the
 /// harness provides it.
+///
+/// The type and subtype are the one vocabulary every driver maps its
+/// records onto. Queries, scanners, blame, and the viewer select
+/// messages by these values, whatever harness wrote the session:
+///
+/// | `message_type` | `subtype` | The message |
+/// |---|---|---|
+/// | `user` | `text` | What a person typed |
+/// | `user` | `meta` | Context the harness wrote into the conversation |
+/// | `user` | `tool_result` | The result of a tool call |
+/// | `user` | `compact_summary` | The summary that replaces compacted history |
+/// | `assistant` | `text` | What the model said |
+/// | `assistant` | `thinking` | The model's reasoning, as far as it is recorded as text |
+/// | `assistant` | `tool_use` | A tool call the model made |
+/// | `system` | a kind the driver names | A message from the harness itself |
+///
+/// A person's prompt is `user`, `text` and nothing else is: a driver
+/// whose harness writes its own context under the user role maps that
+/// context to `meta`. A record that repeats a message another record
+/// already is yields no second message, so a message is counted and
+/// searched once.
+///
+/// A tool call's `tool_use` message is on the line a `tool_use` row
+/// names as its `line`, and its `tool_result` message on the row's
+/// `result_line`; a reader pairs rows with messages through the two.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Message {
-    /// The message type, e.g. `user` or `assistant`
+    /// Who produced the message: `user`, `assistant`, or `system`
     pub message_type: String,
+    /// What the message holds, as the table above names it
     pub subtype: Option<String>,
     pub text: String,
     /// JSON array of attachment blocks, each carrying a `ref` of
