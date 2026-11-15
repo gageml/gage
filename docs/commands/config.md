@@ -29,6 +29,9 @@ backup.sources = []
 drivers.claude.models.large = "claude-opus-4-8"
 drivers.claude.models.medium = "claude-sonnet-4-6"
 drivers.claude.models.small = "claude-haiku-4-5"
+drivers.codex.models.large = "gpt-6.1-sol"
+drivers.codex.models.medium = "gpt-6.1-terra"
+drivers.codex.models.small = "gpt-6-luna"
 drivers.default = "claude"
 issues.related_threshold = 0.2
 scanners.disable = []
@@ -80,3 +83,14 @@ large = "claude-opus-4-8"
 
 A size the table does not set keeps the driver's default. `gage config list`
 shows the model each size uses.
+
+The models a Codex account can use depend on its ChatGPT plan, and Gage does
+not check them. When the plan lacks a size's default model, an agent that
+names the size fails with Codex's message. Set the size to a model the plan
+has:
+
+```toml
+[drivers.codex.models]
+medium = "gpt-5.6-terra"
+large = "gpt-5.6-terra"
+```

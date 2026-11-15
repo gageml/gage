@@ -6,12 +6,15 @@
 //! mode, in which the harness records each command, MCP call, and file
 //! change it ran as a structured item beside the model's own records.
 
+mod agent;
 mod body;
 mod codec;
 mod corpus;
 mod derive;
 pub mod driver;
+mod harness;
 mod home;
+mod model;
 mod patch;
 mod rollout;
 mod text_descriptor;

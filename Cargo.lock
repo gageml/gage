@@ -2499,16 +2499,20 @@ name = "gage-codex"
 version = "0.3.2"
 dependencies = [
  "arrow",
+ "async-trait",
  "chrono",
  "gage-core",
  "gage-corpus",
  "gage-session",
+ "libc",
  "regex",
  "serde",
  "serde_json",
  "serde_yaml",
  "tempfile",
+ "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

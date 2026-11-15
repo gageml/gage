@@ -27,10 +27,11 @@ use gage_corpus::{
     decoded_entries, format_project_slug, project_slug, write_derived,
 };
 use gage_session::{
-    ContentSink, ContentSource, DecodedEntry, Derivation, Driver, DriverError, DriverTables, Entry,
-    EntryBody, EntryCodec, EntryValue, MaintenanceOutcome, MaintenanceStatus, MessageTextFilter,
-    MessageTextHit, NativeLookupError, NativeSession, PatchHunk, SessionAttrs, Source,
-    SourceOptions, StoredSession, SummaryAttrs, ToolUse, WrittenContent, split_scheme,
+    AgentSession, AgentSpec, ContentSink, ContentSource, DecodedEntry, Derivation, Driver,
+    DriverError, DriverStatus, DriverTables, Entry, EntryBody, EntryCodec, EntryValue, Field,
+    MaintenanceOutcome, MaintenanceStatus, MessageTextFilter, MessageTextHit, ModelChoices,
+    ModelSizes, NativeLookupError, NativeSession, PatchHunk, SessionAttrs, Source, SourceOptions,
+    StoredSession, SummaryAttrs, ToolUse, WrittenContent, split_scheme,
 };
 use serde_json::Value;
 
@@ -38,7 +39,9 @@ use crate::body;
 use crate::codec::codec;
 use crate::corpus::CodexCorpus;
 use crate::derive::{SUMMARY_VERSION, derive_entry, derive_session_from};
+use crate::harness;
 use crate::home::codex_home;
+use crate::model::{default_sizes, model_choices};
 use crate::patch;
 use crate::rollout::read_meta;
 use crate::tool_use::ToolUseCollector;
@@ -54,11 +57,22 @@ pub(crate) const CONTENT_FORMAT: &str = "codex-rollout 1";
 /// The path of the rollout in a stored session's content
 const CONTENT_PATH: &str = "rollout.jsonl";
 
-pub struct CodexDriver;
+pub struct CodexDriver {
+    /// The model each size resolves to
+    models: ModelSizes,
+}
 
 impl CodexDriver {
     pub fn new() -> Self {
-        Self
+        Self::with_models(&ModelSizes::default())
+    }
+
+    /// A driver whose sizes resolve to `overrides` where it sets a
+    /// model, and to the defaults elsewhere.
+    pub fn with_models(overrides: &ModelSizes) -> Self {
+        Self {
+            models: default_sizes().overridden_by(overrides),
+        }
     }
 }
 
@@ -130,6 +144,41 @@ impl Driver for CodexDriver {
 
     fn patch_hunks(&self, result_raw: &str) -> Vec<PatchHunk> {
         patch::hunks(result_raw)
+    }
+
+    fn model_sizes(&self) -> ModelSizes {
+        self.models.clone()
+    }
+
+    fn model_choices(&self) -> ModelChoices {
+        model_choices()
+    }
+
+    /// Spawn a `codex exec` child and wait for it to name its
+    /// session; see [`crate::agent`]. Requires a tokio runtime.
+    fn start_agent(&self, spec: AgentSpec) -> Result<Box<dyn AgentSession>, DriverError> {
+        Ok(Box::new(crate::agent::start(spec, &self.models)?))
+    }
+
+    /// An agent starts when `codex` is on PATH and signed in.
+    fn scan_ready(&self) -> Result<(), DriverError> {
+        harness::check_auth().map_err(DriverError::Other)
+    }
+
+    /// The CLI and its sign-in. Gage installs nothing into Codex yet,
+    /// so the install is not reported. A CLI that is not installed is
+    /// absent, and nothing more is asked of it.
+    fn status(&self) -> Result<DriverStatus, DriverError> {
+        let harness = harness::harness_status();
+        let auth = match &harness {
+            Field::Ok(info) => harness::auth_status(&info.path),
+            _ => Field::Unsupported,
+        };
+        Ok(DriverStatus {
+            harness,
+            auth,
+            install: Field::Unsupported,
+        })
     }
 
     /// The rollout is stored as it is read here. A change to the file
@@ -258,6 +307,24 @@ impl CodexSource {
             })
             .as_ref()
             .map_err(|e| DriverError::Other(format!("reading sessions: {e}")))
+    }
+
+    /// The session an agent of this home ran as, by its thread id,
+    /// for storing its transcript. `None` when Codex wrote no rollout
+    /// for the thread.
+    pub(crate) fn agent_session(
+        &self,
+        thread_id: &str,
+    ) -> Result<Option<CodexNativeSession>, DriverError> {
+        if !self.sessions()?.contains_key(thread_id) {
+            return Ok(None);
+        }
+        Ok(Some(CodexNativeSession {
+            source: self.session_url(thread_id),
+            info: self.session(thread_id)?,
+            store: Arc::clone(&self.store),
+            attrs: OnceCell::new(),
+        }))
     }
 
     /// The session `native_id` with a fresh stat of its rollout. The
@@ -482,6 +549,22 @@ pub struct CodexNativeSession {
     attrs: OnceCell<CorpusSessionAttrs>,
 }
 
+impl CodexNativeSession {
+    /// The rollout file
+    pub(crate) fn path(&self) -> &Path {
+        &self.info.src
+    }
+
+    /// Record `project` as the session's project in place of the slug
+    /// of the directory it started in.
+    pub(crate) fn set_project(&mut self, project: String) {
+        if let Some(attrs) = self.attrs.get_mut() {
+            attrs.project = project.clone();
+        }
+        self.info.project = project;
+    }
+}
+
 impl NativeSession for CodexNativeSession {
     fn id(&self) -> &str {
         &self.info.id
@@ -663,6 +746,46 @@ mod tests {
             with_agents.find_native("0000"),
             Err(NativeLookupError::TooManyMatches { .. })
         ));
+    }
+
+    #[test]
+    fn an_agent_s_session_is_found_by_thread_id_and_takes_a_given_project() {
+        let home = tempfile::tempdir().unwrap();
+        let path = seed(home.path(), OTHER_ID, crate::agent::THREAD_SOURCE);
+        let mut options = options_for(home.path());
+        options.show_agents(true);
+        let source = CodexDriver::new().open_source(&options).unwrap();
+        let codex = source.as_any().downcast_ref::<CodexSource>().unwrap();
+
+        let mut session = codex.agent_session(OTHER_ID).unwrap().unwrap();
+        assert_eq!(session.id(), OTHER_ID);
+        assert_eq!(session.path(), path);
+        assert_eq!(session.attrs().project_name(), Some("-home-u-proj"));
+        session.set_project("given".to_string());
+        assert_eq!(session.attrs().project_name(), Some("given"));
+
+        // A project given before the attributes are read holds too
+        let mut fresh = codex.agent_session(OTHER_ID).unwrap().unwrap();
+        fresh.set_project("given".to_string());
+        assert_eq!(fresh.attrs().project_name(), Some("given"));
+
+        assert!(codex.agent_session(THREAD_ID).unwrap().is_none());
+    }
+
+    #[test]
+    fn model_sizes_are_the_defaults_with_the_configured_ones_over_them() {
+        let defaults = CodexDriver::new().model_sizes();
+        assert_eq!(defaults.small.as_deref(), Some("gpt-6-luna"));
+        assert_eq!(defaults.medium.as_deref(), Some("gpt-6.1-terra"));
+        assert_eq!(defaults.large.as_deref(), Some("gpt-6.1-sol"));
+        let overrides = ModelSizes {
+            medium: Some("gpt-5.6-terra".to_string()),
+            ..ModelSizes::default()
+        };
+        let sizes = CodexDriver::with_models(&overrides).model_sizes();
+        assert_eq!(sizes.medium.as_deref(), Some("gpt-5.6-terra"));
+        assert_eq!(sizes.small, defaults.small);
+        assert_eq!(sizes.large, defaults.large);
     }
 
     #[test]

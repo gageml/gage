@@ -75,7 +75,7 @@ fn bundled_with(models: &HashMap<String, ModelSizes>) -> Vec<Arc<dyn Driver>> {
     let models_of = |name: &str| models.get(name).unwrap_or(&none);
     vec![
         Arc::new(ClaudeDriver::with_models(models_of("claude"))),
-        Arc::new(CodexDriver::new()),
+        Arc::new(CodexDriver::with_models(models_of("codex"))),
     ]
 }
 
@@ -399,6 +399,25 @@ mod tests {
         assert_eq!(sizes.medium.as_deref(), Some("custom-medium"));
         assert_eq!(sizes.small, defaults.small);
         assert_eq!(sizes.large, defaults.large);
+    }
+
+    #[test]
+    fn each_bundled_driver_takes_the_sizes_set_under_its_own_name() {
+        let set = ModelSizes {
+            large: Some("codex-large".to_string()),
+            ..ModelSizes::default()
+        };
+        let drivers = bundled_with(&HashMap::from([("codex".to_string(), set)]));
+        let sizes_of = |name: &str| {
+            drivers
+                .iter()
+                .find(|d| d.name() == name)
+                .expect("a bundled driver")
+                .model_sizes()
+        };
+        assert_eq!(sizes_of("codex").large.as_deref(), Some("codex-large"));
+        assert!(sizes_of("codex").small.is_some());
+        assert_ne!(sizes_of("claude").large.as_deref(), Some("codex-large"));
     }
 
     #[test]

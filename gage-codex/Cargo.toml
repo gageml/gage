@@ -7,15 +7,19 @@ edition.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
+async-trait = { workspace = true }
 chrono = { workspace = true }
 gage-core = { path = "../gage-core" }
 gage-corpus = { path = "../gage-corpus" }
 gage-session = { path = "../gage-session" }
+libc = "0.2"
 regex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
+tokio = { workspace = true, features = ["sync", "process", "time", "rt", "rt-multi-thread"] }
 tracing = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
 arrow = { workspace = true }
