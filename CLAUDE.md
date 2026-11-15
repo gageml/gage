@@ -426,6 +426,7 @@ permission.
 
 ## Other rules
 
-- Do NOT edit files under /docs in this project unless instructed to do so. User
-  facing docs are written exclusively by competent humans who can write without
-  sounding like clowns.
+- Keep the files under /docs current. A change to user-facing behavior, such
+  as a command, an option, a table, a column, or a tool, updates the docs that
+  describe it in the same piece of work. Match the surrounding page: its
+  structure, its terms, and its plain declarative sentences.
