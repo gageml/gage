@@ -24,6 +24,7 @@ use rmcp::transport::stdio;
 use rmcp::transport::streamable_http_server::StreamableHttpService;
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use serde_json::Value;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tower::service_fn;
 use tower::util::BoxCloneSyncService;
 
@@ -88,13 +89,22 @@ impl StoreWriterConfig {
     }
 }
 
-/// The `issue_assign` tool's data: the store writer and the URL of the
-/// session the server serves, recorded on each assignment as the
-/// holder. The URL is fixed for the server's lifetime.
+/// Names the session a tool call comes from, given the call's request
+/// `_meta` object: the session's URL, or `None` when the session
+/// cannot be told from the call or from the server's environment.
+/// `Err(reason)` is a failure to look. The CLI builds it over the
+/// driver registry.
+pub type CurrentSessionFn =
+    Arc<dyn Fn(&JsonObject) -> Result<Option<String>, String> + Send + Sync>;
+
+/// The `issue_assign` tool's data: the store writer and how the
+/// session making a call is named. The session is recorded on each
+/// assignment as the holder, and is resolved per call, since a harness
+/// may name it only in the call.
 #[derive(Clone)]
 pub struct IssueAssignConfig {
     pub writer: StoreWriterConfig,
-    pub session_url: String,
+    pub current_session: CurrentSessionFn,
 }
 
 /// Reports whether the session a session URL names is a live instance
@@ -255,9 +265,25 @@ pub enum CustomToolOutcome {
 /// the Gage MCP server to a harness that spawns it as a child process
 /// (Claude Code, OpenCode, Codex, Gemini).
 pub async fn serve_stdio(spec: ToolSpec) -> Result<(), Box<dyn std::error::Error>> {
+    let (reader, writer) = stdio();
+    serve_io(spec, reader, writer).await
+}
+
+/// Serve the tools `spec` declares to the peer that writes MCP
+/// messages to `reader` and reads them from `writer`, one JSON message
+/// per line, until the peer disconnects.
+pub async fn serve_io<R, W>(
+    spec: ToolSpec,
+    reader: R,
+    writer: W,
+) -> Result<(), Box<dyn std::error::Error>>
+where
+    R: AsyncRead + Send + Unpin + 'static,
+    W: AsyncWrite + Send + Unpin + 'static,
+{
     let server = build_server(&spec);
     server
-        .serve(stdio())
+        .serve((reader, writer))
         .await
         .inspect_err(|e| {
             eprintln!("gage mcp2: serving error: {e:?}");

@@ -26,10 +26,10 @@ use gage_session::progress;
 use gage_session::{
     AgentSession, AgentSpec, AuthInfo, ContentSchema, ContentSink, ContentSource, DecodedEntry,
     Derivation, Driver, DriverError, DriverStatus, DriverTables, Entry, EntryBody, EntryCodec,
-    EntryValue, Field, HarnessInfo, HarnessSession, InstallInfo, InstallReport, InstallUi,
-    MaintenanceOutcome, MaintenanceStatus, MessageTextFilter, MessageTextHit, NativeLookupError,
-    NativeSession, SessionAttrs, SessionLiveError, SkillSession, Source, SourceOptions,
-    StoredSession, SummaryAttrs, ToolUse, WrittenContent, split_scheme,
+    EntryValue, Field, HarnessInfo, HarnessSession, HostContext, InstallInfo, InstallReport,
+    InstallUi, MaintenanceOutcome, MaintenanceStatus, MessageTextFilter, MessageTextHit,
+    NativeLookupError, NativeSession, SessionAttrs, SessionLiveError, SkillSession, Source,
+    SourceOptions, StoredSession, SummaryAttrs, ToolUse, WrittenContent, split_scheme,
 };
 use serde::Deserialize;
 use serde_json::{Map, Value};
@@ -63,6 +63,9 @@ pub(crate) const PLUGIN_NAME: &str = "gage";
 const PLUGIN_ID: &str = "gage@gage";
 
 pub(crate) const NAME: &str = "claude";
+/// The environment variable in which Claude Code names the session a
+/// process it started belongs to
+const SESSION_ID_VAR: &str = "CLAUDE_CODE_SESSION_ID";
 /// The harness's display name
 const HARNESS_NAME: &str = "Claude Code";
 const SCHEMES: &[&str] = &["claude"];
@@ -124,6 +127,17 @@ impl Driver for ClaudeDriver {
             )));
         }
         Ok((format!("{NAME}:{root}"), id.to_string()))
+    }
+
+    /// Claude Code names the session in the environment of every
+    /// process it starts, its MCP servers and shell commands alike.
+    /// The session is one in the default location.
+    fn current_session(&self, host: &HostContext<'_>) -> Result<Option<String>, DriverError> {
+        let Some(id) = host.var(SESSION_ID_VAR) else {
+            return Ok(None);
+        };
+        let projects_dir = resolve_projects_dir("")?;
+        Ok(Some(session_url(&root_of(&projects_dir), &id)))
     }
 
     /// Drops the `claude-` vendor prefix every Claude model name carries
@@ -1450,6 +1464,26 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[test]
+    fn current_session_is_the_environment_session_in_the_default_location() {
+        let driver = ClaudeDriver::new();
+        let none = driver
+            .current_session(&HostContext::with_vars(&[]))
+            .unwrap();
+        assert_eq!(none, None);
+
+        let vars = [(SESSION_ID_VAR, "abc")];
+        let url = driver
+            .current_session(&HostContext::with_vars(&vars))
+            .unwrap()
+            .unwrap();
+        let root = root_of(&resolve_projects_dir("").unwrap());
+        assert_eq!(url, session_url(&root, "abc"));
+        let (source, id) = driver.split_session_url(&url).unwrap();
+        assert_eq!(source, format!("claude:{}", root.display()));
+        assert_eq!(id, "abc");
+    }
 
     #[test]
     fn delete_native_removes_session_and_sidecar() {

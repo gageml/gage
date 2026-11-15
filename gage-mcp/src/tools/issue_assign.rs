@@ -45,9 +45,15 @@ fn handle(
                 None,
             ));
         };
-        execute(config, params)
+        // rmcp moves the request's `_meta` into the request context
+        // before dispatch
+        execute(config, &ctx.request_context.meta.0, params)
     })
 }
+
+/// Why a call is refused when its session cannot be named
+const NO_SESSION: &str = "issue_assign could not identify this session, so it has no holder to \
+     record. The harness did not name the session in the server's environment or in the call.";
 
 /// What one call asks for, parsed
 #[derive(Debug, PartialEq, Eq)]
@@ -58,15 +64,25 @@ enum Request {
     Issue { id: String, force: bool },
 }
 
-/// Parse the call and apply it for the configured session. A call that
-/// violates the declared parameters is an invalid-params error; a
-/// store refusal is a result the model reads.
-pub fn execute(config: &IssueAssignConfig, params: JsonObject) -> Result<CallToolResult, McpError> {
+/// Parse the call and apply it for the session the call comes from,
+/// named from the call's request `_meta`. A call that violates the
+/// declared parameters is an invalid-params error; a store refusal,
+/// and a session that cannot be named, is a result the model reads.
+pub fn execute(
+    config: &IssueAssignConfig,
+    meta: &JsonObject,
+    params: JsonObject,
+) -> Result<CallToolResult, McpError> {
     let request = parse_request(&params)?;
+    let session = match (config.current_session)(meta) {
+        Ok(Some(session)) => session,
+        Ok(None) => return Ok(domain_error(NO_SESSION.to_string())),
+        Err(reason) => return Ok(domain_error(format!("{NO_SESSION} ({reason})"))),
+    };
+    let session = session.as_str();
     let store = config.writer.store();
     let issues = IssueStore::from(&*store);
     let author = &config.writer.author;
-    let session = config.session_url.as_str();
     match request {
         Request::Pool(pool) => {
             for id in &pool {
@@ -171,6 +187,8 @@ fn parse_request(params: &JsonObject) -> Result<Request, McpError> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use serde_json::json;
 
     use super::*;
@@ -184,10 +202,68 @@ mod tests {
 
     /// The tool as session `session_url` would run it
     fn session(writer: &StoreWriterConfig, session_url: &str) -> IssueAssignConfig {
+        let session_url = session_url.to_string();
         IssueAssignConfig {
             writer: writer.clone(),
-            session_url: session_url.to_string(),
+            current_session: Arc::new(move |_meta| Ok(Some(session_url.clone()))),
         }
+    }
+
+    /// `execute` for a call with no request `_meta`
+    fn execute(config: &IssueAssignConfig, params: JsonObject) -> Result<CallToolResult, McpError> {
+        super::execute(config, &JsonObject::new(), params)
+    }
+
+    #[test]
+    fn the_session_is_named_from_the_call_meta() {
+        let (_tmp, writer) = config();
+        let config = IssueAssignConfig {
+            writer: writer.clone(),
+            current_session: Arc::new(|meta| {
+                Ok(meta
+                    .get("session")
+                    .and_then(|s| s.as_str())
+                    .map(String::from))
+            }),
+        };
+        let id = issue(&writer, "Something", IssueStatus::Open);
+
+        let r = super::execute(&config, &JsonObject::new(), object(json!({"issue": id}))).unwrap();
+        assert_eq!(r.is_error, Some(true), "{}", text_of(&r));
+        assert!(
+            text_of(&r).contains("could not identify this session"),
+            "{}",
+            text_of(&r)
+        );
+        assert_eq!(status(&writer, &id), IssueStatus::Open);
+
+        let meta = object(json!({"session": "session a"}));
+        let r = super::execute(&config, &meta, object(json!({"issue": id}))).unwrap();
+        assert_eq!(r.is_error, Some(false), "{}", text_of(&r));
+        let store = writer.store.lock().unwrap();
+        let full = IssueStore::from(&*store).get(&id).unwrap();
+        assert_eq!(
+            full.changes.last().unwrap().message.as_deref(),
+            Some("session a")
+        );
+    }
+
+    #[test]
+    fn a_failure_to_name_the_session_is_reported_with_its_reason() {
+        let (_tmp, writer) = config();
+        let config = IssueAssignConfig {
+            writer: writer.clone(),
+            current_session: Arc::new(|_meta| Err("source unavailable".to_string())),
+        };
+        let id = issue(&writer, "Something", IssueStatus::Open);
+        let r = execute(&config, object(json!({"issue": id}))).unwrap();
+        assert_eq!(r.is_error, Some(true), "{}", text_of(&r));
+        assert!(
+            text_of(&r).contains("source unavailable"),
+            "{}",
+            text_of(&r)
+        );
+        assert_eq!(status(&writer, &id), IssueStatus::Open);
     }
 
     #[test]

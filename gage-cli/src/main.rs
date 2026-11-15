@@ -79,6 +79,7 @@ mod progress;
 mod scanner_attach;
 mod scanner_spec;
 mod session_filter;
+mod session_identity;
 mod size_limit;
 mod source;
 mod style;
@@ -480,31 +481,11 @@ async fn run_mcp() -> anyhow::Result<()> {
         store,
         author: author::resolve_author(None),
     };
-    // The server's own session, as issue_assign records it on each
-    // assignment: the id Claude Code put in the environment, spelled
-    // as a session URL by the default source. Without both the tool
-    // is left out of the spec, since it could not name a holder.
-    let session_url = match (
-        env::var_os("CLAUDE_CODE_SESSION_ID"),
-        source::open_source("", "gage mcp"),
-    ) {
-        (Some(id), Ok(opened)) => Some(opened.session_url(&id.to_string_lossy())),
-        (None, _) => {
-            tracing::warn!("issue_assign unavailable: CLAUDE_CODE_SESSION_ID is not set");
-            None
-        }
-        (_, Err(e)) => {
-            let reason = match e {
-                CliError::Exit { message, .. } => {
-                    message.unwrap_or_else(|| "session source unavailable".to_string())
-                }
-                CliError::Other(err) => format!("{err:#}"),
-                CliError::Usage(err) => err.to_string(),
-            };
-            tracing::warn!("issue_assign unavailable: {reason}");
-            None
-        }
-    };
+    // issue_assign records the session a call comes from as the
+    // holder. A harness may name that session in this process's
+    // environment or only in each call, so the drivers are asked per
+    // call.
+    let current_session = session_identity::current_session_fn(Arc::new(source::driver_registry()));
     // issues_free asks whether a holder's session URL is live by
     // routing it through the driver registry. Any failure along the
     // way is an undetermined verdict with its reason.
@@ -557,15 +538,11 @@ async fn run_mcp() -> anyhow::Result<()> {
                 writer: writer.clone(),
                 session_live,
             }),
-        ]
-        .into_iter()
-        .chain(session_url.map(|session_url| {
             GageTool::IssueAssign(IssueAssignConfig {
                 writer,
-                session_url,
-            })
-        }))
-        .collect(),
+                current_session,
+            }),
+        ],
         custom: Vec::new(),
     };
     serve_stdio(spec).await.map_err(|e| anyhow::anyhow!("{e}"))
