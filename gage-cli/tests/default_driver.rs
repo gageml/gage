@@ -41,7 +41,7 @@ fn unknown_default_driver_stops_commands_and_leaves_config_usable() {
     assert_eq!(
         stderr.trim_end(),
         format!(
-            "{}: drivers.default: \"nope\" is not a driver in this build; drivers: claude",
+            "{}: drivers.default: \"nope\" is not a driver in this build; drivers: claude, codex",
             config.display()
         )
     );

@@ -10,6 +10,12 @@ conventions in _[Keep a Changelog]_. Release versions use [semantic versioning].
 
 Pending release.
 
+### Enhancements
+
+- The `codex:` session source reads Codex CLI sessions: `gage session list`,
+  `gage session view`, `gage session add`, and `gage query` work on them as they
+  do on Claude Code sessions
+
 ## [0.3.1]
 
 Pending release

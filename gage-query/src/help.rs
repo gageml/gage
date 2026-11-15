@@ -70,6 +70,8 @@ then reads that source and nothing of the main store:
 gage:<path>     the Gage store at <path>, with every store table
 claude:<path>   the Claude Code sessions under <path>/projects
 claude:         the Claude Code sessions in the default location
+codex:<path>    the Codex sessions under <path>/sessions
+codex:          the Codex sessions in the default location
 
 A named source is read only. The write tools write the main store alone, and an
 id read from another source is not a target for them.
@@ -77,7 +79,7 @@ id read from another source is not a target for them.
 A native source such as claude: holds sessions whether or not they are stored.
 It has session, entry, message, tool_use, and tool_use_file, with the stored
 tables' columns, and blame and message_text over the same sessions; no other
-table is present. Its rows key on the native UUID: id in session, session_id in
+table is present. Its rows key on the native id: id in session, session_id in
 the rest. In its session table modified is the session file's modification time,
 size is the file's size, and created and origin are NULL.
 
@@ -105,7 +107,8 @@ Message kinds: type is user, assistant, or system, and subtype narrows it.
 Typed conversation is subtype text under type user or assistant. A tool call
 is (assistant, tool_use) and its result is (user, tool_result), so
 type = 'user' alone admits tool output. Model reasoning is
-(assistant, thinking). With no term on type or subtype the search covers
+(assistant, thinking). Context the harness wrote into the conversation is
+subtype meta. The kinds are the same for every driver. With no term on type or subtype the search covers
 every kind, and tool calls and results are most messages. To search only what
 the user and the assistant wrote, add WHERE subtype = 'text' or the field
 term +subtype:text.
@@ -176,7 +179,15 @@ SELECT sum(out) AS output_tokens FROM
  (SELECT max(CAST(json_extract(raw, '$.message.usage.output_tokens') AS BIGINT)) AS out
   FROM message
   WHERE session_id = '<ID>' AND type = 'assistant'
-  GROUP BY json_extract(raw, '$.message.id'));"#,
+  GROUP BY json_extract(raw, '$.message.id'));
+
+In codex-rollout 1, a row's raw is {timestamp, type, payload}. entry.type is that
+type (response_item, event_msg, turn_context, ...) and entry.subtype the
+payload's type. The model calls its tools by writing a script to one exec tool,
+so a tool_use message holds the script. A tool_use row is what a script ran: a
+command (exec_command), an MCP call (mcp__<server>__<tool>), or a patch
+(apply_patch). Its result_raw is the item Codex recorded for it, and input_raw
+that item's input. content_schema has no rows for this format."#,
     },
     HelpTopic {
         topic: "summary",

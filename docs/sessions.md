@@ -32,3 +32,34 @@ Gage scans a copy of each session held in its store, not the file under
 updated when the session grows, and it stays after Claude Code deletes the
 original. `gage session list --stored` lists stored sessions. See
 [`gage session`](/docs/commands/session).
+
+## Codex sessions
+
+Gage also reads the sessions of the Codex CLI. Codex writes each session to a
+file under `~/.codex/sessions/`, or under `$CODEX_HOME/sessions/` when
+`CODEX_HOME` is set. Name the `codex` source to read them:
+
+```cli
+gage session list --source codex:
+gage session view --source codex: [<SESSION_ID>]
+gage session add --source codex: <SESSION_ID>
+```
+
+A Codex session is listed, viewed, queried, and stored as a Claude Code session
+is, with these differences:
+
+- A session's project is named for the directory the session started in, in the
+  same form a Claude Code project has, so one directory is one project across
+  both.
+- Only sessions that a person started are listed. Sessions that Codex or Gage
+  started on their own, such as sub-agent threads, are left out.
+- Tool calls are read from the records Codex writes in its newer history mode,
+  which Codex 0.169 uses. A session written in the older mode shows its
+  messages and no tool calls.
+- A command's files are recorded as written when the command redirects output
+  to them or edits them in place with `sed -i`, and as cited otherwise. A file
+  that `apply_patch` changes is recorded as written.
+- A session has no cost. Codex reports token counts and no cost.
+- `gage session move` and `gage session delete` do not apply to Codex sessions.
+- Sessions that Codex has compressed, and a forked session's history from before
+  the fork, are not read.
