@@ -1,7 +1,10 @@
+use std::sync::Arc;
+
 use clap::Args;
 use cliclack as cli;
 use gage_core::config::{Config, user_config_path};
-use gage_session::InstallUi;
+use gage_registry::driver::DriverRegistry;
+use gage_session::{Driver, InstallUi};
 use gage_store::{Store, StoreError};
 
 use crate::dialog::{self, DialogError, DialogResult};
@@ -10,11 +13,30 @@ use crate::source::driver_registry;
 
 #[derive(Args)]
 pub struct InitArgs {
-    /// Remove Gage from Claude Code
-    #[arg(short, long)]
+    /// Remove Gage from coding agents
+    #[arg(short, long, conflicts_with = "default")]
     pub remove: bool,
 
-    /// Skip confirmation prompt
+    /// Driver to set up (repeatable)
+    ///
+    /// Without this option Gage is set up in every installed coding
+    /// agent it has a driver for.
+    #[arg(short, long = "driver", value_name = "DRIVER")]
+    pub drivers: Vec<String>,
+
+    /// Default driver
+    ///
+    /// A source or a model with no driver named goes to this driver.
+    /// Without this option a default already in config is kept. With
+    /// none in config, a single driver set up becomes default, and
+    /// with more than one, prompt asks which.
+    #[arg(long, value_name = "DRIVER")]
+    pub default: Option<String>,
+
+    /// Skip prompts
+    ///
+    /// With more than one driver set up and no default in config,
+    /// --default is required.
     #[arg(short, long)]
     pub yes: bool,
 }
@@ -29,16 +51,34 @@ pub fn run(args: InitArgs) -> Result<(), CliError> {
 
 fn install_dialog(args: &InitArgs) -> Result<DialogResult, DialogError> {
     let registry = driver_registry();
-    let driver = registry
-        .default()
-        .ok_or_else(|| DialogError::Other(anyhow::anyhow!("no default driver registered")))?;
+    let config_path = user_config_path();
+    let configured = Config::named_default_driver(&config_path)
+        .map_err(|e| DialogError::Other(anyhow::anyhow!("reading config: {e}")))?;
+    let plan = plan(
+        &candidates(&registry),
+        &args.drivers,
+        configured.as_deref(),
+        args.default.as_deref(),
+        args.yes,
+    )
+    .map_err(DialogError::Failed)?;
 
     cli::log::step("Gage store")?;
-    cli::log::step(format!(
-        "Plugin\ngage (MCP server + skills) via {} driver",
-        driver.name()
-    ))?;
-    cli::log::step(format!("Default driver\n{}", driver.name()))?;
+    dialog::step_list(
+        "Plugin (MCP server + skills)",
+        plan.drivers.iter().map(|name| harness_of(&registry, name)),
+    )?;
+    let default = match plan.default {
+        DefaultPlan::Keep(name) => {
+            cli::log::step(format!("Default driver\n{name}"))?;
+            None
+        }
+        DefaultPlan::Set(name) => {
+            cli::log::step(format!("Default driver\n{name}"))?;
+            Some(name)
+        }
+        DefaultPlan::Ask(names) => Some(prompt_default(&registry, &names)?),
+    };
 
     dialog::confirm(args.yes, true)?;
 
@@ -52,10 +92,10 @@ fn install_dialog(args: &InitArgs) -> Result<DialogResult, DialogError> {
         }
     }
 
-    // The config names the driver this setup is for, so the default
-    // stays this one when a later build bundles others
-    Config::name_default_driver(&user_config_path(), driver.name())
-        .map_err(|e| DialogError::Other(anyhow::anyhow!("writing config: {e}")))?;
+    if let Some(name) = default {
+        Config::set_default_driver(&config_path, &name)
+            .map_err(|e| DialogError::Other(anyhow::anyhow!("writing config: {e}")))?;
+    }
 
     let gage_bin = std::env::current_exe()?;
     let gage_bin_str = gage_bin.to_str().ok_or_else(|| {
@@ -65,13 +105,161 @@ fn install_dialog(args: &InitArgs) -> Result<DialogResult, DialogError> {
         ))
     })?;
 
-    let mut ui = SpinnerUi::default();
-    driver
-        .system_init(&[gage_bin_str, "mcp"], &mut ui)
-        .map_err(|e| DialogError::Other(anyhow::anyhow!("{e}")))?;
-    ui.finish();
+    for driver in drivers_named(&registry, &plan.drivers) {
+        let mut ui = SpinnerUi::default();
+        driver
+            .system_init(&[gage_bin_str, "mcp"], &mut ui)
+            .map_err(|e| DialogError::Other(anyhow::anyhow!("{}: {e}", driver.harness_name())))?;
+        ui.finish();
+    }
 
     Ok(DialogResult::from("Initialized Gage"))
+}
+
+/// A driver as `gage init` weighs it
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Candidate {
+    /// The driver's name
+    name: String,
+    /// The harness's name as a person knows it
+    harness: String,
+    /// The harness is installed, so Gage can be set up in it
+    installed: bool,
+}
+
+/// What an init does: the drivers it sets Gage up in, by name, and
+/// what becomes of the default driver.
+#[derive(Debug, PartialEq, Eq)]
+struct Plan {
+    drivers: Vec<String>,
+    default: DefaultPlan,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum DefaultPlan {
+    /// The config names this driver and it stays
+    Keep(String),
+    /// This driver is written to the config
+    Set(String),
+    /// The user chooses among these
+    Ask(Vec<String>),
+}
+
+/// Decide what an init does. `only` is the `--driver` values,
+/// `configured` the default driver the config names, `requested` the
+/// `--default` value, and `yes` whether prompts are skipped.
+///
+/// The drivers set up are the installed ones, narrowed to `only` when
+/// it names any. The default driver is `requested` when given; else
+/// the configured one, so that running init again changes nothing the
+/// user did not ask for; else the one driver set up; else the user's
+/// choice among those set up, which `yes` cannot make. The error is
+/// the message for the user.
+fn plan(
+    candidates: &[Candidate],
+    only: &[String],
+    configured: Option<&str>,
+    requested: Option<&str>,
+    yes: bool,
+) -> Result<Plan, String> {
+    for name in only.iter().map(String::as_str).chain(requested) {
+        installed(candidates, name)?;
+    }
+    let drivers: Vec<String> = candidates
+        .iter()
+        .filter(|c| c.installed && (only.is_empty() || only.contains(&c.name)))
+        .map(|c| c.name.clone())
+        .collect();
+    if drivers.is_empty() {
+        let harnesses: Vec<&str> = candidates.iter().map(|c| c.harness.as_str()).collect();
+        return Err(format!(
+            "No coding agent Gage supports is installed. Install one of these and run \
+             `gage init` again: {}",
+            harnesses.join(", ")
+        ));
+    }
+    let default = match (requested, configured, drivers.as_slice()) {
+        (Some(requested), Some(configured), _) if requested == configured => {
+            DefaultPlan::Keep(configured.to_string())
+        }
+        (Some(requested), _, _) => DefaultPlan::Set(requested.to_string()),
+        (None, Some(configured), _) => DefaultPlan::Keep(configured.to_string()),
+        (None, None, [only]) => DefaultPlan::Set(only.clone()),
+        (None, None, _) if yes => {
+            return Err(format!(
+                "More than one driver is set up ({}) and config names no default driver. \
+                 Name one with --default.",
+                drivers.join(", ")
+            ));
+        }
+        (None, None, _) => DefaultPlan::Ask(drivers.clone()),
+    };
+    Ok(Plan { drivers, default })
+}
+
+/// Check that `name` is a driver whose harness is installed.
+fn installed(candidates: &[Candidate], name: &str) -> Result<(), String> {
+    let Some(candidate) = candidates.iter().find(|c| c.name == name) else {
+        let names: Vec<&str> = candidates.iter().map(|c| c.name.as_str()).collect();
+        return Err(format!(
+            "{name:?} is not a driver in this build; drivers: {}",
+            names.join(", ")
+        ));
+    };
+    if !candidate.installed {
+        return Err(format!(
+            "{} is not installed, so the {name} driver cannot be set up or made default.",
+            candidate.harness
+        ));
+    }
+    Ok(())
+}
+
+/// Every driver of the build, with whether its harness is installed
+fn candidates(registry: &DriverRegistry) -> Vec<Candidate> {
+    registry
+        .drivers()
+        .iter()
+        .map(|driver| Candidate {
+            name: driver.name().to_string(),
+            harness: driver.harness_name().to_string(),
+            installed: driver.harness_path().is_some(),
+        })
+        .collect()
+}
+
+fn drivers_named<'a>(
+    registry: &'a DriverRegistry,
+    names: &'a [String],
+) -> impl Iterator<Item = &'a Arc<dyn Driver>> {
+    registry
+        .drivers()
+        .iter()
+        .filter(|driver| names.iter().any(|name| name == driver.name()))
+}
+
+/// The harness of the driver `name`, with the driver's name
+fn harness_of(registry: &DriverRegistry, name: &str) -> String {
+    match registry.for_name(name) {
+        Some(driver) => format!("{} ({name} driver)", driver.harness_name()),
+        None => name.to_string(),
+    }
+}
+
+/// Ask which of the drivers `names` is the default.
+fn prompt_default(registry: &DriverRegistry, names: &[String]) -> Result<String, DialogError> {
+    let mut select = cli::select("Default driver");
+    for name in names {
+        let harness = registry
+            .for_name(name)
+            .map_or(name.as_str(), |driver| driver.harness_name());
+        select = select.item(
+            name.clone(),
+            name,
+            format!("{harness} sessions and models when no driver is named"),
+        );
+    }
+    Ok(select.interact()?)
 }
 
 /// Creates the store only when none exists. An existing store is
@@ -96,26 +284,41 @@ fn init_store() -> Result<&'static str, DialogError> {
     }
 }
 
+/// Remove Gage from every installed harness, or from those `--driver`
+/// names. The store and the config stay.
 fn remove_dialog(args: &InitArgs) -> Result<DialogResult, DialogError> {
     let registry = driver_registry();
-    let driver = registry
-        .default()
-        .ok_or_else(|| DialogError::Other(anyhow::anyhow!("no default driver registered")))?;
+    let candidates = candidates(&registry);
+    for name in &args.drivers {
+        installed(&candidates, name).map_err(DialogError::Failed)?;
+    }
+    let names: Vec<String> = candidates
+        .iter()
+        .filter(|c| c.installed && (args.drivers.is_empty() || args.drivers.contains(&c.name)))
+        .map(|c| c.name.clone())
+        .collect();
+    if names.is_empty() {
+        return Err(DialogError::Failed(
+            "No coding agent Gage supports is installed.".to_string(),
+        ));
+    }
 
-    cli::log::step(format!("Driver\n{}", driver.name()))?;
+    dialog::step_list(
+        "Remove Gage from",
+        names.iter().map(|name| harness_of(&registry, name)),
+    )?;
 
     dialog::confirm(args.yes, false)?;
 
-    let mut ui = SpinnerUi::default();
-    driver
-        .system_remove(&mut ui)
-        .map_err(|e| DialogError::Other(anyhow::anyhow!("{e}")))?;
-    ui.finish();
+    for driver in drivers_named(&registry, &names) {
+        let mut ui = SpinnerUi::default();
+        driver
+            .system_remove(&mut ui)
+            .map_err(|e| DialogError::Other(anyhow::anyhow!("{}: {e}", driver.harness_name())))?;
+        ui.finish();
+    }
 
-    Ok(DialogResult::from(format!(
-        "Removed Gage from {} harness",
-        driver.name()
-    )))
+    Ok(DialogResult::from("Removed Gage"))
 }
 
 /// `InstallUi` sink that drives one dialog spinner at a time: each
@@ -163,5 +366,122 @@ impl InstallUi for SpinnerUi {
         if self.current.is_none() {
             self.flush();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn candidate(name: &str, harness: &str, installed: bool) -> Candidate {
+        Candidate {
+            name: name.to_string(),
+            harness: harness.to_string(),
+            installed,
+        }
+    }
+
+    fn both() -> Vec<Candidate> {
+        vec![
+            candidate("claude", "Claude Code", true),
+            candidate("codex", "Codex", true),
+        ]
+    }
+
+    fn codex_only() -> Vec<Candidate> {
+        vec![
+            candidate("claude", "Claude Code", false),
+            candidate("codex", "Codex", true),
+        ]
+    }
+
+    fn names(names: &[&str]) -> Vec<String> {
+        names.iter().map(|n| n.to_string()).collect()
+    }
+
+    #[test]
+    fn every_installed_driver_is_set_up_when_none_is_named() {
+        let made = plan(&both(), &[], Some("claude"), None, true).unwrap();
+        assert_eq!(made.drivers, ["claude", "codex"]);
+        let made = plan(&codex_only(), &[], None, None, true).unwrap();
+        assert_eq!(made.drivers, ["codex"]);
+    }
+
+    #[test]
+    fn named_drivers_limit_what_is_set_up() {
+        let made = plan(&both(), &names(&["codex"]), Some("claude"), None, true).unwrap();
+        assert_eq!(made.drivers, ["codex"]);
+        assert_eq!(made.default, DefaultPlan::Keep("claude".to_string()));
+    }
+
+    /// Running init again is an edit: a default in config stays, with
+    /// or without `-y`, however many drivers are set up.
+    #[test]
+    fn a_configured_default_is_kept_and_nothing_is_asked() {
+        for yes in [true, false] {
+            let made = plan(&both(), &[], Some("codex"), None, yes).unwrap();
+            assert_eq!(made.default, DefaultPlan::Keep("codex".to_string()));
+        }
+    }
+
+    #[test]
+    fn with_no_default_in_config_a_single_driver_becomes_default() {
+        let made = plan(&codex_only(), &[], None, None, true).unwrap();
+        assert_eq!(made.default, DefaultPlan::Set("codex".to_string()));
+        let made = plan(&both(), &names(&["codex"]), None, None, false).unwrap();
+        assert_eq!(made.default, DefaultPlan::Set("codex".to_string()));
+    }
+
+    #[test]
+    fn with_no_default_in_config_and_two_drivers_the_user_is_asked() {
+        let made = plan(&both(), &[], None, None, false).unwrap();
+        assert_eq!(made.default, DefaultPlan::Ask(names(&["claude", "codex"])));
+    }
+
+    #[test]
+    fn with_yes_two_drivers_and_no_default_in_config_a_default_is_required() {
+        let err = plan(&both(), &[], None, None, true).unwrap_err();
+        assert!(err.contains("--default"), "{err}");
+        assert!(err.contains("claude, codex"), "{err}");
+        let made = plan(&both(), &[], None, Some("codex"), true).unwrap();
+        assert_eq!(made.default, DefaultPlan::Set("codex".to_string()));
+    }
+
+    #[test]
+    fn a_requested_default_replaces_a_configured_one() {
+        let made = plan(&both(), &[], Some("claude"), Some("codex"), true).unwrap();
+        assert_eq!(made.default, DefaultPlan::Set("codex".to_string()));
+        let made = plan(&both(), &[], Some("codex"), Some("codex"), true).unwrap();
+        assert_eq!(made.default, DefaultPlan::Keep("codex".to_string()));
+    }
+
+    /// The default need not be among the drivers this run sets up.
+    #[test]
+    fn a_requested_default_may_be_a_driver_not_set_up_this_time() {
+        let made = plan(&both(), &names(&["codex"]), None, Some("claude"), true).unwrap();
+        assert_eq!(made.drivers, ["codex"]);
+        assert_eq!(made.default, DefaultPlan::Set("claude".to_string()));
+    }
+
+    #[test]
+    fn no_installed_driver_is_an_error() {
+        let none = vec![
+            candidate("claude", "Claude Code", false),
+            candidate("codex", "Codex", false),
+        ];
+        let err = plan(&none, &[], None, None, false).unwrap_err();
+        assert!(err.contains("Claude Code, Codex"), "{err}");
+    }
+
+    #[test]
+    fn an_unknown_or_uninstalled_driver_is_an_error() {
+        let err = plan(&both(), &names(&["cursor"]), None, None, true).unwrap_err();
+        assert!(err.contains("not a driver in this build"), "{err}");
+        let err = plan(&codex_only(), &names(&["claude"]), None, None, true).unwrap_err();
+        assert!(err.contains("Claude Code is not installed"), "{err}");
+        let err = plan(&codex_only(), &[], None, Some("claude"), true).unwrap_err();
+        assert!(err.contains("Claude Code is not installed"), "{err}");
+        let err = plan(&both(), &[], None, Some("nope"), true).unwrap_err();
+        assert!(err.contains("not a driver in this build"), "{err}");
     }
 }
