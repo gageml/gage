@@ -14,7 +14,7 @@
 //! an empty object for a scanner that declares none. Under a publish
 //! filter task it returns the filter's params the same way.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -28,6 +28,7 @@ use datafusion::prelude::SessionContext;
 use gage_core::config::default_cache_root;
 use gage_mcp::{HostError, McpHost};
 use gage_query::{ContextBuilder, ScanScope};
+use gage_registry::driver::DriverRegistry;
 use gage_session::{Driver, DriverError, Source, SourceOptions};
 use gage_store::{ScanDirLayout, Store, StoreError};
 use rune::Sources;
@@ -71,8 +72,10 @@ pub struct ScanContext {
     /// orchestrator per task. Used to render `VmError` with source
     /// excerpts, resolved field names, and a backtrace.
     pub sources: Option<Arc<Sources>>,
-    /// The driver that runs the scan's agents
-    pub driver: Arc<dyn Driver>,
+    /// The drivers of the scan. An agent runs on the driver its model
+    /// names, and a session's native source is reopened through the
+    /// driver recorded on the session.
+    pub drivers: Arc<DriverRegistry>,
     /// Where the sources opened during the scan keep their derived
     /// state; `None` is the default cache root
     pub cache_root: Option<PathBuf>,
@@ -101,6 +104,10 @@ pub struct ScanContext {
     /// The MCP host serving scanner-defined tools to agents, started
     /// by the first `call_agent` that declares tools
     mcp_host: Arc<OnceCell<McpHost>>,
+    /// Whether each driver an agent has asked for can start agents,
+    /// by driver name, with the driver's reason when it cannot. A
+    /// driver is asked once per scan, before its first agent starts.
+    agent_ready: Arc<tokio::sync::Mutex<HashMap<&'static str, Result<(), String>>>>,
 }
 
 impl ScanContext {
@@ -114,7 +121,7 @@ impl ScanContext {
         store_path: &Path,
         cache_root: Option<PathBuf>,
         paths: ScanDirLayout,
-        driver: Arc<dyn Driver>,
+        drivers: Arc<DriverRegistry>,
     ) -> Result<Self, StoreError> {
         let root = cache_root.clone().unwrap_or_else(default_cache_root);
         Ok(ScanContext {
@@ -124,7 +131,7 @@ impl ScanContext {
             scanner: String::new(),
             task: String::new(),
             sources: None,
-            driver,
+            drivers,
             cache_root,
             agent_pool: Arc::new(Semaphore::new(Semaphore::MAX_PERMITS)),
             store: Arc::new(tokio::sync::Mutex::new(Store::open_with_cache_root(
@@ -137,6 +144,7 @@ impl ScanContext {
             scan_query: Arc::new(OnceCell::new()),
             store_query: Arc::new(OnceCell::new()),
             mcp_host: Arc::new(OnceCell::new()),
+            agent_ready: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         })
     }
 
@@ -148,6 +156,23 @@ impl ScanContext {
                 Ok(host)
             })
             .await
+    }
+
+    /// Verify `driver` can start agents, asking it the first time an
+    /// agent of the scan needs it and answering from that afterwards.
+    /// The error is the driver's user-facing reason.
+    pub(crate) async fn ensure_agent_ready(&self, driver: &dyn Driver) -> Result<(), String> {
+        let mut ready = self.agent_ready.lock().await;
+        ready
+            .entry(driver.name())
+            .or_insert_with(|| driver.scan_ready().map_err(|e| e.to_string()))
+            .clone()
+    }
+
+    /// Record that `driver` has answered that it can start agents, so
+    /// the scan's agents do not ask it again.
+    pub async fn agent_ready_checked(&self, driver: &dyn Driver) {
+        self.agent_ready.lock().await.insert(driver.name(), Ok(()));
     }
 
     /// A context builder over the query store, with the scan's cache
@@ -342,42 +367,43 @@ pub(crate) async fn dataset_query() -> Result<SessionContext, VmError> {
     ))
 }
 
-/// The driver of whichever context the caller runs under.
+/// The drivers of whichever context the caller runs under.
 pub(crate) fn native_opener() -> Result<NativeOpener, VmError> {
     if let Ok(opener) = SCAN_CTX.try_with(|ctx| NativeOpener {
-        driver: Arc::clone(&ctx.driver),
+        drivers: Arc::clone(&ctx.drivers),
         cache_root: ctx.cache_root.clone(),
     }) {
         return Ok(opener);
     }
     if let Ok(opener) = crate::attach::ATTACH_CTX.try_with(|ctx| NativeOpener {
-        driver: Arc::clone(&ctx.driver),
+        drivers: Arc::clone(&ctx.drivers),
         cache_root: ctx.cache_root.clone(),
     }) {
         return Ok(opener);
     }
     Err(VmError::panic(
-        "the driver is available only inside a scan task or an attachment function",
+        "the drivers are available only inside a scan task or an attachment function",
     ))
 }
 
-/// How the running context reopens a session's native source: its
-/// driver, and the cache root the source keeps its derived state
-/// under.
+/// How the running context reopens a session's native source: the
+/// drivers it can reopen through, and the cache root the source keeps
+/// its derived state under.
 pub(crate) struct NativeOpener {
-    driver: Arc<dyn Driver>,
+    drivers: Arc<DriverRegistry>,
     cache_root: Option<PathBuf>,
 }
 
 impl NativeOpener {
-    /// Open the source holding the session `session_url` names.
-    fn open(&self, session_url: &str) -> Result<Box<dyn Source>, DriverError> {
-        let (source, _id) = self.driver.split_session_url(session_url)?;
+    /// Open the source holding the session `session_url` names,
+    /// through `driver`.
+    fn open(&self, driver: &dyn Driver, session_url: &str) -> Result<Box<dyn Source>, DriverError> {
+        let (source, _id) = driver.split_session_url(session_url)?;
         let mut options = SourceOptions::new(&source);
         if let Some(root) = &self.cache_root {
             options.cache_root(root);
         }
-        self.driver.open_source(&options)
+        driver.open_source(&options)
     }
 }
 
@@ -656,10 +682,10 @@ impl Session {
         }
     }
 
-    /// The native session this stored one was read from, when it
-    /// belongs to this machine's driver: `Ok(Some(Native))`,
-    /// `Ok(None)` for another driver's session, or `Err` when the
-    /// driver fails to resolve it.
+    /// The native session this stored one was read from, reopened
+    /// through the session's own driver: `Ok(Some(Native))`,
+    /// `Ok(None)` for a session whose driver this build does not
+    /// have, or `Err` when the driver fails to resolve it.
     #[rune::function(instance)]
     fn native(&self) -> NativeQuery {
         NativeQuery {
@@ -763,21 +789,24 @@ impl NativeRow {
     }
 }
 
-/// Reopen the session's native source through `opener` and ask it
-/// for the project directory. A session from another driver is
-/// `None`: it is not this machine's. A source the driver cannot open
-/// or a project path it cannot read is `Error::Driver`.
+/// Reopen the session's native source through the driver recorded on
+/// the session and ask it for the project directory. A session whose
+/// driver this build does not have is `None`: nothing here can reopen
+/// it. A source the driver cannot open or a project path it cannot
+/// read is `Error::Driver`.
 fn resolve_native(
     opener: &NativeOpener,
     id: &str,
     row: NativeRow,
 ) -> Result<Option<Native>, Error> {
-    if row.driver.split(' ').next() != Some(opener.driver.name()) {
-        tracing::debug!(session = %id, driver = %row.driver, "native: another driver's session");
+    // The column is `<name> <version>`
+    let name = row.driver.split(' ').next().unwrap_or_default();
+    let Some(driver) = opener.drivers.for_name(name) else {
+        tracing::debug!(session = %id, driver = %row.driver, "native: no such driver in this build");
         return Ok(None);
-    }
+    };
     let source = opener
-        .open(&row.source)
+        .open(&*driver, &row.source)
         .map_err(|e| Error::Driver(format!("opening {}: {e}", row.source)))?;
     let project_dir = match row.project {
         Some(name) => source
@@ -803,8 +832,8 @@ pub struct SessionsNative {
 
 /// Pair each of the query's sessions with the result of resolving
 /// its native counterpart, `Ok(Native)` or the driver's `Err`, in
-/// the order the sessions query would read them. The sessions of
-/// other drivers are dropped. The await is the list itself: one
+/// the order the sessions query would read them. The sessions whose
+/// driver this build does not have are dropped. The await is the list itself: one
 /// session the driver fails on is that session's entry, not the
 /// read's failure, so the scanner decides what a failed resolution
 /// costs.
@@ -816,7 +845,7 @@ fn sessions_native(sessions: Ref<SessionsQuery>) -> SessionsNative {
 }
 
 /// The `(Session, Result<Native, Error>)` pairs of the dataset's
-/// members this machine's driver owns, read in one statement.
+/// members whose driver this build has, read in one statement.
 async fn fetch_sessions_native(q: SessionsNative) -> Result<Vec<Value>, VmError> {
     let sql = format!(
         "SELECT id, locator, line_count, driver, origin, project FROM session{}",

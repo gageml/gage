@@ -199,7 +199,7 @@ pub(crate) fn agent_rows_of(
                 scan_commit: scan_commit.map(String::from),
             };
             match &a.record {
-                AgentRecord::Running { native_id } => row.native_id = Some(native_id.clone()),
+                AgentRecord::Running { native_id, .. } => row.native_id = Some(native_id.clone()),
                 AgentRecord::Ended(attrs) => {
                     row.exit_code = Some(attrs.exit_code);
                     row.is_error = Some(attrs.is_error);

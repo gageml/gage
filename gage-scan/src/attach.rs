@@ -16,11 +16,11 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use gage_registry::driver::DriverRegistry;
 use gage_registry::scanner::{TaskDef, TaskKind};
 use gage_runtime::{
     ATTACH_CTX, AttachContext, Attached, OUTPUT_SINK, OutputSink, ScanDatasetRef, TaskOutput,
 };
-use gage_session::Driver;
 use gage_store::{DatasetStore, Store, StoreError};
 use tokio::sync::mpsc;
 
@@ -79,14 +79,15 @@ impl From<StoreError> for AttachError {
 }
 
 /// Run every attach task of `scanners` against the dataset
-/// `dataset_id`, which is read at its current commit. `driver` reopens
-/// native sources for `session.native()`, keeping their derived state
-/// under `cache_root`, or the default cache root when it is `None`.
+/// `dataset_id`, which is read at its current commit. `drivers` reopen
+/// native sources for `session.native()`, each session through its
+/// own driver, keeping their derived state under `cache_root`, or the
+/// default cache root when it is `None`.
 pub async fn attach(
     store: &Store,
     dataset_id: &str,
     scanners: &[CompiledScanner],
-    driver: Arc<dyn Driver>,
+    drivers: Arc<DriverRegistry>,
     cache_root: Option<PathBuf>,
     mut on_event: impl FnMut(AttachEvent),
 ) -> Result<(), AttachError> {
@@ -106,7 +107,7 @@ pub async fn attach(
                 &dataset,
                 scanner,
                 task,
-                Arc::clone(&driver),
+                Arc::clone(&drivers),
                 cache_root.clone(),
                 &mut on_event,
             )
@@ -131,7 +132,7 @@ async fn run_one(
     dataset: &ScanDatasetRef,
     scanner: &CompiledScanner,
     task: &TaskDef,
-    driver: Arc<dyn Driver>,
+    drivers: Arc<DriverRegistry>,
     cache_root: Option<PathBuf>,
     on_event: &mut impl FnMut(AttachEvent),
 ) -> Result<(), AttachError> {
@@ -144,7 +145,7 @@ async fn run_one(
         store_path,
         cache_root,
         attached_tx,
-        driver,
+        drivers,
     )?;
     let sink = OutputSink {
         scanner: scanner.name.clone(),

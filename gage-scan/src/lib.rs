@@ -34,13 +34,14 @@ use gage_core::datetime::now_ms;
 use gage_core::glob::glob_match;
 use gage_core::stopwatch::Stopwatch;
 use gage_core::uuid::short_uuid;
+use gage_registry::driver::DriverRegistry;
 use gage_registry::scanner::{Scanner, TaskDef, TaskKind};
 use gage_runtime::source::{SourceError, SourceFile, source_files};
 use gage_runtime::{
     AgentPoolDelta, CURRENT_RUNTIME_SCHEME, Fail, Level, OUTPUT_SINK, Output, OutputSink, SCAN_CTX,
     ScanContext, ScanDatasetRef, TaskOutput, is_ignore,
 };
-use gage_session::{Driver, DriverError};
+use gage_session::DriverError;
 use gage_store::{
     DatasetStore, IssueStore, NoteStore, ScanAttrs, ScanStore, Store, StoreError, TaskAttrs,
     TaskCounts, TaskStatus,
@@ -321,7 +322,8 @@ pub enum ScanError {
     Store(StoreError),
     /// A planned task needs an attachment the dataset does not have
     MissingAttachments(Vec<MissingAttachment>),
-    /// The driver cannot serve the scan; the message is the driver's
+    /// The default driver cannot serve the scan; the message is the
+    /// driver's
     NotReady(DriverError),
 }
 
@@ -388,8 +390,10 @@ pub struct ScanConfig<'a> {
     /// Agents run at once across every task of the scan. Treated as
     /// at least 1.
     pub agent_jobs: usize,
-    /// The driver that runs the scan's agents
-    pub driver: Arc<dyn Driver>,
+    /// The drivers of the scan. An agent runs on the driver its model
+    /// names, the default driver when it names none, and a session's
+    /// native source is reopened through the session's own driver.
+    pub drivers: Arc<DriverRegistry>,
     /// Where the sources opened during the scan keep their derived
     /// state; `None` is the default cache root
     pub cache_root: Option<PathBuf>,
@@ -451,7 +455,13 @@ pub async fn scan(
         None => None,
     };
     let attachment_warnings = check_attachments(store, config, scanners, &plan)?;
-    config.driver.scan_ready().map_err(ScanError::NotReady)?;
+    // The default driver runs every agent whose model names no other,
+    // so it is asked before anything is written. A driver a model
+    // names is asked when its first agent starts.
+    let default_driver = config.drivers.default();
+    if let Some(driver) = &default_driver {
+        driver.scan_ready().map_err(ScanError::NotReady)?;
+    }
     let task_names: Vec<Vec<String>> = scanners
         .iter()
         .map(|s| {
@@ -488,8 +498,11 @@ pub async fn scan(
         store.path(),
         config.cache_root.clone(),
         scan_dir.layout(),
-        Arc::clone(&config.driver),
+        Arc::clone(&config.drivers),
     )?;
+    if let Some(driver) = &default_driver {
+        scan_ctx.agent_ready_checked(&**driver).await;
+    }
     scan_ctx.invalidate = config.invalidate;
     scan_ctx.agent_pool = Arc::new(Semaphore::new(config.agent_jobs.max(1)));
     trace::install_panic_hook();
@@ -1262,7 +1275,7 @@ mod tests {
     use gage_core::config::ScannerConfig;
     use gage_registry::scanner::{ScannerDef, parse_scanner_file};
     use gage_session::{
-        AgentEvent, AgentMcp, AgentSession, AgentSpec, ContentSink, ContentSource, DriverError,
+        AgentEvent, AgentMcp, AgentSession, AgentSpec, ContentSink, ContentSource, Driver,
         NativeSession, SessionAttrs, Source, SourceOptions, StoredSession, TurnResult,
         WrittenContent,
     };
@@ -1299,9 +1312,14 @@ mod tests {
         compile(&Scanner::from_spec(def, &ScannerConfig::default(), None, &def.name).unwrap())
     }
 
-    /// The driver a test scan runs agents with when it runs none
-    fn claude_driver() -> Arc<dyn Driver> {
-        Arc::new(gage_claude::driver::ClaudeDriver::new())
+    /// The drivers of a test scan that runs no agent
+    fn claude_drivers() -> Arc<DriverRegistry> {
+        Arc::new(DriverRegistry::builtin())
+    }
+
+    /// A registry whose one driver, the default, is `driver`
+    fn only(driver: Arc<dyn Driver>) -> Arc<DriverRegistry> {
+        Arc::new(DriverRegistry::new().add_default(driver))
     }
 
     /// A fresh store and scans directory under one directory.
@@ -1328,7 +1346,7 @@ mod tests {
             dataset: None,
             jobs: 1,
             agent_jobs: 8,
-            driver: claude_driver(),
+            drivers: claude_drivers(),
             cache_root: Some(root.with_file_name("cache")),
             invalidate: false,
             ignore_missing_attachments: false,
@@ -1530,6 +1548,9 @@ mod tests {
         cleaned_up: Arc<std::sync::atomic::AtomicBool>,
         /// The MCP server the last `run_agent` was given
         mcp_seen: Arc<std::sync::Mutex<Option<AgentMcp>>>,
+        /// How many times the driver was asked whether it can start
+        /// agents
+        ready_checks: Arc<std::sync::atomic::AtomicUsize>,
     }
 
     impl ScriptedDriver {
@@ -1537,6 +1558,7 @@ mod tests {
             ScriptedDriver {
                 cleaned_up: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 mcp_seen: Arc::new(std::sync::Mutex::new(None)),
+                ready_checks: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             }
         }
     }
@@ -1681,6 +1703,11 @@ mod tests {
             _source: Box<dyn ContentSource>,
         ) -> Result<Box<dyn StoredSession>, DriverError> {
             Err(DriverError::Other("read_stored not used".into()))
+        }
+        fn scan_ready(&self) -> Result<(), DriverError> {
+            self.ready_checks
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
         }
         fn start_agent(&self, spec: AgentSpec) -> Result<Box<dyn AgentSession>, DriverError> {
             assert_eq!(spec.prompt, "hello");
@@ -1945,7 +1972,7 @@ mod tests {
             dataset: None,
             jobs: 1,
             agent_jobs: 1,
-            driver: driver.clone(),
+            drivers: only(driver.clone()),
             cache_root: Some(tmp.path().join("cache")),
             invalidate: false,
             ignore_missing_attachments: false,
@@ -2020,7 +2047,7 @@ mod tests {
             dataset: None,
             jobs: 1,
             agent_jobs: 8,
-            driver: driver.clone(),
+            drivers: only(driver.clone()),
             cache_root: Some(tmp.path().join("cache")),
             invalidate: false,
             ignore_missing_attachments: false,
@@ -2074,7 +2101,7 @@ mod tests {
             dataset: None,
             jobs: 1,
             agent_jobs: 8,
-            driver: driver.clone(),
+            drivers: only(driver.clone()),
             cache_root: Some(tmp.path().join("cache")),
             invalidate: false,
             ignore_missing_attachments: false,
@@ -2147,7 +2174,7 @@ mod tests {
             dataset: None,
             jobs: 1,
             agent_jobs: 8,
-            driver: Arc::new(ScriptedDriver::new()),
+            drivers: only(Arc::new(ScriptedDriver::new())),
             cache_root: Some(tmp.path().join("cache")),
             invalidate: false,
             ignore_missing_attachments: false,
@@ -2218,7 +2245,7 @@ mod tests {
             dataset: None,
             jobs: 1,
             agent_jobs: 8,
-            driver,
+            drivers: only(driver),
             cache_root: Some(tmp.path().join("cache")),
             invalidate: false,
             ignore_missing_attachments: false,
@@ -2357,7 +2384,7 @@ mod tests {
             dataset: None,
             jobs: 1,
             agent_jobs: 8,
-            driver,
+            drivers: only(driver),
             cache_root: Some(tmp.path().join("cache")),
             invalidate: false,
             ignore_missing_attachments: false,
@@ -3113,7 +3140,7 @@ mod tests {
             dataset: None,
             jobs: 1,
             agent_jobs: 8,
-            driver: claude_driver(),
+            drivers: claude_drivers(),
             cache_root: Some(tmp.path().join("cache")),
             invalidate: false,
             ignore_missing_attachments: false,
@@ -3211,7 +3238,7 @@ mod tests {
             dataset: Some(&dataset_sha),
             jobs: 1,
             agent_jobs: 8,
-            driver: claude_driver(),
+            drivers: claude_drivers(),
             cache_root: Some(tmp.path().join("cache")),
             invalidate: false,
             ignore_missing_attachments: false,
@@ -3272,7 +3299,7 @@ mod tests {
             dataset: Some(&dataset_sha),
             jobs: 1,
             agent_jobs: 8,
-            driver: claude_driver(),
+            drivers: claude_drivers(),
             cache_root: Some(tmp.path().join("cache")),
             invalidate: false,
             ignore_missing_attachments: false,
@@ -3407,7 +3434,7 @@ mod tests {
             &store,
             &dataset_id,
             std::slice::from_ref(&compiled),
-            claude_driver(),
+            claude_drivers(),
             Some(tmp.path().join("cache")),
             |e| events.push(e),
         )
@@ -3507,7 +3534,7 @@ mod tests {
             &store,
             &dataset_id,
             std::slice::from_ref(&compiled),
-            claude_driver(),
+            claude_drivers(),
             Some(tmp.path().join("cache")),
             |e| again.push(e),
         )
@@ -3534,7 +3561,7 @@ mod tests {
             dataset: Some(&dataset_sha),
             jobs: 1,
             agent_jobs: 8,
-            driver: claude_driver(),
+            drivers: claude_drivers(),
             cache_root: Some(tmp.path().join("cache")),
             invalidate: false,
             ignore_missing_attachments: false,
@@ -3591,7 +3618,7 @@ mod tests {
             &store,
             &dataset_id,
             &[broken.unwrap()],
-            claude_driver(),
+            claude_drivers(),
             Some(tmp.path().join("cache")),
             |_| {},
         )
@@ -3767,7 +3794,7 @@ mod tests {
             dataset: Some(&dataset_sha),
             jobs: 1,
             agent_jobs: 8,
-            driver: claude_driver(),
+            drivers: claude_drivers(),
             cache_root: Some(tmp.path().join("cache")),
             invalidate: false,
             ignore_missing_attachments: false,
@@ -3871,7 +3898,7 @@ mod tests {
             dataset: Some(&dataset_sha),
             jobs: 1,
             agent_jobs: 8,
-            driver: claude_driver(),
+            drivers: claude_drivers(),
             cache_root: Some(tmp.path().join("cache")),
             invalidate: false,
             ignore_missing_attachments: false,
@@ -4058,7 +4085,7 @@ mod tests {
             dataset: Some(&dataset_sha),
             jobs: 1,
             agent_jobs: 8,
-            driver: claude_driver(),
+            drivers: claude_drivers(),
             cache_root: Some(tmp.path().join("cache")),
             invalidate: false,
             ignore_missing_attachments: false,
@@ -4308,7 +4335,7 @@ mod tests {
                     dataset: Some(&dataset_sha),
                     jobs: 1,
                     agent_jobs: 8,
-                    driver: claude_driver(),
+                    drivers: claude_drivers(),
                     cache_root: Some(root.with_file_name("cache")),
                     invalidate: false,
                     ignore_missing_attachments: false,
@@ -4457,7 +4484,7 @@ mod tests {
             &store,
             &dataset_id,
             &[compiled.unwrap()],
-            claude_driver(),
+            claude_drivers(),
             Some(tmp.path().join("cache")),
             |e| events.push(e),
         )
@@ -4561,7 +4588,7 @@ mod tests {
             dataset: Some(&dataset_sha),
             jobs: 1,
             agent_jobs: 8,
-            driver: claude_driver(),
+            drivers: claude_drivers(),
             cache_root: Some(tmp.path().join("cache")),
             invalidate: false,
             ignore_missing_attachments: false,
@@ -4623,7 +4650,7 @@ mod tests {
             dataset: Some(&dataset_sha),
             jobs: 1,
             agent_jobs: 1,
-            driver: claude_driver(),
+            drivers: claude_drivers(),
             cache_root: Some(scans_dir.with_file_name("cache")),
             invalidate: false,
             ignore_missing_attachments: false,
@@ -4708,7 +4735,7 @@ mod tests {
             dataset: Some(&dataset_sha),
             jobs: 1,
             agent_jobs: 1,
-            driver: claude_driver(),
+            drivers: claude_drivers(),
             cache_root: Some(tmp.path().join("cache")),
             invalidate: false,
             ignore_missing_attachments: false,
@@ -4727,56 +4754,64 @@ mod tests {
         assert!(warnings(&events).is_empty(), "{:?}", warnings(&events));
     }
 
-    /// A driver that cannot serve a scan stops it before anything is
-    /// written, with the driver's own reason.
-    #[tokio::test]
-    async fn a_driver_that_is_not_ready_stops_the_scan_before_it_starts() {
-        struct NotReadyDriver;
+    /// A driver that cannot start agents, and counts how often it is
+    /// asked.
+    struct NotReadyDriver {
+        checks: Arc<std::sync::atomic::AtomicUsize>,
+    }
 
-        impl Driver for NotReadyDriver {
-            fn name(&self) -> &'static str {
-                "unready"
-            }
-            fn version(&self) -> &'static str {
-                "0"
-            }
-            fn schemes(&self) -> &'static [&'static str] {
-                &["unready"]
-            }
-            fn open_source(
-                &self,
-                _options: &SourceOptions,
-            ) -> Result<Box<dyn Source>, DriverError> {
-                Err(DriverError::Other("not used".into()))
-            }
-            fn split_session_url(
-                &self,
-                _session_url: &str,
-            ) -> Result<(String, String), DriverError> {
-                Err(DriverError::Other("not used".into()))
-            }
-            fn write_native(
-                &self,
-                _session: &mut dyn NativeSession,
-                _sink: &mut dyn ContentSink,
-            ) -> Result<WrittenContent, DriverError> {
-                Err(DriverError::Other("not used".into()))
-            }
-            fn read_stored(
-                &self,
-                _native_id: String,
-                _content_format: &str,
-                _source: Box<dyn ContentSource>,
-            ) -> Result<Box<dyn StoredSession>, DriverError> {
-                Err(DriverError::Other("not used".into()))
-            }
-            fn scan_ready(&self) -> Result<(), DriverError> {
-                Err(DriverError::Other(
-                    "Not logged in. Run `login` first.".into(),
-                ))
+    impl NotReadyDriver {
+        fn new() -> Self {
+            NotReadyDriver {
+                checks: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             }
         }
+    }
 
+    impl Driver for NotReadyDriver {
+        fn name(&self) -> &'static str {
+            "unready"
+        }
+        fn version(&self) -> &'static str {
+            "0"
+        }
+        fn schemes(&self) -> &'static [&'static str] {
+            &["unready"]
+        }
+        fn open_source(&self, _options: &SourceOptions) -> Result<Box<dyn Source>, DriverError> {
+            Err(DriverError::Other("not used".into()))
+        }
+        fn split_session_url(&self, _session_url: &str) -> Result<(String, String), DriverError> {
+            Err(DriverError::Other("not used".into()))
+        }
+        fn write_native(
+            &self,
+            _session: &mut dyn NativeSession,
+            _sink: &mut dyn ContentSink,
+        ) -> Result<WrittenContent, DriverError> {
+            Err(DriverError::Other("not used".into()))
+        }
+        fn read_stored(
+            &self,
+            _native_id: String,
+            _content_format: &str,
+            _source: Box<dyn ContentSource>,
+        ) -> Result<Box<dyn StoredSession>, DriverError> {
+            Err(DriverError::Other("not used".into()))
+        }
+        fn scan_ready(&self) -> Result<(), DriverError> {
+            self.checks
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(DriverError::Other(
+                "Not logged in. Run `login` first.".into(),
+            ))
+        }
+    }
+
+    /// A default driver that cannot serve a scan stops it before
+    /// anything is written, with the driver's own reason.
+    #[tokio::test]
+    async fn a_default_driver_that_is_not_ready_stops_the_scan_before_it_starts() {
         let (_dir, compiled) = compile_source(HELLO);
         let (tmp, store) = open_store();
         let scans_dir = tmp.path().join("scans");
@@ -4787,7 +4822,7 @@ mod tests {
             dataset: None,
             jobs: 1,
             agent_jobs: 1,
-            driver: Arc::new(NotReadyDriver),
+            drivers: only(Arc::new(NotReadyDriver::new())),
             cache_root: Some(scans_dir.with_file_name("cache")),
             invalidate: false,
             ignore_missing_attachments: false,
@@ -4805,6 +4840,171 @@ mod tests {
         assert_eq!(err.to_string(), "Not logged in. Run `login` first.");
         assert!(!scans_dir.exists(), "nothing is written before the check");
         assert!(events.is_empty(), "{events:?}");
+    }
+
+    /// An agent whose model carries a driver's scheme runs on that
+    /// driver, which is given the model without the scheme, is asked
+    /// once whether it can start agents, and stores the transcript.
+    /// The dataset's sessions are another driver's and are reopened
+    /// through it.
+    #[tokio::test]
+    async fn an_agent_runs_on_the_driver_its_model_names() {
+        use gage_store::{SessionStore, session_object_id};
+
+        const SCANNER: &str = r#"
+            use gage::{call_agent, scan};
+
+            pub const SCANNER = #{
+                name: "cross",
+                description: "Reads one driver's sessions and runs another's agent",
+                tasks: #{ main: #{} },
+            };
+
+            pub async fn main() {
+                for (s, native) in scan().sessions().native().await {
+                    match native {
+                        Ok(native) => println!("native {:?}", native.project_dir),
+                        other => println!("unexpected: {other:?}"),
+                    }
+                }
+                let r = call_agent("hello").model("scripted:medium").await?.wait().await?;
+                println!("{}", r.text);
+                Ok(())
+            }
+        "#;
+
+        let (tmp, store) = open_store();
+        let work = tmp.path().join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let work = std::fs::canonicalize(&work).unwrap();
+        let (_dataset_id, dataset_sha, _session_id) =
+            seeded_dataset_for_project(tmp.path(), &store, ONE_LINE, &work);
+        std::fs::write(
+            tmp.path().join("claude").join(".claude.json"),
+            format!(r#"{{"projects": {{"{}": {{}}}}}}"#, work.display()),
+        )
+        .unwrap();
+        let (_dir, compiled) = compile_source(SCANNER);
+        let scripted = Arc::new(ScriptedDriver::new());
+        let drivers = DriverRegistry::builtin().add(scripted.clone());
+        assert_eq!(drivers.default().unwrap().name(), "claude");
+        let mut events = Vec::new();
+        let config = ScanConfig {
+            id: &new_uuid(),
+            scans_dir: &tmp.path().join("scans"),
+            gage_version: "test-version",
+            dataset: Some(&dataset_sha),
+            jobs: 1,
+            agent_jobs: 8,
+            drivers: Arc::new(drivers),
+            cache_root: Some(tmp.path().join("cache")),
+            invalidate: false,
+            ignore_missing_attachments: false,
+        };
+        let outcome = scan(
+            &store,
+            &config,
+            &[compiled.unwrap()],
+            &CancellationToken::new(),
+            |e| events.push(e),
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome.attrs.tasks.failed, 0, "{events:?}");
+        assert_eq!(
+            outputs(&events),
+            [
+                &Output::Println(format!("native Some({:?})", work.display().to_string())),
+                &Output::Println("hello there".into()),
+            ]
+        );
+        assert_eq!(
+            scripted
+                .ready_checks
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        let session = SessionStore::from(&store)
+            .get(&session_object_id("scripted", "native-1"))
+            .unwrap();
+        assert_eq!(session.attrs.driver, "scripted 0.1");
+    }
+
+    /// A driver a model names that cannot start agents fails each
+    /// agent that asks for it with the driver's own reason, and is
+    /// asked once. The scan runs, and the default driver, asked before
+    /// the scan started, is not asked again by its agents.
+    #[tokio::test]
+    async fn a_named_driver_that_is_not_ready_fails_its_agents_and_not_the_scan() {
+        const SCANNER: &str = r#"
+            use gage::call_agent;
+
+            pub const SCANNER = #{
+                name: "unready",
+                description: "Asks for a driver that cannot start agents",
+                tasks: #{ main: #{} },
+            };
+
+            pub async fn main() {
+                for _ in 0..2 {
+                    match call_agent("hello").model("unready:medium").await {
+                        Ok(_) => println!("started"),
+                        Err(e) => println!("refused: {e:?}"),
+                    }
+                }
+                let r = call_agent("hello").model("medium").await?.wait().await?;
+                println!("{}", r.text);
+                Ok(())
+            }
+        "#;
+
+        let (_dir, compiled) = compile_source(SCANNER);
+        let scripted = Arc::new(ScriptedDriver::new());
+        let unready = Arc::new(NotReadyDriver::new());
+        let (tmp, store) = open_store();
+        let mut events = Vec::new();
+        let config = ScanConfig {
+            id: &new_uuid(),
+            scans_dir: &tmp.path().join("scans"),
+            gage_version: "test-version",
+            dataset: None,
+            jobs: 1,
+            agent_jobs: 8,
+            drivers: Arc::new(
+                DriverRegistry::new()
+                    .add_default(scripted.clone())
+                    .add(unready.clone()),
+            ),
+            cache_root: Some(tmp.path().join("cache")),
+            invalidate: false,
+            ignore_missing_attachments: false,
+        };
+        let outcome = scan(
+            &store,
+            &config,
+            &[compiled.unwrap()],
+            &CancellationToken::new(),
+            |e| events.push(e),
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome.attrs.tasks.failed, 0, "{events:?}");
+        let refused = r#"refused: Agent(General("Not logged in. Run `login` first."))"#;
+        assert_eq!(
+            outputs(&events),
+            [
+                &Output::Println(refused.into()),
+                &Output::Println(refused.into()),
+                &Output::Println("hello there".into()),
+            ]
+        );
+        assert_eq!(unready.checks.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            scripted
+                .ready_checks
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
     }
 
     /// `key(k).once()` writes once: a second scan finds the issue live
@@ -4858,7 +5058,7 @@ mod tests {
                     dataset: None,
                     jobs: 1,
                     agent_jobs: 8,
-                    driver: claude_driver(),
+                    drivers: claude_drivers(),
                     cache_root: Some(root.with_file_name("cache")),
                     invalidate: false,
                     ignore_missing_attachments: false,
@@ -5002,7 +5202,7 @@ mod tests {
             dataset: Some(&dataset_sha),
             jobs: 1,
             agent_jobs: 8,
-            driver: claude_driver(),
+            drivers: claude_drivers(),
             cache_root: Some(tmp.path().join("cache")),
             invalidate: false,
             ignore_missing_attachments: false,
@@ -5231,7 +5431,7 @@ mod tests {
             dataset: Some(dataset_sha),
             jobs: 1,
             agent_jobs: 8,
-            driver: claude_driver(),
+            drivers: claude_drivers(),
             cache_root: Some(tmp.path().join("cache")),
             invalidate,
             ignore_missing_attachments: false,
@@ -5958,7 +6158,7 @@ mod tests {
             dataset: None,
             jobs: 2,
             agent_jobs: 8,
-            driver: claude_driver(),
+            drivers: claude_drivers(),
             cache_root: Some(tmp.path().join("cache")),
             invalidate: false,
             ignore_missing_attachments: false,
@@ -6042,7 +6242,7 @@ mod tests {
             dataset: Some(&dataset_sha),
             jobs: 2,
             agent_jobs: 8,
-            driver: claude_driver(),
+            drivers: claude_drivers(),
             cache_root: Some(tmp.path().join("cache")),
             invalidate: false,
             ignore_missing_attachments: false,

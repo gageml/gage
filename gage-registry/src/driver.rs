@@ -3,12 +3,47 @@
 //! Constructed and populated explicitly at process startup by the
 //! facility that needs it (the CLI, the MCP server, ...). No lazy
 //! module-level init.
+//!
+//! The default driver is the one a source or an agent model with no
+//! scheme goes to. A process names it once at startup with
+//! [`set_default_driver`], from the user's config; a process that
+//! names none gets [`DEFAULT_DRIVER`].
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use gage_claude::driver::ClaudeDriver;
+use gage_core::config::DEFAULT_DRIVER;
 use gage_session::{Driver, DriverError, Source, SourceOptions, split_scheme};
+
+/// The default driver's name for this process, once named
+static DEFAULT_NAME: OnceLock<String> = OnceLock::new();
+
+/// Name the default driver of every registry [`DriverRegistry::builtin`]
+/// builds in this process. `name` must be a bundled driver. The name
+/// is fixed once set; naming a different one afterwards is an error.
+pub fn set_default_driver(name: &str) -> Result<(), DriverError> {
+    let drivers = bundled();
+    if !drivers.iter().any(|d| d.name() == name) {
+        let names: Vec<&str> = drivers.iter().map(|d| d.name()).collect();
+        return Err(DriverError::Other(format!(
+            "{name:?} is not a driver in this build; drivers: {}",
+            names.join(", ")
+        )));
+    }
+    let set = DEFAULT_NAME.get_or_init(|| name.to_string());
+    if set != name {
+        return Err(DriverError::Other(format!(
+            "default driver is already {set:?}"
+        )));
+    }
+    Ok(())
+}
+
+/// The drivers bundled with this build, in registration order
+fn bundled() -> Vec<Arc<dyn Driver>> {
+    vec![Arc::new(ClaudeDriver::new())]
+}
 
 pub struct DriverRegistry {
     default: Option<Arc<dyn Driver>>,
@@ -27,9 +62,18 @@ impl DriverRegistry {
         }
     }
 
-    /// The drivers bundled with this build. `claude` is the default.
+    /// The drivers bundled with this build. The default is the one
+    /// the process named with [`set_default_driver`], else
+    /// [`DEFAULT_DRIVER`].
     pub fn builtin() -> Self {
-        Self::new().add_default(Arc::new(ClaudeDriver::new()))
+        let default = DEFAULT_NAME.get().map_or(DEFAULT_DRIVER, String::as_str);
+        bundled().into_iter().fold(Self::new(), |registry, driver| {
+            if driver.name() == default {
+                registry.add_default(driver)
+            } else {
+                registry.add(driver)
+            }
+        })
     }
 
     /// Register `driver` and mark it as the default: the driver a
@@ -81,6 +125,28 @@ impl DriverRegistry {
             Some((scheme, _)) if self.by_scheme.contains_key(scheme) => self.for_scheme(scheme),
             _ => self.default(),
         }
+    }
+
+    /// The driver that runs an agent whose model is `model`, and the
+    /// model that driver is given. A model is `<scheme>:<model>` under
+    /// a registered scheme, which names the driver and leaves it the
+    /// rest, or a model with no such scheme, which goes to the default
+    /// driver whole. A scheme alone, `<scheme>:`, is that driver's own
+    /// choice of model, as no model is the default driver's.
+    pub fn agent_driver(
+        &self,
+        model: Option<&str>,
+    ) -> Result<(Arc<dyn Driver>, Option<String>), DriverError> {
+        if let Some((scheme, rest)) = model.and_then(split_scheme)
+            && let Some(driver) = self.for_scheme(scheme)
+        {
+            let model = (!rest.is_empty()).then(|| rest.to_string());
+            return Ok((driver, model));
+        }
+        let driver = self
+            .default()
+            .ok_or_else(|| DriverError::Other("no default session driver registered".into()))?;
+        Ok((driver, model.map(str::to_string)))
     }
 
     /// Route the source `options` names to its driver and open it. The
@@ -168,6 +234,58 @@ mod tests {
             .add(Arc::new(Fake("two", &["b"])));
         assert_eq!(registry.for_name("two").unwrap().name(), "two");
         assert!(registry.for_name("three").is_none());
+    }
+
+    #[test]
+    fn agent_model_scheme_names_the_driver_and_leaves_it_the_rest() {
+        let registry = DriverRegistry::new()
+            .add_default(Arc::new(Fake("one", &["a"])))
+            .add(Arc::new(Fake("two", &["b"])));
+        let (driver, model) = registry.agent_driver(Some("b:medium")).unwrap();
+        assert_eq!(driver.name(), "two");
+        assert_eq!(model.as_deref(), Some("medium"));
+        let (driver, model) = registry.agent_driver(Some("a:x:y")).unwrap();
+        assert_eq!(driver.name(), "one");
+        assert_eq!(model.as_deref(), Some("x:y"));
+        let (driver, model) = registry.agent_driver(Some("b:")).unwrap();
+        assert_eq!(driver.name(), "two");
+        assert_eq!(model, None);
+    }
+
+    #[test]
+    fn agent_model_without_a_driver_scheme_goes_to_default_whole() {
+        let registry = DriverRegistry::new()
+            .add_default(Arc::new(Fake("one", &["a"])))
+            .add(Arc::new(Fake("two", &["b"])));
+        for model in ["medium", "llama3:8b", "ft:gpt-4o:org::id", "sonnet[1m]"] {
+            let (driver, given) = registry.agent_driver(Some(model)).unwrap();
+            assert_eq!(driver.name(), "one");
+            assert_eq!(given.as_deref(), Some(model));
+        }
+        let (driver, model) = registry.agent_driver(None).unwrap();
+        assert_eq!(driver.name(), "one");
+        assert_eq!(model, None);
+    }
+
+    #[test]
+    fn agent_model_needs_a_default_driver_when_it_names_none() {
+        let registry = DriverRegistry::new().add(Arc::new(Fake("two", &["b"])));
+        assert!(registry.agent_driver(Some("medium")).is_err());
+        assert!(registry.agent_driver(Some("b:medium")).is_ok());
+    }
+
+    #[test]
+    fn builtin_default_is_the_build_default_until_a_process_names_one() {
+        assert_eq!(
+            DriverRegistry::builtin().default().unwrap().name(),
+            DEFAULT_DRIVER
+        );
+        assert!(set_default_driver("no-such-driver").is_err());
+        set_default_driver(DEFAULT_DRIVER).unwrap();
+        assert_eq!(
+            DriverRegistry::builtin().default().unwrap().name(),
+            DEFAULT_DRIVER
+        );
     }
 
     #[test]

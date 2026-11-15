@@ -25,7 +25,7 @@ use gage_runtime::{LOG_TARGET, Output, TaskOutput};
 use gage_scan::recover::{self, Recovered};
 use gage_scan::scan_dir::scans_dir;
 use gage_scan::{CompiledScanner, Event, ScanConfig, ScanError, ScanOutput, summary_line};
-use gage_session::{Driver, HarnessSession, SkillMode, SkillSession};
+use gage_session::{HarnessSession, SkillMode, SkillSession};
 use gage_store::ScanDirLayout;
 use gage_store::{
     DatasetOrigin, DatasetStore, IssueStatus, IssueStore, SCAN_TYPE, ScanStore, SessionRecord,
@@ -1579,28 +1579,18 @@ async fn run_scan(args: ScanRunArgs) -> Result<(), CliError> {
     let store = open_store("gage scan")?;
     let config = Config::load_user().context("gage scan: reading config")?;
 
-    let (driver, _) = source::resolve_source(&source::driver_registry(), args.source.as_deref())
-        .map_err(|e| CliError::message(format!("gage scan: {e}")))?;
-
     // The dialog settles the inputs and builds the dataset; the scan
     // itself runs after it, under the progress view or headless
     let mut prep: Option<ScanPrep> = None;
     dialog::run_async("Scan sessions", || {
-        prepare_scan_dialog(
-            args,
-            &registry,
-            &config,
-            &store,
-            Arc::clone(&driver),
-            &mut prep,
-        )
+        prepare_scan_dialog(args, &registry, &config, &store, &mut prep)
     })
     .await?;
     // A declined confirmation leaves nothing to run
     let Some(prep) = prep else {
         return Ok(());
     };
-    run_prepared(prep, &store, driver).await
+    run_prepared(prep, &store).await
 }
 
 /// Everything the dialog settled for the run.
@@ -1669,7 +1659,6 @@ async fn prepare_scan_dialog(
     registry: &ScannerRegistry,
     config: &Config,
     store: &Store,
-    driver: Arc<dyn Driver>,
     prep: &mut Option<ScanPrep>,
 ) -> Result<dialog::DialogResult, DialogError> {
     // Scanner selection: -s (a registry name or a path), -g, the
@@ -1754,7 +1743,7 @@ async fn prepare_scan_dialog(
     // Minted before the dataset so the dataset can record its scan
     let scan_id = new_uuid();
     let (dataset_sha, outro) =
-        materialize_dataset(plan, &scan_id, store, &compiled, driver, progress_ui).await?;
+        materialize_dataset(plan, &scan_id, store, &compiled, progress_ui).await?;
     *prep = Some(ScanPrep {
         compiled,
         scan_id,
@@ -1773,11 +1762,7 @@ async fn prepare_scan_dialog(
 /// Run the prepared scan, headless or under the progress view, and
 /// print its summary line. A canceled scan or one with a failed task
 /// exits with status 1.
-async fn run_prepared(
-    prep: ScanPrep,
-    store: &Store,
-    driver: Arc<dyn Driver>,
-) -> Result<(), CliError> {
+async fn run_prepared(prep: ScanPrep, store: &Store) -> Result<(), CliError> {
     // Ctrl+C cancels the run; the scan applies what ran. Once tokio
     // has taken the signal, a second Ctrl+C during apply has no
     // effect.
@@ -1799,7 +1784,7 @@ async fn run_prepared(
         dataset: prep.dataset_sha.as_deref(),
         jobs: prep.jobs,
         agent_jobs: prep.agent_jobs,
-        driver,
+        drivers: Arc::new(source::driver_registry()),
         cache_root: None,
         invalidate: prep.invalidate,
         ignore_missing_attachments: prep.ignore_missing_attachments,
@@ -2151,7 +2136,6 @@ async fn materialize_dataset(
     scan_id: &str,
     store: &Store,
     scanners: &[CompiledScanner],
-    driver: Arc<dyn Driver>,
     progress: bool,
 ) -> Result<(Option<String>, String), DialogError> {
     match plan {
@@ -2196,7 +2180,7 @@ async fn materialize_dataset(
                 }
             }
             let placed = view.finish()?;
-            scanner_attach::attach_for_scanners(store, &id, scanners, driver).await?;
+            scanner_attach::attach_for_scanners(store, &id, scanners).await?;
             let commit_sha = DatasetStore::from(store)
                 .get(&id)
                 .map_err(|e| DialogError::Failed(e.to_string()))?

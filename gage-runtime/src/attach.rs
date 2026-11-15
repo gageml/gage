@@ -30,7 +30,7 @@ use crate::error::Error;
 use datafusion::prelude::SessionContext;
 use gage_core::config::default_cache_root;
 use gage_query::{ContextBuilder, ScanScope};
-use gage_session::Driver;
+use gage_registry::driver::DriverRegistry;
 use gage_store::{
     AttachmentLinkOutcome, AttachmentSpec, AttachmentStore, DatasetStore, Store,
     default_attachment_key, selection_key_part,
@@ -61,9 +61,9 @@ pub struct AttachContext {
     pub store: Arc<tokio::sync::Mutex<Store>>,
     /// Every attachment the function writes is reported here
     pub attached: mpsc::UnboundedSender<Attached>,
-    /// The driver that reopens a session's native source for
-    /// `session.native()`
-    pub driver: Arc<dyn Driver>,
+    /// The drivers that reopen a session's native source for
+    /// `session.native()`, each session through its own
+    pub drivers: Arc<DriverRegistry>,
     /// Where the sources opened during the phase keep their derived
     /// state; `None` is the default cache root
     pub cache_root: Option<PathBuf>,
@@ -83,7 +83,7 @@ impl AttachContext {
         store_path: &Path,
         cache_root: Option<PathBuf>,
         attached: mpsc::UnboundedSender<Attached>,
-        driver: Arc<dyn Driver>,
+        drivers: Arc<DriverRegistry>,
     ) -> Result<Self, gage_store::StoreError> {
         let root = cache_root.clone().unwrap_or_else(default_cache_root);
         Ok(AttachContext {
@@ -94,7 +94,7 @@ impl AttachContext {
                 store_path, &root,
             )?)),
             attached,
-            driver,
+            drivers,
             cache_root,
             query_store: Arc::new(Mutex::new(Store::open_with_cache_root(store_path, &root)?)),
             dataset_query: Arc::new(OnceCell::new()),

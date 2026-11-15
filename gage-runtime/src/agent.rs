@@ -1,4 +1,4 @@
-//! `call_agent(prompt)`: run an agent through the scan's driver.
+//! `call_agent(prompt)`: run an agent through one of the scan's drivers.
 //!
 //! The builder collects the call's shape and, when awaited, starts the
 //! agent through [`Driver::start_agent`](gage_session::Driver::start_agent)
@@ -10,6 +10,14 @@
 //! the one-shot form. Each event is delivered once; a `poll` after
 //! `Stop`, or a `send`, `send_now`, or `kill` after the session has
 //! ended, fails with `AgentError::Stopped`.
+//!
+//! The call's model names the driver. `<scheme>:<model>` under a
+//! driver's scheme runs on that driver, which is given `<model>`; a
+//! model with no driver scheme, or no model, runs on the default
+//! driver. A driver is asked once per scan whether it can start
+//! agents: the default driver before the scan starts, any other
+//! before its first agent, whose start fails with the driver's reason
+//! when it cannot.
 //!
 //! When the agent ends, the runtime stores its transcript as a session
 //! object whose `native_source` is
@@ -41,7 +49,9 @@ use crate::error::{AgentError, Error};
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
 use gage_mcp::{ServiceHandle, build_mcp_service};
-use gage_session::{AgentEvent, AgentMcp, AgentSession, AgentSpec, SystemPrompt, TurnResult};
+use gage_session::{
+    AgentEvent, AgentMcp, AgentSession, AgentSpec, Driver, SystemPrompt, TurnResult,
+};
 use gage_store::{AgentAttrs, SessionStore, session_object_id};
 use rune::alloc::fmt::TryWrite;
 use rune::runtime::{Formatter, Mut, Object, Protocol, Ref, Value, VmError};
@@ -127,7 +137,8 @@ fn call_agent(prompt: Ref<str>) -> CallAgent {
 
 impl CallAgent {
     /// A model alias (`small`, `medium`, `large`) or a name the driver
-    /// accepts
+    /// accepts, on the default driver; with a driver's scheme in
+    /// front, as in `claude:small`, on that driver
     #[rune::function(instance)]
     fn model(mut self, model: Ref<str>) -> Self {
         self.spec.model = Some(model.to_owned());
@@ -197,8 +208,8 @@ impl CallAgent {
     }
 }
 
-/// Start the agent through the scan's driver. Declared tools are
-/// validated, served from the scan's MCP host, and named to the
+/// Start the agent through the driver its model names. Declared tools
+/// are validated, served from the scan's MCP host, and named to the
 /// driver along with the service URL.
 /// Start the agent under an `agent` span naming its model, turn
 /// limit, and name. Every later method of the agent runs under the
@@ -216,6 +227,15 @@ async fn start(c: CallAgent) -> Result<Agent, Error> {
 async fn start_in_span(c: CallAgent, span: Span) -> Result<Agent, Error> {
     let ctx = current().map_err(|e| Error::agent(e.to_string()))?;
     let mut spec = c.spec;
+    let model = spec.model.clone();
+    let (driver, driver_model) = ctx
+        .drivers
+        .agent_driver(spec.model.as_deref())
+        .map_err(|e| Error::agent(format!("call_agent: {e}")))?;
+    spec.model = driver_model;
+    ctx.ensure_agent_ready(&*driver)
+        .await
+        .map_err(Error::agent)?;
     let tools = c.tools.len();
     let sink = OUTPUT_SINK.try_with(|s| s.clone()).ok();
     spec.builtin_tools = tool::builtin_names(&c.tools)?;
@@ -235,30 +255,30 @@ async fn start_in_span(c: CallAgent, span: Span) -> Result<Agent, Error> {
         });
         Some(handle)
     };
-    let model = spec.model.clone();
     let max_turns = spec.max_turns;
     let permit = acquire_permit(&ctx, sink).await;
-    let session = ctx
-        .driver
+    let session = driver
         .start_agent(spec)
         .map_err(|e| Error::agent(format!("call_agent: {e}")))?;
     tool_uses
         .set(session.tool_use_entries())
         .ok()
         .expect("the tool-use slot is fresh for each agent");
-    let object_id = session_object_id(ctx.driver.name(), session.native_id());
+    let object_id = session_object_id(driver.name(), session.native_id());
     write_running_record(
         &ctx.paths.tasks_dir().join(&ctx.scanner).join(&ctx.task),
         &object_id,
         session.native_id(),
+        driver.name(),
     )
     .map_err(|e| Error::agent(format!("call_agent: writing agent record: {e}")))?;
-    tracing::info!(tools, session = %object_id, "agent started");
+    tracing::info!(tools, session = %object_id, driver = driver.name(), "agent started");
     Ok(Agent {
         model,
         max_turns,
         inner: Arc::new(Mutex::new(AgentInner {
             session: Some(session),
+            driver,
             service,
             permit: Some(permit),
             ctx,
@@ -333,6 +353,8 @@ struct AgentInner {
     /// `None` while a method holds the session across an await, and
     /// after the session has ended
     session: Option<Box<dyn AgentSession>>,
+    /// The driver running the session, which stores its transcript
+    driver: Arc<dyn Driver>,
     /// The tool service registered for this session; unregistered
     /// when the session ends
     service: Option<ServiceHandle>,
@@ -486,10 +508,11 @@ async fn do_stop(inner: Inner) -> Result<(), Error> {
         .map_err(|e| Error::agent(format!("agent.stop: stderr: {e}")))?;
     let stderr = String::from_utf8_lossy(&stderr).into_owned();
 
-    let (ctx, last_turn, stop_reason, started) = {
+    let (ctx, driver, last_turn, stop_reason, started) = {
         let g = inner.lock().unwrap();
         (
             g.ctx.clone(),
+            Arc::clone(&g.driver),
             g.last_turn.clone(),
             g.stop_reason.clone(),
             g.started,
@@ -508,7 +531,7 @@ async fn do_stop(inner: Inner) -> Result<(), Error> {
         exit_code,
         stderr,
     );
-    store_transcript(&ctx, session.as_mut(), &result, raw.as_deref()).await?;
+    store_transcript(&ctx, &*driver, session.as_mut(), &result, raw.as_deref()).await?;
     if let Err(e) = session.cleanup() {
         tracing::warn!(error = %e, "agent cleanup");
     }
@@ -527,6 +550,7 @@ async fn do_stop(inner: Inner) -> Result<(), Error> {
 /// source and write the task's agent record into the scan directory.
 async fn store_transcript(
     ctx: &ScanContext,
+    driver: &dyn Driver,
     session: &mut dyn AgentSession,
     result: &AgentResult,
     raw: Option<&str>,
@@ -548,7 +572,7 @@ async fn store_transcript(
     );
     let added = SessionStore::from(&*store)
         .with_origin(origin)
-        .add(&*ctx.driver, &mut *native)
+        .add(driver, &mut *native)
         .map_err(|e| Error::agent(format!("storing agent session: {e}")))?;
     drop(store);
     tracing::info!(session = %added.id, "stored agent session");
@@ -562,14 +586,22 @@ async fn store_transcript(
     .map_err(|e| Error::agent(format!("writing agent record: {e}")))
 }
 
-/// `agents/<id>/native_id` under the task's directory: the record of
-/// an agent that has started and not ended. `id` is the object id the
-/// store will give the session, so the result written at stop lands
-/// in the same directory. Live readers open the session through the
-/// harness's native source by the id in the file.
-fn write_running_record(task_dir: &Path, id: &str, native_id: &str) -> io::Result<()> {
+/// `agents/<id>/{driver, native_id}` under the task's directory: the
+/// record of an agent that has started and not ended. `id` is the
+/// object id the store will give the session, so the result written
+/// at stop lands in the same directory. Live readers open the session
+/// through the named driver's native source by the id in `native_id`.
+/// The driver is written first, since `native_id` is what marks the
+/// record as present.
+fn write_running_record(
+    task_dir: &Path,
+    id: &str,
+    native_id: &str,
+    driver: &str,
+) -> io::Result<()> {
     let dir = task_dir.join("agents").join(id);
     fs::create_dir_all(&dir)?;
+    fs::write(dir.join("driver"), driver)?;
     fs::write(dir.join("native_id"), native_id)
 }
 
@@ -578,7 +610,9 @@ fn write_running_record(task_dir: &Path, id: &str, native_id: &str) -> io::Resul
 /// `attrs.json` carries the session-level result; `result` is the
 /// harness's last turn message verbatim, absent when the harness
 /// reported none, in which case a nonzero exit is the error. The
-/// running marker goes once the result is in place.
+/// running record's driver goes first, since a directory that holds a
+/// result holds nothing else, and its `native_id` once the result is
+/// in place.
 fn write_agent_record(
     task_dir: &Path,
     id: &str,
@@ -588,6 +622,7 @@ fn write_agent_record(
 ) -> io::Result<()> {
     let dir = task_dir.join("agents").join(id);
     fs::create_dir_all(&dir)?;
+    remove_if_present(&dir.join("driver"))?;
     let attrs = serde_json::to_vec_pretty(&AgentAttrs {
         exit_code: result.exit_code,
         is_error: result.is_error || (raw.is_none() && result.exit_code != 0),
@@ -602,18 +637,23 @@ fn write_agent_record(
     if let Some(raw) = raw {
         fs::write(dir.join("result"), raw)?;
     }
-    // A marker already gone means the record was never provisional,
-    // which changes nothing about the result beside it
-    match fs::remove_file(dir.join("native_id")) {
-        Ok(()) => {}
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-        Err(e) => return Err(e),
-    }
+    remove_if_present(&dir.join("native_id"))?;
     let mut link = fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(task_dir.join("agents.link"))?;
     writeln!(link, "{commit_sha}")
+}
+
+/// Remove a file of the running record. One already gone means the
+/// record was never provisional, which changes nothing about the
+/// result beside it.
+fn remove_if_present(path: &Path) -> io::Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
 }
 
 /// The result once the session has ended, `None` while it runs
@@ -949,5 +989,34 @@ impl Event {
             Event::ParseError(s) => write!(f, "ParseError({s:?})")?,
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The running record names the driver beside the native id, and
+    /// the result that replaces it leaves neither, since a directory
+    /// with a result is stored and holds nothing but the result.
+    #[test]
+    fn running_record_names_the_driver_until_the_result_replaces_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("agents").join("abc");
+        write_running_record(tmp.path(), "abc", "native-1", "scripted").unwrap();
+        assert_eq!(fs::read_to_string(dir.join("driver")).unwrap(), "scripted");
+        assert_eq!(
+            fs::read_to_string(dir.join("native_id")).unwrap(),
+            "native-1"
+        );
+
+        let result = AgentResult::new(TurnResult::default(), "end_turn", 0, String::new());
+        write_agent_record(tmp.path(), "abc", "0123abc", &result, None).unwrap();
+        let mut names: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["attrs.json", "stderr"]);
     }
 }

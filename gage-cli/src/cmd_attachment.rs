@@ -43,7 +43,6 @@ use crate::human::{count, format_elapsed_ms, format_size};
 use crate::progress;
 use crate::scanner_attach::{self, describe};
 use crate::scanner_spec;
-use crate::source;
 use crate::style::{self, IdKind, styled_id};
 use crate::target::resolve_target;
 
@@ -307,10 +306,7 @@ async fn add_from_scanners(
         selected.iter().map(|r| r.source.def().name.clone()),
     )?;
     dialog::confirm(yes, true)?;
-    let driver = source::driver_registry()
-        .default()
-        .ok_or_else(|| DialogError::Failed("no default session driver registered".to_string()))?;
-    let placed = scanner_attach::attach_for_scanners(store, &dataset_id, &compiled, driver).await?;
+    let placed = scanner_attach::attach_for_scanners(store, &dataset_id, &compiled).await?;
     Ok(format!(
         "Added {} to dataset {}",
         count(placed, "attachment"),

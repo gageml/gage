@@ -19,7 +19,7 @@ use datafusion::prelude::SessionContext;
 use gage_query::ContextBuilder;
 use gage_registry::driver::DriverRegistry;
 use gage_session::is_system;
-use gage_session::{Driver, EntryValue};
+use gage_session::{Driver, EntryValue, NativeLookupError, SourceOptions};
 use gage_store::url::{self, LineSelection};
 use gage_store::{
     ChangeKind, ExternalSession, NoteEdit, NoteFull, NoteInput, NoteStore, NoteValue, Store,
@@ -87,6 +87,39 @@ impl Backend {
             spec: spec.to_string(),
             show_agents: false,
             cache_root: None,
+        }
+    }
+
+    /// Over the native source holding the running agent session
+    /// `native_id`, read with the runtime's own in-flight agent
+    /// sessions. An agent runs on the driver its model names, so each
+    /// driver's default source is asked for the session, in
+    /// registration order. A session no driver holds opens the default
+    /// driver's source, whose read then reports it missing; a driver
+    /// that fails to answer is the error when no other holds it.
+    pub async fn live_agent(native_id: &str) -> Result<Backend, Box<dyn Error>> {
+        let registry = DriverRegistry::builtin();
+        let mut failed = None;
+        for driver in registry.drivers() {
+            let Some(scheme) = driver.schemes().first() else {
+                continue;
+            };
+            let spec = format!("{scheme}:");
+            let mut options = SourceOptions::new(&spec);
+            options.show_agents(true);
+            let found = driver
+                .open_source(&options)
+                .map_err(NativeLookupError::Driver)
+                .and_then(|source| source.find_native(native_id));
+            match found {
+                Ok(_) => return Backend::native(&spec).show_agents().open().await,
+                Err(NativeLookupError::NoMatch(_)) => {}
+                Err(e) => failed = Some(format!("{} driver: {e}", driver.name())),
+            }
+        }
+        match failed {
+            Some(e) => Err(e.into()),
+            None => Backend::native("").show_agents().open().await,
         }
     }
 
