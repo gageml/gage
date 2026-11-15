@@ -199,9 +199,18 @@ async fn write_store_counts(
 fn write_storage(out: &mut String, root: &Path, verbose: bool) {
     w(out, format!("{}", style("Storage").bold()));
     let total = dir_size(root);
+    let hint = if verbose {
+        String::new()
+    } else {
+        format!(" {}", style("(use -v for details)").dim())
+    };
     w(
         out,
-        format!("  {}:  {}", shorten_home(root), format_size(total as i64)),
+        format!(
+            "  {}:  {}{hint}",
+            shorten_home(root),
+            format_size(total as i64)
+        ),
     );
     if !verbose {
         return;
@@ -281,8 +290,11 @@ mod tests {
         fs::write(dir.path().join("a"), b"12345").unwrap();
         let mut out = String::new();
         write_storage(&mut out, dir.path(), false);
-        let line = out.lines().nth(1).unwrap();
-        assert_eq!(line, format!("  {}:  5 B", shorten_home(dir.path())));
+        let line = console::strip_ansi_codes(out.lines().nth(1).unwrap()).into_owned();
+        assert_eq!(
+            line,
+            format!("  {}:  5 B (use -v for details)", shorten_home(dir.path()))
+        );
         assert!(!out.contains("~/.gage"));
     }
 }
