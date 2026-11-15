@@ -252,6 +252,11 @@ pub struct Entry {
     pub uuid: Option<String>,
     /// The entry type, from the `entry` table
     pub entry_type: String,
+    /// Who produced the message, from the `message` table; `None` for
+    /// an entry that is not a message. A harness need not name its
+    /// entries by who produced them, so this and not the entry type
+    /// says whose message an entry is.
+    pub message_type: Option<String>,
     /// The message subtype the driver derived, from the `message`
     /// table; `None` for an entry that is not a message
     pub message_subtype: Option<String>,
@@ -287,10 +292,7 @@ impl BodySource {
     #[cfg(test)]
     pub(crate) fn claude() -> Self {
         let registry = gage_registry::driver::DriverRegistry::builtin();
-        Self::new(
-            registry.for_name("claude").unwrap(),
-            crate::format::SUPPORTED,
-        )
+        Self::new(registry.for_name("claude").unwrap(), crate::format::CLAUDE)
     }
 }
 
@@ -390,11 +392,12 @@ impl Entry {
     }
 
     /// Outline label — the message subtype when meaningful (e.g.
-    /// `tool_use`, `thinking`, `tool_result`, `meta`), otherwise the
-    /// entry type.
+    /// `tool_use`, `thinking`, `tool_result`, `meta`), otherwise who
+    /// produced the message, otherwise the entry type.
     pub fn label(&self) -> &str {
         match self.message_subtype.as_deref() {
-            Some("text") | None => &self.entry_type,
+            Some("text") => self.message_type.as_deref().unwrap_or(&self.entry_type),
+            None => &self.entry_type,
             Some(sub) => sub,
         }
     }
@@ -436,6 +439,7 @@ mod tests {
                     line,
                     uuid: None,
                     entry_type: "user".to_string(),
+                    message_type: None,
                     message_subtype: None,
                     value: json!({}).into(),
                 })

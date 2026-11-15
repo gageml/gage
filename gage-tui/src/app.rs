@@ -2679,6 +2679,7 @@ mod tests {
                     line,
                     uuid: Some(format!("u{line}")),
                     entry_type: "user".into(),
+                    message_type: None,
                     message_subtype: Some("text".into()),
                     value: serde_json::json!({"type": "user"}).into(),
                 })
