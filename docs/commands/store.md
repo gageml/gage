@@ -71,20 +71,31 @@ gage store gc [OPTIONS]
 
 ## store ls
 
-List the files stored for an object.
+List store paths.
 
 ```cli
-gage store ls <OBJECT>
+gage store ls [PATHS]...
 ```
+
+The store is one hierarchy: namespaces, the references in them, and the files
+of the commit each reference points at. A path starts at the store root, runs
+through a reference, and continues into the files of its commit. Without a
+path, the command lists the Gage namespaces as a starting point.
+
+A path with no wildcard lists the children of the container it names, or the
+file it names. A path with a wildcard lists what it matches. `*` matches one
+name and `**` matches any number of names, on either side of a reference.
 
 ## store cat
 
-Print a file stored for an object, as stored. Without `FILE`, the object's
-attributes are printed.
+Print a stored file. The file's bytes are printed as stored.
 
 ```cli
-gage store cat <OBJECT> [FILE]
+gage store cat <PATH>
 ```
+
+`PATH` is a path as `gage store ls` lists it. A wildcard is accepted when it
+matches exactly one file.
 
 ## store delete
 

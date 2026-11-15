@@ -17,7 +17,8 @@ gage fetch [OPTIONS] <REPOSITORY> [OBJECTS]...
 [`gage remote add`](/docs/commands/remote), or any Git URL or path. A URL is
 fetched without adding a remote, and nothing of it stays in the store. Objects
 are tag names, object IDs, or unique ID prefixes as the remote has them. With
-no objects, `--all` is required.
+no objects, the command fetches the objects the remote records as its fetch
+default. Pass `--all` to fetch the whole remote.
 
 | Option      | Description                                                        |
 | ----------- | ------------------------------------------------------------------ |

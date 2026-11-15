@@ -2,7 +2,7 @@
 title: gage dataset
 description:
   Command reference for gage dataset, including subcommands to add, refresh,
-  list, show, and delete datasets
+  list, show, delete, link, and unlink datasets
 ---
 
 The `gage dataset` command manages datasets. A dataset is a set of stored
@@ -32,19 +32,22 @@ linked into the new dataset in a single step.
 | ------------------------- | ------------------------------------------------------------ |
 | `-s, --source <SOURCE>`   | Session source, as described in [`gage session`](/docs/commands/session) |
 | `-p, --project <PROJECT>` | Limit sessions to a project path or name                     |
+| `--touches <DIR>`         | Limit sessions to those that touch a directory, as described in [`gage session add`](/docs/commands/session#session-add) |
 | `--since <SINCE>`         | Select sessions modified within a duration (e.g. `1h`, `30m`, `7d`) |
 | `-a, --all`               | Select every available session                               |
 | `-n, --limit <N>`         | Select the latest N sessions                                 |
 | `-r, --sample <N>`        | Select N sessions at random                                  |
 | `--max-size <SIZE>`       | Maximum stored size per session. Overrides `storage.max_session_size`. |
-| `--tag <NAME>`            | Tag the new dataset                                          |
+| `-t, --tag <NAME>`        | Tag the new dataset                                          |
 | `--force-tag`             | Move the tag if it exists                                    |
 | `-y, --yes`               | Skip confirmation prompt                                     |
 
 To add sessions to an existing dataset, use
 [`gage session add --dataset`](/docs/commands/session#session-add). To add
 attachments, use
-[`gage attachment add --dataset`](/docs/commands/attachment#attachment-add).
+[`gage attachment add --dataset`](/docs/commands/attachment#attachment-add). To
+add sessions and attachments already in the store, use
+[`gage dataset link`](#dataset-link).
 
 ## dataset refresh
 
@@ -106,3 +109,33 @@ Member sessions and the scan runs that used the dataset are kept unless
 | ------------- | --------------------------------------------------------------------------------- |
 | `--sessions`  | Also remove member sessions from the store. A session another dataset holds is kept. |
 | `-y, --yes`   | Skip confirmation prompt                                                          |
+
+## dataset link
+
+Add stored sessions and attachments to a dataset.
+
+```cli
+gage dataset link [OPTIONS] <DATASET> <OBJECT>...
+```
+
+Each object is already in the store and is given as a tag, an ID, or a unique
+ID prefix. A session takes a member slot. An object that is already a member
+advances to its current commit.
+
+| Option      | Description              |
+| ----------- | ------------------------ |
+| `-y, --yes` | Skip confirmation prompt |
+
+## dataset unlink
+
+Remove sessions and attachments from a dataset.
+
+```cli
+gage dataset unlink [OPTIONS] <DATASET> <OBJECT>...
+```
+
+The objects stay in the store.
+
+| Option      | Description              |
+| ----------- | ------------------------ |
+| `-y, --yes` | Skip confirmation prompt |

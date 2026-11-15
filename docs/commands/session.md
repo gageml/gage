@@ -2,7 +2,7 @@
 title: gage session
 description:
   Command reference for gage session, including subcommands to list, add,
-  remove, delete, and view sessions
+  delete, move, view, and find sessions
 ---
 
 The `gage session` command manages sessions. For background, see
@@ -42,6 +42,7 @@ gage session list [OPTIONS]
 | `--since <SINCE>`         | Show sessions modified within a duration (e.g. `1h`, `30m`, `7d`) |
 | `--empty`                 | Only show empty sessions                                 |
 | `-d, --dataset <DATASET>` | List sessions in a dataset, in member order. Implies `--stored`. |
+| `--share <SHARE>`         | List sessions in a share, given as a tag, ID, or prefix. Implies `--stored`. |
 | `-m, --more`              | Show more items. Repeat to show more per use.            |
 | `-a, --all`               | Show all items                                           |
 | `-n, --limit <LIMIT>`     | Limit the number of items shown (default: 20)            |
@@ -62,45 +63,63 @@ least one session argument or selection option is required.
 | Option                    | Description                                                  |
 | ------------------------- | ------------------------------------------------------------ |
 | `-d, --dataset <DATASET>` | Add the sessions to a dataset in the same step. With `--stored`, links sessions already in the store. |
+| `--share <SHARE>`         | Add the sessions to a share in the same step, given as a tag, ID, or prefix. A share that names filters admits published sessions only. |
 | `-p, --project <PROJECT>` | Limit sessions to a project path or name                     |
+| `--touches <DIR>`         | Limit sessions to those that touch a directory               |
 | `--since <SINCE>`         | Select sessions modified within a duration (e.g. `1h`, `30m`, `7d`) |
 | `-a, --all`               | Select every available session                               |
 | `-n, --limit <N>`         | Select the latest N sessions                                 |
 | `-r, --sample <N>`        | Select N sessions at random                                  |
 | `--max-size <SIZE>`       | Maximum stored size per session, e.g. `256MB` or `1GB`. Overrides `storage.max_session_size`. |
+| `-t, --tag <NAME>`        | Tag the added session. Applies when one session is given.    |
+| `--force-tag`             | Move the tag if it exists                                    |
 | `-y, --yes`               | Skip confirmation prompt                                     |
 
-## session remove
+A session touches a directory when it wrote or read a file in the directory or
+below it, or when it started there.
 
-Remove stored sessions from the store or from a dataset.
-
-```cli
-gage session remove [OPTIONS] <IDS>...
-```
-
-Without `--dataset`, each session is unlinked from every dataset that holds it
-and marked removed in the store. With `--dataset`, each session is unlinked
-from that dataset only and stays in the store. The native session is never
-affected.
-
-| Option                    | Description                                 |
-| ------------------------- | ------------------------------------------- |
-| `-d, --dataset <DATASET>` | Remove from this dataset only (ID or prefix) |
-| `-y, --yes`               | Skip confirmation prompt                    |
+`--limit` combines with `--since` to cap the sessions selected from the window.
+`--sample` draws from sessions modified in the past 30 days, or the window given
+with `--since`.
 
 ## session delete
 
-Delete native sessions. Each session's files are removed from the source.
-Stored sessions are not affected.
+Delete native sessions, or stored sessions with `--stored`.
 
 ```cli
 gage session delete [OPTIONS] [IDS]...
 ```
 
-| Option      | Description              |
-| ----------- | ------------------------ |
-| `--empty`   | Delete empty sessions    |
-| `-y, --yes` | Skip confirmation prompt |
+Each native session's files are removed from the source. Stored sessions are
+not affected.
+
+With `--stored`, each session is unlinked from every dataset and share that
+holds it and marked removed in the store. The native session is not affected.
+To take a session out of one dataset and keep it in the store, use
+[`gage dataset unlink`](/docs/commands/dataset#dataset-unlink).
+
+| Option      | Description                                      |
+| ----------- | ------------------------------------------------ |
+| `--empty`   | Delete empty sessions. Applies to native sessions. |
+| `-y, --yes` | Skip confirmation prompt                         |
+
+## session move
+
+Move a native session to another project.
+
+```cli
+gage session move [OPTIONS] <SESSION> <DIR>
+```
+
+The session's files are moved to the project at `DIR`, and `DIR` is recorded as
+the session's working directory, so Claude Code resumes the session from there.
+Stored sessions are not affected. A session that is open in Claude Code is not
+moved.
+
+| Option      | Description                                         |
+| ----------- | --------------------------------------------------- |
+| `--force`   | Move the session without checking that it is closed |
+| `-y, --yes` | Skip confirmation prompt                            |
 
 ## session view
 
@@ -110,11 +129,54 @@ View a session.
 gage session view [OPTIONS] [SESSION]
 ```
 
-If you omit the ID, Gage lets you pick from a list.
+If you omit the ID, Gage lets you pick from a list. A trailing `:LINES` opens
+the view at a session line, as in `7260:2956`. `LINES` is a line (`42`), a
+range (`10-20`), or a comma-separated list of them (`10-20,42`). The view opens
+at the first line.
 
 | Option                    | Description                    |
 | ------------------------- | ------------------------------ |
 | `-v, --options <OPTIONS>` | View options (comma-separated) |
 
-View options: `turns` shows model turns in the outline. `detail` shows all
-entries. The default hides low-signal entries.
+Each view option has a short and a long name. A leading `!` turns an option
+off, as in `!user`.
+
+| View option      | Description                                         |
+| ---------------- | --------------------------------------------------- |
+| `a`, `assistant` | Assistant messages and thinking in the outline (on by default) |
+| `u`, `user`      | User messages in the outline (on by default)        |
+| `t`, `tools`     | Tool calls in the outline                           |
+| `e`, `entries`   | All entries in the outline, including system and bookkeeping entries |
+| `s`, `source`    | Native source in the content pane                   |
+| `n`, `turns`     | Turn markers in the outline                         |
+| `c`, `changes`   | Changes of a published session                      |
+
+## session find
+
+Find sessions by message text.
+
+```cli
+gage session find [OPTIONS] <QUERY>
+```
+
+The command searches message text in the default source, in each `--source`,
+and in the store with `--stored`. It lists the matching messages, best match
+first. `--source` is repeatable here.
+
+Bare terms match any of them. `a AND b`, `+a`, `-a`, a quoted phrase, and a
+field term such as `type:assistant` narrow a search.
+
+| Option                | Description                                         |
+| --------------------- | --------------------------------------------------- |
+| `--since <SINCE>`     | Search sessions modified within a duration (e.g. `1h`, `30m`, `7d`) |
+| `-U, --user`          | Search text typed by the user                       |
+| `-A, --assistant`     | Search text written by the assistant                |
+| `-T, --tool`          | Search tool calls and results                       |
+| `-D, --by-date`       | Sort hits by date, most recent first. The hits shown are still the best matches. |
+| `-m, --more`          | Show more items. Repeat to show more per use.       |
+| `-a, --all`           | Show all items, up to 1000 matches per source       |
+| `-n, --limit <LIMIT>` | Limit the number of items shown (default: 20)       |
+| `--full-id`           | Show the full session ID                            |
+
+`--user`, `--assistant`, and `--tool` search only messages of those kinds.
+`--user` with `--assistant` searches both.

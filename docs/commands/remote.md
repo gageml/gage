@@ -25,10 +25,15 @@ gage remote add [OPTIONS] <NAME> <URL>
 `URL` is any Git URL or path. A project's own repository is a valid remote.
 What Gage stores there is not transferred by a clone or seen by a checkout.
 
-| Option      | Description                                                                    |
-| ----------- | ------------------------------------------------------------------------------ |
-| `--backup`  | Mark the remote as a backup target. `gage backup` sends the whole store to a backup target and refuses any other remote. |
-| `-y, --yes` | Skip confirmation prompt                                                       |
+| Option             | Description                                                             |
+| ------------------ | ----------------------------------------------------------------------- |
+| `--push <OBJECT>`  | Object to push, as a tag, ID, or prefix (repeatable). `gage push` sends these objects, and everything they link, when no object is named. |
+| `--fetch <OBJECT>` | Object to fetch, as a tag, ID, or prefix (repeatable). `gage fetch` takes these objects, and everything they link, when no object is named. |
+| `--backup`         | Mark the remote as a backup target. `gage backup` sends the whole store to a backup target and refuses any other remote. |
+| `-y, --yes`        | Skip confirmation prompt                                                |
+
+Each `--push` and `--fetch` object is recorded as given. It is resolved when
+pushed, or against what the remote has when fetched.
 
 ## remote list
 
