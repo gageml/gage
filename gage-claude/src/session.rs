@@ -16,6 +16,7 @@ use std::time::{Duration, SystemTime};
 use crate::codec::codec;
 use gage_core::config::gage_home;
 pub use gage_corpus::SessionInfo;
+use gage_corpus::project_slug;
 use gage_session::{DriverError, EntryCodec, EntryValue};
 use regex::Regex;
 
@@ -440,16 +441,7 @@ pub fn is_agent_tmp_slug(slug: &str) -> bool {
 /// `~/.claude/projects/`. Lossy: every non-ASCII-alnum character (including
 /// the path separator) becomes `-`.
 pub fn encode_project_dir(path: &Path) -> String {
-    let s = path.to_string_lossy();
-    let mut encoded = String::with_capacity(s.len());
-    for c in s.chars() {
-        if c.is_ascii_alphanumeric() {
-            encoded.push(c);
-        } else {
-            encoded.push('-');
-        }
-    }
-    encoded
+    project_slug(path)
 }
 
 #[cfg(test)]

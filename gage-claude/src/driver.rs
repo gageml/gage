@@ -52,6 +52,7 @@ use crate::session::{
 use crate::session_reader;
 use crate::skill::skill_command;
 use gage_corpus::tables::{EntryTable, MessageTable, SessionTable, ToolUseFileTable, ToolUseTable};
+use gage_corpus::{decoded_entries, format_project_slug, write_derived};
 
 /// MCP server name under which Gage registers in `.mcp.json`.
 pub(crate) const MCP_SERVER_NAME: &str = "gage";
@@ -74,6 +75,8 @@ pub(crate) const SESSION_TYPE: &str = "claude";
 /// `read_stored`. The name identifies the byte layout under
 /// `files.d/`; the trailing digit is its version.
 pub(crate) const CONTENT_FORMAT: &str = "claude-jsonl 1";
+/// The path of the transcript in a stored session's content
+const CONTENT_PATH: &str = "session.jsonl";
 
 pub struct ClaudeDriver {
     /// The model each size name resolves to
@@ -197,7 +200,7 @@ impl Driver for ClaudeDriver {
     }
 
     fn format_project(&self, name: &str, max_chars: usize) -> String {
-        shorten_project_name(strip_home_prefix(name), max_chars)
+        format_project_slug(name, max_chars)
     }
 
     fn write_native(
@@ -229,7 +232,7 @@ impl Driver for ClaudeDriver {
         // the cost is one early timestamp, so the race is accepted.
         let path = claude.session_path().to_path_buf();
         let bytes = fs::read(&path).map_err(DriverError::Io)?;
-        sink.create("session.jsonl")
+        sink.create(CONTENT_PATH)
             .and_then(|mut w| w.write_all(&bytes))
             .map_err(DriverError::Io)?;
         let fingerprint = Fingerprint {
@@ -894,43 +897,6 @@ fn pid_alive(pid: i32) -> bool {
     io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
-/// Slug to cwd for every project the root's registry records. A
-/// missing registry is an empty map.
-/// The project name without a leading `-home-<user>-` or
-/// `-Users-<user>-`, the encoded home directory Claude Code puts in
-/// front of nearly every project. The match is on the name's shape,
-/// so names written on another machine shorten the same way.
-fn strip_home_prefix(name: &str) -> &str {
-    ["-home-", "-Users-"]
-        .iter()
-        .find_map(|prefix| {
-            let rest = name.strip_prefix(prefix)?;
-            let (user, project) = rest.split_once('-')?;
-            (!user.is_empty() && !project.is_empty()).then_some(project)
-        })
-        .unwrap_or(name)
-}
-
-/// The name cut to `max_chars` characters. A long name keeps a head
-/// of one quarter of the budget, then `…`, then as many of its final
-/// characters as fill the rest. The tail carries the project's own
-/// directory name, so it gets the larger share.
-fn shorten_project_name(name: &str, max_chars: usize) -> String {
-    const ELLIPSIS: char = '…';
-    let count = name.chars().count();
-    if count <= max_chars {
-        return name.to_string();
-    }
-    if max_chars == 0 {
-        return String::new();
-    }
-    let head_len = max_chars / 4;
-    let tail_len = max_chars - head_len - 1;
-    let head: String = name.chars().take(head_len).collect();
-    let tail: String = name.chars().skip(count - tail_len).collect();
-    format!("{head}{ELLIPSIS}{tail}")
-}
-
 impl ClaudeSource {
     /// The session file for `native_id` and its metadata
     /// The transcript path and a fresh stat of it. The stat is taken
@@ -1217,7 +1183,7 @@ impl StoredSession for ClaudeStoredSession {
     /// as they do for a native session; a line that does not read or
     /// decode is an error naming the line.
     fn entries(&mut self) -> Box<dyn Iterator<Item = Result<Entry, DriverError>> + '_> {
-        let reader = match self.source.open("session.jsonl") {
+        let reader = match self.source.open(CONTENT_PATH) {
             Ok(r) => session_reader::reader(r),
             Err(e) => return Box::new(std::iter::once(Err(DriverError::Io(e)))),
         };
@@ -1236,7 +1202,7 @@ impl StoredSession for ClaudeStoredSession {
     /// whole file, so the rows are read before the first is yielded;
     /// read failures follow the rows.
     fn tool_uses(&mut self) -> Box<dyn Iterator<Item = Result<ToolUse, DriverError>> + '_> {
-        let reader = match self.source.open("session.jsonl") {
+        let reader = match self.source.open(CONTENT_PATH) {
             Ok(r) => session_reader::reader(r),
             Err(e) => return Box::new(std::iter::once(Err(DriverError::Io(e)))),
         };
@@ -1258,23 +1224,7 @@ impl StoredSession for ClaudeStoredSession {
     /// line number and yield nothing, as they do for `entries`; a line
     /// that does not decode is an error naming the line.
     fn entry_values(&mut self) -> Box<dyn Iterator<Item = Result<DecodedEntry, DriverError>> + '_> {
-        use std::io::BufRead;
-        let reader = match self.source.open("session.jsonl") {
-            Ok(r) => io::BufReader::new(r),
-            Err(e) => return Box::new(std::iter::once(Err(DriverError::Io(e)))),
-        };
-        let codec = codec();
-        Box::new(reader.lines().enumerate().filter_map(move |(i, item)| {
-            let line = i as u32 + 1;
-            match item {
-                Ok(text) if text.trim().is_empty() => None,
-                Ok(text) => match codec.decode(text.as_bytes()) {
-                    Ok(value) => is_entry(&value).then_some(Ok(DecodedEntry { line, value })),
-                    Err(e) => Some(Err(DriverError::Other(format!("line {line}: {e}")))),
-                },
-                Err(e) => Some(Err(DriverError::Io(e))),
-            }
-        }))
+        decoded_entries(&*self.source, CONTENT_PATH, codec())
     }
 
     fn write_derived(
@@ -1282,14 +1232,14 @@ impl StoredSession for ClaudeStoredSession {
         derivation: &Derivation,
         sink: &mut dyn ContentSink,
     ) -> Result<Vec<u32>, DriverError> {
-        self.write_derived_content(derivation, sink)
+        write_derived(&*self.source, CONTENT_PATH, &*codec(), derivation, sink)
     }
 
     /// The transcript's attributes through the same derivation a
     /// native session gets. The project is not in the content; the
     /// store keeps the original's.
     fn attrs(&mut self) -> Result<Box<dyn SessionAttrs>, DriverError> {
-        let mut reader = self.source.open("session.jsonl")?;
+        let mut reader = self.source.open(CONTENT_PATH)?;
         let mut bytes = Vec::new();
         reader.read_to_end(&mut bytes)?;
         let fingerprint = Fingerprint {
@@ -1309,56 +1259,6 @@ impl StoredSession for ClaudeStoredSession {
     fn summary_version(&self) -> u32 {
         SUMMARY_VERSION
     }
-}
-
-impl ClaudeStoredSession {
-    /// `session.jsonl` with `derivation` applied, line by line, the
-    /// appended entries after its last line, and every other path
-    /// copied as stored.
-    fn write_derived_content(
-        &mut self,
-        derivation: &Derivation,
-        sink: &mut dyn ContentSink,
-    ) -> Result<Vec<u32>, DriverError> {
-        use std::io::{BufRead, Write};
-        let mut appended = Vec::new();
-        for path in self.source.paths()? {
-            let mut reader = self.source.open(&path)?;
-            let mut writer = sink.create(&path)?;
-            if path != "session.jsonl" {
-                io::copy(&mut reader, &mut writer)?;
-                continue;
-            }
-            let codec = codec();
-            let mut written: u32 = 0;
-            for (i, line) in io::BufReader::new(reader).lines().enumerate() {
-                let line = line?;
-                let number = i as u32 + 1;
-                if derivation.dropped.contains(&number) {
-                    continue;
-                }
-                match derivation.replaced.get(&number) {
-                    Some(value) => writer.write_all(&codec.encode(value)?)?,
-                    None => writer.write_all(line.as_bytes())?,
-                }
-                writer.write_all(b"\n")?;
-                written += 1;
-            }
-            for value in &derivation.appended {
-                writer.write_all(&codec.encode(value)?)?;
-                writer.write_all(b"\n")?;
-                written += 1;
-                appended.push(written);
-            }
-        }
-        Ok(appended)
-    }
-}
-
-/// Whether a decoded line is one `entries` yields a row for: an entry
-/// with a `type`.
-fn is_entry(value: &EntryValue) -> bool {
-    value.get("type").and_then(EntryValue::as_str).is_some()
 }
 
 #[cfg(test)]

@@ -14,9 +14,11 @@
 
 mod codec;
 mod derive;
+mod project;
 mod session_reader;
 pub mod shell_paths;
 mod store;
+mod stored;
 mod summary_cache;
 pub mod tables;
 
@@ -32,8 +34,10 @@ pub use derive::{
     DerivedRows, DerivedSession, Fingerprint, derived_schema,
 };
 pub use gage_index::LockMode;
+pub use project::{format_project_slug, project_slug};
 pub use session_reader::{ReadError, SessionReader};
 pub use store::{IndexStore, ReconcileOutcome, Status};
+pub use stored::{decoded_entries, write_derived};
 
 /// One session file of a corpus, as the listing finds it without
 /// deriving it.
