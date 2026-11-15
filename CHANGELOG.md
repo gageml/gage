@@ -15,6 +15,8 @@ Pending release.
 - The `codex:` session source reads Codex CLI sessions: `gage session list`,
   `gage session view`, `gage session add`, and `gage query` work on them as they
   do on Claude Code sessions
+- Experimental `checks` scanner applies the `general` and `code-review` checks
+  to each session in one agent call
 
 ## [0.3.1]
 
