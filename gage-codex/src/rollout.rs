@@ -154,43 +154,80 @@ fn collect(dir: &Path, depth: usize, out: &mut Vec<RolloutFile>) -> io::Result<(
     Ok(())
 }
 
-/// The thread name Codex records for the thread `id` in the Codex
-/// home `home`: the last entry of the session index that names the
-/// thread. `None` when the index is missing or does not name the
-/// thread; a session without a recorded name keeps the title derived
-/// from its content. An index that cannot be read is logged and names
-/// nothing.
-pub(crate) fn thread_name(home: &Path, id: &str) -> Option<String> {
-    let path = home.join(SESSION_INDEX_FILE);
-    let file = match File::open(&path) {
-        Ok(file) => file,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return None,
-        Err(e) => {
-            tracing::warn!(path = %path.display(), "thread names not read: {e}");
-            return None;
-        }
-    };
-    let mut name = None;
-    for line in BufReader::new(file).lines() {
-        let line = match line {
-            Ok(line) => line,
+/// The thread names Codex records in the Codex home `home`, by thread
+/// id, read once per change of the session index: a listing asks for
+/// the name of every session it shows.
+#[derive(Debug, Default)]
+pub(crate) struct ThreadNames {
+    read: Mutex<Option<ReadNames>>,
+}
+
+/// The names as last read, with the index file's state at that read
+#[derive(Debug)]
+struct ReadNames {
+    modified: Option<SystemTime>,
+    size: u64,
+    names: HashMap<String, String>,
+}
+
+impl ThreadNames {
+    /// The name recorded for the thread `id`: the last entry of the
+    /// session index that names the thread. `None` when the index is
+    /// missing or does not name the thread; a session without a
+    /// recorded name keeps the title derived from its content. An
+    /// index that cannot be read is logged and names nothing.
+    pub(crate) fn name(&self, home: &Path, id: &str) -> Option<String> {
+        let path = home.join(SESSION_INDEX_FILE);
+        let (modified, size) = match path.metadata() {
+            Ok(meta) => (meta.modified().ok(), meta.len()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return None,
             Err(e) => {
                 tracing::warn!(path = %path.display(), "thread names not read: {e}");
                 return None;
             }
         };
+        let mut read = self.read.lock().expect("thread names lock");
+        let current = read
+            .as_ref()
+            .is_some_and(|names| names.modified == modified && names.size == size);
+        if !current {
+            let names = match read_thread_names(&path) {
+                Ok(names) => names,
+                Err(e) => {
+                    tracing::warn!(path = %path.display(), "thread names not read: {e}");
+                    HashMap::new()
+                }
+            };
+            *read = Some(ReadNames {
+                modified,
+                size,
+                names,
+            });
+        }
+        read.as_ref()?.names.get(id).cloned()
+    }
+}
+
+/// Every thread's name in the session index at `path`: for each
+/// thread, the last entry that names it. A name that is blank names
+/// nothing.
+fn read_thread_names(path: &Path) -> io::Result<HashMap<String, String>> {
+    let mut names = HashMap::new();
+    for line in BufReader::new(File::open(path)?).lines() {
         // A line being appended while the index is read does not
         // parse; the names before it stand.
-        let Ok(entry) = serde_json::from_str::<Value>(&line) else {
+        let Ok(entry) = serde_json::from_str::<Value>(&line?) else {
             continue;
         };
-        if entry.get("id").and_then(Value::as_str) == Some(id)
-            && let Some(thread_name) = entry.get("thread_name").and_then(Value::as_str)
-        {
-            name = Some(thread_name.to_string());
+        let field = |key| entry.get(key).and_then(Value::as_str);
+        if let (Some(id), Some(name)) = (field("id"), field("thread_name")) {
+            match name.trim().is_empty() {
+                true => names.remove(id),
+                false => names.insert(id.to_string(), name.to_string()),
+            };
         }
     }
-    name.filter(|name| !name.trim().is_empty())
+    Ok(names)
 }
 
 #[cfg(test)]
@@ -250,8 +287,9 @@ mod tests {
             ),
         )
         .unwrap();
-        assert_eq!(thread_name(home.path(), "t1").as_deref(), Some("Renamed"));
-        assert_eq!(thread_name(home.path(), "t3"), None);
-        assert_eq!(thread_name(&home.path().join("missing"), "t1"), None);
+        let names = ThreadNames::default();
+        assert_eq!(names.name(home.path(), "t1").as_deref(), Some("Renamed"));
+        assert_eq!(names.name(home.path(), "t3"), None);
+        assert_eq!(names.name(&home.path().join("missing"), "t1"), None);
     }
 }

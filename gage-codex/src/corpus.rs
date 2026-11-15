@@ -8,20 +8,25 @@ use gage_corpus::{Corpus, DerivedSession, Result, SessionInfo, project_slug};
 
 use crate::derive::{SUMMARY_VERSION, derive_session};
 use crate::driver::{CONTENT_FORMAT, NAME, SESSION_TYPE};
-use crate::rollout::{SESSIONS_DIR, SessionMeta, read_meta, rollout_files, thread_name};
+use crate::rollout::{SESSIONS_DIR, SessionMeta, ThreadNames, read_meta, rollout_files};
 
 /// The sessions under one Codex home.
 #[derive(Debug)]
 pub(crate) struct CodexCorpus {
     home: PathBuf,
     sessions_dir: PathBuf,
+    thread_names: ThreadNames,
 }
 
 impl CodexCorpus {
     pub(crate) fn new(home: impl Into<PathBuf>) -> Self {
         let home = home.into();
         let sessions_dir = home.join(SESSIONS_DIR);
-        Self { home, sessions_dir }
+        Self {
+            home,
+            sessions_dir,
+            thread_names: ThreadNames::default(),
+        }
     }
 }
 
@@ -92,6 +97,6 @@ impl Corpus for CodexCorpus {
     }
 
     fn recorded_title(&self, id: &str) -> Option<String> {
-        thread_name(&self.home, id)
+        self.thread_names.name(&self.home, id)
     }
 }
