@@ -178,6 +178,41 @@ pub struct DriversConfig {
     /// by name
     #[serde(default = "default_driver")]
     pub default: String,
+
+    /// Per-driver settings, one `[drivers.<name>]` table each. The
+    /// name is the driver's; `default` is the setting above, so no
+    /// driver has that name.
+    #[serde(default, flatten)]
+    pub entries: BTreeMap<String, DriverEntry>,
+}
+
+/// Settings for one driver.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DriverEntry {
+    /// The model each size name resolves to on this driver, set under
+    /// `[drivers.<name>.models]`. A size set here replaces the
+    /// driver's default model for it.
+    #[serde(default, skip_serializing_if = "ModelsConfig::is_empty")]
+    pub models: ModelsConfig,
+}
+
+/// A model for each size name a driver resolves.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelsConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub small: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub medium: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub large: Option<String>,
+}
+
+impl ModelsConfig {
+    pub fn is_empty(&self) -> bool {
+        self.small.is_none() && self.medium.is_none() && self.large.is_none()
+    }
 }
 
 fn default_driver() -> String {
@@ -188,6 +223,7 @@ impl Default for DriversConfig {
     fn default() -> Self {
         Self {
             default: default_driver(),
+            entries: BTreeMap::new(),
         }
     }
 }
@@ -331,7 +367,9 @@ impl Config {
     /// `path`, when the file names none. A missing file is created
     /// with every setting at its default. A file that sets other
     /// things gains a `[drivers]` table at its end, so its comments
-    /// and layout stay as written. Returns whether the file changed.
+    /// and layout stay as written. A file that already opens a
+    /// `[drivers]` table without a default cannot take a second one
+    /// and is an error. Returns whether the file changed.
     pub fn name_default_driver(path: &Path, driver: &str) -> io::Result<bool> {
         let text = match fs::read_to_string(path) {
             Ok(text) => text,
@@ -344,20 +382,10 @@ impl Config {
             Err(e) => return Err(e),
         };
         let table: toml::Table = toml::from_str(&text).map_err(io::Error::other)?;
-        match table.get("drivers") {
-            None => {}
-            Some(toml::Value::Table(drivers)) if drivers.contains_key("default") => {
-                return Ok(false);
-            }
-            Some(_) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!(
-                        "{} has a drivers table with no default; add default = {driver:?} to it",
-                        path.display()
-                    ),
-                ));
-            }
+        if let Some(toml::Value::Table(drivers)) = table.get("drivers")
+            && drivers.contains_key("default")
+        {
+            return Ok(false);
         }
         let separator = if text.is_empty() || text.ends_with("\n\n") {
             ""
@@ -374,7 +402,20 @@ impl Config {
             )])),
         )]))
         .map_err(io::Error::other)?;
-        fs::write(path, format!("{text}{separator}{table}"))?;
+        let text = format!("{text}{separator}{table}");
+        // A file with only `[drivers.<name>]` tables takes the
+        // `[drivers]` table after them; one that opens `[drivers]`
+        // itself does not parse with a second.
+        if toml::from_str::<toml::Table>(&text).is_err() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "{} has a drivers table with no default; add default = {driver:?} to it",
+                    path.display()
+                ),
+            ));
+        }
+        fs::write(path, text)?;
         Ok(true)
     }
 
@@ -455,6 +496,53 @@ mod tests {
         std::fs::write(&path, "[drivers]\n").unwrap();
         let err = Config::name_default_driver(&path, "claude").unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn naming_the_default_driver_follows_per_driver_tables() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let written = "[drivers.claude.models]\nsmall = \"haiku\"\n";
+        std::fs::write(&path, written).unwrap();
+        assert!(Config::name_default_driver(&path, "claude").unwrap());
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            text,
+            format!("{written}\n[drivers]\ndefault = \"claude\"\n")
+        );
+        let config = Config::load_from(&path).unwrap();
+        assert_eq!(config.drivers.default, "claude");
+        assert_eq!(
+            config.drivers.entries["claude"].models.small.as_deref(),
+            Some("haiku")
+        );
+    }
+
+    #[test]
+    fn driver_models_are_read_from_a_per_driver_table_and_survive_a_save() {
+        let config: Config = toml::from_str(
+            r#"
+[drivers]
+default = "claude"
+
+[drivers.claude.models]
+medium = "claude-sonnet-5-5"
+"#,
+        )
+        .unwrap();
+        let models = &config.drivers.entries["claude"].models;
+        assert_eq!(models.medium.as_deref(), Some("claude-sonnet-5-5"));
+        assert_eq!(models.small, None);
+        let text = toml::to_string_pretty(&config).unwrap();
+        let loaded: Config = toml::from_str(&text).unwrap();
+        assert_eq!(loaded.drivers.default, "claude");
+        assert_eq!(&loaded.drivers.entries["claude"].models, models);
+    }
+
+    #[test]
+    fn a_model_size_the_drivers_do_not_have_is_refused() {
+        let err = toml::from_str::<Config>("[drivers.claude.models]\nhuge = \"x\"\n").unwrap_err();
+        assert!(err.to_string().contains("huge"), "{err}");
     }
 
     #[test]

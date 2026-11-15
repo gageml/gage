@@ -7,14 +7,18 @@
 //! The default driver is the one a source or an agent model with no
 //! scheme goes to. A process names it once at startup with
 //! [`set_default_driver`], from the user's config; a process that
-//! names none gets [`DEFAULT_DRIVER`].
+//! names none gets [`DEFAULT_DRIVER`]. The models the user's config
+//! sets for a driver's sizes are named the same way, with
+//! [`set_driver_models`].
 
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
 use gage_claude::driver::ClaudeDriver;
 use gage_core::config::DEFAULT_DRIVER;
-use gage_session::{Driver, DriverError, HostContext, Source, SourceOptions, split_scheme};
+use gage_session::{
+    Driver, DriverError, HostContext, ModelSizes, Source, SourceOptions, split_scheme,
+};
 
 /// The default driver's name for this process, once named
 static DEFAULT_NAME: OnceLock<String> = OnceLock::new();
@@ -40,9 +44,35 @@ pub fn set_default_driver(name: &str) -> Result<(), DriverError> {
     Ok(())
 }
 
-/// The drivers bundled with this build, in registration order
+/// The models the process set for each driver's sizes, by driver
+/// name, once set
+static DRIVER_MODELS: OnceLock<HashMap<String, ModelSizes>> = OnceLock::new();
+
+/// Set the model sizes each driver that [`DriverRegistry::builtin`]
+/// builds in this process resolves in place of its defaults, by
+/// driver name. A name no bundled driver has is kept and unused, so
+/// one config serves builds with different drivers. The models are
+/// fixed once set; setting different ones afterwards is an error.
+pub fn set_driver_models(models: HashMap<String, ModelSizes>) -> Result<(), DriverError> {
+    let set = DRIVER_MODELS.get_or_init(|| models.clone());
+    if *set != models {
+        return Err(DriverError::Other(
+            "driver models are already set".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// The drivers bundled with this build, in registration order, each
+/// resolving the model sizes the process set for it
 fn bundled() -> Vec<Arc<dyn Driver>> {
-    vec![Arc::new(ClaudeDriver::new())]
+    bundled_with(DRIVER_MODELS.get().unwrap_or(&HashMap::new()))
+}
+
+fn bundled_with(models: &HashMap<String, ModelSizes>) -> Vec<Arc<dyn Driver>> {
+    let none = ModelSizes::default();
+    let models_of = |name: &str| models.get(name).unwrap_or(&none);
+    vec![Arc::new(ClaudeDriver::with_models(models_of("claude")))]
 }
 
 pub struct DriverRegistry {
@@ -345,6 +375,26 @@ mod tests {
         let registry = DriverRegistry::new().add(Arc::new(Fake("two", &["b"])));
         assert!(registry.agent_driver(Some("medium")).is_err());
         assert!(registry.agent_driver(Some("b:medium")).is_ok());
+    }
+
+    #[test]
+    fn a_bundled_driver_resolves_the_sizes_set_for_it_and_defaults_the_rest() {
+        let unset = bundled_with(&HashMap::new());
+        let defaults = unset[0].model_sizes();
+        assert!(defaults.small.is_some() && defaults.medium.is_some());
+
+        let set = ModelSizes {
+            medium: Some("custom-medium".to_string()),
+            ..ModelSizes::default()
+        };
+        let models = HashMap::from([
+            ("claude".to_string(), set),
+            ("not-in-this-build".to_string(), ModelSizes::default()),
+        ]);
+        let sizes = bundled_with(&models)[0].model_sizes();
+        assert_eq!(sizes.medium.as_deref(), Some("custom-medium"));
+        assert_eq!(sizes.small, defaults.small);
+        assert_eq!(sizes.large, defaults.large);
     }
 
     #[test]

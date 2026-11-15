@@ -28,8 +28,8 @@ use gage_session::{
     Derivation, Driver, DriverError, DriverStatus, DriverTables, Entry, EntryBody, EntryCodec,
     EntryValue, Field, HarnessInfo, HarnessSession, HostContext, InstallInfo, InstallReport,
     InstallUi, MaintenanceOutcome, MaintenanceStatus, MessageTextFilter, MessageTextHit,
-    NativeLookupError, NativeSession, SessionAttrs, SessionLiveError, SkillSession, Source,
-    SourceOptions, StoredSession, SummaryAttrs, ToolUse, WrittenContent, split_scheme,
+    ModelSizes, NativeLookupError, NativeSession, SessionAttrs, SessionLiveError, SkillSession,
+    Source, SourceOptions, StoredSession, SummaryAttrs, ToolUse, WrittenContent, split_scheme,
 };
 use serde::Deserialize;
 use serde_json::{Map, Value};
@@ -42,7 +42,7 @@ use crate::index::{
     ClaudeSessionAttrs, Fingerprint, IndexStore, LockMode, SUMMARY_VERSION, ToolUseCollector,
     derive_entry, derive_session, derive_session_from, project_of,
 };
-use crate::model::resolve_model;
+use crate::model::{default_sizes, resolve_model};
 use crate::plugin;
 use crate::preflight;
 use crate::proc::find_claude;
@@ -76,11 +76,22 @@ pub(crate) const SESSION_TYPE: &str = "claude";
 /// `files.d/`; the trailing digit is its version.
 pub(crate) const CONTENT_FORMAT: &str = "claude-jsonl 1";
 
-pub struct ClaudeDriver;
+pub struct ClaudeDriver {
+    /// The model each size name resolves to
+    models: ModelSizes,
+}
 
 impl ClaudeDriver {
     pub fn new() -> Self {
-        Self
+        Self::with_models(&ModelSizes::default())
+    }
+
+    /// A driver that resolves each size `overrides` sets to that
+    /// model, and every other size to its default.
+    pub fn with_models(overrides: &ModelSizes) -> Self {
+        Self {
+            models: default_sizes().overridden_by(overrides),
+        }
     }
 }
 
@@ -138,6 +149,10 @@ impl Driver for ClaudeDriver {
         };
         let projects_dir = resolve_projects_dir("")?;
         Ok(Some(session_url(&root_of(&projects_dir), &id)))
+    }
+
+    fn model_sizes(&self) -> ModelSizes {
+        self.models.clone()
     }
 
     /// Drops the `claude-` vendor prefix every Claude model name carries
@@ -274,7 +289,7 @@ impl Driver for ClaudeDriver {
     /// Spawn a `claude -p` child; see [`crate::agent`]. Requires a
     /// tokio runtime.
     fn start_agent(&self, spec: AgentSpec) -> Result<Box<dyn AgentSession>, DriverError> {
-        Ok(Box::new(crate::agent::start(spec)?))
+        Ok(Box::new(crate::agent::start(spec, &self.models)?))
     }
 
     /// An agent starts when `claude` is on PATH and logged in.
@@ -290,7 +305,9 @@ impl Driver for ClaudeDriver {
         session: &SkillSession<'_>,
     ) -> Result<Box<dyn HarnessSession>, DriverError> {
         preflight::check().map_err(|e| DriverError::Other(e.to_string()))?;
-        let model = session.model.map(resolve_model);
+        let model = session
+            .model
+            .map(|model| resolve_model(model, &self.models));
         let session = SkillSession { model, ..*session };
         let child = skill_command(&session)?.spawn().map_err(DriverError::Io)?;
         Ok(Box::new(ClaudeHarnessSession(child)))
@@ -1464,6 +1481,20 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[test]
+    fn model_sizes_are_the_defaults_with_the_configured_ones_over_them() {
+        let defaults = ClaudeDriver::new().model_sizes();
+        assert_eq!(defaults, default_sizes());
+        let overrides = ModelSizes {
+            large: Some("opus".to_string()),
+            ..ModelSizes::default()
+        };
+        let sizes = ClaudeDriver::with_models(&overrides).model_sizes();
+        assert_eq!(sizes.large.as_deref(), Some("opus"));
+        assert_eq!(sizes.small, defaults.small);
+        assert_eq!(sizes.medium, defaults.medium);
+    }
 
     #[test]
     fn current_session_is_the_environment_session_in_the_default_location() {

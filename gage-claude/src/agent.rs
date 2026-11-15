@@ -25,8 +25,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use gage_core::config::gage_home;
 use gage_session::{
-    AgentEvent, AgentSession, AgentSpec, Driver, DriverError, NativeSession, SourceOptions,
-    SystemPrompt, ToolUseEntries, TurnResult,
+    AgentEvent, AgentSession, AgentSpec, Driver, DriverError, ModelSizes, NativeSession,
+    SourceOptions, SystemPrompt, ToolUseEntries, TurnResult,
 };
 use serde_json::Value as Json;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -45,9 +45,10 @@ const DEFAULT_WAIT_TIMEOUT: Duration = Duration::from_secs(900);
 /// The `SIGTERM` to `SIGKILL` grace when a wait times out
 const TIMEOUT_GRACE: Duration = Duration::from_secs(10);
 
-/// Spawn the child. Requires a tokio runtime: the child's pipes are
-/// tokio handles and its stdout reader is a tokio task.
-pub(crate) fn start(spec: AgentSpec) -> Result<ClaudeAgent, DriverError> {
+/// Spawn the child, resolving the spec's model under `models`.
+/// Requires a tokio runtime: the child's pipes are tokio handles and
+/// its stdout reader is a tokio task.
+pub(crate) fn start(spec: AgentSpec, models: &ModelSizes) -> Result<ClaudeAgent, DriverError> {
     let allowed_tools: Vec<String> = spec
         .mcp
         .iter()
@@ -83,7 +84,7 @@ pub(crate) fn start(spec: AgentSpec) -> Result<ClaudeAgent, DriverError> {
         cmd.arg("--mcp-config").arg(mcp_config_json(&mcp.url));
     }
     cmd.arg("--model")
-        .arg(resolved_model(spec.model.as_deref()));
+        .arg(resolved_model(spec.model.as_deref(), models));
     if let Some(n) = spec.max_turns {
         cmd.arg("--max-turns").arg(n.to_string());
     }
