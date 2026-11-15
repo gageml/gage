@@ -46,6 +46,7 @@ toml.workspace = true
 
 [dev-dependencies]
 tempfile = { workspace = true }
+tokio = { version = "1", features = ["io-util"] }
 
 [lints]
 workspace = true

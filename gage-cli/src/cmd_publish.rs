@@ -65,6 +65,7 @@ use crate::session_filter::{
     FILTER_ARG_NAMES, SessionFilterArgs, SessionLine, SessionSelect, SessionSelectError,
     native_session_lines, preview_sessions, select_sessions, stored_session_lines,
 };
+use crate::session_identity::environment_session_id;
 use crate::source;
 use crate::style::{self, IdKind};
 use crate::text_arg::text_value;
@@ -1334,12 +1335,13 @@ fn check_init_args(args: &InitArgs) -> Result<(), String> {
     Ok(())
 }
 
-/// The author of what this run writes: the Claude Code session named
-/// in `CLAUDE_CODE_SESSION_ID` as `session:<id>`, else the user.
+/// The author of what this run writes: the session this process's
+/// environment names, as a harness sets it for the commands a session
+/// runs, as `session:<id>`, else the user.
 fn default_author() -> String {
-    match env::var_os("CLAUDE_CODE_SESSION_ID") {
-        Some(id) if !id.is_empty() => format!("session:{}", id.to_string_lossy()),
-        _ => resolve_author(None),
+    match environment_session_id(&source::driver_registry()) {
+        Some(id) => format!("session:{id}"),
+        None => resolve_author(None),
     }
 }
 
