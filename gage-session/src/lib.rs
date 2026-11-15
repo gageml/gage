@@ -27,6 +27,7 @@ pub mod body;
 pub mod codec;
 pub mod content_schema;
 pub mod filter;
+pub mod host;
 pub mod progress;
 pub mod status;
 pub mod summary_columns;
@@ -43,6 +44,7 @@ pub use codec::{DecodedEntry, EntryCodec, EntryValue, INVALID_ENTRY_TYPE};
 pub use content_schema::{
     ContentField, ContentSchema, content_schema_batch, content_schema_schema,
 };
+pub use host::HostContext;
 pub use status::{AuthInfo, DriverStatus, Field, HarnessInfo, InstallInfo};
 pub use summary_columns::{SummaryArrays, SummaryColumns};
 pub use system_col::{SYSTEM_META_KEY, is_system, system};
@@ -264,6 +266,17 @@ pub trait Driver: Send + Sync {
             "driver {} does not install Gage",
             self.name()
         )))
+    }
+
+    /// The session of this driver's harness that `host` describes:
+    /// the one the process runs in, or the one making the tool call
+    /// being served. The value is the session's URL as
+    /// [`Source::session_url`] spells it, which
+    /// [`Driver::split_session_url`] reads back. `None` when `host`
+    /// names no session of this harness. The default is `None`, for
+    /// a driver whose harness does not say.
+    fn current_session(&self, _host: &HostContext<'_>) -> Result<Option<String>, DriverError> {
+        Ok(None)
     }
 }
 

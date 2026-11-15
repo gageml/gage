@@ -14,7 +14,7 @@ use std::sync::{Arc, OnceLock};
 
 use gage_claude::driver::ClaudeDriver;
 use gage_core::config::DEFAULT_DRIVER;
-use gage_session::{Driver, DriverError, Source, SourceOptions, split_scheme};
+use gage_session::{Driver, DriverError, HostContext, Source, SourceOptions, split_scheme};
 
 /// The default driver's name for this process, once named
 static DEFAULT_NAME: OnceLock<String> = OnceLock::new();
@@ -149,6 +149,24 @@ impl DriverRegistry {
         Ok((driver, model.map(str::to_string)))
     }
 
+    /// The session `host` describes, as the first driver in
+    /// registration order that sees one of its sessions there names
+    /// it. `None` when no driver sees one. A driver that fails is
+    /// passed over; its error is returned when no driver answers.
+    pub fn current_session(&self, host: &HostContext<'_>) -> Result<Option<String>, DriverError> {
+        let mut failed = None;
+        for driver in &self.drivers {
+            match driver.current_session(host) {
+                Ok(Some(url)) => return Ok(Some(url)),
+                Ok(None) => {}
+                Err(e) => {
+                    failed.get_or_insert(e);
+                }
+            }
+        }
+        failed.map_or(Ok(None), Err)
+    }
+
     /// Route the source `options` names to its driver and open it. The
     /// empty source is the default driver's default location.
     pub fn open_source(&self, options: &SourceOptions) -> Result<Box<dyn Source>, DriverError> {
@@ -216,6 +234,61 @@ mod tests {
         ) -> Result<Box<dyn StoredSession>, DriverError> {
             Err(DriverError::Other("not used".into()))
         }
+        /// The session a tool call names under this driver's key,
+        /// `<name>/session`; a `<name>/fail` key is a failure.
+        fn current_session(&self, host: &HostContext<'_>) -> Result<Option<String>, DriverError> {
+            let Some(meta) = host.call_meta() else {
+                return Ok(None);
+            };
+            if meta.contains_key(&format!("{}/fail", self.0)) {
+                return Err(DriverError::Other(format!("{} failed", self.0)));
+            }
+            Ok(meta
+                .get(&format!("{}/session", self.0))
+                .and_then(|id| id.as_str())
+                .map(|id| format!("{}:{id}", self.0)))
+        }
+    }
+
+    fn current(
+        registry: &DriverRegistry,
+        meta: serde_json::Value,
+    ) -> Result<Option<String>, String> {
+        let host = HostContext::with_vars(&[]);
+        registry
+            .current_session(&host.serving_call(meta.as_object().unwrap()))
+            .map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn current_session_is_the_first_driver_that_sees_one() {
+        let registry = DriverRegistry::new()
+            .add_default(Arc::new(Fake("one", &["a"])))
+            .add(Arc::new(Fake("two", &["b"])));
+        let url = current(&registry, serde_json::json!({"two/session": "t1"}));
+        assert_eq!(url.unwrap().as_deref(), Some("two:t1"));
+        let url = current(
+            &registry,
+            serde_json::json!({"one/session": "o1", "two/session": "t1"}),
+        );
+        assert_eq!(url.unwrap().as_deref(), Some("one:o1"));
+        assert_eq!(current(&registry, serde_json::json!({})).unwrap(), None);
+        let host = HostContext::with_vars(&[]);
+        assert_eq!(registry.current_session(&host).unwrap(), None);
+    }
+
+    #[test]
+    fn current_session_passes_over_a_failing_driver() {
+        let registry = DriverRegistry::new()
+            .add_default(Arc::new(Fake("one", &["a"])))
+            .add(Arc::new(Fake("two", &["b"])));
+        let url = current(
+            &registry,
+            serde_json::json!({"one/fail": true, "two/session": "t1"}),
+        );
+        assert_eq!(url.unwrap().as_deref(), Some("two:t1"));
+        let err = current(&registry, serde_json::json!({"one/fail": true})).unwrap_err();
+        assert!(err.contains("one failed"), "{err}");
     }
 
     #[test]
