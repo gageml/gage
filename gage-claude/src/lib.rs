@@ -8,6 +8,7 @@ pub mod entry;
 pub mod home;
 pub mod index;
 pub mod model;
+mod patch;
 pub mod plugin;
 mod preflight;
 pub mod proc;

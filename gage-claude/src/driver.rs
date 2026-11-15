@@ -27,9 +27,9 @@ use gage_session::{
     Derivation, Driver, DriverError, DriverStatus, DriverTables, Entry, EntryBody, EntryCodec,
     EntryValue, Field, HarnessInfo, HarnessSession, HostContext, InstallInfo, InstallReport,
     InstallUi, MaintenanceOutcome, MaintenanceStatus, MessageTextFilter, MessageTextHit,
-    ModelChoices, ModelSizes, NativeLookupError, NativeSession, SessionAttrs, SessionLiveError,
-    SkillSession, Source, SourceOptions, StoredSession, SummaryAttrs, ToolUse, WrittenContent,
-    split_scheme,
+    ModelChoices, ModelSizes, NativeLookupError, NativeSession, PatchHunk, SessionAttrs,
+    SessionLiveError, SkillSession, Source, SourceOptions, StoredSession, SummaryAttrs, ToolUse,
+    WrittenContent, split_scheme,
 };
 use serde::Deserialize;
 
@@ -42,6 +42,7 @@ use crate::index::{
     derive_entry, derive_session_from, index_store, project_of,
 };
 use crate::model::{default_sizes, model_choices, resolve_model};
+use crate::patch;
 use crate::plugin;
 use crate::preflight;
 use crate::proc::find_claude;
@@ -193,6 +194,10 @@ impl Driver for ClaudeDriver {
             return EntryBody::default();
         }
         body::entry_body(entry)
+    }
+
+    fn patch_hunks(&self, result_raw: &str) -> Vec<PatchHunk> {
+        patch::hunks(result_raw)
     }
 
     fn format_model(&self, model: &str) -> String {
