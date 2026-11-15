@@ -25,6 +25,9 @@ Pending release
 ### Fixes
 
 - `gage blame` attributes an edit that was committed after an unrelated commit
+- `gage blame` attributes a shell write to a file the command names relative to
+  a `cd`, through a variable it assigned, or by its bare name as a redirect
+  target or a quoted string in an inline script
 - Files with `[`, `?`, or `*` in their path are recorded as read or written
 
 ## [0.3.0]

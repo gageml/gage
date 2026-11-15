@@ -1533,8 +1533,9 @@ filename f.rs
     /// line as context while adding another, an Edit after the second
     /// commit writing a line the committed file carries reflowed over
     /// two lines, and a shell append whose result has no diff. The
-    /// shell commands name the file as `./a.rs`: a token is a path
-    /// only when it holds a slash, so a bare `a.rs` is not cited.
+    /// shell commands name the file as `./a.rs`: a bare `a.rs` is a
+    /// path only as a redirect target or a quoted string, so the grep
+    /// would not cite it.
     fn fixture() -> (tempfile::TempDir, tempfile::TempDir, PathBuf, String) {
         let repo = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(repo.path()).unwrap();
@@ -2144,6 +2145,62 @@ filename f.rs
             [(1, Some(2), some(NATIVE_ID), some("t1"), some("command"))],
             "both lines of the heredoc fold into one range, the command tier"
         );
+    }
+
+    /// A file a shell command names relative to a directory it entered
+    /// with `cd` through a variable is found: by a redirect to its bare
+    /// name, and by the quoted name an inline script opens.
+    #[tokio::test]
+    async fn a_file_written_after_a_cd_is_found_by_its_bare_name() {
+        let home = tempfile::tempdir().unwrap();
+        let home = std::fs::canonicalize(home.path()).unwrap();
+        let project_root = home.join("proj");
+        let work = home.join("work");
+        std::fs::create_dir_all(&project_root).unwrap();
+        std::fs::create_dir_all(&work).unwrap();
+        std::fs::write(work.join("redirect.py"), "redirect_written = 11\n").unwrap();
+        std::fs::write(work.join("script.py"), "script_written = 22\n").unwrap();
+
+        let mut lines = vec![prompt(1, "write two files", "2025-01-01T00:00:00Z")];
+        lines.extend(shell(
+            2,
+            "t1",
+            &project_root,
+            &format!(
+                "T={}; cd \"$T\" && cat > redirect.py <<'EOF'\nredirect_written = 11\nEOF",
+                work.display()
+            ),
+            "2025-01-01T00:00:05Z",
+        ));
+        lines.extend(shell(
+            3,
+            "t2",
+            &project_root,
+            &format!(
+                "cd {} && python3 - <<'EOF'\nopen('script.py', 'w').write('script_written = 22\\n')\nEOF",
+                work.display()
+            ),
+            "2025-01-01T00:00:06Z",
+        ));
+        let claude_root = tempfile::tempdir().unwrap();
+        let spec = write_session(claude_root.path(), &project_root, NATIVE_ID, &lines);
+
+        let ctx = ContextBuilder::new(None)
+            .cache_root(claude_root.path().join("cache"))
+            .build()
+            .await;
+        for (name, call) in [("redirect.py", "t1"), ("script.py", "t2")] {
+            let rows = rows(
+                &ctx,
+                &format!("native_blame('{spec}', '{}')", work.join(name).display()),
+            )
+            .await;
+            let shape: Vec<_> = rows
+                .iter()
+                .map(|r| (r.line, r.tool_use_id.clone(), r.tier.clone()))
+                .collect();
+            assert_eq!(shape, [(1, some(call), some("command"))], "{name}");
+        }
     }
 
     /// Candidate sessions come from `tool_use_file` in every project:
