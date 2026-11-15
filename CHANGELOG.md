@@ -10,6 +10,11 @@ conventions in _[Keep a Changelog]_. Release versions use [semantic versioning].
 
 Pending release.
 
+### Enhancements
+
+- Experimental `checks` scanner applies the `general` and `code-review` checks
+  to each session in one agent call
+
 ## [0.3.1]
 
 Pending release
