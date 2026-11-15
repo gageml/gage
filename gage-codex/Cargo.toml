@@ -1,0 +1,26 @@
+[package]
+name = "gage-codex"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+chrono = { workspace = true }
+gage-core = { path = "../gage-core" }
+gage-corpus = { path = "../gage-corpus" }
+gage-session = { path = "../gage-session" }
+regex = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+arrow = { workspace = true }
+gage-session = { path = "../gage-session", features = ["test-util"] }
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

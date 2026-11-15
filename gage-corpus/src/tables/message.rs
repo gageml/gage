@@ -1,13 +1,15 @@
-use std::collections::HashMap;
 use std::fmt::{self, Formatter};
 use std::path::PathBuf;
 use std::sync::{Arc, LazyLock};
 
-use crate::index::{
-    COL_LINE, COL_RAW, COL_SESSION_ID, COL_SUBTYPE, COL_TIMESTAMP, COL_TYPE, COL_UUID, IndexStore,
+use crate::{
+    COL_ATTACHMENTS, COL_IDE_TAGS, COL_LINE, COL_MESSAGE_SUBTYPE, COL_MESSAGE_TYPE, COL_RAW,
+    COL_SESSION_ID, COL_TEXT, COL_TIMESTAMP, COL_UUID, IndexStore,
 };
 use async_trait::async_trait;
-use datafusion::arrow::datatypes::SchemaRef;
+use datafusion::arrow::array::{Array, BooleanArray, StringArray};
+use datafusion::arrow::compute::filter_record_batch;
+use datafusion::arrow::datatypes::{Field, Schema, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::catalog::Session;
 use datafusion::common::tree_node::TreeNodeRecursion;
@@ -25,9 +27,8 @@ use datafusion::physical_plan::{
 use datafusion::prelude::*;
 use futures::StreamExt;
 
-use super::SessionSource;
-use super::cache::SessionCache;
-use super::walk::{SummaryPrune, lookup_paths, session_paths};
+use super::cache::CorpusCache;
+use super::walk::{SummaryPrune, session_paths};
 use gage_session::filter;
 
 /// The pushed filters the walk prunes sessions on through the summary
@@ -38,54 +39,66 @@ const PRUNE: SummaryPrune = SummaryPrune {
     type_col: None,
 };
 
-const PROJECTION: &[usize] = &[
+/// The derived columns serving the `message` table, in table-column
+/// order. `text` is non-null exactly for message rows: the entries
+/// the driver derives a message for.
+pub(crate) const PROJECTION: &[usize] = &[
     COL_SESSION_ID,
     COL_LINE,
     COL_UUID,
-    COL_TYPE,
-    COL_SUBTYPE,
+    COL_MESSAGE_TYPE,
+    COL_MESSAGE_SUBTYPE,
+    COL_TEXT,
     COL_TIMESTAMP,
+    COL_ATTACHMENTS,
+    COL_IDE_TAGS,
     COL_RAW,
 ];
 
-static ENTRY_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
-    Arc::new(
-        crate::index::derived_schema()
-            .project(PROJECTION)
-            .expect("derived schema serves entry projection"),
-    )
+/// Indexes into the projected (message-table) schema of the columns
+/// the derived batch supplies as `message_type` and `message_subtype`
+/// and the message table exposes as `type` and `subtype`.
+const PROJECTED_TYPE: usize = 3;
+const PROJECTED_SUBTYPE: usize = 4;
+
+static MESSAGE_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
+    let projected = crate::derived_schema()
+        .project(PROJECTION)
+        .expect("derived schema serves message projection");
+    let fields: Vec<Field> = projected
+        .fields()
+        .iter()
+        .enumerate()
+        .map(|(i, f)| match i {
+            PROJECTED_TYPE => Field::new("type", f.data_type().clone(), f.is_nullable()),
+            PROJECTED_SUBTYPE => Field::new("subtype", f.data_type().clone(), f.is_nullable()),
+            _ => f.as_ref().clone(),
+        })
+        .collect();
+    Arc::new(Schema::new(fields))
 });
 
-fn entry_schema() -> SchemaRef {
-    ENTRY_SCHEMA.clone()
+pub fn message_schema() -> SchemaRef {
+    MESSAGE_SCHEMA.clone()
 }
 
 #[derive(Debug, Clone)]
-pub struct EntryTable {
-    source: SessionSource,
+pub struct MessageTable {
+    store: Arc<IndexStore>,
     schema: SchemaRef,
 }
 
-impl EntryTable {
+impl MessageTable {
     pub fn new(store: Arc<IndexStore>) -> Self {
         Self {
-            source: SessionSource::Corpus(store),
-            schema: entry_schema(),
-        }
-    }
-
-    /// Build an `EntryTable` over an explicit `session_id` -> path map.
-    /// Mirrors [`crate::tables::MessageTable::with_lookup`].
-    pub fn with_lookup(sessions: Arc<HashMap<String, PathBuf>>) -> Self {
-        Self {
-            source: SessionSource::Lookup(sessions),
-            schema: entry_schema(),
+            store,
+            schema: message_schema(),
         }
     }
 }
 
 #[async_trait]
-impl TableProvider for EntryTable {
+impl TableProvider for MessageTable {
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }
@@ -113,17 +126,14 @@ impl TableProvider for EntryTable {
         filters: &[Expr],
         limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        let paths = match &self.source {
-            SessionSource::Corpus(store) => session_paths(store, filters, "session_id", PRUNE)?,
-            SessionSource::Lookup(sessions) => lookup_paths(sessions, filters)?,
-        };
+        let paths = session_paths(&self.store, filters, "session_id", PRUNE)?;
         let row_filter = filter::RowFilter::new(filters, "session_id")?;
-        let cache = SessionCache::shared();
+        let cache = CorpusCache::shared(&self.store);
         let projected_schema = match projection {
             Some(indices) => Arc::new(self.schema.project(indices)?),
             None => self.schema.clone(),
         };
-        Ok(Arc::new(EntryExec::new(
+        Ok(Arc::new(MessageExec::new(
             paths,
             cache,
             projected_schema,
@@ -134,13 +144,13 @@ impl TableProvider for EntryTable {
     }
 }
 
-/// Streaming plan: pulls one session at a time, projects its derived
-/// batch to the entry schema, and emits it. Honors `limit` so the
-/// stream stops opening sessions once enough rows have been produced.
+/// Streaming plan: pulls one session at a time, parses it on a
+/// blocking thread, emits a single batch of its message rows, and
+/// drops the parsed `DerivedSession` before pulling the next.
 #[derive(Clone)]
-struct EntryExec {
+struct MessageExec {
     paths: Arc<Vec<(String, PathBuf)>>,
-    cache: Arc<SessionCache>,
+    cache: CorpusCache,
     projected_schema: SchemaRef,
     projection: Option<Vec<usize>>,
     row_filter: Option<filter::RowFilter>,
@@ -148,19 +158,19 @@ struct EntryExec {
     properties: Arc<PlanProperties>,
 }
 
-impl fmt::Debug for EntryExec {
+impl fmt::Debug for MessageExec {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        f.debug_struct("EntryExec")
+        f.debug_struct("MessageExec")
             .field("sessions", &self.paths.len())
             .field("limit", &self.limit)
             .finish()
     }
 }
 
-impl EntryExec {
+impl MessageExec {
     fn new(
         paths: Vec<(String, PathBuf)>,
-        cache: Arc<SessionCache>,
+        cache: CorpusCache,
         projected_schema: SchemaRef,
         projection: Option<Vec<usize>>,
         row_filter: Option<filter::RowFilter>,
@@ -184,15 +194,15 @@ impl EntryExec {
     }
 }
 
-impl DisplayAs for EntryExec {
+impl DisplayAs for MessageExec {
     fn fmt_as(&self, _t: DisplayFormatType, f: &mut Formatter) -> fmt::Result {
-        write!(f, "EntryExec")
+        write!(f, "MessageExec")
     }
 }
 
-impl ExecutionPlan for EntryExec {
+impl ExecutionPlan for MessageExec {
     fn name(&self) -> &'static str {
-        "EntryExec"
+        "MessageExec"
     }
 
     fn properties(&self) -> &Arc<PlanProperties> {
@@ -259,14 +269,14 @@ impl ExecutionPlan for EntryExec {
             })
             .map(move |res| {
                 res.and_then(|derived| {
-                    let mut projected = derived.batch.project(PROJECTION)?;
+                    let mut batch = message_rows(&derived.batch)?;
                     // session_id / line sit at indices 0 / 1 of PROJECTION
                     if let Some(f) = &row_filter {
-                        projected = f.filter_batch(&projected, 0, 1)?;
+                        batch = f.filter_batch(&batch, 0, 1)?;
                     }
                     match &projection {
-                        Some(p) => projected.project(p).map_err(DataFusionError::from),
-                        None => Ok(projected),
+                        Some(p) => batch.project(p).map_err(DataFusionError::from),
+                        None => Ok(batch),
                     }
                 })
             });
@@ -296,4 +306,35 @@ impl ExecutionPlan for EntryExec {
 
         Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)))
     }
+}
+
+/// Filter a derived batch to message rows (text non-null) and project
+/// to the message schema.
+fn message_rows(batch: &RecordBatch) -> Result<RecordBatch> {
+    let texts = batch
+        .column(COL_TEXT)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .ok_or_else(|| DataFusionError::Internal("derived text column type".into()))?;
+    let mask: BooleanArray = (0..batch.num_rows())
+        .map(|i| Some(texts.is_valid(i)))
+        .collect();
+    let filtered = filter_record_batch(batch, &mask)?;
+    into_message_batch(&filtered)
+}
+
+/// Project a derived batch to the message-table columns and reconcile
+/// the result with [`message_schema`]. The derived schema names its
+/// message columns `message_type` and `message_subtype`;
+/// `message_schema` renames them to `type` and `subtype`. Returning the unmodified `project` output would yield a
+/// batch whose schema disagrees with the table's declared schema,
+/// which DataFusion rejects at scan time with "Mismatch between schema
+/// and batches". Always route message-shaped output through this
+/// helper.
+pub fn into_message_batch(batch: &RecordBatch) -> Result<RecordBatch> {
+    let projected = batch.project(PROJECTION)?;
+    Ok(RecordBatch::try_new(
+        message_schema(),
+        projected.columns().to_vec(),
+    )?)
 }

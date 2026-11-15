@@ -7,18 +7,13 @@ edition.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
-arrow = { workspace = true }
 async-trait = { workspace = true }
-datafusion = { workspace = true }
-futures = { workspace = true }
-fs4 = { workspace = true }
 gage-core = { path = "../gage-core" }
-gage-index = { path = "../gage-index" }
+gage-corpus = { path = "../gage-corpus" }
 gage-session = { path = "../gage-session" }
 chrono = { workspace = true }
 libc = "0.2"
 regex = { workspace = true }
-rmp-serde = { workspace = true }
 rust-embed = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -28,6 +23,7 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+arrow = { workspace = true }
 gage-session = { path = "../gage-session", features = ["test-util"] }
 jsonschema = { version = "0.58", default-features = false }
 tempfile = { workspace = true }

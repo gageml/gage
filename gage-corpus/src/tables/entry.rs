@@ -1,9 +1,10 @@
-use std::collections::HashMap;
 use std::fmt::{self, Formatter};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
-use crate::index::IndexStore;
+use crate::{
+    COL_LINE, COL_RAW, COL_SESSION_ID, COL_SUBTYPE, COL_TIMESTAMP, COL_TYPE, COL_UUID, IndexStore,
+};
 use async_trait::async_trait;
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::arrow::record_batch::RecordBatch;
@@ -23,50 +24,57 @@ use datafusion::physical_plan::{
 use datafusion::prelude::*;
 use futures::StreamExt;
 
-use super::SessionSource;
-use super::cache::SessionCache;
-use super::walk::{SummaryPrune, lookup_paths, session_paths};
-use gage_session::{filter, tool_use_schema};
+use super::cache::CorpusCache;
+use super::walk::{SummaryPrune, session_paths};
+use gage_session::filter;
 
 /// The pushed filters the walk prunes sessions on through the summary
 /// cache
 const PRUNE: SummaryPrune = SummaryPrune {
-    time_col: Some("result_timestamp"),
+    time_col: Some("timestamp"),
     path_col: None,
     type_col: None,
 };
 
-/// Positions of `session_id` and `line` in the `tool_use` schema, the
-/// two columns a `RowFilter` masks on
-const COL_SESSION_ID: usize = 0;
-const COL_LINE: usize = 3;
+const PROJECTION: &[usize] = &[
+    COL_SESSION_ID,
+    COL_LINE,
+    COL_UUID,
+    COL_TYPE,
+    COL_SUBTYPE,
+    COL_TIMESTAMP,
+    COL_RAW,
+];
+
+static ENTRY_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
+    Arc::new(
+        crate::derived_schema()
+            .project(PROJECTION)
+            .expect("derived schema serves entry projection"),
+    )
+});
+
+fn entry_schema() -> SchemaRef {
+    ENTRY_SCHEMA.clone()
+}
 
 #[derive(Debug, Clone)]
-pub struct ToolUseTable {
-    source: SessionSource,
+pub struct EntryTable {
+    store: Arc<IndexStore>,
     schema: SchemaRef,
 }
 
-impl ToolUseTable {
+impl EntryTable {
     pub fn new(store: Arc<IndexStore>) -> Self {
         Self {
-            source: SessionSource::Corpus(store),
-            schema: tool_use_schema(),
-        }
-    }
-
-    /// Build a `ToolUseTable` over an explicit `session_id` -> path
-    /// map. Mirrors [`crate::tables::MessageTable::with_lookup`].
-    pub fn with_lookup(sessions: Arc<HashMap<String, PathBuf>>) -> Self {
-        Self {
-            source: SessionSource::Lookup(sessions),
-            schema: tool_use_schema(),
+            store,
+            schema: entry_schema(),
         }
     }
 }
 
 #[async_trait]
-impl TableProvider for ToolUseTable {
+impl TableProvider for EntryTable {
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }
@@ -94,17 +102,14 @@ impl TableProvider for ToolUseTable {
         filters: &[Expr],
         limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        let paths = match &self.source {
-            SessionSource::Corpus(store) => session_paths(store, filters, "session_id", PRUNE)?,
-            SessionSource::Lookup(sessions) => lookup_paths(sessions, filters)?,
-        };
+        let paths = session_paths(&self.store, filters, "session_id", PRUNE)?;
         let row_filter = filter::RowFilter::new(filters, "session_id")?;
-        let cache = SessionCache::shared();
+        let cache = CorpusCache::shared(&self.store);
         let projected_schema = match projection {
             Some(indices) => Arc::new(self.schema.project(indices)?),
             None => self.schema.clone(),
         };
-        Ok(Arc::new(ToolUseExec::new(
+        Ok(Arc::new(EntryExec::new(
             paths,
             cache,
             projected_schema,
@@ -115,13 +120,13 @@ impl TableProvider for ToolUseTable {
     }
 }
 
-/// Streaming plan: pulls one session at a time and emits its
-/// `tool_use` batch. Honors `limit` so the stream stops opening
-/// sessions once enough rows have been produced.
+/// Streaming plan: pulls one session at a time, projects its derived
+/// batch to the entry schema, and emits it. Honors `limit` so the
+/// stream stops opening sessions once enough rows have been produced.
 #[derive(Clone)]
-struct ToolUseExec {
+struct EntryExec {
     paths: Arc<Vec<(String, PathBuf)>>,
-    cache: Arc<SessionCache>,
+    cache: CorpusCache,
     projected_schema: SchemaRef,
     projection: Option<Vec<usize>>,
     row_filter: Option<filter::RowFilter>,
@@ -129,19 +134,19 @@ struct ToolUseExec {
     properties: Arc<PlanProperties>,
 }
 
-impl fmt::Debug for ToolUseExec {
+impl fmt::Debug for EntryExec {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        f.debug_struct("ToolUseExec")
+        f.debug_struct("EntryExec")
             .field("sessions", &self.paths.len())
             .field("limit", &self.limit)
             .finish()
     }
 }
 
-impl ToolUseExec {
+impl EntryExec {
     fn new(
         paths: Vec<(String, PathBuf)>,
-        cache: Arc<SessionCache>,
+        cache: CorpusCache,
         projected_schema: SchemaRef,
         projection: Option<Vec<usize>>,
         row_filter: Option<filter::RowFilter>,
@@ -165,15 +170,15 @@ impl ToolUseExec {
     }
 }
 
-impl DisplayAs for ToolUseExec {
+impl DisplayAs for EntryExec {
     fn fmt_as(&self, _t: DisplayFormatType, f: &mut Formatter) -> fmt::Result {
-        write!(f, "ToolUseExec")
+        write!(f, "EntryExec")
     }
 }
 
-impl ExecutionPlan for ToolUseExec {
+impl ExecutionPlan for EntryExec {
     fn name(&self) -> &'static str {
-        "ToolUseExec"
+        "EntryExec"
     }
 
     fn properties(&self) -> &Arc<PlanProperties> {
@@ -240,13 +245,14 @@ impl ExecutionPlan for ToolUseExec {
             })
             .map(move |res| {
                 res.and_then(|derived| {
-                    let mut batch = derived.tool_uses.clone();
+                    let mut projected = derived.batch.project(PROJECTION)?;
+                    // session_id / line sit at indices 0 / 1 of PROJECTION
                     if let Some(f) = &row_filter {
-                        batch = f.filter_batch(&batch, COL_SESSION_ID, COL_LINE)?;
+                        projected = f.filter_batch(&projected, 0, 1)?;
                     }
                     match &projection {
-                        Some(p) => batch.project(p).map_err(DataFusionError::from),
-                        None => Ok(batch),
+                        Some(p) => projected.project(p).map_err(DataFusionError::from),
+                        None => Ok(projected),
                     }
                 })
             });

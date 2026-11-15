@@ -28,7 +28,9 @@ A source is `SCHEME:PATH`. A value with no scheme uses the default driver,
 which the `drivers.default` setting names; see
 [`gage config`](/docs/commands/config#settings).
 The `claude` scheme reads Claude Code sessions under `PATH/projects`, or the
-Claude Code home directory when `PATH` is omitted.
+Claude Code home directory when `PATH` is omitted. The `codex` scheme reads
+Codex sessions under `PATH/sessions`, or the Codex home directory when `PATH`
+is omitted. See [Codex sessions](/docs/sessions#codex-sessions).
 
 ## session list
 
@@ -105,6 +107,9 @@ To take a session out of one dataset and keep it in the store, use
 | `--empty`   | Delete empty sessions. Applies to native sessions. |
 | `-y, --yes` | Skip confirmation prompt                         |
 
+A native Codex session is not deleted; the command reports that it is not
+supported.
+
 ## session move
 
 Move a native session to another project.
@@ -116,7 +121,8 @@ gage session move [OPTIONS] <SESSION> <DIR>
 The session's files are moved to the project at `DIR`, and `DIR` is recorded as
 the session's working directory, so Claude Code resumes the session from there.
 Stored sessions are not affected. A session that is open in Claude Code is not
-moved.
+moved. A Codex session is not moved; the command reports that it is not
+supported.
 
 | Option      | Description                                         |
 | ----------- | --------------------------------------------------- |

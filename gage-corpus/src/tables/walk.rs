@@ -6,19 +6,17 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Instant, UNIX_EPOCH};
 
-use crate::index::IndexStore;
 use datafusion::arrow::array::{Int64Array, StringArray, TimestampMillisecondArray};
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use datafusion::arrow::record_batch::RecordBatch;
-use datafusion::error::Result;
+use datafusion::error::{DataFusionError, Result};
 use datafusion::prelude::Expr;
 
 use gage_core::style::IdHighlighter;
 
-use crate::index::ClaudeSessionAttrs;
-use crate::session::SessionInfo;
+use crate::{CorpusSessionAttrs, IndexStore, SessionInfo};
 use gage_session::filter::{
-    ColumnFilter, IdFilter, LiteralMatch, TimeBounds, covered_by, literal_matches, literal_members,
+    ColumnFilter, LiteralMatch, TimeBounds, covered_by, literal_matches, literal_members,
     time_bounds,
 };
 
@@ -47,10 +45,7 @@ fn walk_schema(id_col: &str) -> SchemaRef {
 /// The walked sessions as a batch of the walk's columns.
 fn walk_batch(schema: &SchemaRef, sessions: &[SessionInfo]) -> Result<RecordBatch> {
     let ids: Vec<&str> = sessions.iter().map(|s| s.id.as_str()).collect();
-    let projects: Vec<String> = sessions
-        .iter()
-        .map(|s| s.project_name().into_owned())
-        .collect();
+    let projects: Vec<&str> = sessions.iter().map(|s| s.project.as_str()).collect();
     let mtimes: Vec<i64> = sessions
         .iter()
         .map(|s| {
@@ -119,7 +114,7 @@ impl SummaryPrune {
     }
 
     /// Whether the summary admits a session under `filters`.
-    fn admits(&self, summary: &ClaudeSessionAttrs, bounds: &TimeBounds, terms: &FileTerms) -> bool {
+    fn admits(&self, summary: &CorpusSessionAttrs, bounds: &TimeBounds, terms: &FileTerms) -> bool {
         let in_span = match (summary.first_timestamp_ms, summary.last_timestamp_ms) {
             (Some(first), Some(last)) => bounds.admits(first, last),
             _ => true,
@@ -180,7 +175,9 @@ pub(crate) fn walk_sessions(
     let limit_pushed = limit.is_some() && filters.iter().all(|f| covered_by(f, &walk_cols));
 
     let walk_start = Instant::now();
-    let mut sessions: Vec<SessionInfo> = store.session_list().build().into_iter().collect();
+    let mut sessions: Vec<SessionInfo> = store
+        .sessions()
+        .map_err(|e| DataFusionError::Execution(format!("listing sessions: {e}")))?;
     let walk_ms = walk_start.elapsed().as_millis();
     let walked = sessions.len();
 
@@ -247,23 +244,6 @@ pub(crate) fn session_paths(
         .collect())
 }
 
-/// `(id, path)` pairs resolved through an explicit id-to-path map,
-/// filtered by predicates over `session_id`.
-pub(crate) fn lookup_paths(
-    sessions: &Arc<HashMap<String, PathBuf>>,
-    filters: &[Expr],
-) -> Result<Vec<(String, PathBuf)>> {
-    let mut pairs: Vec<(String, PathBuf)> = sessions
-        .iter()
-        .map(|(id, path)| (id.clone(), path.clone()))
-        .collect();
-    pairs.sort_by(|a, b| a.0.cmp(&b.0));
-    match IdFilter::new(filters, "session_id")? {
-        Some(f) => f.retain(pairs, |(id, _)| id.as_str()),
-        None => Ok(pairs),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -284,8 +264,8 @@ mod tests {
         path
     }
 
-    fn summary(first: i64, last: i64, files: &[(&str, FileType)]) -> ClaudeSessionAttrs {
-        ClaudeSessionAttrs {
+    fn summary(first: i64, last: i64, files: &[(&str, FileType)]) -> CorpusSessionAttrs {
+        CorpusSessionAttrs {
             first_timestamp_ms: Some(first),
             last_timestamp_ms: Some(last),
             files: files
@@ -341,7 +321,8 @@ mod tests {
     fn summaries_prune_the_walk_by_time_and_by_file() {
         let root = tempfile::tempdir().unwrap();
         let cache = tempfile::tempdir().unwrap();
-        let store = IndexStore::new(root.path(), cache.path());
+        let corpus = Arc::new(crate::testing::LineCorpus::new(root.path()));
+        let store = IndexStore::new(corpus, cache.path());
         let ids = [
             "aaaaaaaa-0000-0000-0000-000000000001",
             "aaaaaaaa-0000-0000-0000-000000000002",

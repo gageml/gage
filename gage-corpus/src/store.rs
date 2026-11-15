@@ -2,7 +2,7 @@
 //! per-session summary cache.
 //!
 //! The cache of one corpus is the `summary/` directory of its corpus
-//! directory under the cache root, `driver/claude/<digest>` as
+//! directory under the cache root, `driver/<driver name>/<digest>` as
 //! `gage_core::cache` lays it out. It holds `manifest.json`, naming
 //! the format version, the source, and the fingerprint of every
 //! session indexed; the reconcile lock; and one summary file per
@@ -19,6 +19,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::File;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -32,13 +33,12 @@ use gage_session::progress;
 use gage_session::{MessageTextFilter, MessageTextHit};
 use serde::{Deserialize, Serialize};
 
-use super::Result;
-use super::derive::{
-    COL_LINE, COL_MESSAGE_SUBTYPE, COL_TEXT, COL_TYPE, ClaudeSessionAttrs, Fingerprint,
-    derive_session,
+use crate::derive::{
+    COL_LINE, COL_MESSAGE_SUBTYPE, COL_MESSAGE_TYPE, COL_TEXT, CorpusSessionAttrs, DerivedSession,
+    Fingerprint,
 };
-use super::summary_cache;
-use crate::session::SessionListBuilder;
+use crate::summary_cache;
+use crate::{Corpus, Result, SessionInfo};
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ReconcileOutcome {
@@ -83,17 +83,13 @@ struct Manifest {
 }
 
 impl Manifest {
-    fn empty(source: &Path) -> Self {
+    fn empty(source: &Path, format_version: u32) -> Self {
         Self {
-            format_version: summary_cache::VERSION,
+            format_version,
             source: source.to_path_buf(),
             last_reconcile_ms: 0,
             sessions: BTreeMap::new(),
         }
-    }
-
-    fn is_current(&self) -> bool {
-        self.format_version == summary_cache::VERSION
     }
 }
 
@@ -114,17 +110,16 @@ fn process_lock(summary_dir: &Path) -> Arc<Mutex<()>> {
 /// Handle to the derived artifacts of one session corpus: the summary
 /// cache and the full-text index.
 ///
-/// `root` is the Claude projects directory the corpus is read from.
-/// The corpus directory is `driver/claude/<digest>` under `cache_root`
-/// (`~/.gage/cache` in production); the summary cache is its
-/// `summary/` and the text index its `text/`. Everything under either
-/// is rebuildable; deleting it is a complete reset.
+/// The corpus directory is `driver/<driver name>/<digest>` under
+/// `cache_root` (`~/.gage/cache` in production); the summary cache is
+/// its `summary/` and the text index its `text/`. Everything under
+/// either is rebuildable; deleting it is a complete reset.
 #[derive(Debug, Clone)]
 pub struct IndexStore {
-    root: PathBuf,
+    corpus: Arc<dyn Corpus>,
     corpus_dir: PathBuf,
     /// The source URL the corpus record and the text index name, and
-    /// that session URLs are prefixed with: `claude:<Claude root>`
+    /// that session URLs are prefixed with: `<driver>:<harness root>`
     source_url: String,
     summary_dir: PathBuf,
     show_agents: bool,
@@ -133,19 +128,14 @@ pub struct IndexStore {
 /// The summary cache directory inside the corpus directory
 const SUMMARY_DIR: &str = "summary";
 
-/// The scheme of a Claude session URL, and the driver's name
-const URL_SCHEME: &str = "claude";
-
 impl IndexStore {
-    pub fn new(root: impl Into<PathBuf>, cache_root: impl Into<PathBuf>) -> Self {
-        let root = root.into();
+    pub fn new(corpus: Arc<dyn Corpus>, cache_root: impl Into<PathBuf>) -> Self {
         let cache_root = cache_root.into();
-        let claude_root = root.parent().unwrap_or(&root);
-        let corpus_dir = driver_corpus_dir(&cache_root, URL_SCHEME, claude_root);
-        let source_url = format!("{URL_SCHEME}:{}", claude_root.display());
+        let corpus_dir = driver_corpus_dir(&cache_root, corpus.driver(), corpus.root());
+        let source_url = format!("{}:{}", corpus.driver(), corpus.root().display());
         let summary_dir = corpus_dir.join(SUMMARY_DIR);
         Self {
-            root,
+            corpus,
             corpus_dir,
             source_url,
             summary_dir,
@@ -154,7 +144,7 @@ impl IndexStore {
     }
 
     /// Include the runtime's own in-flight agent sessions in every
-    /// walk of the projects directory
+    /// walk of the corpus
     pub fn show_agents(mut self, show: bool) -> Self {
         self.show_agents = show;
         self
@@ -164,16 +154,86 @@ impl IndexStore {
         self.show_agents
     }
 
-    /// A session walk over this store's projects directory, reading
-    /// agent sessions as the store does
-    pub fn session_list(&self) -> SessionListBuilder {
-        SessionListBuilder::new()
-            .root(&self.root)
-            .show_agents(self.show_agents)
+    /// The corpus this store shadows
+    pub fn corpus(&self) -> &Arc<dyn Corpus> {
+        &self.corpus
     }
 
+    /// Every session file of the corpus, newest first, reading agent
+    /// sessions as the store does
+    pub fn sessions(&self) -> io::Result<Vec<SessionInfo>> {
+        self.corpus.sessions(self.show_agents)
+    }
+
+    /// The directory holding the corpus's session files
     pub fn root(&self) -> &Path {
-        &self.root
+        self.corpus.sessions_dir()
+    }
+
+    /// The URL of the source the corpus is: `<driver>:<harness root>`
+    pub fn source_url(&self) -> &str {
+        &self.source_url
+    }
+
+    /// Parse the session file at `path` and derive its rows and
+    /// attributes.
+    pub fn derive(&self, id: &str, path: &Path) -> Result<DerivedSession> {
+        self.corpus.derive(id, path)
+    }
+
+    /// The attributes of the session `info` lists: from the summary
+    /// cache when its entry is current for the file's mtime, else from
+    /// one parse of the file, which then refreshes the cache. The
+    /// project is the listing's, and a title the harness records
+    /// outside the file takes the place of the derived one.
+    ///
+    /// A file that does not derive is still a session: the walk listed
+    /// it. Its attributes carry the error in place of the derived
+    /// values and are cached like any other, so the file is read again
+    /// only when it changes.
+    pub fn attrs_of(&self, info: &SessionInfo) -> CorpusSessionAttrs {
+        self.attrs_with(info, self.session_attrs(&info.id, info.mtime))
+    }
+
+    /// [`Self::attrs_of`] for a caller that already read the summary
+    /// cache: `cached` is what [`Self::session_attrs`] returned for
+    /// the session.
+    pub fn attrs_with(
+        &self,
+        info: &SessionInfo,
+        cached: Option<CorpusSessionAttrs>,
+    ) -> CorpusSessionAttrs {
+        let mut attrs = match cached {
+            Some(cached) => cached,
+            None => {
+                let attrs = match self.derive(&info.id, &info.src) {
+                    Ok(derived) => derived.attrs,
+                    Err(e) => {
+                        let fingerprint = Fingerprint {
+                            mtime_ms: info
+                                .mtime
+                                .duration_since(UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_millis() as i64,
+                            size: info.size,
+                        };
+                        CorpusSessionAttrs::with_read_error(&info.project, fingerprint, e)
+                    }
+                };
+                // The cache is rebuilt from the file on any read that
+                // misses it, so a failed write costs a later read and
+                // is logged rather than raised.
+                if let Err(e) = self.put_session_attrs(&info.id, &attrs) {
+                    tracing::warn!(session_id = %info.id, "summary cache write failed: {e}");
+                }
+                attrs
+            }
+        };
+        attrs.project = info.project.clone();
+        if let Some(title) = self.corpus.recorded_title(&info.id) {
+            attrs.title = Some(title);
+        }
+        attrs
     }
 
     /// The directory holding this corpus's manifest, lock, and
@@ -222,20 +282,38 @@ impl IndexStore {
         self.summary_dir.join(summary_cache::MANIFEST_FILE)
     }
 
-    /// Read the cached `ClaudeSessionAttrs` for `id` if its file exists and
+    /// Prepare the newest `limit` sessions for a listing read: each one
+    /// the summary cache does not hold at its current mtime is derived
+    /// and cached. The sessions that need it are reported as
+    /// [`progress::read_sessions`].
+    pub fn warm(&self, limit: usize) -> io::Result<()> {
+        let newest: Vec<SessionInfo> = self.sessions()?.into_iter().take(limit).collect();
+        let uncached: Vec<&SessionInfo> = newest
+            .iter()
+            .filter(|s| self.session_attrs(&s.id, s.mtime).is_none())
+            .collect();
+        let span = progress::read_sessions(uncached.len());
+        for (done, s) in uncached.iter().enumerate() {
+            self.attrs_of(s);
+            progress::advance(&span, done + 1);
+        }
+        Ok(())
+    }
+
+    /// Read the cached `CorpusSessionAttrs` for `id` if its file exists and
     /// its mtime is at least `jsonl_mtime`. Returns `None` on missing
     /// file, stale cache, or decode failure — the caller falls through
     /// to a full parse. Lock-free; the writer is reconcile, whose
     /// tmp+rename pattern means the reader either sees the old file or
     /// the new one, never a partial.
-    pub fn session_attrs(&self, id: &str, jsonl_mtime: SystemTime) -> Option<ClaudeSessionAttrs> {
+    pub fn session_attrs(&self, id: &str, jsonl_mtime: SystemTime) -> Option<CorpusSessionAttrs> {
         summary_cache::read(&self.summary_dir, id, jsonl_mtime)
     }
 
-    /// Persist a `ClaudeSessionAttrs` to the on-disk cache. Used by the
+    /// Persist a `CorpusSessionAttrs` to the on-disk cache. Used by the
     /// session-table lazy path to populate the cache as it derives
     /// sessions on demand, so subsequent queries hit `session_attrs`.
-    pub fn put_session_attrs(&self, id: &str, attrs: &ClaudeSessionAttrs) -> std::io::Result<()> {
+    pub fn put_session_attrs(&self, id: &str, attrs: &CorpusSessionAttrs) -> std::io::Result<()> {
         self.ensure_summary_dir()?;
         summary_cache::write(&self.summary_dir, id, attrs)
     }
@@ -250,7 +328,7 @@ impl IndexStore {
         let manifest_path = self.manifest_path();
         if self.summary_dir.is_dir() {
             match read_manifest(&manifest_path) {
-                Ok(manifest) if manifest.is_current() => return Ok(()),
+                Ok(manifest) if self.is_current(&manifest) => return Ok(()),
                 Ok(_) => tracing::info!(
                     dir = %self.summary_dir.display(),
                     "summary cache format changed, discarding"
@@ -263,7 +341,15 @@ impl IndexStore {
             std::fs::remove_dir_all(&self.summary_dir)?;
         }
         std::fs::create_dir_all(&self.summary_dir)?;
-        write_manifest(&manifest_path, &Manifest::empty(&self.root))
+        write_manifest(&manifest_path, &self.empty_manifest())
+    }
+
+    fn empty_manifest(&self) -> Manifest {
+        Manifest::empty(self.root(), self.corpus.summary_version())
+    }
+
+    fn is_current(&self, manifest: &Manifest) -> bool {
+        manifest.format_version == self.corpus.summary_version()
     }
 
     /// Run the reconcile pass: diff the corpus against the cache,
@@ -278,7 +364,7 @@ impl IndexStore {
     /// from scratch.
     pub fn rebuild(&self) -> Result<ReconcileOutcome> {
         self.locked(LockMode::Wait, |store| {
-            write_manifest(&store.manifest_path(), &Manifest::empty(&store.root))?;
+            write_manifest(&store.manifest_path(), &store.empty_manifest())?;
             summary_cache::remove_all(&store.summary_dir)?;
             TextIndex::remove(&store.corpus_dir)?;
             store.reconcile_locked()
@@ -336,8 +422,7 @@ impl IndexStore {
 
         // 1. Walk: (mtime, size) per session, no file reads.
         let walked: Vec<(String, PathBuf, Fingerprint)> = self
-            .session_list()
-            .build()
+            .sessions()?
             .into_iter()
             .map(|s| {
                 let mtime_ms = s
@@ -357,11 +442,11 @@ impl IndexStore {
             .collect();
         let walked_ids: BTreeSet<&str> = walked.iter().map(|(id, _, _)| id.as_str()).collect();
 
-        let mut manifest = load_manifest(&self.manifest_path(), &self.root);
-        if !manifest.is_current() {
+        let mut manifest = self.load_manifest();
+        if !self.is_current(&manifest) {
             tracing::info!("summary cache format changed, rebuilding");
             summary_cache::remove_all(&self.summary_dir)?;
-            manifest = Manifest::empty(&self.root);
+            manifest = self.empty_manifest();
         }
         let mut text = self.text_index()?;
 
@@ -405,7 +490,7 @@ impl IndexStore {
         // whose summary or documents fail to write stays out of its
         // manifest, so the next pass retries it.
         for (id, path, fp) in &dirty {
-            let derived = match derive_session(id, path) {
+            let derived = match self.derive(id, path) {
                 Ok(d) => d,
                 Err(e) => {
                     tracing::warn!(session_id = %id, "skipping unreadable session: {e}");
@@ -469,10 +554,9 @@ impl IndexStore {
 
     /// The status report: cache version, session counts, dirty count,
     /// on-disk size, last reconcile time. Read-only — takes no lock.
-    pub fn status(&self) -> Status {
+    pub fn status(&self) -> Result<Status> {
         let walked: HashMap<String, Fingerprint> = self
-            .session_list()
-            .build()
+            .sessions()?
             .into_iter()
             .map(|s| {
                 let mtime_ms = s
@@ -490,15 +574,15 @@ impl IndexStore {
             })
             .collect();
 
-        let manifest = load_manifest(&self.manifest_path(), &self.root);
+        let manifest = self.load_manifest();
 
         let dirty = walked
             .iter()
             .filter(|(id, fp)| manifest.sessions.get(id.as_str()) != Some(fp))
             .count();
 
-        Status {
-            cache_version: summary_cache::VERSION,
+        Ok(Status {
+            cache_version: self.corpus.summary_version(),
             discovered: walked.len(),
             indexed: manifest.sessions.len(),
             dirty,
@@ -508,6 +592,20 @@ impl IndexStore {
             cache_bytes: dir_size(&self.summary_dir),
             text_dir: self.text_dir(),
             text_bytes: dir_size(&self.text_dir()),
+        })
+    }
+
+    fn load_manifest(&self) -> Manifest {
+        match read_manifest(&self.manifest_path()) {
+            Ok(manifest) => manifest,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => self.empty_manifest(),
+            Err(e) => {
+                tracing::warn!("unreadable cache manifest, rebuilding: {e}");
+                Manifest {
+                    format_version: 0,
+                    ..self.empty_manifest()
+                }
+            }
         }
     }
 }
@@ -523,7 +621,7 @@ fn message_rows_of(batch: &RecordBatch) -> Vec<MessageRow> {
     let column = |i: usize| batch.columns().get(i);
     let (Some(lines), Some(types), Some(subtypes), Some(texts)) = (
         column(COL_LINE).and_then(|c| c.as_any().downcast_ref::<Int64Array>()),
-        column(COL_TYPE).and_then(|c| c.as_any().downcast_ref::<StringArray>()),
+        column(COL_MESSAGE_TYPE).and_then(|c| c.as_any().downcast_ref::<StringArray>()),
         column(COL_MESSAGE_SUBTYPE).and_then(|c| c.as_any().downcast_ref::<StringArray>()),
         column(COL_TEXT).and_then(|c| c.as_any().downcast_ref::<StringArray>()),
     ) else {
@@ -550,20 +648,6 @@ fn now_ms() -> i64 {
 /// The manifest as written, or an empty one for `source` when the
 /// file is absent. An unreadable file is reported as version 0, so
 /// the caller rebuilds.
-fn load_manifest(path: &Path, source: &Path) -> Manifest {
-    match read_manifest(path) {
-        Ok(manifest) => manifest,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Manifest::empty(source),
-        Err(e) => {
-            tracing::warn!("unreadable cache manifest, rebuilding: {e}");
-            Manifest {
-                format_version: 0,
-                ..Manifest::empty(source)
-            }
-        }
-    }
-}
-
 fn read_manifest(path: &Path) -> std::io::Result<Manifest> {
     let text = std::fs::read_to_string(path)?;
     serde_json::from_str(&text).map_err(std::io::Error::other)

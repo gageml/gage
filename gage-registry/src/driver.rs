@@ -15,6 +15,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
 use gage_claude::driver::ClaudeDriver;
+use gage_codex::driver::CodexDriver;
 use gage_core::config::DEFAULT_DRIVER;
 use gage_session::{
     Driver, DriverError, HostContext, ModelSizes, Source, SourceOptions, split_scheme,
@@ -72,7 +73,10 @@ fn bundled() -> Vec<Arc<dyn Driver>> {
 fn bundled_with(models: &HashMap<String, ModelSizes>) -> Vec<Arc<dyn Driver>> {
     let none = ModelSizes::default();
     let models_of = |name: &str| models.get(name).unwrap_or(&none);
-    vec![Arc::new(ClaudeDriver::with_models(models_of("claude")))]
+    vec![
+        Arc::new(ClaudeDriver::with_models(models_of("claude"))),
+        Arc::new(CodexDriver::new()),
+    ]
 }
 
 pub struct DriverRegistry {

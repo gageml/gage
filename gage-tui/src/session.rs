@@ -247,7 +247,7 @@ impl Backend {
         let codec = bodies.codec()?;
         let id = sql_str(session_id);
         let sql = format!(
-            "SELECT e.line, e.uuid, e.type, m.subtype, e.raw \
+            "SELECT e.line, e.uuid, e.type, m.type, m.subtype, e.raw \
              FROM entry e LEFT JOIN message m ON m.session_id = '{id}' AND m.line = e.line \
              WHERE e.session_id = '{id}' ORDER BY e.line"
         );
@@ -257,8 +257,9 @@ impl Backend {
             let lines = column::<Int64Array>(batch, 0);
             let uuids = column::<StringArray>(batch, 1);
             let types = column::<StringArray>(batch, 2);
-            let subtypes = column::<StringArray>(batch, 3);
-            let raws = column::<StringArray>(batch, 4);
+            let message_types = column::<StringArray>(batch, 3);
+            let subtypes = column::<StringArray>(batch, 4);
+            let raws = column::<StringArray>(batch, 5);
             for i in 0..batch.num_rows() {
                 // A driver that supplies no raw row leaves the entry
                 // with nothing to render; it still holds its line
@@ -271,6 +272,9 @@ impl Backend {
                     line: u32::try_from(lines.value(i)).unwrap_or(0),
                     uuid: uuids.is_valid(i).then(|| uuids.value(i).to_string()),
                     entry_type: types.value(i).to_string(),
+                    message_type: message_types
+                        .is_valid(i)
+                        .then(|| message_types.value(i).to_string()),
                     message_subtype: subtypes.is_valid(i).then(|| subtypes.value(i).to_string()),
                     value,
                 });
@@ -928,6 +932,103 @@ pub(crate) mod tests {
             session_id,
             cache_root,
             _dirs: (claude_root, store_root),
+        }
+    }
+
+    /// The fixture over a Codex session whose rollout is the Codex
+    /// driver's test rollout.
+    fn codex_fixture() -> Fixture {
+        let rollout = include_str!("../../gage-codex/testdata/rollout.jsonl");
+        let native_id = "00000000-0000-7000-8000-000000000001";
+        let codex_home = tempfile::tempdir().unwrap();
+        let day = codex_home.path().join("sessions/2026/01/02");
+        std::fs::create_dir_all(&day).unwrap();
+        let file = format!("rollout-2026-01-02T03-04-05-{native_id}.jsonl");
+        std::fs::write(day.join(file), rollout).unwrap();
+        let store_root = tempfile::tempdir().unwrap();
+        let path = store_root.path().join("store.git");
+        gage_store::init(&path).unwrap();
+        let cache_root = store_root.path().join("cache");
+        let store = Store::open_with_cache_root(&path, &cache_root).unwrap();
+        let spec = format!("codex:{}", codex_home.path().display());
+        let registry = DriverRegistry::builtin();
+        let driver = registry.driver_for(&spec).unwrap();
+        let source = driver
+            .open_source(SourceOptions::new(&spec).cache_root(&cache_root))
+            .unwrap();
+        let mut native = source.open_native(native_id).unwrap();
+        let session_id = SessionStore::from(&store)
+            .add(driver.as_ref(), native.as_mut())
+            .unwrap()
+            .id;
+        Fixture {
+            spec,
+            native_id: native_id.to_string(),
+            store,
+            session_id,
+            cache_root,
+            _dirs: (codex_home, store_root),
+        }
+    }
+
+    /// A Codex session's rows are labelled by who produced the
+    /// message, not by the entry types Codex names, and its tool call
+    /// rows pair with the `tool_use` table as any driver's do. The
+    /// stored and native backends agree.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_codex_session_loads_with_labels_tool_calls_and_bodies() {
+        let f = codex_fixture();
+        let labels_of = |doc: &Document| -> Vec<(u32, String)> {
+            doc.entries
+                .iter()
+                .filter(|e| e.message_subtype.is_some())
+                .map(|e| (e.line, e.label().to_string()))
+                .collect()
+        };
+        let expected_labels = [
+            (4, "meta"),
+            (5, "meta"),
+            (7, "user"),
+            (9, "thinking"),
+            (11, "assistant"),
+            (12, "tool_use"),
+            (15, "tool_result"),
+            (16, "tool_use"),
+            (19, "tool_result"),
+            (20, "assistant"),
+        ]
+        .map(|(line, label)| (line, label.to_string()));
+
+        let stored = Backend::stored(f.store).await;
+        let native = Backend::native(&f.spec)
+            .cache_root(&f.cache_root)
+            .open()
+            .await
+            .unwrap();
+        let docs = [
+            stored.load(&f.session_id).await.unwrap(),
+            native.load(&f.native_id).await.unwrap(),
+        ];
+        for doc in &docs {
+            assert_eq!(doc.entries.len(), 23);
+            assert_eq!(doc.entries[0].label(), "session_meta");
+            assert_eq!(labels_of(doc), expected_labels);
+            let calls: Vec<(u32, Option<u32>, &str)> = doc
+                .tool_uses
+                .iter()
+                .map(|t| (t.line, t.result_line, t.name.as_str()))
+                .collect();
+            assert_eq!(
+                calls,
+                [
+                    (12, Some(15), "exec_command"),
+                    (16, Some(19), "apply_patch"),
+                    (16, Some(19), "mcp__gage__query"),
+                ]
+            );
+            // Line 16 made two calls; line 7 is the prompt
+            assert!(matches!(doc.entry_body(15), Some(Body::ToolCalls(calls)) if calls.len() == 2));
+            assert!(matches!(doc.entry_body(6), Some(Body::Entry(_))));
         }
     }
 

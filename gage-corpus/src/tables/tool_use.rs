@@ -2,7 +2,7 @@ use std::fmt::{self, Formatter};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::index::IndexStore;
+use crate::IndexStore;
 use async_trait::async_trait;
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::arrow::record_batch::RecordBatch;
@@ -22,38 +22,40 @@ use datafusion::physical_plan::{
 use datafusion::prelude::*;
 use futures::StreamExt;
 
-use super::cache::SessionCache;
+use super::cache::CorpusCache;
 use super::walk::{SummaryPrune, session_paths};
-use gage_session::{filter, tool_use_file_schema};
+use gage_session::{filter, tool_use_schema};
 
 /// The pushed filters the walk prunes sessions on through the summary
-/// cache: a session is read only when one of its recorded `(path,
-/// type)` pairs satisfies the pushed `path` and `type` terms.
+/// cache
 const PRUNE: SummaryPrune = SummaryPrune {
-    time_col: None,
-    path_col: Some("path"),
-    type_col: Some("type"),
+    time_col: Some("result_timestamp"),
+    path_col: None,
+    type_col: None,
 };
 
-/// The `tool_use_file` table over a corpus: one row per tool call per
-/// path it names.
+/// Positions of `session_id` and `line` in the `tool_use` schema, the
+/// two columns a `RowFilter` masks on
+const COL_SESSION_ID: usize = 0;
+const COL_LINE: usize = 3;
+
 #[derive(Debug, Clone)]
-pub struct ToolUseFileTable {
+pub struct ToolUseTable {
     store: Arc<IndexStore>,
     schema: SchemaRef,
 }
 
-impl ToolUseFileTable {
+impl ToolUseTable {
     pub fn new(store: Arc<IndexStore>) -> Self {
         Self {
             store,
-            schema: tool_use_file_schema(),
+            schema: tool_use_schema(),
         }
     }
 }
 
 #[async_trait]
-impl TableProvider for ToolUseFileTable {
+impl TableProvider for ToolUseTable {
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }
@@ -62,16 +64,15 @@ impl TableProvider for ToolUseFileTable {
         TableType::Base
     }
 
-    /// A filter over `session_id` alone is applied in the walk. A
-    /// filter over `path` or `type` prunes the walk and is then
-    /// applied by DataFusion to the rows, so it is inexact.
     fn supports_filters_pushdown(
         &self,
         filters: &[&Expr],
     ) -> Result<Vec<datafusion::logical_expr::TableProviderFilterPushDown>> {
+        // Pushdowns limited to session_id (path pruning) and line
+        // (row masking); everything else needs the parsed columns
         Ok(filters
             .iter()
-            .map(|f| filter::pushdown(f, "session_id"))
+            .map(|f| filter::pushdown_lines(f, "session_id"))
             .collect())
     }
 
@@ -83,48 +84,53 @@ impl TableProvider for ToolUseFileTable {
         limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let paths = session_paths(&self.store, filters, "session_id", PRUNE)?;
+        let row_filter = filter::RowFilter::new(filters, "session_id")?;
+        let cache = CorpusCache::shared(&self.store);
         let projected_schema = match projection {
             Some(indices) => Arc::new(self.schema.project(indices)?),
             None => self.schema.clone(),
         };
-        Ok(Arc::new(ToolUseFileExec::new(
+        Ok(Arc::new(ToolUseExec::new(
             paths,
-            SessionCache::shared(),
+            cache,
             projected_schema,
             projection.cloned(),
+            row_filter,
             limit,
         )))
     }
 }
 
 /// Streaming plan: pulls one session at a time and emits its
-/// `tool_use_file` batch. Honors `limit` so the stream stops opening
+/// `tool_use` batch. Honors `limit` so the stream stops opening
 /// sessions once enough rows have been produced.
 #[derive(Clone)]
-struct ToolUseFileExec {
+struct ToolUseExec {
     paths: Arc<Vec<(String, PathBuf)>>,
-    cache: Arc<SessionCache>,
+    cache: CorpusCache,
     projected_schema: SchemaRef,
     projection: Option<Vec<usize>>,
+    row_filter: Option<filter::RowFilter>,
     limit: Option<usize>,
     properties: Arc<PlanProperties>,
 }
 
-impl fmt::Debug for ToolUseFileExec {
+impl fmt::Debug for ToolUseExec {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        f.debug_struct("ToolUseFileExec")
+        f.debug_struct("ToolUseExec")
             .field("sessions", &self.paths.len())
             .field("limit", &self.limit)
             .finish()
     }
 }
 
-impl ToolUseFileExec {
+impl ToolUseExec {
     fn new(
         paths: Vec<(String, PathBuf)>,
-        cache: Arc<SessionCache>,
+        cache: CorpusCache,
         projected_schema: SchemaRef,
         projection: Option<Vec<usize>>,
+        row_filter: Option<filter::RowFilter>,
         limit: Option<usize>,
     ) -> Self {
         let properties = Arc::new(PlanProperties::new(
@@ -138,21 +144,22 @@ impl ToolUseFileExec {
             cache,
             projected_schema,
             projection,
+            row_filter,
             limit,
             properties,
         }
     }
 }
 
-impl DisplayAs for ToolUseFileExec {
+impl DisplayAs for ToolUseExec {
     fn fmt_as(&self, _t: DisplayFormatType, f: &mut Formatter) -> fmt::Result {
-        write!(f, "ToolUseFileExec")
+        write!(f, "ToolUseExec")
     }
 }
 
-impl ExecutionPlan for ToolUseFileExec {
+impl ExecutionPlan for ToolUseExec {
     fn name(&self) -> &'static str {
-        "ToolUseFileExec"
+        "ToolUseExec"
     }
 
     fn properties(&self) -> &Arc<PlanProperties> {
@@ -196,6 +203,7 @@ impl ExecutionPlan for ToolUseFileExec {
         let paths = (*self.paths).clone();
         let cache = self.cache.clone();
         let projection = self.projection.clone();
+        let row_filter = self.row_filter.clone();
         let schema = self.projected_schema.clone();
         let limit = self.limit;
 
@@ -218,7 +226,10 @@ impl ExecutionPlan for ToolUseFileExec {
             })
             .map(move |res| {
                 res.and_then(|derived| {
-                    let batch = derived.tool_use_files.clone();
+                    let mut batch = derived.tool_uses.clone();
+                    if let Some(f) = &row_filter {
+                        batch = f.filter_batch(&batch, COL_SESSION_ID, COL_LINE)?;
+                    }
                     match &projection {
                         Some(p) => batch.project(p).map_err(DataFusionError::from),
                         None => Ok(batch),

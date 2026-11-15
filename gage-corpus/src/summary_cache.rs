@@ -1,15 +1,15 @@
 //! On-disk per-session summary cache.
 //!
 //! One file per session at `<summary dir>/<id>`, holding the
-//! rmp-serde-encoded `ClaudeSessionAttrs` produced during derivation.
+//! rmp-serde-encoded `CorpusSessionAttrs` produced during derivation.
 //! The directory also holds the manifest and the reconcile lock, which
 //! the session listing skips. Reconcile and the session-table lazy
 //! path write; `IndexStore::session_attrs` reads.
 //!
 //! Validation is by mtime: a cache file whose mtime is at least the
-//! JSONL's mtime is treated as fresh. JSONL files only grow (Claude
-//! Code appends), so any write moves mtime forward and invalidates the
-//! cache.
+//! JSONL's mtime is treated as fresh. Session files only grow (the
+//! harness appends), so any write moves mtime forward and invalidates
+//! the cache.
 //!
 //! A session is defined at the time it is read. A line appended after
 //! the read and before the cache write is not in the entry, and the
@@ -21,16 +21,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use super::derive::ClaudeSessionAttrs;
-
-/// The generation of `ClaudeSessionAttrs`. Bumped on any schema or
-/// semantic change to it (new field, changed title heuristic, fixed
-/// token accounting, ...). It is recorded in the cache manifest, and
-/// a directory whose manifest records another version is discarded
-/// and rebuilt. It is also the `summary_version` of every session the
-/// driver writes to a store, where a stored session with a lower
-/// version is derived again on its next add.
-pub const VERSION: u32 = 12;
+use crate::derive::CorpusSessionAttrs;
 
 /// The manifest file beside the session files
 pub(crate) const MANIFEST_FILE: &str = "manifest.json";
@@ -53,7 +44,7 @@ fn is_session_file(name: &str) -> bool {
 
 /// Read the cached summary for `id`. Returns `None` on missing file,
 /// stale cache (cache.mtime < jsonl_mtime), or decode failure.
-pub(crate) fn read(dir: &Path, id: &str, jsonl_mtime: SystemTime) -> Option<ClaudeSessionAttrs> {
+pub(crate) fn read(dir: &Path, id: &str, jsonl_mtime: SystemTime) -> Option<CorpusSessionAttrs> {
     let path = cache_path(dir, id);
     let cache_mtime = std::fs::metadata(&path).ok()?.modified().ok()?;
     if cache_mtime < jsonl_mtime {
@@ -64,7 +55,7 @@ pub(crate) fn read(dir: &Path, id: &str, jsonl_mtime: SystemTime) -> Option<Clau
 }
 
 /// Write the summary for `id`. Atomic via tmp file + rename.
-pub(crate) fn write(dir: &Path, id: &str, attrs: &ClaudeSessionAttrs) -> std::io::Result<()> {
+pub(crate) fn write(dir: &Path, id: &str, attrs: &CorpusSessionAttrs) -> std::io::Result<()> {
     let bytes = rmp_serde::to_vec(attrs).map_err(std::io::Error::other)?;
     let final_path = cache_path(dir, id);
     let tmp_path = dir.join(format!("{id}{TMP_SUFFIX}"));

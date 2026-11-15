@@ -41,6 +41,8 @@ that source and nothing of the store. A source is read and never written.
 | `gage:<path>`   | The Gage store at `<path>`, with every table         |
 | `claude:<path>` | The Claude Code sessions under `<path>/projects`     |
 | `claude:`       | The Claude Code sessions in the default location     |
+| `codex:<path>`  | The Codex sessions under `<path>/sessions`           |
+| `codex:`        | The Codex sessions in the default location           |
 
 A session directory such as `claude:` holds native sessions, whether or not they
 are in the store. It has the `session`, `entry`, `message`, `tool_use`, and

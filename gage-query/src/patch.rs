@@ -1,11 +1,9 @@
-//! The recorded patch of a tool call --- the hunks Claude Code writes
-//! into an Edit, Write, or MultiEdit result as `structuredPatch`, and
-//! into a Bash result as `bashEditDiff` when a command changed files
-//! --- and `patch_lines(result_raw, op)`, the lines of that patch with
-//! `op` of `add`, `remove`, or `context`.
+//! The recorded patch of a tool call --- the hunks the session's
+//! driver reads from the call's result record --- and
+//! `patch_lines(result_raw, op)`, the lines of that patch with `op`
+//! of `add`, `remove`, or `context`.
 
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use datafusion::arrow::array::{Array, ListBuilder, StringArray, StringBuilder};
 use datafusion::arrow::datatypes::{DataType, Field};
@@ -14,69 +12,24 @@ use datafusion::logical_expr::{
     ColumnarValue, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature, Volatility,
 };
 use datafusion::scalar::ScalarValue;
-use serde_json::Value;
+use gage_registry::driver::DriverRegistry;
+use gage_session::PatchHunk;
 
-/// One hunk of a recorded patch
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Hunk {
-    /// The file the hunk changed, when the record names it: a Bash
-    /// diff does, an edit result does not
-    pub path: Option<PathBuf>,
-    /// Each line with its marker: `+`, `-`, or a space
-    pub lines: Vec<(char, String)>,
-}
-
-impl Hunk {
-    /// The lines with marker `op`
-    pub fn lines_with(&self, op: char) -> impl Iterator<Item = &str> {
-        self.lines
-            .iter()
-            .filter(move |(m, _)| *m == op)
-            .map(|(_, l)| l.as_str())
-    }
-}
+/// The drivers whose result records carry patches
+static DRIVERS: LazyLock<DriverRegistry> = LazyLock::new(DriverRegistry::builtin);
 
 /// The hunks of a call's result record, in order; empty when the
-/// record carries no patch.
-pub fn hunks(result_raw: &str) -> Vec<Hunk> {
-    let Ok(value) = serde_json::from_str::<Value>(result_raw) else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    if let Some(patch) = value.get("structuredPatch").and_then(Value::as_array) {
-        out.extend(patch.iter().filter_map(|h| hunk(h, None)));
-    }
-    if let Some(files) = value
-        .get("bashEditDiff")
-        .and_then(|d| d.get("files"))
-        .and_then(Value::as_array)
-    {
-        for file in files {
-            let path = file
-                .get("filePath")
-                .and_then(Value::as_str)
-                .map(PathBuf::from);
-            if let Some(list) = file.get("hunks").and_then(Value::as_array) {
-                out.extend(list.iter().filter_map(|h| hunk(h, path.clone())));
-            }
-        }
-    }
-    out
-}
-
-fn hunk(value: &Value, path: Option<PathBuf>) -> Option<Hunk> {
-    let lines = value
-        .get("lines")?
-        .as_array()?
+/// record carries no patch. A result record does not name the driver
+/// that wrote it, so each driver is asked in turn and the first that
+/// reads a patch in the record answers: a driver reads none in a
+/// record that is not its own.
+pub fn hunks(result_raw: &str) -> Vec<PatchHunk> {
+    DRIVERS
+        .drivers()
         .iter()
-        .filter_map(Value::as_str)
-        .map(|l| {
-            let mut chars = l.chars();
-            let marker = chars.next().unwrap_or(' ');
-            (marker, chars.as_str().to_string())
-        })
-        .collect();
-    Some(Hunk { path, lines })
+        .map(|driver| driver.patch_hunks(result_raw))
+        .find(|hunks| !hunks.is_empty())
+        .unwrap_or_default()
 }
 
 /// The marker `op` names, or `None` for an unknown op
@@ -167,6 +120,8 @@ impl ScalarUDFImpl for PatchLines {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
 
     const EDIT: &str = r#"{"filePath":"/w/a.rs","oldString":"x","newString":"y",
@@ -199,6 +154,16 @@ mod tests {
         assert_eq!(shell[1].lines_with('-').collect::<Vec<_>>(), ["gone"]);
         assert!(hunks(r#"{"stdout":"no diff"}"#).is_empty());
         assert!(hunks("not json").is_empty());
+    }
+
+    #[test]
+    fn hunks_come_from_the_driver_that_reads_the_record() {
+        let change = r#"{"type":"FileChange","id":"exec-1","status":"completed","changes":
+            {"/w/a.rs":{"type":"update","unified_diff":"@@ -1 +1 @@\n-x\n+y\n","move_path":null}}}"#;
+        let hunks = hunks(change);
+        assert_eq!(hunks.len(), 1);
+        assert_eq!(hunks[0].path, Some(PathBuf::from("/w/a.rs")));
+        assert_eq!(hunks[0].lines_with('+').collect::<Vec<_>>(), ["y"]);
     }
 
     #[tokio::test]

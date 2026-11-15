@@ -17,7 +17,9 @@ the default driver. Schemes are defined by drivers:
 
   claude  Claude Code sessions under \
 PATH/projects; without PATH, the
-          Claude Code home directory";
+          Claude Code home directory
+  codex   Codex sessions under PATH/sessions; without PATH, the
+          Codex home directory";
 
 /// The drivers this CLI build registers. The default is the one the
 /// config names, once [`configure_drivers`] has run.

@@ -15,7 +15,7 @@ description = "Page of the cursor's result to return, starting at 1 (default 1).
 
 [parameters.source]
 type = "string"
-description = "Run sql over this source instead of the main store, read only: gage:<path> is the Gage store at <path>; a native source is a driver's scheme and a path, as in claude:<path> for the Claude Code sessions under <path>/projects, or claude: for those in the default location. Goes with sql."
+description = "Run sql over this source instead of the main store, read only: gage:<path> is the Gage store at <path>; a native source is a driver's scheme and a path, as in claude:<path> for the Claude Code sessions under <path>/projects or codex:<path> for the Codex sessions under <path>/sessions, and the scheme alone, claude: or codex:, for those in the default location. Goes with sql."
 
 [parameters.publish]
 type = "boolean"

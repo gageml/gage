@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use gage_claude::index::{IndexStore, LockMode};
+use gage_claude::index::{IndexStore, LockMode, index_store};
 use gage_session::MessageTextFilter;
 
 /// The claude session fixtures
@@ -36,7 +36,7 @@ fn store_with_tempdirs() -> (IndexStore, tempfile::TempDir, tempfile::TempDir) {
     let root = tempfile::tempdir().unwrap();
     let cache = tempfile::tempdir().unwrap();
     copy_fixtures(root.path());
-    let store = IndexStore::new(root.path(), cache.path());
+    let store = index_store(root.path(), cache.path());
     (store, root, cache)
 }
 
@@ -73,7 +73,7 @@ fn reconcile_lifecycle() {
     assert_eq!(outcome.indexed, 0);
     assert_eq!(outcome.removed, 0);
 
-    let status = store.status();
+    let status = store.status().unwrap();
     assert_eq!(status.discovered, 4);
     assert_eq!(status.indexed, 4);
     assert_eq!(status.dirty, 0);
@@ -103,7 +103,7 @@ fn reconcile_lifecycle() {
     contents.push('\n');
     std::fs::write(&session_path, contents).unwrap();
 
-    assert!(store.status().dirty >= 1);
+    assert!(store.status().unwrap().dirty >= 1);
     let outcome = store.reconcile(LockMode::Wait).unwrap();
     assert_eq!(outcome.indexed, 1);
     let summary = rich_summary(&store, root.path()).expect("summary refreshed after append");
@@ -124,7 +124,7 @@ fn reconcile_lifecycle() {
     let outcome = store.reconcile(LockMode::Wait).unwrap();
     assert_eq!(outcome.removed, 1);
     assert!(rich_summary(&store, root.path()).is_none());
-    assert_eq!(store.status().indexed, 3);
+    assert_eq!(store.status().unwrap().indexed, 3);
     assert!(
         store
             .search("zanzibar", &MessageTextFilter::new(), 10, 200)
@@ -155,15 +155,15 @@ fn rebuild_resets_artifacts() {
             .len(),
         before
     );
-    let status = store.status();
+    let status = store.status().unwrap();
     assert!(status.text_bytes > 0);
 }
 
 #[test]
 fn status_on_empty_cache_has_no_reconcile() {
     let cache = tempfile::tempdir().unwrap();
-    let store = IndexStore::new(fixture_root(), cache.path());
-    let status = store.status();
+    let store = index_store(fixture_root(), cache.path());
+    let status = store.status().unwrap();
     assert_eq!(status.indexed, 0);
     assert_eq!(status.discovered, 4);
     assert!(status.last_reconcile_ms.is_none());
