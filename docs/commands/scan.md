@@ -24,10 +24,13 @@ scanner group, and sessions from the past 30 days capped at 20.
 
 | Option                          | Description                                                         |
 | ------------------------------- | ------------------------------------------------------------------- |
+| `--source <SOURCE>`             | Session source, as described in [`gage session`](/docs/commands/session) |
+| `-S, --stored`                  | Scan stored sessions                                                |
 | `-s, --scanner <SCANNER>`       | Scanner to run, as a name or path (repeatable)                      |
 | `-g, --group <NAME>`            | Scanner group to run (repeatable)                                   |
 | `-d, --dataset <DATASET>`       | Scan an existing dataset (ID or prefix)                             |
 | `-p, --project <PROJECT>`       | Limit sessions to a project, given as a directory path or a project slug as shown by `gage session list` |
+| `--touches <DIR>`               | Limit sessions to those that touch a directory                      |
 | `--since <SINCE>`               | Select sessions modified within a duration (e.g. `1h`, `30m`, `7d`) |
 | `-a, --all`                     | Select every available session                                      |
 | `-n, --limit <N>`               | Select the latest N sessions                                        |
@@ -36,7 +39,7 @@ scanner group, and sessions from the past 30 days capped at 20.
 | `--agent-jobs <N>`              | Agents to run at once across all tasks (default 8)                  |
 | `--invalidate`                  | Ignore prior work: scan every session in full and carry no notes forward |
 | `--ignore-missing-attachments`  | Start the scan when a required attachment is missing                |
-| `--tag <NAME>`                  | Tag the new scan run                                                |
+| `-t, --tag <NAME>`              | Tag the new scan run                                                |
 | `--force-tag`                   | Move the tag if it exists                                           |
 | `--no-progress`                 | Print task output as it happens instead of the progress view        |
 | `--no-dataset`                  | Run with no dataset; scanners see no sessions                       |
@@ -46,6 +49,9 @@ scanner group, and sessions from the past 30 days capped at 20.
 `--scanner` takes a scanner name. When no scanner has that name, the value is a
 path to a directory holding a `scanner.rn` or to a scanner file. A `#{...}`
 suffix overrides the scanner's params.
+
+A session touches a directory when it wrote or read a file in the directory or
+below it, or when it started there.
 
 `--limit` combines with `--since` to cap the sessions selected from the window.
 `--sample` draws from sessions modified in the past 30 days, or the window given

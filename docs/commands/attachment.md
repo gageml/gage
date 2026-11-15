@@ -2,7 +2,7 @@
 title: gage attachment
 description:
   Command reference for gage attachment, including subcommands to add, list,
-  show, and remove attachments
+  show, and delete attachments
 ---
 
 The `gage attachment` command manages attachments. An attachment is a set of
@@ -35,7 +35,6 @@ attachment holds at most 10 MiB and 1000 files.
 | --------------------------- | ----------------------------------------------------------------- |
 | `-r, --root <DIR>`          | Directory to select files from (default: current directory). Stored paths are relative to it. |
 | `-e, --exclude <PATTERN>`   | Files to exclude (glob; repeatable)                               |
-| `-S, --stored <ATTACHMENT>` | Add an attachment already in the store to a dataset. Requires `--dataset`. |
 | `-s, --scanner <SCANNER>`   | Attach the files a scanner's scan reads (name or path; repeatable). Requires `--dataset`. |
 | `-d, --dataset <DATASET>`   | Store the attachment and add it to a dataset in one step          |
 | `-t, --target <OBJECT>`     | Target object such as a session or note (ID or prefix; repeatable) |
@@ -50,6 +49,9 @@ patterns. An unnamed add without `--key` always creates a new attachment.
 `--scanner` prepares an existing dataset for a scan: each scanner attaches the
 files its tasks read. A scan runs these attach tasks itself on a dataset it
 creates, but not on a dataset given with `gage scan --dataset`.
+
+To add an attachment already in the store to a dataset, use
+[`gage dataset link`](/docs/commands/dataset#dataset-link).
 
 ## attachment list
 
@@ -75,19 +77,18 @@ Show an attachment and its files.
 gage attachment show <ATTACHMENT>
 ```
 
-## attachment remove
+## attachment delete
 
-Remove attachments from the store or from a dataset.
+Delete attachments from the store.
 
 ```cli
-gage attachment remove [OPTIONS] <ATTACHMENTS>...
+gage attachment delete [OPTIONS] <ATTACHMENTS>...
 ```
 
-Without `--dataset`, each attachment is removed from every dataset that holds
-it and marked removed in the store. With `--dataset`, each attachment is
-removed from that dataset only and stays in the store.
+Each attachment is removed from every dataset that holds it and marked removed
+in the store. To take an attachment out of one dataset and keep it in the
+store, use [`gage dataset unlink`](/docs/commands/dataset#dataset-unlink).
 
-| Option                    | Description                                   |
-| ------------------------- | --------------------------------------------- |
-| `-d, --dataset <DATASET>` | Remove from this dataset only (ID or prefix)  |
-| `-y, --yes`               | Skip confirmation prompt                      |
+| Option      | Description              |
+| ----------- | ------------------------ |
+| `-y, --yes` | Skip confirmation prompt |
