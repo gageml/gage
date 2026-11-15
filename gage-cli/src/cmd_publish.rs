@@ -613,7 +613,7 @@ async fn publish_sessions(args: PublishRunArgs) -> Result<(), CliError> {
             dialog::step_list("Segments", segments.iter().map(|s| value_cell(s)))?;
         }
         let description = description_step(description, args.yes)?;
-        let model = model_prompt::model_step(args.model.as_deref(), args.yes)?;
+        let model = model_prompt::model_step("gage publish", args.model.as_deref(), args.yes)?;
         if !args.yes {
             dialog::usage_notice(usage_notice(false))?;
             dialog::confirm(false, true)?;
@@ -720,7 +720,7 @@ async fn publish_batch(args: PublishRunArgs) -> Result<(), CliError> {
             if let Some(description) = &description {
                 dialog::step_value("Description", value_cell(description))?;
             }
-            let model = model_prompt::model_step(args.model.as_deref(), args.yes)?;
+            let model = model_prompt::model_step("gage publish", args.model.as_deref(), args.yes)?;
             if !args.yes {
                 dialog::usage_notice(usage_notice(true))?;
             }

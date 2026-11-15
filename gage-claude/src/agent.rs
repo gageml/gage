@@ -25,8 +25,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use gage_core::config::gage_home;
 use gage_session::{
-    AgentEvent, AgentSession, AgentSpec, Driver, DriverError, NativeSession, SourceOptions,
-    SystemPrompt, ToolUseEntries, TurnResult,
+    AgentEvent, AgentSession, AgentSpec, Driver, DriverError, ModelSizes, NativeSession,
+    SourceOptions, SystemPrompt, ToolUseEntries, TurnResult,
 };
 use serde_json::Value as Json;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -45,9 +45,10 @@ const DEFAULT_WAIT_TIMEOUT: Duration = Duration::from_secs(900);
 /// The `SIGTERM` to `SIGKILL` grace when a wait times out
 const TIMEOUT_GRACE: Duration = Duration::from_secs(10);
 
-/// Spawn the child. Requires a tokio runtime: the child's pipes are
-/// tokio handles and its stdout reader is a tokio task.
-pub(crate) fn start(spec: AgentSpec) -> Result<ClaudeAgent, DriverError> {
+/// Spawn the child, resolving the spec's model under `models`.
+/// Requires a tokio runtime: the child's pipes are tokio handles and
+/// its stdout reader is a tokio task.
+pub(crate) fn start(spec: AgentSpec, models: &ModelSizes) -> Result<ClaudeAgent, DriverError> {
     let allowed_tools: Vec<String> = spec
         .mcp
         .iter()
@@ -83,7 +84,7 @@ pub(crate) fn start(spec: AgentSpec) -> Result<ClaudeAgent, DriverError> {
         cmd.arg("--mcp-config").arg(mcp_config_json(&mcp.url));
     }
     cmd.arg("--model")
-        .arg(resolved_model(spec.model.as_deref()));
+        .arg(resolved_model(spec.model.as_deref(), models));
     if let Some(n) = spec.max_turns {
         cmd.arg("--max-turns").arg(n.to_string());
     }
@@ -685,10 +686,7 @@ fn turn_result_of(v: &Json) -> TurnResult {
         turns: int_field(v, "num_turns"),
         duration_ms: int_field(v, "duration_ms"),
         duration_api_ms: int_field(v, "duration_api_ms"),
-        cost_usd: v
-            .get("total_cost_usd")
-            .and_then(Json::as_f64)
-            .unwrap_or(0.0),
+        cost_usd: v.get("total_cost_usd").and_then(Json::as_f64),
         usage: json_field("usage"),
         model_usage: json_field("modelUsage"),
         permission_denials: json_field("permission_denials"),
@@ -818,7 +816,7 @@ mod tests {
         let o = turn_result_of(&v);
         assert_eq!(o.text, "done");
         assert_eq!(o.turns, 3);
-        assert_eq!(o.cost_usd, 0.02);
+        assert_eq!(o.cost_usd, Some(0.02));
         assert_eq!(o.usage, r#"{"input_tokens":5}"#);
         assert_eq!(o.session_id, "S");
         assert!(o.raw.contains("\"uuid\":\"U\""));

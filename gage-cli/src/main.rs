@@ -343,7 +343,7 @@ async fn main() -> ExitCode {
     // `gage config` runs without a default driver, so a config that
     // names one this build does not have can still be edited
     if !matches!(cli.command, Command::Config { .. })
-        && let Err(e) = source::name_default_driver()
+        && let Err(e) = source::configure_drivers()
     {
         return exit_code(Err(e));
     }

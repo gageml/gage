@@ -62,3 +62,49 @@ fn named_default_driver_lets_commands_run() {
     let (code, _stdout, stderr) = run(home.path(), &["scan", "--list-scanners"]);
     assert_eq!(code, 0, "{stderr}");
 }
+
+#[test]
+fn model_sizes_list_the_driver_default_until_config_sets_one() {
+    let home = tempfile::tempdir().unwrap();
+    let (code, stdout, stderr) = run(
+        home.path(),
+        &["config", "get", "drivers.claude.models.medium"],
+    );
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(stdout.trim_end(), "claude-sonnet-4-6");
+
+    fs::write(
+        home.path().join("config.toml"),
+        "[drivers.claude.models]\nmedium = \"claude-sonnet-5-5\"\n",
+    )
+    .unwrap();
+    let (code, stdout, stderr) = run(home.path(), &["config", "list"]);
+    assert_eq!(code, 0, "{stderr}");
+    let models: Vec<&str> = stdout
+        .lines()
+        .filter(|line| line.starts_with("drivers.claude.models."))
+        .collect();
+    assert_eq!(
+        models,
+        [
+            "drivers.claude.models.large = \"claude-opus-4-8\"",
+            "drivers.claude.models.medium = \"claude-sonnet-5-5\"",
+            "drivers.claude.models.small = \"claude-haiku-4-5\"",
+        ]
+    );
+    let (code, _stdout, stderr) = run(home.path(), &["scan", "--list-scanners"]);
+    assert_eq!(code, 0, "{stderr}");
+}
+
+#[test]
+fn unknown_model_size_stops_commands() {
+    let home = tempfile::tempdir().unwrap();
+    fs::write(
+        home.path().join("config.toml"),
+        "[drivers.claude.models]\nhuge = \"x\"\n",
+    )
+    .unwrap();
+    let (code, _stdout, stderr) = run(home.path(), &["scan", "--list-scanners"]);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stderr.contains("huge"), "{stderr}");
+}

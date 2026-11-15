@@ -6,8 +6,10 @@ use clap::Subcommand;
 use toml::{Table, Value};
 
 use gage_core::config::{Config, user_config_path};
+use gage_session::ModelSizes;
 
 use crate::error::CliError;
+use crate::source::{driver_models, driver_registry};
 
 #[derive(Subcommand)]
 pub enum ConfigCommand {
@@ -71,10 +73,43 @@ fn get(name: &str) -> Result<(), CliError> {
 /// every setting, set or defaulted, has a dotted name and a value.
 fn load_effective(verb: &str) -> Result<Table, CliError> {
     let config = Config::load_user().with_context(|| format!("gage config {verb}"))?;
-    match Value::try_from(&config).with_context(|| format!("gage config {verb}"))? {
-        Value::Table(t) => Ok(t),
+    let mut table = match Value::try_from(&config).with_context(|| format!("gage config {verb}"))? {
+        Value::Table(t) => t,
         _ => unreachable!("Config serializes to a TOML table"),
+    };
+    let models = driver_models(&config.drivers);
+    for driver in driver_registry().drivers() {
+        let none = ModelSizes::default();
+        let set = models.get(driver.name()).unwrap_or(&none);
+        set_driver_model_sizes(
+            &mut table,
+            driver.name(),
+            &driver.model_sizes().overridden_by(set),
+        );
     }
+    Ok(table)
+}
+
+/// Put each size's working model on driver `name` into `table` as
+/// `drivers.<name>.models.<size>`. A driver's defaults are its own,
+/// so the config alone does not hold them.
+fn set_driver_model_sizes(table: &mut Table, name: &str, sizes: &ModelSizes) {
+    let models: Table = sizes
+        .iter()
+        .filter_map(|(size, model)| Some((size.to_string(), Value::String(model?.to_string()))))
+        .collect();
+    if models.is_empty() {
+        return;
+    }
+    let mut at = table;
+    for key in ["drivers", name] {
+        let Value::Table(inner) = at.entry(key).or_insert_with(|| Value::Table(Table::new()))
+        else {
+            unreachable!("drivers and its driver entries serialize as tables");
+        };
+        at = inner;
+    }
+    at.insert("models".to_string(), Value::Table(models));
 }
 
 /// Flattens a table to `(dotted.name, value)` pairs in key order.
@@ -148,6 +183,31 @@ mod tests {
                 "scanners.disable",
                 "scanners.enable",
                 "storage.max_session_size",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_drivers_model_sizes_are_listed_under_its_name() {
+        let mut table = default_table();
+        let sizes = ModelSizes {
+            small: Some("s".to_string()),
+            medium: None,
+            large: Some("l".to_string()),
+        };
+        set_driver_model_sizes(&mut table, "fake", &sizes);
+        set_driver_model_sizes(&mut table, "sizeless", &ModelSizes::default());
+        let listed: Vec<(String, String)> = leaves(&table)
+            .into_iter()
+            .filter(|(name, _)| name.starts_with("drivers."))
+            .map(|(name, value)| (name, value.to_string()))
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                ("drivers.default".to_string(), "\"claude\"".to_string()),
+                ("drivers.fake.models.large".to_string(), "\"l\"".to_string()),
+                ("drivers.fake.models.small".to_string(), "\"s\"".to_string()),
             ]
         );
     }

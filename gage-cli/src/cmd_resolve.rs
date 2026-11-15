@@ -99,7 +99,7 @@ fn run_dialog(
         )?;
     }
 
-    let model = model_prompt::model_step(args.model.as_deref(), args.yes)?;
+    let model = model_prompt::model_step("gage resolve", args.model.as_deref(), args.yes)?;
 
     if !args.yes {
         dialog::usage_notice(

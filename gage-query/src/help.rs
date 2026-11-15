@@ -246,7 +246,8 @@ status is pending, started, completed, failed, or canceled. scan_task_agent
 (scan_id, scanner, task, session_id, native_id, exit_code, is_error, stop_reason,
 turns, duration_ms, cost_usd, result) is one row per agent a task ran; session_id
 is the agent's stored session, native_id its native UUID, result the harness's
-result message verbatim. An agent still running has null result columns.
+result message verbatim. An agent still running has null result columns, and
+cost_usd is null for an agent whose harness reports no cost.
 
 scan_log (scan_id, name, text) is one row per log a scan wrote, at most three:
 name is out (what the scanners printed), err (Gage's status lines and task

@@ -1,87 +1,60 @@
-//! Model alias resolution for values passed to `claude --model`.
-//! Maps size aliases (`small`/`medium`/`large`) to pinned model ids.
-//! The family aliases claude documents (`haiku`/`sonnet`/`opus`)
-//! track the latest release of each family, and the 5.x releases
-//! refuse routine Gage prompts through the reasoning_extraction
-//! safety classifier, so each size pins the latest 4.x release of its
+//! Model resolution for values passed to `claude --model`. A size
+//! name (`small`/`medium`/`large`) resolves to a model id. The
+//! family aliases claude documents (`haiku`/`sonnet`/`opus`) track
+//! the latest release of each family, and the 5.x releases refuse
+//! routine Gage prompts through the reasoning_extraction safety
+//! classifier, so each size defaults to the latest 4.x release of its
 //! family. Family aliases and concrete model ids pass through
 //! unchanged.
 
-use std::collections::HashMap;
+use gage_session::{ModelChoice, ModelChoices, ModelSizes};
 
-const MODEL_ALIASES: &[(&str, &str)] = &[
-    ("large", "claude-opus-4-8"),
-    ("medium", "claude-sonnet-4-6"),
-    ("small", "claude-haiku-4-5"),
-];
-
-/// Model used when a spec does not set one. Every child claude gets
-/// `--model`; an unset model never falls through to the user's
+/// Size used when a spec does not set a model. Every child claude
+/// gets `--model`; an unset model never falls through to the user's
 /// Claude Code default.
 pub const DEFAULT_MODEL: &str = "medium";
 
-/// Resolve a spec's optional model to the `--model` value: the
-/// resolved alias, or the resolved [`DEFAULT_MODEL`] when unset.
-pub fn resolved_model(model: Option<&str>) -> String {
-    resolve_model(model.unwrap_or(DEFAULT_MODEL)).to_string()
-}
-
-/// Per-size model overrides, built from repeated `[SIZE=]MODEL`
-/// values (the CLI's `--model` option). An empty map resolves
-/// identically to [`resolved_model`].
-#[derive(Debug, Clone, Default)]
-pub struct ModelMap(HashMap<String, String>);
-
-impl ModelMap {
-    /// Parse repeated `[SIZE=]MODEL` values. A bare MODEL sets every
-    /// size alias; `SIZE=MODEL` sets one. Later values override
-    /// earlier ones per size.
-    pub fn from_args(values: &[String]) -> Result<Self, String> {
-        let mut map = HashMap::new();
-        for value in values {
-            match value.split_once('=') {
-                Some((size, model)) => {
-                    if !MODEL_ALIASES.iter().any(|(alias, _)| *alias == size) {
-                        return Err(format!(
-                            "unknown model size {size:?} in {value:?}: \
-                             expected small, medium, or large"
-                        ));
-                    }
-                    if model.is_empty() {
-                        return Err(format!("missing model in {value:?}"));
-                    }
-                    map.insert(size.to_string(), model.to_string());
-                }
-                None => {
-                    if value.is_empty() {
-                        return Err("empty model".to_string());
-                    }
-                    for (alias, _) in MODEL_ALIASES {
-                        map.insert((*alias).to_string(), value.clone());
-                    }
-                }
-            }
-        }
-        Ok(Self(map))
-    }
-
-    /// Resolve a spec's optional model like [`resolved_model`], with
-    /// this map's overrides applied first. Only size aliases are
-    /// remapped; family aliases and concrete ids pass through.
-    pub fn resolve(&self, model: Option<&str>) -> String {
-        let input = model.unwrap_or(DEFAULT_MODEL);
-        let mapped = self.0.get(input).map(String::as_str).unwrap_or(input);
-        resolve_model(mapped).to_string()
+/// The model each size resolves to when the user's config sets none.
+pub fn default_sizes() -> ModelSizes {
+    ModelSizes {
+        small: Some("claude-haiku-4-5".to_string()),
+        medium: Some("claude-sonnet-4-6".to_string()),
+        large: Some("claude-opus-4-8".to_string()),
     }
 }
 
-pub fn resolve_model(input: &str) -> &str {
-    for (alias, target) in MODEL_ALIASES {
-        if *alias == input {
-            return target;
-        }
+/// The models a dialog offers for a Claude Code session, best first.
+/// Each is a name Claude Code resolves itself.
+pub fn model_choices() -> ModelChoices {
+    let choice = ModelChoice::new;
+    ModelChoices {
+        choices: vec![
+            choice("fable", "Fable", ""),
+            choice("opus[1m]", "Opus (1M context)", ""),
+            choice("opus", "Opus", "latest Opus"),
+            choice(
+                "opusplan",
+                "Opus plan",
+                "Opus for planning, Sonnet for execution",
+            ),
+            choice("sonnet[1m]", "Sonnet (1M context)", ""),
+            choice("sonnet", "Sonnet", "latest Sonnet"),
+        ],
+        example: Some("claude-sonnet-4-6".to_string()),
     }
-    input
+}
+
+/// Resolve a spec's optional model to the `--model` value under
+/// `sizes`: the model of the size it names, or of [`DEFAULT_MODEL`]
+/// when unset.
+pub fn resolved_model(model: Option<&str>, sizes: &ModelSizes) -> String {
+    resolve_model(model.unwrap_or(DEFAULT_MODEL), sizes).to_string()
+}
+
+/// The model `input` names under `sizes`: the size's model when
+/// `input` is a size name, else `input` as given.
+pub fn resolve_model<'a>(input: &'a str, sizes: &'a ModelSizes) -> &'a str {
+    sizes.get(input).unwrap_or(input)
 }
 
 #[cfg(test)]
@@ -89,68 +62,69 @@ mod tests {
     use super::*;
 
     #[test]
-    fn resolves_aliases() {
-        assert_eq!(resolve_model("large"), "claude-opus-4-8");
-        assert_eq!(resolve_model("medium"), "claude-sonnet-4-6");
-        assert_eq!(resolve_model("small"), "claude-haiku-4-5");
+    fn choices_run_best_first_and_pass_through_resolution() {
+        let offered = model_choices();
+        let models: Vec<&str> = offered.choices.iter().map(|c| c.model.as_str()).collect();
+        assert_eq!(
+            models,
+            [
+                "fable",
+                "opus[1m]",
+                "opus",
+                "opusplan",
+                "sonnet[1m]",
+                "sonnet"
+            ]
+        );
+        assert_eq!(offered.example.as_deref(), Some("claude-sonnet-4-6"));
+        let sizes = default_sizes();
+        for model in models {
+            assert_eq!(resolve_model(model, &sizes), model);
+        }
+    }
+
+    #[test]
+    fn resolves_sizes_to_their_defaults() {
+        let sizes = default_sizes();
+        assert_eq!(resolve_model("large", &sizes), "claude-opus-4-8");
+        assert_eq!(resolve_model("medium", &sizes), "claude-sonnet-4-6");
+        assert_eq!(resolve_model("small", &sizes), "claude-haiku-4-5");
     }
 
     #[test]
     fn passes_through_family_aliases_and_ids() {
-        assert_eq!(resolve_model("opus"), "opus");
-        assert_eq!(resolve_model("sonnet"), "sonnet");
-        assert_eq!(resolve_model("haiku"), "haiku");
-        assert_eq!(resolve_model("claude-opus-4-8"), "claude-opus-4-8");
-        assert_eq!(resolve_model("unknown-model"), "unknown-model");
+        let sizes = default_sizes();
+        for model in [
+            "opus",
+            "sonnet",
+            "haiku",
+            "claude-opus-4-8",
+            "unknown-model",
+        ] {
+            assert_eq!(resolve_model(model, &sizes), model);
+        }
     }
 
     #[test]
     fn default_model_when_unset() {
-        assert_eq!(resolved_model(None), "claude-sonnet-4-6");
-        assert_eq!(resolved_model(Some("large")), "claude-opus-4-8");
-        assert_eq!(resolved_model(Some("claude-haiku-4-5")), "claude-haiku-4-5");
-    }
-
-    fn map(values: &[&str]) -> ModelMap {
-        let owned: Vec<String> = values.iter().map(|s| s.to_string()).collect();
-        ModelMap::from_args(&owned).unwrap()
-    }
-
-    #[test]
-    fn empty_map_matches_resolved_model() {
-        let m = map(&[]);
-        assert_eq!(m.resolve(None), "claude-sonnet-4-6");
-        assert_eq!(m.resolve(Some("large")), "claude-opus-4-8");
-        assert_eq!(m.resolve(Some("claude-haiku-4-5")), "claude-haiku-4-5");
+        let sizes = default_sizes();
+        assert_eq!(resolved_model(None, &sizes), "claude-sonnet-4-6");
+        assert_eq!(resolved_model(Some("large"), &sizes), "claude-opus-4-8");
+        assert_eq!(
+            resolved_model(Some("claude-haiku-4-5"), &sizes),
+            "claude-haiku-4-5"
+        );
     }
 
     #[test]
-    fn bare_model_sets_every_size() {
-        let m = map(&["claude-sonnet-4-6"]);
-        assert_eq!(m.resolve(Some("small")), "claude-sonnet-4-6");
-        assert_eq!(m.resolve(Some("medium")), "claude-sonnet-4-6");
-        assert_eq!(m.resolve(Some("large")), "claude-sonnet-4-6");
-        assert_eq!(m.resolve(None), "claude-sonnet-4-6");
-    }
-
-    #[test]
-    fn scoped_overrides_bare_and_last_wins() {
-        let m = map(&["claude-sonnet-4-6", "large=claude-opus-4-7", "large=opus"]);
-        assert_eq!(m.resolve(Some("medium")), "claude-sonnet-4-6");
-        assert_eq!(m.resolve(Some("large")), "opus");
-    }
-
-    #[test]
-    fn map_leaves_non_size_inputs_alone() {
-        let m = map(&["claude-sonnet-4-6"]);
-        assert_eq!(m.resolve(Some("sonnet")), "sonnet");
-        assert_eq!(m.resolve(Some("claude-opus-4-7")), "claude-opus-4-7");
-    }
-
-    #[test]
-    fn rejects_bad_values() {
-        for bad in ["huge=opus", "medium=", ""] {
-            assert!(ModelMap::from_args(&[bad.to_string()]).is_err(), "{bad:?}");
-        }
+    fn an_overridden_size_resolves_to_its_override_set_or_unset() {
+        let sizes = default_sizes().overridden_by(&ModelSizes {
+            medium: Some("claude-sonnet-5-5".to_string()),
+            ..ModelSizes::default()
+        });
+        assert_eq!(resolved_model(None, &sizes), "claude-sonnet-5-5");
+        assert_eq!(resolved_model(Some("medium"), &sizes), "claude-sonnet-5-5");
+        assert_eq!(resolved_model(Some("small"), &sizes), "claude-haiku-4-5");
+        assert_eq!(resolved_model(Some("sonnet"), &sizes), "sonnet");
     }
 }

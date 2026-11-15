@@ -99,6 +99,7 @@ pub(crate) fn module() -> Result<Module, ContextError> {
     m.function_meta(runner_next)?;
 
     m.ty::<AgentResult>()?;
+    m.field_function(&Protocol::GET, "cost_usd", AgentResult::cost_usd_value)?;
     m.function_meta(AgentResult::debug)?;
     m.function_meta(AgentResult::metadata)?;
 
@@ -629,7 +630,7 @@ fn write_agent_record(
         stop_reason: result.stop_reason.clone(),
         turns: result.turns,
         duration_ms: result.duration_ms,
-        cost_usd: raw.map(|_| result.cost_usd),
+        cost_usd: raw.and(result.cost_usd),
     })
     .map_err(io::Error::other)?;
     fs::write(dir.join("attrs.json"), attrs)?;
@@ -815,8 +816,9 @@ pub struct AgentResult {
     pub duration_ms: i64,
     #[rune(get, copy)]
     pub duration_api_ms: i64,
-    #[rune(get, copy)]
-    pub cost_usd: f64,
+    /// Spend in USD; `None` when the harness reported no cost. A
+    /// scanner reads it as a float, or as `()` when there is none.
+    pub cost_usd: Option<f64>,
     /// Token counts, JSON
     #[rune(get)]
     pub usage: String,
@@ -867,12 +869,19 @@ impl AgentResult {
         }
     }
 
+    fn cost_usd_value(&self) -> Value {
+        match self.cost_usd {
+            Some(usd) => rune::to_value(usd).unwrap(),
+            None => Value::from(()),
+        }
+    }
+
     #[rune::function(protocol = DEBUG_FMT)]
     fn debug(&self, f: &mut Formatter) -> Result<(), VmError> {
         write!(
             f,
             "AgentResult {{ exit_code: {}, is_error: {}, stop_reason: {:?}, turns: {}, \
-             duration_ms: {}, cost_usd: {}, session_id: {:?}, text: {:?}, stderr: {:?} }}",
+             duration_ms: {}, cost_usd: {:?}, session_id: {:?}, text: {:?}, stderr: {:?} }}",
             self.exit_code,
             self.is_error,
             self.stop_reason,
@@ -887,7 +896,8 @@ impl AgentResult {
     }
 
     /// The fields suited to a note's metadata. `duration` is in
-    /// seconds.
+    /// seconds. `cost_usd` is left out when the harness reported no
+    /// cost.
     #[rune::function(instance)]
     fn metadata(&self) -> Object {
         let mut obj = Object::new();
@@ -905,7 +915,9 @@ impl AgentResult {
             "duration",
             rune::to_value(self.duration_ms as f64 / 1000.0).unwrap(),
         );
-        put("cost_usd", rune::to_value(self.cost_usd).unwrap());
+        if let Some(usd) = self.cost_usd {
+            put("cost_usd", rune::to_value(usd).unwrap());
+        }
         put(
             "session_id",
             rune::to_value(self.session_id.clone()).unwrap(),
@@ -994,7 +1006,78 @@ impl Event {
 
 #[cfg(test)]
 mod tests {
+    use rune::runtime::Vm;
+    use rune::sync::Arc as RuneArc;
+    use rune::{Source, Sources};
+
     use super::*;
+
+    fn result_costing(cost_usd: Option<f64>) -> AgentResult {
+        let turn = TurnResult {
+            cost_usd,
+            ..TurnResult::default()
+        };
+        AgentResult::new(turn, "end_turn", 0, String::new())
+    }
+
+    /// A scanner reads a reported cost as the float it always was and
+    /// an unreported one as unit, and note metadata carries a cost
+    /// only when there is one.
+    #[test]
+    fn an_unreported_cost_is_unit_to_a_scanner_and_absent_from_metadata() {
+        let known = result_costing(Some(0.5));
+        assert_eq!(known.cost_usd_value().as_float().unwrap(), 0.5);
+        let unknown = result_costing(None);
+        unknown.cost_usd_value().into_unit().unwrap();
+
+        let script = r#"
+            pub fn main(result) {
+                let m = result.metadata();
+                (result.cost_usd, m.contains_key("cost_usd"))
+            }
+        "#;
+        let run = |result: AgentResult| -> (Value, bool) {
+            let context = crate::context().unwrap();
+            let runtime = RuneArc::try_new(context.runtime().unwrap()).unwrap();
+            let mut sources = Sources::new();
+            sources.insert(Source::memory(script).unwrap()).unwrap();
+            let unit = rune::prepare(&mut sources)
+                .with_context(&context)
+                .build()
+                .unwrap();
+            let mut vm = Vm::new(runtime, RuneArc::try_new(unit).unwrap());
+            let output = vm.call(["main"], (result,)).unwrap();
+            let tuple = output.borrow_tuple_ref().unwrap();
+            (tuple[0].clone(), tuple[1].as_bool().unwrap())
+        };
+        let (cost, in_metadata) = run(known);
+        assert_eq!(cost.as_float().unwrap(), 0.5);
+        assert!(in_metadata);
+        let (cost, in_metadata) = run(unknown);
+        cost.into_unit().unwrap();
+        assert!(!in_metadata);
+    }
+
+    /// The stored record carries the cost the harness reported, and
+    /// none when it reported a result without one.
+    #[test]
+    fn agent_record_stores_a_cost_only_when_one_was_reported() {
+        let tmp = tempfile::tempdir().unwrap();
+        let attrs = |id: &str, cost_usd: Option<f64>| -> AgentAttrs {
+            write_agent_record(
+                tmp.path(),
+                id,
+                "0123abc",
+                &result_costing(cost_usd),
+                Some("{}"),
+            )
+            .unwrap();
+            let path = tmp.path().join("agents").join(id).join("attrs.json");
+            serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
+        };
+        assert_eq!(attrs("known", Some(0.5)).cost_usd, Some(0.5));
+        assert_eq!(attrs("unknown", None).cost_usd, None);
+    }
 
     /// The running record names the driver beside the native id, and
     /// the result that replaces it leaves neither, since a directory

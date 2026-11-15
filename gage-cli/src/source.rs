@@ -1,12 +1,13 @@
 //! Session source selection for the CLI: the driver registry and the
 //! `--source` resolution shared by commands that read sessions.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Context;
-use gage_core::config::{Config, display_user_config_path};
-use gage_registry::driver::{DriverRegistry, set_default_driver};
-use gage_session::{Driver, SkillSession, Source, SourceOptions};
+use gage_core::config::{Config, DriversConfig, display_user_config_path};
+use gage_registry::driver::{DriverRegistry, set_default_driver, set_driver_models};
+use gage_session::{Driver, ModelSizes, SkillSession, Source, SourceOptions};
 
 use crate::error::CliError;
 
@@ -19,20 +20,40 @@ PATH/projects; without PATH, the
           Claude Code home directory";
 
 /// The drivers this CLI build registers. The default is the one the
-/// config names, once [`name_default_driver`] has run.
+/// config names, once [`configure_drivers`] has run.
 pub fn driver_registry() -> DriverRegistry {
     DriverRegistry::builtin()
 }
 
-/// Name the process's default driver from the `drivers.default`
-/// setting of the user config. A config that cannot be read, or that
-/// names a driver this build does not have, is the error.
-pub fn name_default_driver() -> Result<(), CliError> {
+/// Configure the process's drivers from the `drivers` settings of the
+/// user config: the default driver and the models each driver
+/// resolves its sizes to. A config that cannot be read, or that names
+/// a default driver this build does not have, is the error.
+pub fn configure_drivers() -> Result<(), CliError> {
     let path = display_user_config_path();
     let config = Config::load_user().with_context(|| format!("reading {path}"))?;
+    set_driver_models(driver_models(&config.drivers))
+        .with_context(|| format!("{path}: drivers"))?;
     set_default_driver(&config.drivers.default)
         .with_context(|| format!("{path}: drivers.default"))
         .map_err(CliError::from)
+}
+
+/// The model sizes `config` sets, by driver name
+pub fn driver_models(config: &DriversConfig) -> HashMap<String, ModelSizes> {
+    config
+        .entries
+        .iter()
+        .map(|(name, entry)| {
+            let models = &entry.models;
+            let sizes = ModelSizes {
+                small: models.small.clone(),
+                medium: models.medium.clone(),
+                large: models.large.clone(),
+            };
+            (name.clone(), sizes)
+        })
+        .collect()
 }
 
 /// Resolve a `--source` value to the driver that handles it and the

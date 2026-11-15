@@ -478,12 +478,11 @@ async fn list_rows(
     Ok(rows)
 }
 
-/// A scan's spend as `gage scan view` shows it: `$0.50`, with a `+`
-/// suffix when an agent's cost went unrecorded. A scan with no agent
-/// rows is `$0.00`.
+/// A stored scan's spend as `gage scan view` shows it: `$0.50`, with
+/// a `+` suffix when an agent has no recorded cost, and `unknown`
+/// when none has one. A scan with no agent rows is `$0.00`.
 fn cost_cell(usd: Option<f64>, incomplete: bool) -> String {
-    let suffix = if incomplete { "+" } else { "" };
-    format!("${:.2}{suffix}", usd.unwrap_or(0.0))
+    ScanCost { usd, incomplete }.label(true)
 }
 
 async fn view(args: ScanViewArgs) -> Result<(), CliError> {
@@ -872,7 +871,7 @@ impl StoreHost {
     /// store scope, since agent sessions are not dataset members.
     async fn load_results(&self, ctx: &SessionContext) -> Result<ScanResults, Box<dyn Error>> {
         let mut agents = Vec::new();
-        let mut task_costs: HashMap<TaskId, (f64, bool)> = HashMap::new();
+        let mut task_costs: HashMap<TaskId, ScanCost> = HashMap::new();
         let mut agent_ids = Vec::new();
         for batch in &query(
             ctx,
@@ -898,11 +897,7 @@ impl StoreHost {
                     is_errors.is_valid(i).then(|| is_errors.value(i)),
                     costs.is_valid(i).then(|| costs.value(i)),
                 );
-                let cost = task_costs.entry(task.clone()).or_insert((0.0, false));
-                match agent.cost {
-                    Some(usd) => cost.0 += usd,
-                    None => cost.1 = true,
-                }
+                task_costs.entry(task.clone()).or_default().add(agent.cost);
                 agent_ids.push(agent.session_id.clone());
                 agents.push(TaskAgent { task, agent });
             }
@@ -915,16 +910,15 @@ impl StoreHost {
             }
         }
         let cost = {
-            let usd: f64 = task_costs.values().map(|(usd, _)| usd).sum();
-            let incomplete = task_costs.values().any(|(_, incomplete)| *incomplete);
-            (usd != 0.0 || incomplete).then_some(ScanCost { usd, incomplete })
+            let mut total = ScanCost::default();
+            for cost in task_costs.values() {
+                total.merge(*cost);
+            }
+            (total != ScanCost::default()).then_some(total)
         };
         let task_costs = task_costs
             .into_iter()
-            .map(|(id, (usd, incomplete))| TaskCost {
-                id,
-                cost: ScanCost { usd, incomplete },
-            })
+            .map(|(id, cost)| TaskCost { id, cost })
             .collect();
 
         let mut notes = Vec::new();
@@ -2399,15 +2393,16 @@ mod tests {
     }
 
     /// The Cost column sums a scan's agent spend, marks a total with
-    /// an unrecorded agent cost with `+`, and shows `$0.00` for a scan
-    /// that ran no agent.
+    /// an unrecorded agent cost with `+`, shows `unknown` when no
+    /// agent has a cost, and shows `$0.00` for a scan that ran no
+    /// agent.
     #[tokio::test]
     async fn list_rows_show_each_scans_agent_cost() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("store.git");
         gage_store::init(&path).unwrap();
         let store = Store::open_with_cache_root(&path, &tmp.path().join("cache")).unwrap();
-        let ids: Vec<String> = (0..3).map(|_| new_uuid()).collect();
+        let ids: Vec<String> = (0..4).map(|_| new_uuid()).collect();
         store_scan(
             &store,
             tmp.path(),
@@ -2421,6 +2416,12 @@ mod tests {
             &[("AGENT3", Some(1.0)), ("AGENT4", None)],
         );
         store_scan(&store, tmp.path(), &ids[2], &[]);
+        store_scan(
+            &store,
+            tmp.path(),
+            &ids[3],
+            &[("AGENT5", None), ("AGENT6", None)],
+        );
         let ctx = ContextBuilder::new(Some(Arc::new(Mutex::new(store))))
             .build()
             .await;
@@ -2440,6 +2441,7 @@ mod tests {
             (ids[0].clone(), "$0.75".to_string()),
             (ids[1].clone(), "$1.00+".to_string()),
             (ids[2].clone(), "$0.00".to_string()),
+            (ids[3].clone(), "unknown".to_string()),
         ];
         expected.sort();
         assert_eq!(costs, expected);

@@ -28,6 +28,8 @@ pub mod codec;
 pub mod content_schema;
 pub mod filter;
 pub mod host;
+pub mod model_choice;
+pub mod model_size;
 pub mod progress;
 pub mod status;
 pub mod summary_columns;
@@ -45,6 +47,8 @@ pub use content_schema::{
     ContentField, ContentSchema, content_schema_batch, content_schema_schema,
 };
 pub use host::HostContext;
+pub use model_choice::{ModelChoice, ModelChoices};
+pub use model_size::{MODEL_SIZES, ModelSizes};
 pub use status::{AuthInfo, DriverStatus, Field, HarnessInfo, InstallInfo};
 pub use summary_columns::{SummaryArrays, SummaryColumns};
 pub use system_col::{SYSTEM_META_KEY, is_system, system};
@@ -159,6 +163,19 @@ pub trait Driver: Send + Sync {
         content_format: &str,
         source: Box<dyn ContentSource>,
     ) -> Result<Box<dyn StoredSession>, DriverError>;
+
+    /// The model each size name resolves to when this driver starts
+    /// an agent or a skill session, as the driver is configured. The
+    /// default is none, for a driver that resolves no size names.
+    fn model_sizes(&self) -> ModelSizes {
+        ModelSizes::default()
+    }
+
+    /// The models a dialog offers for a session this driver starts.
+    /// The default offers none, and the dialog asks for a model name.
+    fn model_choices(&self) -> ModelChoices {
+        ModelChoices::default()
+    }
 
     /// The display form of a model name from this driver's sessions.
     /// The default shows the name as stored.
