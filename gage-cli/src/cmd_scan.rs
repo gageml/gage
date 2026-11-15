@@ -629,7 +629,7 @@ impl ScanHost for StoreHost {
             .ok_or_else(|| io::Error::other("no default session driver registered"))?;
         let session = SkillSession {
             name: "Resolve Gage issues",
-            skill: "gage:resolve",
+            skill: "resolve",
             args: issue_ids,
             model: None,
             extra_args: &[],

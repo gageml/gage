@@ -265,6 +265,19 @@ pub trait Driver: Send + Sync {
         )))
     }
 
+    /// The harness's name as a person knows it, `Claude Code`. The
+    /// default is the driver's name.
+    fn harness_name(&self) -> &'static str {
+        self.name()
+    }
+
+    /// Where the harness's command is installed. `None` when it is
+    /// not installed, and for a driver with no harness to install
+    /// Gage into, which is the default.
+    fn harness_path(&self) -> Option<PathBuf> {
+        None
+    }
+
     /// What this driver reports about itself. The default reports
     /// every field unsupported.
     fn status(&self) -> Result<DriverStatus, DriverError> {
@@ -313,7 +326,8 @@ pub trait Driver: Send + Sync {
 pub struct SkillSession<'a> {
     /// The session's display name in the harness
     pub name: &'a str,
-    /// The skill as the harness invokes it, `gage:resolve`
+    /// The Gage skill by its own name, `resolve`. The driver spells
+    /// the invocation its harness takes
     pub skill: &'a str,
     /// The skill's arguments, each one word of its invocation. A word
     /// is quoted for the harness by the driver
