@@ -40,7 +40,7 @@ syntax, and the dialect limits. Read a topic with
 `SELECT full FROM help WHERE topic = '<topic>'`. The topics:
 
 source: reading another store or a native source in place of the main store
-message_text: full-text message search, its query syntax, and message kinds
+message_text: full-text message search and its query syntax
 blame: the session call that wrote each line of a file
 json: reading raw, input_raw, result_raw, and content_schema
 summary: the summary JSON fields and token totals
@@ -55,12 +55,26 @@ scopes: what a scan-scoped context restricts
 
 The named tables are session, entry, message, tool_use, tool_use_file,
 session_change, note, note_doc, issue, issue_event, issue_evidence, scan and its
-link and log tables, dataset, attachment, and content_schema. session carries
-the derived attributes as typed columns (`title`, `model`, `message_count`,
-`line_count`, `is_empty`, the token totals, `cost_usd`), the same values with
-the driver's extra members in a `summary` JSON, and `origin` the source URL;
+link and log tables, dataset, attachment, and content_schema. session is keyed
+by `id`; every other table names its session `session_id`, and rows within a
+session are ordered by `line`.
+
+session carries the derived attributes as typed columns (`title`, `model`,
+`message_count`, `line_count`, `is_empty`, the token totals, `cost_usd`), the
+same values with the driver's extra members in a `summary` JSON, and `origin`
+the source URL.
+
+message is one row per message. `type` is who produced it: user, assistant, or
+system. `subtype` is what it holds: text, thinking, tool_use, or tool_result,
+and for system messages kinds such as api_error or compact_boundary. Typed
+conversation is subtype text under type user or assistant; a tool result is
+(user, tool_result), so type = 'user' alone admits tool output.
+
+tool_use is one row per tool call, joined to its result: `name`, `output`, and
+`is_error`, true when the call failed.
+
 entry and message carry `raw`, tool_use carries `input_raw` and `result_raw`,
 each JSON in the driver's native shape.
 
-Read a session by `session_id` ordered by `line`, taking `substr(text, 1, 800)`
-over full `text` or `raw` on wide rows.
+Read a session's messages from message by `session_id` ordered by `line`,
+taking `substr(text, 1, 800)` over full `text` or `raw` on wide rows.

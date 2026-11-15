@@ -87,7 +87,7 @@ whether a native session is already stored."#,
     },
     HelpTopic {
         topic: "message_text",
-        short: "full-text message search, its query syntax, and message kinds",
+        short: "full-text message search and its query syntax",
         full: r#"message_text(query [, snippet_len]) searches the text of every stored session's
 messages, or every session of the native source the query names. It returns (url,
 session_id, line, type, subtype, score, snippet), one row per matching message,
