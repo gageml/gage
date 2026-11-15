@@ -4,7 +4,8 @@
 use std::sync::Arc;
 
 use anyhow::Context;
-use gage_registry::driver::DriverRegistry;
+use gage_core::config::{Config, display_user_config_path};
+use gage_registry::driver::{DriverRegistry, set_default_driver};
 use gage_session::{Driver, SkillSession, Source, SourceOptions};
 
 use crate::error::CliError;
@@ -17,9 +18,21 @@ the default driver. Schemes are defined by drivers:
 PATH/projects; without PATH, the
           Claude Code home directory";
 
-/// The drivers this CLI build registers
+/// The drivers this CLI build registers. The default is the one the
+/// config names, once [`name_default_driver`] has run.
 pub fn driver_registry() -> DriverRegistry {
     DriverRegistry::builtin()
+}
+
+/// Name the process's default driver from the `drivers.default`
+/// setting of the user config. A config that cannot be read, or that
+/// names a driver this build does not have, is the error.
+pub fn name_default_driver() -> Result<(), CliError> {
+    let path = display_user_config_path();
+    let config = Config::load_user().with_context(|| format!("reading {path}"))?;
+    set_default_driver(&config.drivers.default)
+        .with_context(|| format!("{path}: drivers.default"))
+        .map_err(CliError::from)
 }
 
 /// Resolve a `--source` value to the driver that handles it and the

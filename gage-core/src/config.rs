@@ -163,6 +163,33 @@ pub struct Config {
 
     #[serde(default)]
     pub backup: BackupConfig,
+
+    #[serde(default)]
+    pub drivers: DriversConfig,
+}
+
+/// The driver a build treats as default when the config names none
+pub const DEFAULT_DRIVER: &str = "claude";
+
+/// Session driver settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DriversConfig {
+    /// The driver a source or an agent model with no scheme goes to,
+    /// by name
+    #[serde(default = "default_driver")]
+    pub default: String,
+}
+
+fn default_driver() -> String {
+    DEFAULT_DRIVER.to_string()
+}
+
+impl Default for DriversConfig {
+    fn default() -> Self {
+        Self {
+            default: default_driver(),
+        }
+    }
 }
 
 /// `gage backup` settings.
@@ -300,6 +327,57 @@ impl Config {
         fs::write(path, s)
     }
 
+    /// Name `driver` as the default driver in the config file at
+    /// `path`, when the file names none. A missing file is created
+    /// with every setting at its default. A file that sets other
+    /// things gains a `[drivers]` table at its end, so its comments
+    /// and layout stay as written. Returns whether the file changed.
+    pub fn name_default_driver(path: &Path, driver: &str) -> io::Result<bool> {
+        let text = match fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                let mut config = Config::default();
+                config.drivers.default = driver.to_string();
+                config.save_to(path)?;
+                return Ok(true);
+            }
+            Err(e) => return Err(e),
+        };
+        let table: toml::Table = toml::from_str(&text).map_err(io::Error::other)?;
+        match table.get("drivers") {
+            None => {}
+            Some(toml::Value::Table(drivers)) if drivers.contains_key("default") => {
+                return Ok(false);
+            }
+            Some(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "{} has a drivers table with no default; add default = {driver:?} to it",
+                        path.display()
+                    ),
+                ));
+            }
+        }
+        let separator = if text.is_empty() || text.ends_with("\n\n") {
+            ""
+        } else if text.ends_with('\n') {
+            "\n"
+        } else {
+            "\n\n"
+        };
+        let table = toml::to_string(&toml::Table::from_iter([(
+            "drivers".to_string(),
+            toml::Value::Table(toml::Table::from_iter([(
+                "default".to_string(),
+                toml::Value::String(driver.to_string()),
+            )])),
+        )]))
+        .map_err(io::Error::other)?;
+        fs::write(path, format!("{text}{separator}{table}"))?;
+        Ok(true)
+    }
+
     /// True if the named scanner is enabled per this config. Entries
     /// in `enable` / `disable` may contain `*` wildcards that match any
     /// run of characters.
@@ -325,6 +403,59 @@ impl Config {
 mod tests {
     use super::Config;
     use serde_json as json;
+
+    #[test]
+    fn default_driver_is_claude_until_the_config_names_one() {
+        assert_eq!(Config::default().drivers.default, "claude");
+        let config: Config = toml::from_str("[drivers]\ndefault = \"codex\"\n").unwrap();
+        assert_eq!(config.drivers.default, "codex");
+    }
+
+    #[test]
+    fn naming_the_default_driver_creates_a_missing_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        assert!(Config::name_default_driver(&path, "codex").unwrap());
+        let config = Config::load_from(&path).unwrap();
+        assert_eq!(config.drivers.default, "codex");
+    }
+
+    #[test]
+    fn naming_the_default_driver_appends_to_a_config_and_keeps_its_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let written = "# kept\n[backup]\nsources = [\"claude:\"]";
+        std::fs::write(&path, written).unwrap();
+        assert!(Config::name_default_driver(&path, "claude").unwrap());
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            text,
+            format!("{written}\n\n[drivers]\ndefault = \"claude\"\n")
+        );
+        assert_eq!(
+            Config::load_from(&path).unwrap().backup.sources,
+            ["claude:"]
+        );
+    }
+
+    #[test]
+    fn naming_the_default_driver_leaves_a_named_default_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let written = "[drivers]\ndefault = \"codex\"\n";
+        std::fs::write(&path, written).unwrap();
+        assert!(!Config::name_default_driver(&path, "claude").unwrap());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), written);
+    }
+
+    #[test]
+    fn naming_the_default_driver_refuses_a_drivers_table_without_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[drivers]\n").unwrap();
+        let err = Config::name_default_driver(&path, "claude").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
 
     #[test]
     fn scanner_enable_disable_globs() {

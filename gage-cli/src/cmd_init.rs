@@ -1,5 +1,6 @@
 use clap::Args;
 use cliclack as cli;
+use gage_core::config::{Config, user_config_path};
 use gage_session::InstallUi;
 use gage_store::{Store, StoreError};
 
@@ -37,6 +38,7 @@ fn install_dialog(args: &InitArgs) -> Result<DialogResult, DialogError> {
         "Plugin\ngage (MCP server + skills) via {} driver",
         driver.name()
     ))?;
+    cli::log::step(format!("Default driver\n{}", driver.name()))?;
 
     dialog::confirm(args.yes, true)?;
 
@@ -49,6 +51,11 @@ fn install_dialog(args: &InitArgs) -> Result<DialogResult, DialogError> {
             return Err(e);
         }
     }
+
+    // The config names the driver this setup is for, so the default
+    // stays this one when a later build bundles others
+    Config::name_default_driver(&user_config_path(), driver.name())
+        .map_err(|e| DialogError::Other(anyhow::anyhow!("writing config: {e}")))?;
 
     let gage_bin = std::env::current_exe()?;
     let gage_bin_str = gage_bin.to_str().ok_or_else(|| {

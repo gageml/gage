@@ -143,6 +143,7 @@ mod tests {
             names,
             [
                 "backup.sources",
+                "drivers.default",
                 "issues.related_threshold",
                 "scanners.disable",
                 "scanners.enable",

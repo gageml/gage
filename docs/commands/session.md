@@ -24,7 +24,9 @@ before or after the subcommand.
 | `-s, --source <SOURCE>` | Session source                    |
 | `-S, --stored`          | Operate on stored sessions        |
 
-A source is `SCHEME:PATH`. A value with no scheme uses the default driver.
+A source is `SCHEME:PATH`. A value with no scheme uses the default driver,
+which the `drivers.default` setting names; see
+[`gage config`](/docs/commands/config#settings).
 The `claude` scheme reads Claude Code sessions under `PATH/projects`, or the
 Claude Code home directory when `PATH` is omitted.
 

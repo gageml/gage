@@ -6,7 +6,9 @@ description:
 ---
 
 The `gage init` command sets up Gage. It registers the Gage plugin with Claude
-Code.
+Code. When the config file does not set `drivers.default`, it writes the
+setting, creating the file if needed; see
+[`gage config`](/docs/commands/config#settings).
 
 ```cli
 gage init [OPTIONS]
