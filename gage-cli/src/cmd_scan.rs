@@ -185,6 +185,7 @@ enum ScanCommand {
 pub struct ScanRunArgs {
     /// Session source
     #[arg(
+        short = 'N',
         long,
         value_name = "SOURCE",
         long_help = format!("Session source\n\n{}", source::SOURCE_HELP),
@@ -2390,6 +2391,8 @@ mod tests {
         assert_eq!(args.filter.since, Some(Duration::from_secs(7 * 86_400)));
         let args = run_args(&["-S", "--all"]);
         assert!(args.stored && args.filter.all);
+        let args = run_args(&["-N", "codex:", "--all"]);
+        assert_eq!(args.native.as_deref(), Some("codex:"));
         let args = run_args(&["--stored-remote", "acme", "abc"]);
         assert_eq!(args.stored_remote.as_deref(), Some("acme"));
         assert_eq!(args.sessions, ["abc"]);

@@ -24,7 +24,7 @@ scanner group, and sessions from the past 30 days capped at 20.
 
 | Option                          | Description                                                         |
 | ------------------------------- | ------------------------------------------------------------------- |
-| `--native <SOURCE>`             | Session source, as described in [`gage session`](/docs/commands/session) |
+| `-N, --native <SOURCE>`             | Session source, as described in [`gage session`](/docs/commands/session) |
 | `-S, --stored`                  | Scan stored sessions                                                |
 | `-R, --stored-remote <NAME>`    | Scan sessions fetched from a remote                                 |
 | `-s, --scanner <SCANNER>`       | Scanner to run, as a name or path (repeatable)                      |

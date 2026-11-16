@@ -88,6 +88,7 @@ pub struct PublishRunArgs {
 
     /// Session source
     #[arg(
+        short = 'N',
         long,
         value_name = "SOURCE",
         long_help = format!("Session source\n\n{}", source::SOURCE_HELP),
@@ -278,6 +279,7 @@ pub struct InitArgs {
     /// Session source
     #[arg(
         id = "native",
+        short = 'N',
         long = "native",
         value_name = "SOURCE",
         long_help = format!("Session source\n\n{}", source::SOURCE_HELP),

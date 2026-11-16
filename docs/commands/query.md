@@ -23,7 +23,7 @@ a script end with `;` and lines starting with `--` are comments.
 | `--timing`              | Enable query timings                              |
 | `--stats`               | Enable query stats                                |
 | `--system`              | Include system columns                            |
-| `--native <SOURCE>`     | Query a session source in place of the store      |
+| `-N, --native <SOURCE>`     | Query a session source in place of the store      |
 | `-R, --stored-remote <NAME>` | Query the objects fetched from a remote in place of the store |
 | `--scan <SCAN>`         | Query within a scan                               |
 

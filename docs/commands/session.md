@@ -16,13 +16,23 @@ A session is either _native_, a file in a session source such as the Claude
 Code home directory, or _stored_, a copy in the Gage store. Commands that take
 session IDs accept unique ID prefixes.
 
-Two options select which sessions a subcommand works on. They are accepted
-before or after the subcommand.
+Three options select which sessions a subcommand works on. They are accepted
+before or after the subcommand, and each excludes the other two.
 
-| Option                  | Description                       |
-| ----------------------- | --------------------------------- |
-| `--native <SOURCE>`     | Session source                    |
-| `-S, --stored`          | Operate on stored sessions        |
+| Option                       | Description                                 |
+| ---------------------------- | ------------------------------------------- |
+| `-N, --native <SOURCE>`      | Session source                              |
+| `-S, --stored`               | Operate on stored sessions                  |
+| `-R, --stored-remote <NAME>` | Operate on sessions fetched from a remote   |
+
+`--stored-remote` names a remote of the store. The sessions are those that
+[`gage fetch`](/docs/commands/fetch) brought from that remote, which are kept
+apart from the store's own sessions until
+[`gage merge`](/docs/commands/merge) merges them. Nothing is fetched and
+nothing is written. `list`, `view`, and `find` accept the option. `add`,
+`delete`, and `move` refuse it, because fetched sessions are read only. With
+`list --dataset` or `list --share`, the dataset or share is one the remote
+holds.
 
 A source is `SCHEME:PATH`. A value with no scheme uses the default driver,
 which the `drivers.default` setting names; see
@@ -168,8 +178,9 @@ gage session find [OPTIONS] <QUERY>
 ```
 
 The command searches message text in the default source, in each `--native`,
-and in the store with `--stored`. It lists the matching messages, best match
-first. `--native` is repeatable here.
+in the store with `--stored`, and in the sessions fetched from each
+`--stored-remote`. It lists the matching messages, best match first. `--native`
+and `--stored-remote` are repeatable here, and the three options combine.
 
 Bare terms match any of them. `a AND b`, `+a`, `-a`, a quoted phrase, and a
 field term such as `type:assistant` narrow a search.

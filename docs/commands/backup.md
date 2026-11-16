@@ -19,7 +19,7 @@ exactly one backup remote exists.
 
 | Option                  | Description                                                        |
 | ----------------------- | ------------------------------------------------------------------ |
-| `--native <SOURCE>`     | Add sessions from this source before the backup (repeatable). Replaces the configured `backup.sources` list for this run. |
+| `-N, --native <SOURCE>`     | Add sessions from this source before the backup (repeatable). Replaces the configured `backup.sources` list for this run. |
 | `-S, --stored`          | Back up stored sessions only. No source is read first.            |
 | `--force`               | Replace diverged objects and tags on the remote                    |
 | `--prune`               | Delete objects and tags that are only on the remote                |

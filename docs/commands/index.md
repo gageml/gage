@@ -20,8 +20,9 @@ gage index [OPTIONS]
 
 | Option                  | Description                                  |
 | ----------------------- | -------------------------------------------- |
-| `--native <SOURCE>`     | Session source whose index to maintain       |
+| `-N, --native <SOURCE>`     | Session source whose index to maintain       |
 | `-S, --stored`          | Maintain the index of stored sessions        |
+| `-R, --stored-remote <NAME>` | Maintain the index of sessions fetched from a remote |
 | `--rebuild`             | Rebuild the index                            |
 | `--status`              | Show index status                            |
 | `--list`                | List every index under the cache directory   |

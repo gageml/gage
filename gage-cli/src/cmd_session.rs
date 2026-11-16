@@ -235,6 +235,7 @@ pub struct SessionFindArgs {
     /// Session sources to search (repeatable)
     #[arg(
         id = "native",
+        short = 'N',
         long = "native",
         value_name = "SOURCE",
         action = clap::ArgAction::Append,
@@ -246,6 +247,21 @@ pub struct SessionFindArgs {
     /// Search stored sessions
     #[arg(id = "stored", short = 'S', long = "stored", display_order = 2)]
     pub stored: bool,
+
+    /// Remotes whose sessions to search (repeatable)
+    #[arg(
+        id = "stored_remote",
+        short = 'R',
+        long = "stored-remote",
+        value_name = "NAME",
+        action = clap::ArgAction::Append,
+        long_help = format!(
+            "Remotes whose sessions to search (repeatable)\n\n{}",
+            source::STORED_REMOTE_HELP
+        ),
+        display_order = 3
+    )]
+    pub stored_remotes: Vec<String>,
 
     /// Search sessions modified within SINCE
     #[arg(long, value_parser = super::parse_duration)]
@@ -317,8 +333,10 @@ pub struct SessionMoveArgs {
 pub async fn list(
     source: Option<String>,
     stored: bool,
+    stored_remote: Option<String>,
     args: SessionListArgs,
 ) -> Result<(), CliError> {
+    let remote = stored_remote.as_deref();
     if args.dataset.is_some() {
         if source.is_some() {
             return Err(CliError::message(
@@ -328,7 +346,7 @@ pub async fn list(
         if stored {
             eprintln!("warning: --stored is redundant with --dataset");
         }
-        list_dataset(args).await
+        list_dataset(remote, args).await
     } else if args.share.is_some() {
         if source.is_some() {
             return Err(CliError::message(
@@ -338,9 +356,9 @@ pub async fn list(
         if stored {
             eprintln!("warning: --stored is redundant with --share");
         }
-        list_share(args).await
-    } else if stored {
-        list_stored(args).await
+        list_share(remote, args).await
+    } else if stored || remote.is_some() {
+        list_stored(remote, args).await
     } else {
         list_native(source, args).await
     }
@@ -378,8 +396,10 @@ async fn list_native(source: Option<String>, args: SessionListArgs) -> Result<()
 /// listing. Rows are in the store's `modified` order, newest first,
 /// and `--since` filters on it; the `Created` column shows when the
 /// session was first added.
-async fn list_stored(args: SessionListArgs) -> Result<(), CliError> {
-    let store = Store::open(&gage_store::store_path()).context("gage session list")?;
+/// List the sessions of the store, or with `remote` the sessions
+/// fetched from that remote.
+async fn list_stored(remote: Option<&str>, args: SessionListArgs) -> Result<(), CliError> {
+    let store = source::open_stored(remote).context("gage session list")?;
     let ctx = ContextBuilder::new(Some(Arc::new(Mutex::new(store))))
         .build()
         .await;
@@ -403,12 +423,12 @@ async fn list_stored(args: SessionListArgs) -> Result<(), CliError> {
 
 /// List the member sessions of a dataset in member order, each at its
 /// current commit: the `session` table joined to `dataset_session`.
-async fn list_dataset(args: SessionListArgs) -> Result<(), CliError> {
+async fn list_dataset(remote: Option<&str>, args: SessionListArgs) -> Result<(), CliError> {
     let prefix = args
         .dataset
         .as_deref()
         .expect("list_dataset is called with --dataset");
-    let store = Store::open(&gage_store::store_path()).context("gage session list")?;
+    let store = source::open_stored(remote).context("gage session list")?;
     let dataset = DatasetStore::from(&store)
         .get(prefix)
         .with_context(|| format!("gage session list: --dataset {prefix}"))?;
@@ -436,12 +456,12 @@ async fn list_dataset(args: SessionListArgs) -> Result<(), CliError> {
 
 /// List the member sessions of a share the way the stored listing
 /// lists them, each at its current commit.
-async fn list_share(args: SessionListArgs) -> Result<(), CliError> {
+async fn list_share(remote: Option<&str>, args: SessionListArgs) -> Result<(), CliError> {
     let prefix = args
         .share
         .as_deref()
         .expect("list_share is called with --share");
-    let store = Store::open(&gage_store::store_path()).context("gage session list")?;
+    let store = source::open_stored(remote).context("gage session list")?;
     let share = ShareStore::from(&store)
         .get(prefix)
         .with_context(|| format!("gage session list: --share {prefix}"))?;
@@ -1132,6 +1152,14 @@ pub async fn find(args: SessionFindArgs) -> Result<(), CliError> {
     if args.stored {
         corpora.push(Corpus::Stored);
     }
+    for remote in &args.stored_remotes {
+        let store = source::open_stored(Some(remote))
+            .with_context(|| format!("gage session find: --stored-remote {remote}"))?;
+        corpora.push(Corpus::StoredRemote {
+            remote: remote.clone(),
+            store: Arc::new(Mutex::new(store)),
+        });
+    }
     if corpora.is_empty() {
         corpora.push(Corpus::Native(String::new()));
     }
@@ -1258,6 +1286,12 @@ enum Corpus {
     /// default source
     Native(String),
     Stored,
+    /// The sessions fetched from a remote, read through a store
+    /// opened on that remote's tracking refs
+    StoredRemote {
+        remote: String,
+        store: Arc<Mutex<Store>>,
+    },
 }
 
 /// The hits of a corpus for `query`, each joined to its session row
@@ -1328,6 +1362,9 @@ impl Corpus {
                 let store = store.expect("the store is opened when a stored corpus is searched");
                 Ok(ContextBuilder::new(Some(Arc::clone(store))).build().await)
             }
+            Corpus::StoredRemote { store, .. } => {
+                Ok(ContextBuilder::new(Some(Arc::clone(store))).build().await)
+            }
         }
     }
 
@@ -1337,6 +1374,7 @@ impl Corpus {
             Corpus::Native(spec) if spec.is_empty() => "default".to_string(),
             Corpus::Native(spec) => spec.clone(),
             Corpus::Stored => "stored".to_string(),
+            Corpus::StoredRemote { remote, .. } => format!("remote {remote}"),
         }
     }
 
@@ -1346,13 +1384,16 @@ impl Corpus {
             Corpus::Native(spec) if spec.is_empty() => "searching default source".to_string(),
             Corpus::Native(spec) => format!("searching source {spec}"),
             Corpus::Stored => "searching stored sessions".to_string(),
+            Corpus::StoredRemote { remote, .. } => {
+                format!("searching sessions fetched from {remote}")
+            }
         }
     }
 
     fn id_kind(&self) -> IdKind {
         match self {
             Corpus::Native(_) => IdKind::Native,
-            Corpus::Stored => IdKind::Gage,
+            Corpus::Stored | Corpus::StoredRemote { .. } => IdKind::Gage,
         }
     }
 }
@@ -1401,7 +1442,7 @@ fn hits_from_batches(
             // A stored row names its driver; the id's display form is
             // the driver's, so an unknown driver is an error here as
             // it is in a listing.
-            if let Corpus::Stored = corpus {
+            if let Corpus::Stored | Corpus::StoredRemote { .. } = corpus {
                 let name = driver_name_of(drivers.value(i));
                 registry
                     .for_name(name)
@@ -1831,14 +1872,15 @@ fn delete_lines(batches: &[RecordBatch]) -> Vec<SessionLine> {
 pub async fn view(
     source: Option<String>,
     stored: bool,
+    stored_remote: Option<String>,
     args: SessionViewArgs,
 ) -> Result<(), CliError> {
     let command = "gage session view";
     let (prefix, line, options) =
         view_target(command, "gage query", args.session.as_deref(), &args.view)?;
     // No session arg: the view opens with its session picker dialog.
-    let result = if stored {
-        view_stored(prefix, line, options).await
+    let result = if stored || stored_remote.is_some() {
+        view_stored(stored_remote.as_deref(), prefix, line, options).await
     } else {
         view_native(source.as_deref(), prefix, line, options).await
     };
@@ -1914,13 +1956,16 @@ fn split_view_target(arg: &str) -> Result<(&str, Option<u32>), Box<dyn Error>> {
     Ok((prefix, Some(first)))
 }
 
+/// View a session of the store, or with `remote` a session fetched
+/// from that remote.
 async fn view_stored(
+    remote: Option<&str>,
     prefix: Option<&str>,
     line: Option<u32>,
     options: ViewOptions,
 ) -> Result<(), Box<dyn Error>> {
     let (backend, id) = progress::busy_async(OPEN_LABEL, async {
-        let store = Store::open(&gage_store::store_path())?;
+        let store = source::open_stored(remote)?;
         let id = match prefix {
             Some(prefix) => Some(SessionStore::from(&store).get(prefix)?.id),
             None => None,
@@ -2119,6 +2164,53 @@ mod tests {
             panic!("--share parsed with --dataset");
         };
         assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    /// `--stored-remote` names one remote on the session commands and
+    /// is given before or after the subcommand. It excludes `--native`
+    /// and `--stored`. `find` takes it once per remote and beside the
+    /// other two.
+    #[test]
+    fn stored_remote_scopes_the_session_commands() {
+        let remote = |argv: &[&str]| {
+            let cli = Cli::try_parse_from([&["gage", "session"], argv].concat()).unwrap();
+            let Command::Session { stored_remote, .. } = cli.command else {
+                panic!("expected a session command");
+            };
+            stored_remote
+        };
+        assert_eq!(remote(&["-R", "acme", "list"]).as_deref(), Some("acme"));
+        assert_eq!(
+            remote(&["view", "--stored-remote", "acme"]).as_deref(),
+            Some("acme")
+        );
+        assert_eq!(remote(&["list"]), None);
+        for argv in [
+            vec!["list", "-R", "acme", "--stored"],
+            vec!["list", "-R", "acme", "--native", "claude:"],
+        ] {
+            let parsed = Cli::try_parse_from([&["gage", "session"], &argv[..]].concat());
+            let Err(err) = parsed else {
+                panic!("{argv:?} parsed");
+            };
+            assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+        }
+
+        let cli = Cli::try_parse_from([
+            "gage", "session", "find", "quokka", "-R", "acme", "-R", "other", "--stored",
+            "--native", "claude:",
+        ])
+        .unwrap();
+        let Command::Session {
+            command: SessionCommand::Find(args),
+            ..
+        } = cli.command
+        else {
+            panic!("expected session find");
+        };
+        assert_eq!(args.stored_remotes, ["acme", "other"]);
+        assert!(args.stored);
+        assert_eq!(args.sources, ["claude:"]);
     }
 
     /// Write a one-message Claude session `id` under `project` in

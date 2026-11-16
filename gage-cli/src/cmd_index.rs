@@ -10,7 +10,6 @@ use gage_index::LockMode;
 use gage_query::text::{StoreTextIndex, StoreTextOutcome, StoreTextStatus};
 use gage_session::MaintenanceStatus;
 use gage_store::OBJECTS_FILE;
-use gage_store::Store;
 use tabled::{
     Table,
     settings::{
@@ -29,12 +28,25 @@ use crate::style;
 #[derive(Args)]
 pub struct IndexArgs {
     /// Session source whose index to maintain
-    #[arg(long, value_name = "SOURCE", long_help = format!("Session source whose index to maintain\n\n{}", source::SOURCE_HELP))]
+    #[arg(short = 'N', long, value_name = "SOURCE", long_help = format!("Session source whose index to maintain\n\n{}", source::SOURCE_HELP))]
     native: Option<String>,
 
     /// Maintain index of stored sessions
     #[arg(short = 'S', long, conflicts_with = "native")]
     stored: bool,
+
+    /// Maintain index of sessions fetched from remote
+    #[arg(
+        short = 'R',
+        long,
+        value_name = "NAME",
+        conflicts_with_all = ["native", "stored", "list", "remove"],
+        long_help = format!(
+            "Maintain index of sessions fetched from remote\n\n{}",
+            source::STORED_REMOTE_HELP
+        )
+    )]
+    stored_remote: Option<String>,
 
     /// Rebuild index
     #[arg(long)]
@@ -74,7 +86,7 @@ pub async fn run(args: IndexArgs) -> Result<(), CliError> {
     if let Some(corpus) = &args.remove {
         return remove_corpus(&default_cache_root(), corpus);
     }
-    if args.stored {
+    if args.stored || args.stored_remote.is_some() {
         return run_stored(args).await;
     }
     let source = source::open_source(args.native.as_deref().unwrap_or(""), "gage index")?;
@@ -109,7 +121,7 @@ pub async fn run(args: IndexArgs) -> Result<(), CliError> {
 
 /// The store's text index: status, rebuild, or reconcile.
 async fn run_stored(args: IndexArgs) -> Result<(), CliError> {
-    let store = Store::open(&gage_store::store_path()).context("gage index")?;
+    let store = source::open_stored(args.stored_remote.as_deref()).context("gage index")?;
     let index = Arc::new(StoreTextIndex::new(Arc::new(Mutex::new(store)), None));
 
     if args.status {

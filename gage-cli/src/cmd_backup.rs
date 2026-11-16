@@ -48,6 +48,7 @@ pub struct BackupArgs {
     ///
     /// Replaces the configured backup.sources list for this run.
     #[arg(
+        short = 'N',
         long,
         value_name = "SOURCE",
         long_help = format!("Add sessions from SOURCE before backup (repeatable)\n\n\

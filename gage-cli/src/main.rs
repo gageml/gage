@@ -20,7 +20,7 @@ use humantime::DurationError;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::CliError;
-use crate::source::SOURCE_HELP;
+use crate::source::{SOURCE_HELP, STORED_REMOTE_HELP, stored_remote_is_read_only};
 
 static PANIC_TOKEN: OnceLock<CancellationToken> = OnceLock::new();
 
@@ -145,6 +145,7 @@ enum Command {
     Session {
         /// Session source
         #[arg(
+            short = 'N',
             long,
             value_name = "SOURCE",
             long_help = format!("Session source\n\n{SOURCE_HELP}"),
@@ -162,6 +163,18 @@ enum Command {
             display_order = 2
         )]
         stored: bool,
+
+        /// Operate on sessions fetched from remote
+        #[arg(
+            short = 'R',
+            long,
+            value_name = "NAME",
+            long_help = format!("Operate on sessions fetched from remote\n\n{STORED_REMOTE_HELP}"),
+            global = true,
+            conflicts_with_all = ["native", "stored"],
+            display_order = 3
+        )]
+        stored_remote: Option<String>,
 
         #[command(subcommand)]
         command: cmd_session::SessionCommand,
@@ -393,10 +406,23 @@ async fn main() -> ExitCode {
             Command::Session {
                 native: source,
                 stored,
+                stored_remote,
                 command,
             } => match command {
                 cmd_session::SessionCommand::List(args) => {
-                    cmd_session::list(source, stored, args).await
+                    cmd_session::list(source, stored, stored_remote, args).await
+                }
+                cmd_session::SessionCommand::View(args) => {
+                    cmd_session::view(source, stored, stored_remote, args).await
+                }
+                cmd_session::SessionCommand::Add(_) if stored_remote.is_some() => {
+                    Err(stored_remote_is_read_only("gage session add"))
+                }
+                cmd_session::SessionCommand::Delete(_) if stored_remote.is_some() => {
+                    Err(stored_remote_is_read_only("gage session delete"))
+                }
+                cmd_session::SessionCommand::Move(_) if stored_remote.is_some() => {
+                    Err(stored_remote_is_read_only("gage session move"))
                 }
                 cmd_session::SessionCommand::Add(args) => {
                     cmd_session::add(source, stored, args).await
@@ -405,9 +431,6 @@ async fn main() -> ExitCode {
                     cmd_session::delete(source, stored, args).await
                 }
                 cmd_session::SessionCommand::Move(args) => cmd_session::move_(source, stored, args),
-                cmd_session::SessionCommand::View(args) => {
-                    cmd_session::view(source, stored, args).await
-                }
                 cmd_session::SessionCommand::Find(args) => cmd_session::find(args).await,
             },
             Command::Publish(args) => cmd_publish::run(args).await,

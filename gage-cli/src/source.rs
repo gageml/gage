@@ -5,9 +5,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Context;
-use gage_core::config::{Config, DriversConfig, display_user_config_path};
+use gage_core::config::{Config, DriversConfig, default_cache_root, display_user_config_path};
 use gage_registry::driver::{DriverRegistry, set_default_driver, set_driver_models};
 use gage_session::{Driver, ModelSizes, SkillSession, Source, SourceOptions};
+use gage_store::{Store, StoreError};
 
 use crate::error::CliError;
 
@@ -80,6 +81,29 @@ pub fn describe_source(driver: &dyn Driver, spec: &str) -> String {
     } else {
         spec.to_string()
     }
+}
+
+/// Long help shared by every `--stored-remote` option, after the
+/// option's own short line
+pub const STORED_REMOTE_HELP: &str = "NAME is a remote that gage fetch brought objects from. Those objects are kept apart from the store until gage merge merges them. Nothing is fetched and nothing is written";
+
+/// Open the store a command reads: its own objects, or with
+/// `stored_remote` the objects fetched from that remote, which are
+/// read and never written.
+pub fn open_stored(stored_remote: Option<&str>) -> Result<Store, StoreError> {
+    let path = gage_store::store_path();
+    match stored_remote {
+        None => Store::open(&path),
+        Some(remote) => Store::open_stored_remote(&path, &default_cache_root(), remote),
+    }
+}
+
+/// The error of a command that writes sessions and was given
+/// `--stored-remote`: `<command>: --stored-remote does not apply; ...`.
+pub fn stored_remote_is_read_only(command: &str) -> CliError {
+    CliError::message(format!(
+        "{command}: --stored-remote does not apply; sessions fetched from a remote are read only"
+    ))
 }
 
 /// The default driver, or `command: <error>`

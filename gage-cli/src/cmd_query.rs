@@ -18,6 +18,7 @@ use crate::source::SOURCE_HELP;
 pub struct QueryArgs {
     /// Session source to query in place of store
     #[arg(
+        short = 'N',
         long,
         value_name = "SOURCE",
         conflicts_with = "stored_remote",

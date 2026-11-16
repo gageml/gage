@@ -108,7 +108,7 @@ pub struct DatasetUnlinkArgs {
 #[derive(Args)]
 pub struct DatasetAddArgs {
     /// Session source
-    #[arg(long, value_name = "SOURCE", long_help = format!("Session source\n\n{SOURCE_HELP}"))]
+    #[arg(short = 'N', long, value_name = "SOURCE", long_help = format!("Session source\n\n{SOURCE_HELP}"))]
     pub native: Option<String>,
 
     /// Sessions to add (ID or prefix)
@@ -140,7 +140,7 @@ pub struct DatasetRefreshArgs {
     pub dataset: String,
 
     /// Session source
-    #[arg(long, value_name = "SOURCE", long_help = format!("Session source\n\n{SOURCE_HELP}"))]
+    #[arg(short = 'N', long, value_name = "SOURCE", long_help = format!("Session source\n\n{SOURCE_HELP}"))]
     pub native: Option<String>,
 
     #[command(flatten)]

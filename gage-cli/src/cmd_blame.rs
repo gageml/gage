@@ -12,7 +12,6 @@ use datafusion::arrow::array::{Array, Int64Array, StringArray, TimestampMillisec
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::prelude::SessionContext;
 use gage_query::{ContextBuilder, PrintFormat};
-use gage_store::Store;
 use gage_store::url::LineSelection;
 
 use gage_core::style::{IdHighlighter, IdKind};
@@ -36,12 +35,22 @@ pub struct BlameArgs {
     lines: Option<LineSelection>,
 
     /// Session source
-    #[arg(long, value_name = "SOURCE", long_help = format!("Session source\n\n{SOURCE_HELP}"))]
+    #[arg(short = 'N', long, value_name = "SOURCE", long_help = format!("Session source\n\n{SOURCE_HELP}"))]
     native: Option<String>,
 
     /// Use stored sessions
     #[arg(short = 'S', long, conflicts_with = "native")]
     stored: bool,
+
+    /// Use sessions fetched from remote
+    #[arg(
+        short = 'R',
+        long,
+        value_name = "NAME",
+        conflicts_with_all = ["native", "stored"],
+        long_help = format!("Use sessions fetched from remote\n\n{}", source::STORED_REMOTE_HELP)
+    )]
+    stored_remote: Option<String>,
 
     /// Output JSON
     #[arg(long)]
@@ -83,8 +92,8 @@ async fn blame(args: &BlameArgs) -> Result<Blamed, CliError> {
         .as_ref()
         .map(|l| format!(", {}", quote(&l.to_string())))
         .unwrap_or_default();
-    let ctx = if args.stored {
-        let store = Store::open(&gage_store::store_path()).context("gage blame")?;
+    let ctx = if args.stored || args.stored_remote.is_some() {
+        let store = source::open_stored(args.stored_remote.as_deref()).context("gage blame")?;
         ContextBuilder::new(Some(Arc::new(Mutex::new(store))))
             .build()
             .await
