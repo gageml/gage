@@ -24,6 +24,8 @@ Pending release.
   no longer accepts a URL. `gage merge` merges what was fetched, and `gage pull`
   does both in one run, which is what `gage fetch` did before
 
+## [0.4.0]
+
 ## [0.3.1]
 
 Pending release
