@@ -452,24 +452,32 @@ impl RemoteStore<'_> {
         stale.retain(|prefix| !kept.contains(prefix));
         stale.dedup();
 
-        // Git renames a refspec that names the remote's own prefix and
-        // warns about any other, so the refspec is written for the old
-        // name first and again for the new name after
-        let set_refspec = |name: &str| {
-            let fetch = format!("+{ROOT}*:{}*", tracking_prefix(name));
-            run(git_in(
-                path,
-                [
-                    "config",
-                    "--replace-all",
-                    &format!("remote.{name}.fetch"),
-                    &fetch,
-                ],
-            ))
-        };
-        set_refspec(old)?;
-        run(git_in(path, ["remote", "rename", old, new]))?;
-        set_refspec(new)?;
+        // `git remote rename` moves each ref in its own transaction
+        // and takes time quadratic in the ref count, so the refs move
+        // in one transaction here. The refs move first: a failure
+        // leaves the remote as it was.
+        self.move_refs(
+            &format!("refs/remotes/{old}/"),
+            &format!("refs/remotes/{new}/"),
+        )?;
+        run(git_in(
+            path,
+            [
+                "config",
+                "--rename-section",
+                &format!("remote.{old}"),
+                &format!("remote.{new}"),
+            ],
+        ))?;
+        run(git_in(
+            path,
+            [
+                "config",
+                "--replace-all",
+                &format!("remote.{new}.fetch"),
+                &format!("+{ROOT}*:{}*", tracking_prefix(new)),
+            ],
+        ))?;
         for prefix in &stale {
             self.delete_refs_under(prefix)?;
         }
@@ -744,6 +752,34 @@ impl RemoteStore<'_> {
             return Ok(0);
         }
         self.delete_refs_under(source.tracking())
+    }
+
+    /// Move every ref under prefix `from` to the same name under
+    /// prefix `to` in one `update-ref` transaction. A ref already at
+    /// the new name is overwritten.
+    fn move_refs(&self, from: &str, to: &str) -> Result<(), StoreError> {
+        let out = run(git_in(
+            self.store.path(),
+            ["for-each-ref", "--format=%(objectname) %(refname)", from],
+        ))?;
+        let mut input = String::new();
+        for line in out.lines() {
+            let Some((oid, name)) = line.split_once(' ') else {
+                continue;
+            };
+            let Some(rest) = name.strip_prefix(from) else {
+                continue;
+            };
+            input.push_str(&format!("update {to}{rest} {oid}\ndelete {name} {oid}\n"));
+        }
+        if input.is_empty() {
+            return Ok(());
+        }
+        run_with_stdin(
+            git_in(self.store.path(), ["update-ref", "--stdin"]),
+            input.as_bytes(),
+        )?;
+        Ok(())
     }
 
     /// Delete every ref under `prefix` in one `update-ref` transaction.
