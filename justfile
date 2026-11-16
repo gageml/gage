@@ -49,8 +49,6 @@ dist-init: _require_dist
 _require_dist:
     @command -v dist >/dev/null 2>&1 || { echo "This recipe requires dist - run 'cargo install cargo-dist --locked' to install it"; exit 1; }
 
-# Propose jj commit messages
-commit:
-    claude -p /commit-jj \
-      --model sonnet \
-      --allowedTools "Bash(jj status:*)" "Bash(jj diff:*)" "Bash(jj log:*)"
+# List unmerged branches
+unmerged:
+    @jj log -r 'remote_bookmarks() ~ ::@'
