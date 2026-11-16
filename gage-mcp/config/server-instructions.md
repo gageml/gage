@@ -13,10 +13,11 @@ content shapes, which are read with `json_extract`. The table functions:
   file.
 - `message_text(query [, snippet_len])` searches message text.
 
-`query` reads the main store. Its `source` parameter names another source to
-read in its place: another Gage store, or a native source, which holds sessions
-not yet in the store. A named source is read only. Every write tool writes the
-main store alone.
+`query` reads the main store. Two parameters each name another source to read
+in its place: `native` names a native source, which holds sessions not yet in
+the store, and `stored_remote` names a remote, whose fetched objects are kept
+apart from the main store's own. A named source is read only. Every write tool
+writes the main store alone.
 
 `issue_write` writes a new issue for a finding and cites the notes that are
 its evidence.

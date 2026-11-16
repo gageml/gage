@@ -64,8 +64,8 @@ If the user has not provided sessions, ask them what they want to publish. If
 they don't know the IDs, use `mcp__plugin_gage_gage__query` and in particular
 the `message_text` TVF to find the sessions.
 
-Consult the `session` table for recent session titles. Without a `source`
-parameter the query reads the stored sessions; with `source` set to `claude:`
+Consult the `session` table for recent session titles. Without a `native`
+parameter the query reads the stored sessions; with `native` set to `claude:`
 it reads the native Claude Code sessions.
 
 ```sql

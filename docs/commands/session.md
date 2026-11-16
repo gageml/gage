@@ -21,7 +21,7 @@ before or after the subcommand.
 
 | Option                  | Description                       |
 | ----------------------- | --------------------------------- |
-| `-s, --source <SOURCE>` | Session source                    |
+| `--native <SOURCE>`     | Session source                    |
 | `-S, --stored`          | Operate on stored sessions        |
 
 A source is `SCHEME:PATH`. A value with no scheme uses the default driver,
@@ -167,9 +167,9 @@ Find sessions by message text.
 gage session find [OPTIONS] <QUERY>
 ```
 
-The command searches message text in the default source, in each `--source`,
+The command searches message text in the default source, in each `--native`,
 and in the store with `--stored`. It lists the matching messages, best match
-first. `--source` is repeatable here.
+first. `--native` is repeatable here.
 
 Bare terms match any of them. `a AND b`, `+a`, `-a`, a quoted phrase, and a
 field term such as `type:assistant` narrow a search.

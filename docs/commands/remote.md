@@ -7,7 +7,8 @@ description:
 
 The `gage remote` command manages remotes. A remote is a Git repository the
 store pushes to, fetches from, or backs up to. See
-[`gage push`](/docs/commands/push), [`gage fetch`](/docs/commands/fetch), and
+[`gage push`](/docs/commands/push), [`gage fetch`](/docs/commands/fetch),
+[`gage merge`](/docs/commands/merge), [`gage pull`](/docs/commands/pull), and
 [`gage backup`](/docs/commands/backup).
 
 ```cli
@@ -28,7 +29,7 @@ What Gage stores there is not transferred by a clone or seen by a checkout.
 | Option             | Description                                                             |
 | ------------------ | ----------------------------------------------------------------------- |
 | `--push <OBJECT>`  | Object to push, as a tag, ID, or prefix (repeatable). `gage push` sends these objects, and everything they link, when no object is named. |
-| `--fetch <OBJECT>` | Object to fetch, as a tag, ID, or prefix (repeatable). `gage fetch` takes these objects, and everything they link, when no object is named. |
+| `--fetch <OBJECT>` | Object to fetch, as a tag, ID, or prefix (repeatable). `gage fetch`, `gage merge`, and `gage pull` take these objects, and everything they link, when no object is named. |
 | `--backup`         | Mark the remote as a backup target. `gage backup` sends the whole store to a backup target and refuses any other remote. |
 | `-y, --yes`        | Skip confirmation prompt                                                |
 
@@ -61,7 +62,7 @@ gage remote edit [OPTIONS] <NAME>
 | `--add-push <OBJECT>`     | Add an object to push (repeatable)                                       |
 | `--remove-push <OBJECT>`  | Remove an object to push (repeatable)                                    |
 | `--no-push`               | Clear the objects to push                                                |
-| `--fetch <OBJECT>`        | Replace the objects `gage fetch` takes when no object is named (repeatable) |
+| `--fetch <OBJECT>`        | Replace the objects `gage fetch`, `gage merge`, and `gage pull` take when no object is named (repeatable) |
 | `--add-fetch <OBJECT>`    | Add an object to fetch (repeatable)                                      |
 | `--remove-fetch <OBJECT>` | Remove an object to fetch (repeatable)                                   |
 | `--no-fetch`              | Clear the objects to fetch                                               |

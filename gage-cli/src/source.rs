@@ -1,5 +1,5 @@
 //! Session source selection for the CLI: the driver registry and the
-//! `--source` resolution shared by commands that read sessions.
+//! `--native` resolution shared by commands that read sessions.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -11,7 +11,7 @@ use gage_session::{Driver, ModelSizes, SkillSession, Source, SourceOptions};
 
 use crate::error::CliError;
 
-/// Long help shared by every `--source` option
+/// Long help shared by every `--native` option
 pub const SOURCE_HELP: &str = "Session directory as SCHEME:PATH. A value with no scheme uses \
 the default driver. Schemes are defined by drivers:
 
@@ -58,7 +58,7 @@ pub fn driver_models(config: &DriversConfig) -> HashMap<String, ModelSizes> {
         .collect()
 }
 
-/// Resolve a `--source` value to the driver that handles it and the
+/// Resolve a `--native` value to the driver that handles it and the
 /// value to hand that driver. `None` is the empty source, which every
 /// driver reads as its default location.
 pub fn resolve_source(

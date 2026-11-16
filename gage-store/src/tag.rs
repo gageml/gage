@@ -9,7 +9,7 @@
 
 use crate::git::{git_in, run};
 use crate::index::IdMatch;
-use crate::refs::{TAG_REFS, object_ref, tag_ref};
+use crate::refs::tag_ref;
 use crate::{Store, StoreError};
 
 /// Typed view over a [`Store`] for tags.
@@ -78,12 +78,13 @@ pub struct TagRef {
 impl TagStore<'_> {
     /// Every tag, name-sorted, with the commit each points at.
     pub fn list(&self) -> Result<Vec<TagRef>, StoreError> {
+        let namespace = self.store.refs().tags();
         let out = run(git_in(
             self.store.path(),
             [
                 "for-each-ref",
                 "--format=%(refname) %(objectname)",
-                TAG_REFS,
+                &namespace,
             ],
         ))?;
         let mut tags = Vec::new();
@@ -91,7 +92,7 @@ impl TagStore<'_> {
             let (ref_name, sha) = line
                 .split_once(' ')
                 .ok_or_else(|| StoreError::Parse(format!("for-each-ref line: {line}")))?;
-            let Some(name) = ref_name.strip_prefix(TAG_REFS) else {
+            let Some(name) = ref_name.strip_prefix(&namespace) else {
                 continue;
             };
             tags.push(TagRef {
@@ -108,6 +109,7 @@ impl TagStore<'_> {
     /// [`StoreError::TagExists`] unless `force`, which moves it. A
     /// tombstoned object cannot be tagged.
     pub fn add(&self, name: &str, objectish: &str, force: bool) -> Result<TagAdded, StoreError> {
+        self.store.require_local()?;
         self.check_available(name, force)?;
         let found = self.store.resolve_in(objectish, None)?;
         if found.deleted {
@@ -149,6 +151,7 @@ impl TagStore<'_> {
     /// touched. A name no tag has is [`StoreError::TagNotFound`].
     /// Returns the ref as it was.
     pub fn delete(&self, name: &str) -> Result<TagRef, StoreError> {
+        self.store.require_local()?;
         let ref_name = tag_ref(name);
         let sha = self
             .store
@@ -171,17 +174,18 @@ impl TagStore<'_> {
     /// The match is the object's current state, which may be a
     /// tombstone; the tag is then dangling.
     pub fn resolve(&self, name: &str) -> Result<Option<IdMatch>, StoreError> {
-        let Some(sha) = self.store.rev_parse(&tag_ref(name))? else {
+        let ref_name = self.store.refs().tag_ref(name);
+        let Some(sha) = self.store.rev_parse(&ref_name)? else {
             return Ok(None);
         };
         let record = self.read(&TagRef {
             name: name.to_string(),
-            ref_name: tag_ref(name),
+            ref_name,
             commit_sha: sha,
         })?;
         let tip = self
             .store
-            .rev_parse(&object_ref(&record.id))?
+            .rev_parse(&self.store.refs().object_ref(&record.id))?
             .ok_or_else(|| StoreError::ObjectNotFound(record.id.clone()))?;
         Ok(Some(IdMatch {
             id: record.id,
@@ -226,7 +230,7 @@ impl TagStore<'_> {
         let id = self.store.read_header(&tag.commit_sha)?.id;
         let tip = self
             .store
-            .rev_parse(&object_ref(&id))?
+            .rev_parse(&self.store.refs().object_ref(&id))?
             .ok_or_else(|| StoreError::ObjectNotFound(id.clone()))?;
         let header = self.store.read_header(&tip)?;
         Ok(TagRecord {

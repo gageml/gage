@@ -104,6 +104,15 @@ pub enum StoreError {
     RemoteNotFound(String),
     /// A default object of a remote that is empty or holds whitespace
     RemoteObject(String),
+    /// A remote whose tracking refs hold no object: nothing was
+    /// fetched from it
+    RemoteNotFetched(String),
+    /// A write to a store opened on the tracking refs of the named
+    /// remote, which are read and never written
+    StoredRemoteWrite(String),
+    /// An object that is not sent to another repository: its links
+    /// reach a session the store holds only as fetched from a remote
+    Withheld(String),
     /// A listing pattern the glob syntax rejects
     ListPattern(String),
     /// No namespace, reference, tree, or file at the path, and no
@@ -253,6 +262,17 @@ impl fmt::Display for StoreError {
             ),
             StoreError::RemoteExists(name) => write!(f, "remote {name} exists"),
             StoreError::RemoteNotFound(name) => write!(f, "remote not found: {name}"),
+            StoreError::RemoteNotFetched(name) => write!(
+                f,
+                "remote {name} has no fetched objects: run gage fetch {name}"
+            ),
+            StoreError::StoredRemoteWrite(name) => {
+                write!(f, "objects fetched from remote {name} are read only")
+            }
+            StoreError::Withheld(id) => write!(
+                f,
+                "object {id} links a session fetched from a remote and is not sent"
+            ),
             StoreError::RemoteObject(object) => write!(
                 f,
                 "invalid object {object:?}: an object is a tag, an ID, or an ID prefix"
@@ -316,6 +336,9 @@ impl std::error::Error for StoreError {
             | StoreError::RemoteExists(_)
             | StoreError::RemoteNotFound(_)
             | StoreError::RemoteObject(_)
+            | StoreError::RemoteNotFetched(_)
+            | StoreError::StoredRemoteWrite(_)
+            | StoreError::Withheld(_)
             | StoreError::ListPattern(_)
             | StoreError::PathNotFound(_)
             | StoreError::PathAmbiguous { .. }

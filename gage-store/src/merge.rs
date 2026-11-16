@@ -1,16 +1,18 @@
-//! Fetch: adopting what a remote has into the store.
+//! Merge: bringing what a remote has into the store's own refs.
 //!
 //! Git applies Gage's ref rules on push, through the receiving
-//! store's `update` hook, and none of them on fetch. So a fetch is two
-//! steps. One forced `git fetch` writes what the remote has under its
-//! tracking prefix, the real layout with `refs/gage/` replaced by
-//! `refs/remotes/<name>/gage/` for a configured remote or by a
-//! transient `refs/gage-fetch/<run>/` for a bare URL, where nothing
-//! carries a rule. Then [`Store::apply_fetched`] decides per tracked
-//! ref what the local ref becomes, with the `update` hook's rules in
-//! Rust plus the merges a hook cannot do, and reports what it did.
+//! store's `update` hook, and none of them on fetch. So taking a
+//! remote's objects is two steps. One forced `git fetch` writes what
+//! the remote has under its tracking prefix, the real layout with
+//! `refs/gage/` replaced by `refs/remotes/<name>/gage/` for a
+//! configured remote or by a transient `refs/gage-fetch/<run>/` for a
+//! bare URL, where nothing carries a rule. Then
+//! [`Store::merge_fetched`] decides per tracked ref what the local ref
+//! becomes, with the `update` hook's rules in Rust plus the merges a
+//! hook cannot do, and reports what it did. The second step reads the
+//! tracking refs alone and never contacts the remote.
 //!
-//! Object refs are decided first, then the key refs of the adopted
+//! Object refs are decided first, then the key refs of the merged
 //! objects are derived from their `attrs.key` (the remote's key refs
 //! are not consulted: a key ref is derived state), then tag refs.
 //!
@@ -45,17 +47,17 @@ pub enum Side {
     Theirs,
 }
 
-/// What [`Store::apply_fetched`] did with one ref.
+/// What [`Store::merge_fetched`] did with one ref.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
-    /// No local ref existed; the remote's commit is adopted
+    /// No local ref existed; the remote's commit is taken
     Created,
     /// Both sides hold the same commit, or both hold tombstones
     UpToDate,
     /// The local commit descends from the remote's, or a local
-    /// tombstone stands against a remote edit; nothing to adopt
+    /// tombstone stands against a remote edit; nothing to take
     Ahead,
-    /// The remote's commit descends from the local one; adopted
+    /// The remote's commit descends from the local one; taken
     FastForwarded,
     /// The remote's tombstone replaces the live local commit
     Tombstoned,
@@ -101,13 +103,13 @@ pub struct RefOutcome {
     pub outcome: Outcome,
 }
 
-/// Everything one fetch did.
+/// Everything one merge did.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct FetchReport {
+pub struct MergeReport {
     pub outcomes: Vec<RefOutcome>,
 }
 
-impl FetchReport {
+impl MergeReport {
     /// The outcomes that are conflicts, in report order.
     pub fn conflicts(&self) -> impl Iterator<Item = &RefOutcome> {
         self.outcomes
@@ -122,19 +124,19 @@ impl Store {
     /// real ref name is in `only`. `author` signs any resolution entry
     /// a merge writes; `choose` resolves divergences that would
     /// otherwise be conflicts. The index is brought up to date with
-    /// every adopted commit.
-    pub fn apply_fetched(
+    /// every commit it takes.
+    pub fn merge_fetched(
         &self,
         source: &FetchSource,
         only: Option<&HashSet<String>>,
         author: &str,
         choose: Option<Side>,
-    ) -> Result<FetchReport, StoreError> {
+    ) -> Result<MergeReport, StoreError> {
         let tracked = self.tracking_refs(source)?;
         let selected = |name: &str| only.is_none_or(|set| set.contains(name));
-        let mut report = FetchReport::default();
+        let mut report = MergeReport::default();
 
-        let mut adopted: Vec<(String, String)> = Vec::new();
+        let mut taken: Vec<(String, String)> = Vec::new();
         for (ref_name, remote_sha) in &tracked {
             if !ref_name.starts_with(OBJECT_REFS) || !selected(ref_name) {
                 continue;
@@ -155,12 +157,12 @@ impl Store {
                     | Outcome::Merged
                     | Outcome::Resolved(_)
             ) {
-                adopted.push((outcome.id.clone(), ref_name.clone()));
+                taken.push((outcome.id.clone(), ref_name.clone()));
             }
             report.outcomes.push(outcome);
         }
 
-        for (id, ref_name) in adopted {
+        for (id, ref_name) in taken {
             if let Some(outcome) = self.derive_key_ref(&id, &ref_name)? {
                 report.outcomes.push(outcome);
             }
@@ -349,7 +351,7 @@ impl Store {
 
     /// Keep one side of a divergence as a whole: ours is the local
     /// tree rewritten onto the remote's commit, theirs is the remote's
-    /// commit adopted as is.
+    /// commit taken as is.
     fn resolve_whole(
         &self,
         local: &Object,
@@ -519,7 +521,7 @@ impl Store {
         Ok(true)
     }
 
-    /// Claim the key ref of an adopted object from its current tip, as
+    /// Claim the key ref of a merged object from its current tip, as
     /// a create does. A key held by another live object is reported
     /// and the object stays live without it.
     fn derive_key_ref(&self, id: &str, ref_name: &str) -> Result<Option<RefOutcome>, StoreError> {
@@ -691,7 +693,7 @@ mod tests {
         (dir, a, b)
     }
 
-    fn fetch(store: &Store, name: &str, choose: Option<Side>) -> FetchReport {
+    fn pull(store: &Store, name: &str, choose: Option<Side>) -> MergeReport {
         apply(
             store,
             &FetchSource::from(Repository::from_remote(name)),
@@ -699,11 +701,11 @@ mod tests {
         )
     }
 
-    fn apply(store: &Store, source: &FetchSource, choose: Option<Side>) -> FetchReport {
+    fn apply(store: &Store, source: &FetchSource, choose: Option<Side>) -> MergeReport {
         let status = RemoteStore::from(store).fetch_all(source).unwrap();
         assert!(status.success());
         store
-            .apply_fetched(source, None, "user:resolver", choose)
+            .merge_fetched(source, None, "user:resolver", choose)
             .unwrap()
     }
 
@@ -711,7 +713,7 @@ mod tests {
         FetchSource::from(Repository::from_url(store.path().to_str().unwrap()).unwrap())
     }
 
-    fn outcome<'a>(report: &'a FetchReport, id: &str) -> &'a Outcome {
+    fn outcome<'a>(report: &'a MergeReport, id: &str) -> &'a Outcome {
         &report
             .outcomes
             .iter()
@@ -724,18 +726,60 @@ mod tests {
     fn fetch_creates_fast_forwards_and_leaves_ahead_refs() {
         let (_dir, a, b) = pair();
         let n = note(&a, "n");
-        let report = fetch(&b, "a", None);
+        let report = pull(&b, "a", None);
         assert_eq!(outcome(&report, &n), &Outcome::Created);
         assert_eq!(tip(&b, &n), tip(&a, &n));
 
         edit_note(&a, &n, "v2");
-        let report = fetch(&b, "a", None);
+        let report = pull(&b, "a", None);
         assert_eq!(outcome(&report, &n), &Outcome::FastForwarded);
         assert_eq!(tip(&b, &n), tip(&a, &n));
-        assert_eq!(outcome(&fetch(&b, "a", None), &n), &Outcome::UpToDate);
+        assert_eq!(outcome(&pull(&b, "a", None), &n), &Outcome::UpToDate);
 
         edit_note(&b, &n, "v3");
-        assert_eq!(outcome(&fetch(&b, "a", None), &n), &Outcome::Ahead);
+        assert_eq!(outcome(&pull(&b, "a", None), &n), &Outcome::Ahead);
+    }
+
+    /// A fetch writes the tracking refs and nothing else: the local
+    /// ref of a new object stays absent and that of a changed one
+    /// stays where it was.
+    #[test]
+    fn a_fetch_updates_tracking_refs_and_leaves_local_refs_alone() {
+        let (_dir, a, b) = pair();
+        let shared = note(&a, "shared");
+        pull(&b, "a", None);
+        let before = tip(&b, &shared);
+        edit_note(&a, &shared, "v2");
+        let new = note(&a, "new");
+
+        let source = FetchSource::from(Repository::from_remote("a"));
+        assert!(RemoteStore::from(&b).fetch_all(&source).unwrap().success());
+
+        let tracked = b.tracking_refs(&source).unwrap();
+        assert_eq!(tracked[&object_ref(&shared)], tip(&a, &shared));
+        assert_eq!(tracked[&object_ref(&new)], tip(&a, &new));
+        assert_eq!(tip(&b, &shared), before);
+        assert_eq!(b.rev_parse(&object_ref(&new)).unwrap(), None);
+    }
+
+    /// A merge reads the tracking refs alone, so it runs with the
+    /// remote's repository gone.
+    #[test]
+    fn a_merge_takes_fetched_refs_without_the_remote() {
+        let (dir, a, b) = pair();
+        let n = note(&a, "n");
+        let remote_tip = tip(&a, &n);
+        let source = FetchSource::from(Repository::from_remote("a"));
+        assert!(RemoteStore::from(&b).fetch_all(&source).unwrap().success());
+        drop(a);
+        std::fs::remove_dir_all(dir.path().join("a")).unwrap();
+
+        let report = b
+            .merge_fetched(&source, None, "user:resolver", None)
+            .unwrap();
+
+        assert_eq!(outcome(&report, &n), &Outcome::Created);
+        assert_eq!(tip(&b, &n), remote_tip);
     }
 
     #[test]
@@ -785,39 +829,39 @@ mod tests {
     }
 
     #[test]
-    fn fetch_adopts_tombstones_and_resurrections_and_wins_over_edits() {
+    fn merge_takes_tombstones_and_resurrections_and_wins_over_edits() {
         let (_dir, a, b) = pair();
         let n = note(&a, "n");
-        fetch(&b, "a", None);
+        pull(&b, "a", None);
 
         // Remote delete against a local edit: the tombstone wins
         edit_note(&b, &n, "local edit");
         NoteStore::from(&a).delete(&n).unwrap();
-        let report = fetch(&b, "a", None);
+        let report = pull(&b, "a", None);
         assert_eq!(outcome(&report, &n), &Outcome::Tombstoned);
         assert!(b.read_header(&tip(&b, &n)).unwrap().is_tombstone());
 
         // Local delete against a remote edit: the local tombstone stays
         let m = note(&a, "m");
-        fetch(&b, "a", None);
+        pull(&b, "a", None);
         NoteStore::from(&b).delete(&m).unwrap();
         edit_note(&a, &m, "remote edit");
-        assert_eq!(outcome(&fetch(&b, "a", None), &m), &Outcome::Ahead);
+        assert_eq!(outcome(&pull(&b, "a", None), &m), &Outcome::Ahead);
     }
 
     #[test]
     fn divergent_notes_conflict_and_resolve_by_side() {
         let (_dir, a, b) = pair();
         let n = note(&a, "n");
-        fetch(&b, "a", None);
+        pull(&b, "a", None);
         edit_note(&a, &n, "theirs");
         edit_note(&b, &n, "ours");
         let local_tip = tip(&b, &n);
-        let report = fetch(&b, "a", None);
+        let report = pull(&b, "a", None);
         assert_eq!(outcome(&report, &n), &Outcome::Conflict(Conflict::Object));
         assert_eq!(tip(&b, &n), local_tip, "a conflict leaves the local ref");
 
-        let report = fetch(&b, "a", Some(Side::Ours));
+        let report = pull(&b, "a", Some(Side::Ours));
         assert_eq!(outcome(&report, &n), &Outcome::Resolved(Side::Ours));
         let merged = b.read_object(&tip(&b, &n)).unwrap();
         assert_eq!(
@@ -829,12 +873,12 @@ mod tests {
             NoteValue::Text("ours".into())
         );
 
-        // Theirs adopts the remote commit as is
+        // Theirs takes the remote commit as is
         let m = note(&a, "m");
-        fetch(&b, "a", None);
+        pull(&b, "a", None);
         edit_note(&a, &m, "theirs");
         edit_note(&b, &m, "ours");
-        let report = fetch(&b, "a", Some(Side::Theirs));
+        let report = pull(&b, "a", Some(Side::Theirs));
         assert_eq!(outcome(&report, &m), &Outcome::Resolved(Side::Theirs));
         assert_eq!(tip(&b, &m), tip(&a, &m));
     }
@@ -843,7 +887,7 @@ mod tests {
     fn divergent_issues_merge_comments_and_one_sided_status_changes() {
         let (_dir, a, b) = pair();
         let i = issue(&a, "i");
-        fetch(&b, "a", None);
+        pull(&b, "a", None);
         let issues_a = IssueStore::from(&a);
         let issues_b = IssueStore::from(&b);
         issues_a.comment(&i, "user:a", "from a").unwrap();
@@ -856,7 +900,7 @@ mod tests {
                 None,
             )
             .unwrap();
-        let report = fetch(&b, "a", None);
+        let report = pull(&b, "a", None);
         assert_eq!(outcome(&report, &i), &Outcome::Merged);
         let full = issues_b.get(&i).unwrap();
         assert_eq!(full.status, IssueStatus::Closed);
@@ -876,7 +920,7 @@ mod tests {
     fn divergent_issue_statuses_conflict_and_resolve_with_a_recorded_entry() {
         let (_dir, a, b) = pair();
         let i = issue(&a, "i");
-        fetch(&b, "a", None);
+        pull(&b, "a", None);
         IssueStore::from(&a)
             .set_status(
                 &i,
@@ -895,7 +939,7 @@ mod tests {
                 None,
             )
             .unwrap();
-        let report = fetch(&b, "a", None);
+        let report = pull(&b, "a", None);
         assert_eq!(
             outcome(&report, &i),
             &Outcome::Conflict(Conflict::Status {
@@ -903,7 +947,7 @@ mod tests {
                 theirs: "closed/completed".into()
             })
         );
-        let report = fetch(&b, "a", Some(Side::Theirs));
+        let report = pull(&b, "a", Some(Side::Theirs));
         assert_eq!(outcome(&report, &i), &Outcome::Resolved(Side::Theirs));
         let full = IssueStore::from(&b).get(&i).unwrap();
         assert_eq!(full.status_reason, Some(StatusReason::Completed));
@@ -925,14 +969,14 @@ mod tests {
         let n2 = note(&a, "n2");
         let n3 = note(&a, "n3");
         let ds = DatasetStore::from(&a).create().unwrap();
-        fetch(&b, "a", None);
+        pull(&b, "a", None);
         // Datasets link sessions; notes stand in through the generic
         // link writer, which the set merge does not care about
         link(&a, &ds, &[&n1, &n2]);
-        fetch(&b, "a", None);
+        pull(&b, "a", None);
         link(&a, &ds, &[&n1, &n2, &n3]);
         link(&b, &ds, &[&n2]);
-        let report = fetch(&b, "a", None);
+        let report = pull(&b, "a", None);
         assert_eq!(outcome(&report, &ds), &Outcome::Merged);
         let merged = b.read_object(&tip(&b, &ds)).unwrap();
         let members: Vec<String> = merged.tree.links[SESSIONS_LINK]
@@ -968,14 +1012,14 @@ mod tests {
             filters: vec!["secret".into()],
         };
         let share = ShareStore::from(&a).create(&attrs, &[]).unwrap();
-        fetch(&b, "a", None);
+        pull(&b, "a", None);
         // Notes stand in for members through the generic link writer,
         // which the set merge does not care about
         link(&a, &share, &[&n1, &n2]);
-        fetch(&b, "a", None);
+        pull(&b, "a", None);
         link(&a, &share, &[&n1, &n2, &n3]);
         link(&b, &share, &[&n2]);
-        let report = fetch(&b, "a", None);
+        let report = pull(&b, "a", None);
         assert_eq!(outcome(&report, &share), &Outcome::Merged);
         let merged = b.read_object(&tip(&b, &share)).unwrap();
         let members: Vec<String> = merged.tree.links[SESSIONS_LINK]
@@ -987,12 +1031,12 @@ mod tests {
     }
 
     /// A published session replaced on the remote without descent is
-    /// adopted as it is, including when the replacement's content is a
+    /// taken as it is, including when the replacement's content is a
     /// prefix of the local content, which a merge would resolve to the
-    /// local side. A session that is not a publish is not adopted this
+    /// local side. A session that is not a publish is not taken this
     /// way.
     #[test]
-    fn a_replaced_published_session_is_adopted_without_a_merge() {
+    fn a_replaced_published_session_is_taken_without_a_merge() {
         let (dir, a, b) = pair();
         let sessions = SessionStore::from(&a);
         let write = |id: &str, publish: Option<PublishAttrs>, content: &str| {
@@ -1017,7 +1061,7 @@ mod tests {
         sessions
             .create_from_dir(&write(&plain, None, "a\nb\nsecret\n"))
             .unwrap();
-        fetch(&b, "a", None);
+        pull(&b, "a", None);
 
         let replaced = sessions
             .replace_from_dir(&write(&published, publish, "a\nb\n"))
@@ -1025,7 +1069,7 @@ mod tests {
         sessions
             .replace_from_dir(&write(&plain, None, "a\nb\n"))
             .unwrap();
-        let report = fetch(&b, "a", None);
+        let report = pull(&b, "a", None);
         assert_eq!(outcome(&report, &published), &Outcome::Replaced);
         assert_eq!(tip(&b, &published), replaced);
         assert_eq!(b.walk_parent_chain(&replaced).unwrap(), [replaced]);
@@ -1038,7 +1082,7 @@ mod tests {
         let n = note(&a, "n");
         let m = note(&a, "m");
         TagStore::from(&a).add("t", &n, false).unwrap();
-        let report = fetch(&b, "a", None);
+        let report = pull(&b, "a", None);
         let tag = report.outcomes.iter().find(|o| o.kind == "tag").unwrap();
         assert_eq!(tag.outcome, Outcome::Created);
         assert_eq!(
@@ -1047,10 +1091,10 @@ mod tests {
         );
 
         TagStore::from(&a).add("t", &m, true).unwrap();
-        let report = fetch(&b, "a", None);
+        let report = pull(&b, "a", None);
         let tag = report.outcomes.iter().find(|o| o.kind == "tag").unwrap();
         assert_eq!(tag.outcome, Outcome::Conflict(Conflict::Tag));
-        let report = fetch(&b, "a", Some(Side::Theirs));
+        let report = pull(&b, "a", Some(Side::Theirs));
         let tag = report.outcomes.iter().find(|o| o.kind == "tag").unwrap();
         assert_eq!(tag.outcome, Outcome::Resolved(Side::Theirs));
         assert_eq!(
@@ -1076,7 +1120,7 @@ mod tests {
                 .unwrap()
         };
         let ia = keyed(&a, "a");
-        let report = fetch(&b, "a", None);
+        let report = pull(&b, "a", None);
         assert_eq!(outcome(&report, &ia), &Outcome::Created);
         assert_eq!(
             b.rev_parse("refs/gage/1/key/issue/shared")
@@ -1088,7 +1132,7 @@ mod tests {
         let (_dir2, c, d) = pair();
         let ic = keyed(&c, "c");
         let id_ = keyed(&d, "d");
-        let report = fetch(&d, "a", None);
+        let report = pull(&d, "a", None);
         assert_eq!(outcome(&report, &ic), &Outcome::Created);
         let key = report.outcomes.iter().find(|o| o.kind == "key").unwrap();
         assert_eq!(

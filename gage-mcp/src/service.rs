@@ -136,11 +136,13 @@ pub struct QueryConfig {
     pub source: Option<SourceConfig>,
 }
 
-/// What a `source` call needs to read a source other than the main
-/// store: where that source's derived state is kept. Nothing here
-/// writes the source itself.
+/// What a `native` or `stored_remote` call needs to read something
+/// other than the main store's own objects: the store whose remotes a
+/// `stored_remote` call names, and where the derived state of what is
+/// read is kept. Nothing here writes what is read.
 #[derive(Clone)]
 pub struct SourceConfig {
+    pub store: PathBuf,
     pub cache_root: PathBuf,
 }
 

@@ -8,7 +8,7 @@ use clap::Args;
 use datafusion::prelude::SessionContext;
 use gage_core::config::default_cache_root;
 use gage_publish::Staging;
-use gage_query::{ContextBuilder, PrintFormat, QuerySource, ScanScope, exec_command, run_repl};
+use gage_query::{ContextBuilder, PrintFormat, ScanScope, exec_command, run_repl};
 use gage_store::{ScanStore, Store};
 
 use crate::error::CliError;
@@ -16,20 +16,27 @@ use crate::source::SOURCE_HELP;
 
 #[derive(Args)]
 pub struct QueryArgs {
-    /// Source to query in place of store
+    /// Session source to query in place of store
     #[arg(
-        short,
         long,
         value_name = "SOURCE",
+        conflicts_with = "stored_remote",
         long_help = format!(
-            "Source to query in place of store\n\n\
-             A source is read and never written. The value gage:PATH names \
-             another store at PATH, which has every table. Any other value \
-             names a session directory, which has session tables alone, as \
-             its sessions are whether or not they are stored.\n\n{SOURCE_HELP}"
+            "Session source to query in place of store\n\n\
+             A source is read and never written. It has session tables \
+             alone, as its sessions are whether or not they are stored.\n\n\
+             {SOURCE_HELP}"
         )
     )]
-    source: Option<String>,
+    native: Option<String>,
+
+    /// Remote whose fetched objects to query
+    ///
+    /// Reads objects that gage fetch brought from the remote NAME and
+    /// that are not merged into the store. Every table is present.
+    /// Nothing is fetched and nothing is written
+    #[arg(short = 'R', long, value_name = "NAME")]
+    stored_remote: Option<String>,
 
     /// Query within scan (ID or prefix)
     ///
@@ -88,20 +95,22 @@ pub struct QueryRunArgs {
 }
 
 pub async fn main(args: QueryArgs) -> Result<(), CliError> {
-    let store = match args.source.as_deref().map(QuerySource::from_spec) {
+    if let Some(spec) = args.native.as_deref() {
+        if args.scan.is_some() {
+            return Err(CliError::message(format!(
+                "gage query: --scan reads a store, and --native {spec} is a session directory"
+            )));
+        }
+        let ctx = builder(None, &args.run)
+            .build_source(spec)
+            .with_context(|| format!("gage query: --native {spec}"))?;
+        return run("gage query", &ctx, &args.run).await;
+    }
+    let store = match args.stored_remote.as_deref() {
         None => Store::open(&gage_store::store_path()).context("gage query")?,
-        Some(QuerySource::Store(path)) => Store::open_read_only(path, &default_cache_root())
-            .with_context(|| format!("gage query: --source {}", path.display()))?,
-        Some(QuerySource::Driver(spec)) => {
-            if args.scan.is_some() {
-                return Err(CliError::message(format!(
-                    "gage query: --scan reads a store, and --source {spec} is a session directory"
-                )));
-            }
-            let ctx = builder(None, &args.run)
-                .build_source(spec)
-                .with_context(|| format!("gage query: --source {spec}"))?;
-            return run("gage query", &ctx, &args.run).await;
+        Some(remote) => {
+            Store::open_stored_remote(&gage_store::store_path(), &default_cache_root(), remote)
+                .with_context(|| format!("gage query: --stored-remote {remote}"))?
         }
     };
     let scope = match &args.scan {

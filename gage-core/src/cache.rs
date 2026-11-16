@@ -59,6 +59,20 @@ pub fn store_source_url(store: &Path) -> String {
     format!("{STORE_SCHEME}:{}", canonical(store).display())
 }
 
+/// The corpus directory of what the store at `store` holds of the
+/// remote `remote`. It is a directory of its own beside the store's,
+/// since the two hold different objects under the same ids.
+pub fn stored_remote_corpus_dir(cache_root: &Path, store: &Path, remote: &str) -> PathBuf {
+    let mut input = store_source_url(store).into_bytes();
+    // A NUL cannot occur in a path, so no store path and remote name
+    // share the input of another pair.
+    input.push(0);
+    input.extend_from_slice(remote.as_bytes());
+    cache_root
+        .join(STORE_DIR)
+        .join(format!("{:016x}", XxHash3_64::oneshot(&input)))
+}
+
 /// The digest naming the corpus directory of `scheme:<path>`: XxHash3
 /// over the URL with the path canonicalized, as 16 hex characters. A
 /// digest keys distinct locations to distinct directories, which a
@@ -84,20 +98,44 @@ fn canonical(path: &Path) -> PathBuf {
 pub struct Corpus {
     /// The source URL the corpus derives from
     pub source: String,
+    /// The remote whose fetched objects the corpus derives from, for
+    /// a corpus of what a store holds of a remote; absent for a
+    /// corpus of a source's own content
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote: Option<String>,
 }
 
 /// Create the corpus directory `dir` if absent and write `corpus.json`
 /// naming `source` if absent. A present record is left as written.
 pub fn ensure_corpus_dir(dir: &Path, source: &str) -> io::Result<()> {
+    ensure_corpus_record(
+        dir,
+        &Corpus {
+            source: source.to_string(),
+            remote: None,
+        },
+    )
+}
+
+/// As [`ensure_corpus_dir`], for the corpus of what the store at the
+/// source URL `source` holds of the remote `remote`.
+pub fn ensure_stored_remote_corpus_dir(dir: &Path, source: &str, remote: &str) -> io::Result<()> {
+    ensure_corpus_record(
+        dir,
+        &Corpus {
+            source: source.to_string(),
+            remote: Some(remote.to_string()),
+        },
+    )
+}
+
+fn ensure_corpus_record(dir: &Path, corpus: &Corpus) -> io::Result<()> {
     fs::create_dir_all(dir)?;
     let file = dir.join(CORPUS_FILE);
     if file.exists() {
         return Ok(());
     }
-    let corpus = Corpus {
-        source: source.to_string(),
-    };
-    let text = serde_json::to_string_pretty(&corpus).map_err(io::Error::other)?;
+    let text = serde_json::to_string_pretty(corpus).map_err(io::Error::other)?;
     fs::write(file, text + "\n")
 }
 
@@ -172,6 +210,30 @@ mod tests {
     }
 
     #[test]
+    fn a_stored_remote_has_a_corpus_dir_of_its_own() {
+        let root = Path::new("/cache");
+        let store = Path::new("/s/store.git");
+        let acme = stored_remote_corpus_dir(root, store, "acme");
+        assert_ne!(acme, store_corpus_dir(root, store));
+        assert_ne!(acme, stored_remote_corpus_dir(root, store, "other"));
+        assert_eq!(acme, stored_remote_corpus_dir(root, store, "acme"));
+    }
+
+    #[test]
+    fn a_stored_remote_corpus_record_names_the_remote() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("store").join("abc");
+        ensure_stored_remote_corpus_dir(&dir, "gage:/s/store.git", "acme").unwrap();
+        assert_eq!(
+            read_corpus(&dir).unwrap(),
+            Corpus {
+                source: "gage:/s/store.git".to_string(),
+                remote: Some("acme".to_string()),
+            }
+        );
+    }
+
+    #[test]
     fn ensure_corpus_dir_writes_the_record_once() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("store").join("abc");
@@ -179,7 +241,8 @@ mod tests {
         assert_eq!(
             read_corpus(&dir).unwrap(),
             Corpus {
-                source: "gage:/s/store.git".to_string()
+                source: "gage:/s/store.git".to_string(),
+                remote: None,
             }
         );
         ensure_corpus_dir(&dir, "gage:/other").unwrap();

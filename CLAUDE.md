@@ -163,7 +163,7 @@ These rules apply to ALL Rust code in this workspace. They are non-negotiable.
     object's own properties, then how the work runs, then output, then utility
     flags, with `--yes` last. A modifier follows the option it modifies: `--tag`
     then `--force-tag`.
-  - Shared blocks keep their place: scope options (`--source`, `--stored`) lead;
+  - Shared blocks keep their place: scope options (`--native`, `--stored`, `--stored-remote`) lead;
     the session filter block orders which-filters before how-many limiters; a
     list command puts its own filters first, then `--more`, `--all`, `--limit`,
     and `--full-id` last.
@@ -173,7 +173,7 @@ These rules apply to ALL Rust code in this workspace. They are non-negotiable.
 ## Store schema rules
 
 These rules keep a store readable by every Gage build that touches it. A store
-is shared: `gage fetch` brings in objects other builds wrote, so an older build
+is shared: `gage pull` brings in objects other builds wrote, so an older build
 reading a newer object is a normal condition, not an upgrade-window edge case.
 
 Confirm with the user before a `type` version bump, a generation bump, an

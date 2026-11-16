@@ -45,12 +45,12 @@ mod content;
 pub use content::{DirContentSink, DirContentSource};
 mod dataset;
 mod error;
-mod fetch;
 pub mod git;
 pub mod index;
 mod issue;
 pub mod key;
 mod ls;
+mod merge;
 mod note;
 pub mod object;
 mod pack_index;
@@ -67,6 +67,7 @@ mod tag;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub mod url;
+mod withheld;
 mod writer;
 
 pub use admin::{
@@ -86,7 +87,6 @@ pub use dataset::{
     OBJECT_TYPE as DATASET_TYPE, SessionSpec,
 };
 pub use error::StoreError;
-pub use fetch::{Conflict, FetchReport, Outcome, RefOutcome, Side};
 pub use gage_session::SummaryAttrs;
 pub use git::{CommitMeta, EntryKind, TreeEntry};
 pub use index::{IdMatch, IndexCounts, IndexStatus, Order, SelectedTip};
@@ -96,6 +96,7 @@ pub use issue::{
 };
 pub use key::{KeyRef, KeyStore, object_key_ref};
 pub use ls::{PathEntry, PathKind};
+pub use merge::{Conflict, MergeReport, Outcome, RefOutcome, Side};
 pub use note::{
     NoteEdit, NoteFull, NoteInput, NoteQuery, NoteRecord, NoteStore, NoteValue,
     OBJECT_TYPE as NOTE_TYPE,
@@ -108,7 +109,7 @@ pub use query::{
     scan_log_table, scan_scope_tables, scan_table, scan_task_agent_table, scan_task_table,
     scan_watermark_table, share_table, tag_table,
 };
-pub use refs::{GENERATION, KEY_REFS, OBJECT_REFS, ROOT as REFS_ROOT, TAG_REFS};
+pub use refs::{GENERATION, KEY_REFS, OBJECT_REFS, ROOT as REFS_ROOT, RefRoot, TAG_REFS};
 pub use remote::{
     FetchSource, LeasedRef, PushSet, Remote, RemoteDiff, RemoteStore, Repository, Retraction,
     tracking_prefix, validate_objects as validate_remote_objects,

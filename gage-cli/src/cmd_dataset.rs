@@ -108,8 +108,8 @@ pub struct DatasetUnlinkArgs {
 #[derive(Args)]
 pub struct DatasetAddArgs {
     /// Session source
-    #[arg(short, long, value_name = "SOURCE", long_help = format!("Session source\n\n{SOURCE_HELP}"))]
-    pub source: Option<String>,
+    #[arg(long, value_name = "SOURCE", long_help = format!("Session source\n\n{SOURCE_HELP}"))]
+    pub native: Option<String>,
 
     /// Sessions to add (ID or prefix)
     #[arg(value_name = "SESSION", conflicts_with_all = FILTER_ARG_NAMES)]
@@ -140,8 +140,8 @@ pub struct DatasetRefreshArgs {
     pub dataset: String,
 
     /// Session source
-    #[arg(short, long, value_name = "SOURCE", long_help = format!("Session source\n\n{SOURCE_HELP}"))]
-    pub source: Option<String>,
+    #[arg(long, value_name = "SOURCE", long_help = format!("Session source\n\n{SOURCE_HELP}"))]
+    pub native: Option<String>,
 
     #[command(flatten)]
     pub size: SizeLimitArgs,
@@ -209,10 +209,10 @@ async fn add_dialog(args: &DatasetAddArgs, store: &Store) -> Result<DialogResult
     let selecting = !args.sessions.is_empty() || !args.filter.is_empty();
     let selected = if selecting {
         let registry = crate::source::driver_registry();
-        let (driver, spec) = crate::source::resolve_source(&registry, args.source.as_deref())
+        let (driver, spec) = crate::source::resolve_source(&registry, args.native.as_deref())
             .map_err(DialogError::Failed)?;
         let selected = select_sessions(
-            SessionSelect::Native(args.source.as_deref()),
+            SessionSelect::Native(args.native.as_deref()),
             &args.sessions,
             &args.filter,
         )
@@ -222,7 +222,7 @@ async fn add_dialog(args: &DatasetAddArgs, store: &Store) -> Result<DialogResult
             "Source",
             crate::source::describe_source(driver.as_ref(), &spec),
         )?;
-        let lines = native_session_lines(args.source.as_deref(), &selected)
+        let lines = native_session_lines(args.native.as_deref(), &selected)
             .await
             .map_err(|e| DialogError::Failed(format!("{e}")))?;
         preview_sessions(&lines, IdKind::Native, None)?;
@@ -253,7 +253,7 @@ async fn add_dialog(args: &DatasetAddArgs, store: &Store) -> Result<DialogResult
     add_native_to_dataset(
         store,
         &dataset_id,
-        args.source.as_deref(),
+        args.native.as_deref(),
         &selected,
         Some(args.size.max_bytes().context("user config")?),
         &mut |e| view.on(e),
@@ -291,7 +291,7 @@ pub fn refresh(args: DatasetRefreshArgs) -> Result<(), CliError> {
         add_native_to_dataset(
             &store,
             &record.id,
-            args.source.as_deref(),
+            args.native.as_deref(),
             &selected,
             Some(args.size.max_bytes().context("user config")?),
             &mut |e| view.on(e),
@@ -954,6 +954,18 @@ pub(crate) fn link_stored(
     let outcomes = DatasetStore::from(store)
         .sessions_link(dataset_id, &ids)
         .map_err(|e| DialogError::Failed(format!("{e}")))?;
+    report_linked(dataset_id, &outcomes, records, on_event);
+    Ok(())
+}
+
+/// Report each linked session of `records` with its outcome, then the
+/// counts.
+fn report_linked(
+    dataset_id: &str,
+    outcomes: &[DatasetSessionAddOutcome],
+    records: &[SessionRecord],
+    on_event: &mut dyn FnMut(AddEvent<'_>),
+) {
     for (outcome, record) in outcomes.iter().zip(records) {
         on_event(AddEvent::Added {
             outcome: outcome.outcome,
@@ -966,6 +978,22 @@ pub(crate) fn link_stored(
         counts: AddCounts::from_outcomes(outcomes.iter().map(|o| o.outcome)),
         dataset: Some(dataset_id),
     });
+}
+
+/// Link sessions the store holds as fetched from a remote into the
+/// dataset, each at the commit of `records`, reporting each to
+/// `on_event`. The sessions stay under the remote's tracking refs.
+pub(crate) fn link_fetched(
+    store: &Store,
+    dataset_id: &str,
+    records: &[SessionRecord],
+    on_event: &mut dyn FnMut(AddEvent<'_>),
+) -> Result<(), DialogError> {
+    let commits: Vec<String> = records.iter().map(|r| r.commit_sha.clone()).collect();
+    let outcomes = DatasetStore::from(store)
+        .sessions_link_commits(dataset_id, &commits)
+        .map_err(|e| DialogError::Failed(format!("{e}")))?;
+    report_linked(dataset_id, &outcomes, records, on_event);
     Ok(())
 }
 

@@ -10,7 +10,7 @@
 //! `--batch` publishes each session under an id derived from the
 //! session and what the publish applies, and writes the store itself
 //! when no part of the publish needs a model. The original
-//! sessions are resolved through `--source` and `--stored`, the way
+//! sessions are resolved through `--native` and `--stored`, the way
 //! `gage scan` resolves sessions: a `--stored` session is used as is,
 //! and a native session is added to the store first so it has an
 //! object id and commit for `origin`.
@@ -93,7 +93,7 @@ pub struct PublishRunArgs {
         long_help = format!("Session source\n\n{}", source::SOURCE_HELP),
         conflicts_with = "stored",
     )]
-    source: Option<String>,
+    native: Option<String>,
 
     /// Publish stored sessions
     #[arg(short = 'S', long)]
@@ -277,14 +277,13 @@ pub struct InitArgs {
 
     /// Session source
     #[arg(
-        id = "source",
-        short = 's',
-        long = "source",
+        id = "native",
+        long = "native",
         value_name = "SOURCE",
         long_help = format!("Session source\n\n{}", source::SOURCE_HELP),
         conflicts_with = "stored",
     )]
-    source: Option<String>,
+    native: Option<String>,
 
     /// Publish stored sessions
     #[arg(id = "stored", short = 'S', long = "stored")]
@@ -683,7 +682,7 @@ async fn publish_batch(args: PublishRunArgs) -> Result<(), CliError> {
     let shares = resolve_shares("gage publish", &store, &args.share)?;
     let originals = resolve_originals(
         &store,
-        args.source.as_deref(),
+        args.native.as_deref(),
         args.stored,
         &args.sessions,
         &args.select,
@@ -957,8 +956,8 @@ fn skill_args(args: &PublishRunArgs, inputs: &SkillInputs<'_>, ids: &[String]) -
         out.extend(["--stored".to_string(), "--derive-id".to_string()]);
     } else if args.stored {
         out.push("--stored".to_string());
-    } else if let Some(source) = &args.source {
-        out.extend(["--source".to_string(), source.clone()]);
+    } else if let Some(source) = &args.native {
+        out.extend(["--native".to_string(), source.clone()]);
     }
     for group in &args.group {
         out.extend(["--group".to_string(), group.clone()]);
@@ -1071,7 +1070,7 @@ async fn preview_selection(
     let select = if args.stored {
         SessionSelect::Stored(store)
     } else {
-        SessionSelect::Native(args.source.as_deref())
+        SessionSelect::Native(args.native.as_deref())
     };
     let ids = select_sessions(select, &args.sessions, &args.select)
         .await
@@ -1089,9 +1088,9 @@ async fn preview_selection(
     }
     let registry = source::driver_registry();
     let (driver, spec) =
-        source::resolve_source(&registry, args.source.as_deref()).map_err(DialogError::Failed)?;
+        source::resolve_source(&registry, args.native.as_deref()).map_err(DialogError::Failed)?;
     dialog::step_value("Source", source::describe_source(driver.as_ref(), &spec))?;
-    let lines = native_session_lines(args.source.as_deref(), &ids)
+    let lines = native_session_lines(args.native.as_deref(), &ids)
         .await
         .map_err(|e| DialogError::Failed(format!("{e}")))?;
     preview_sessions(&lines, IdKind::Native, None)?;
@@ -1239,7 +1238,7 @@ async fn init(args: InitArgs) -> Result<(), CliError> {
     };
     let originals = resolve_originals(
         &store,
-        args.source.as_deref(),
+        args.native.as_deref(),
         args.stored,
         &args.sessions,
         &args.select,
@@ -2422,7 +2421,7 @@ mod tests {
     }
 
     /// The publish commands live under `gage publish`, not `gage
-    /// session`. `init` takes its own --source and --stored and the
+    /// session`. `init` takes its own --native and --stored and the
     /// session selection; the other commands take a pending session.
     #[test]
     fn publish_is_a_top_level_command() {
@@ -2465,8 +2464,8 @@ mod tests {
         );
         assert_eq!(args.filter, ["secret"]);
         assert_eq!(check_init_args(&args), Ok(()));
-        let args = init_args(&["-s", "claude:/tmp/claude", "--all"]);
-        assert_eq!(args.source.as_deref(), Some("claude:/tmp/claude"));
+        let args = init_args(&["--native", "claude:/tmp/claude", "--all"]);
+        assert_eq!(args.native.as_deref(), Some("claude:/tmp/claude"));
         assert!(args.select.all);
         let args = init_args(&["-g", "public"]);
         assert_eq!(
@@ -2477,7 +2476,7 @@ mod tests {
         Cli::try_parse_from(["gage", "publish", "init", "--list-filters"]).unwrap();
         for argv in [
             vec!["init", "abc", "--since", "7d"],
-            vec!["init", "-s", "claude:/tmp/claude", "-S", "abc"],
+            vec!["init", "--native", "claude:/tmp/claude", "-S", "abc"],
             vec!["init", "abc", "--list-filters"],
         ] {
             assert!(
@@ -2616,7 +2615,7 @@ mod tests {
     /// `gage publish` without a subcommand is a run: its positional
     /// sessions, scope, selection axes, and publish configuration
     /// parse into the run args, and the subcommands still parse. The
-    /// positional sessions exclude the axes, `--source` excludes
+    /// positional sessions exclude the axes, `--native` excludes
     /// `--stored`, and `--list-filters` stands alone.
     #[test]
     fn publish_without_a_subcommand_is_a_run() {
@@ -2665,15 +2664,15 @@ mod tests {
             args.select.since,
             Some(std::time::Duration::from_secs(7 * 86_400))
         );
-        let args = run_args(&["--source", "claude:/tmp/claude", "--all"]);
-        assert_eq!(args.source.as_deref(), Some("claude:/tmp/claude"));
+        let args = run_args(&["--native", "claude:/tmp/claude", "--all"]);
+        assert_eq!(args.native.as_deref(), Some("claude:/tmp/claude"));
         assert!(args.select.all);
         run_args(&["--list-filters"]);
         run_args(&[]);
         Cli::try_parse_from(["gage", "publish", "init", "-g", "public", "abc"]).unwrap();
         for argv in [
             vec!["abc", "--since", "7d"],
-            vec!["--source", "claude:/tmp/claude", "--stored", "abc"],
+            vec!["--native", "claude:/tmp/claude", "--stored", "abc"],
             vec!["--list-filters", "abc"],
             vec!["-a", "public", "abc"],
             vec!["-A", "public", "abc"],
@@ -2700,7 +2699,7 @@ mod tests {
             run_args
         };
         let args = run_args(&[
-            "--source",
+            "--native",
             "claude:/tmp/c",
             "--since",
             "7d",
@@ -2720,7 +2719,7 @@ mod tests {
             [
                 "--description",
                 "For the blog",
-                "--source",
+                "--native",
                 "claude:/tmp/c",
                 "--group",
                 "public",
@@ -2743,7 +2742,7 @@ mod tests {
         // A batch publish passes stored ids under derived ids,
         // whatever source the selection named
         let args = run_args(&[
-            "--source",
+            "--native",
             "claude:/tmp/c",
             "-b",
             "--since",

@@ -29,11 +29,11 @@ use crate::style;
 #[derive(Args)]
 pub struct IndexArgs {
     /// Session source whose index to maintain
-    #[arg(short, long, value_name = "SOURCE", long_help = format!("Session source whose index to maintain\n\n{}", source::SOURCE_HELP))]
-    source: Option<String>,
+    #[arg(long, value_name = "SOURCE", long_help = format!("Session source whose index to maintain\n\n{}", source::SOURCE_HELP))]
+    native: Option<String>,
 
     /// Maintain index of stored sessions
-    #[arg(short = 'S', long, conflicts_with = "source")]
+    #[arg(short = 'S', long, conflicts_with = "native")]
     stored: bool,
 
     /// Rebuild index
@@ -51,7 +51,7 @@ pub struct IndexArgs {
     /// it was built from, whether that source is still present, and
     /// its size. An entry from an earlier cache layout is listed as
     /// legacy
-    #[arg(long, conflicts_with_all = ["source", "stored", "rebuild", "status", "remove"])]
+    #[arg(long, conflicts_with_all = ["native", "stored", "rebuild", "status", "remove"])]
     list: bool,
 
     /// Remove indexes of a corpus
@@ -59,7 +59,7 @@ pub struct IndexArgs {
     /// Remove indexes of a corpus. CORPUS is a corpus path --list
     /// shows, as store/1a2b3c4d5e6f7a8b; its whole directory is
     /// removed, whether or not its source is still present
-    #[arg(long, value_name = "CORPUS", conflicts_with_all = ["source", "stored", "rebuild", "status"])]
+    #[arg(long, value_name = "CORPUS", conflicts_with_all = ["native", "stored", "rebuild", "status"])]
     remove: Option<String>,
 }
 
@@ -77,7 +77,7 @@ pub async fn run(args: IndexArgs) -> Result<(), CliError> {
     if args.stored {
         return run_stored(args).await;
     }
-    let source = source::open_source(args.source.as_deref().unwrap_or(""), "gage index")?;
+    let source = source::open_source(args.native.as_deref().unwrap_or(""), "gage index")?;
 
     if args.status {
         let status = tokio::task::spawn_blocking(move || source.maintenance_status())
@@ -327,23 +327,32 @@ fn corpus_row(corpus: String, dir: &Path) -> Result<IndexRow, CliError> {
             indexes.push(category);
         }
     }
-    let source = match read_corpus(dir) {
-        Ok(corpus) => Some(corpus.source),
+    let record = match read_corpus(dir) {
+        Ok(corpus) => Some(corpus),
         Err(e) if e.kind() == io::ErrorKind::NotFound => None,
         Err(e) => {
             tracing::warn!(dir = %dir.display(), "unreadable corpus record: {e}");
             None
         }
     };
-    let present = match &source {
-        Some(source) => {
-            if source_path(source).is_dir() {
+    let present = match &record {
+        Some(record) => {
+            if source_path(&record.source).is_dir() {
                 "yes"
             } else {
                 "no"
             }
         }
         None => "unknown",
+    };
+    // A corpus of what a store holds of a remote names the remote
+    // after the store.
+    let source = match record {
+        Some(record) => match record.remote {
+            Some(remote) => format!("{} (remote {remote})", record.source),
+            None => record.source,
+        },
+        None => "(no record)".to_string(),
     };
     Ok(IndexRow {
         corpus,
@@ -352,7 +361,7 @@ fn corpus_row(corpus: String, dir: &Path) -> Result<IndexRow, CliError> {
         } else {
             indexes.join(", ")
         },
-        source: source.unwrap_or_else(|| "(no record)".to_string()),
+        source,
         present: present.to_string(),
         bytes: tree_size(dir)?,
     })
@@ -496,6 +505,23 @@ mod tests {
         );
         assert_eq!(rows[1].bytes, 3);
         assert!(rows[2].source.starts_with("gage:"), "{}", rows[2].source);
+    }
+
+    /// A corpus of what a store holds of a remote names the remote
+    /// after the store, and is present while the store is.
+    #[test]
+    fn a_stored_remote_corpus_row_names_the_remote() {
+        let source = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("store").join("3333333333333333");
+        let url = format!("gage:{}", source.path().display());
+        gage_core::cache::ensure_stored_remote_corpus_dir(&dir, &url, "acme").unwrap();
+        let row = match corpus_row("store/3333333333333333".to_string(), &dir) {
+            Ok(row) => row,
+            Err(_) => panic!("the corpus row was not read"),
+        };
+        assert_eq!(row.source, format!("{url} (remote acme)"));
+        assert_eq!(row.present, "yes");
     }
 
     #[test]

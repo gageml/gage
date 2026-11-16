@@ -33,7 +33,6 @@ use serde_json::Value as JsonValue;
 use crate::git::{EntryKind, git_in, run};
 use crate::index::IdMatch;
 use crate::key::plan_key_ref;
-use crate::refs::OBJECT_REFS;
 pub(crate) use crate::refs::object_ref;
 use crate::url;
 use crate::writer::{TreeInput, commit_tree, mktree, write_blob};
@@ -461,17 +460,17 @@ impl Store {
     /// Point the object's ref at `object`, a commit already in the
     /// repository, while the ref holds `expected_tip` (empty for a ref
     /// that must not exist), and index it. The fetch path uses this for
-    /// every outcome that adopts a remote commit as is.
+    /// every outcome that takes a remote commit as is.
     pub(crate) fn record_ref_move(
         &self,
         object: &Object,
         expected_tip: &str,
     ) -> Result<(), StoreError> {
         let links = self.find_link_files(&object.commit_sha)?;
-        // Key refs are derived from the adopted objects afterwards, by
+        // Key refs are derived from the merged objects afterwards, by
         // the fetch loop, so none is written here
         self.record_write(object, &links, expected_tip, None)?;
-        // The adopted commit may bring ancestors the index has not seen
+        // The merged commit may bring ancestors the index has not seen
         self.in_index_transaction(|| self.index_from(&object.commit_sha))
     }
 
@@ -649,6 +648,30 @@ impl Store {
     /// result carries the object's current tip, which may be newer
     /// than the linked commit. A tombstoned object has no links.
     pub fn link_closure(&self, ids: &[String]) -> Result<Vec<IdMatch>, StoreError> {
+        self.link_closure_checked(ids, |_| Ok(()))
+    }
+
+    /// As [`Store::link_closure`], for a set that is sent to another
+    /// repository. A withheld object in the closure is
+    /// [`StoreError::Withheld`]: sending it would send a session the
+    /// store holds only as fetched from a remote.
+    pub fn sendable_closure(&self, ids: &[String]) -> Result<Vec<IdMatch>, StoreError> {
+        let withheld = self.withheld_ids()?;
+        self.link_closure_checked(ids, |id| {
+            if withheld.contains(id) {
+                return Err(StoreError::Withheld(id.to_string()));
+            }
+            Ok(())
+        })
+    }
+
+    /// The link closure of `ids`, with `check` run on each object id
+    /// before its links are followed.
+    fn link_closure_checked(
+        &self,
+        ids: &[String],
+        check: impl Fn(&str) -> Result<(), StoreError>,
+    ) -> Result<Vec<IdMatch>, StoreError> {
         let mut seen: HashSet<String> = HashSet::new();
         let mut queue: VecDeque<String> = ids.iter().cloned().collect();
         let mut out = Vec::new();
@@ -656,8 +679,9 @@ impl Store {
             if !seen.insert(id.clone()) {
                 continue;
             }
+            check(&id)?;
             let tip = self
-                .rev_parse(&object_ref(&id))?
+                .rev_parse(&self.refs().object_ref(&id))?
                 .ok_or_else(|| StoreError::ObjectNotFound(id.clone()))?;
             let header = self.read_header(&tip)?;
             if !header.is_tombstone() {
@@ -683,12 +707,13 @@ impl Store {
     /// List every ref under the object namespace with its id and tip
     /// SHA.
     pub fn list_object_refs(&self) -> Result<Vec<ObjectRef>, StoreError> {
+        let namespace = self.refs().objects();
         let out = run(git_in(
             self.path(),
             [
                 "for-each-ref",
                 "--format=%(refname) %(objectname)",
-                OBJECT_REFS,
+                &namespace,
             ],
         ))?;
         let mut refs = Vec::new();
@@ -696,7 +721,7 @@ impl Store {
             let (name, sha) = line
                 .split_once(' ')
                 .ok_or_else(|| StoreError::Parse(format!("for-each-ref line: {line}")))?;
-            let Some(id) = name.strip_prefix(OBJECT_REFS) else {
+            let Some(id) = name.strip_prefix(&namespace) else {
                 continue;
             };
             if id.is_empty() {
@@ -931,7 +956,7 @@ impl Store {
                 if out.iter().any(|m| m.id == id) {
                     continue;
                 }
-                let Some(tip) = self.rev_parse(&object_ref(&id))? else {
+                let Some(tip) = self.rev_parse(&self.refs().object_ref(&id))? else {
                     continue;
                 };
                 let header = self.read_header(&tip)?;
@@ -991,6 +1016,28 @@ pub(crate) fn resolve_target(store: &Store, raw: &str) -> Result<String, StoreEr
         return Err(StoreError::ObjectDeleted(target.header.id));
     }
     Ok(sha)
+}
+
+/// Check that `commit` is a live commit of the object the target URL
+/// `raw` names: the object's id and the type its scheme names. A
+/// commit of another object, of another type, or a tombstone is
+/// [`StoreError::TargetNotFound`].
+pub(crate) fn require_target_commit(
+    store: &Store,
+    raw: &str,
+    commit: &str,
+) -> Result<(), StoreError> {
+    let parsed = url::parse(raw)?;
+    let not_found = || StoreError::TargetNotFound(raw.to_string());
+    if store.object_info(commit)?.is_none() {
+        return Err(not_found());
+    }
+    let header = store.read_header(commit)?;
+    let expected = format!("gage::{}", parsed.scheme);
+    if header.id != parsed.body || header.object_type != expected || header.is_tombstone() {
+        return Err(not_found());
+    }
+    Ok(())
 }
 
 /// Fail unless the object's `type` is `expected` at a version this

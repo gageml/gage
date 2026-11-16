@@ -6,8 +6,8 @@
 //! on a case-insensitive filesystem.
 
 use crate::git::{git_in, run};
-use crate::object::{Object, ObjectTree, object_ref};
-use crate::refs::{KEY_REFS, key_ref};
+use crate::object::{Object, ObjectTree};
+use crate::refs::key_ref;
 use crate::{Store, StoreError};
 
 /// Check `key` against the ref name rules. The checks restate what
@@ -293,11 +293,12 @@ pub(crate) fn resolve_key(
     object_type: &str,
     key: &str,
 ) -> Result<Option<Object>, StoreError> {
-    let Some(sha) = store.rev_parse(&key_ref(type_name(object_type), key))? else {
+    let refs = store.refs();
+    let Some(sha) = store.rev_parse(&refs.key_ref(type_name(object_type), key))? else {
         return Ok(None);
     };
     let id = store.read_header(&sha)?.id;
-    let Some(tip) = store.rev_parse(&object_ref(&id))? else {
+    let Some(tip) = store.rev_parse(&refs.object_ref(&id))? else {
         return Ok(None);
     };
     let object = store.read_object(&tip)?;
@@ -334,12 +335,13 @@ impl KeyStore<'_> {
     /// Every key ref in ref order with the id of the object it names,
     /// one `id` blob read per ref.
     pub fn list(&self) -> Result<Vec<KeyRef>, StoreError> {
+        let namespace = self.store.refs().keys();
         let out = run(git_in(
             self.store.path(),
             [
                 "for-each-ref",
                 "--format=%(refname) %(objectname)",
-                KEY_REFS,
+                &namespace,
             ],
         ))?;
         let mut refs = Vec::new();
@@ -347,7 +349,7 @@ impl KeyStore<'_> {
             let (ref_name, sha) = line
                 .split_once(' ')
                 .ok_or_else(|| StoreError::Parse(format!("for-each-ref line: {line}")))?;
-            let rest = ref_name.strip_prefix(KEY_REFS).ok_or_else(|| {
+            let rest = ref_name.strip_prefix(&namespace).ok_or_else(|| {
                 StoreError::Parse(format!("key ref outside namespace: {ref_name}"))
             })?;
             let (type_name, key) = rest
@@ -371,6 +373,7 @@ impl Store {
     /// derived state, so this is the whole repair after a rebuild or
     /// a ref lost outside the store.
     pub fn rebuild_key_refs(&self) -> Result<usize, StoreError> {
+        self.require_local()?;
         let mut written = 0;
         for object_ref in self.list_object_refs()? {
             let object = self.read_object(&object_ref.tip_sha)?;

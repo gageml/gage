@@ -1,5 +1,7 @@
 //! `query`: SQL over the context the service was configured with,
-//! or over a source the call names, which is read and never written.
+//! or over what the call names in its place, a native source or the
+//! objects fetched from a remote, either of which is read and never
+//! written.
 //!
 //! Every result is written once to the query cache as an Arrow IPC
 //! file named by a cursor, and every call returns one page of it. A
@@ -27,7 +29,7 @@ use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::prelude::SessionContext;
 use gage_core::config::default_cache_root;
 use gage_core::uuid::new_uuid;
-use gage_query::{ContextBuilder, QuerySource, write_yaml_capped};
+use gage_query::{ContextBuilder, write_yaml_capped};
 use gage_store::Store;
 use rmcp::ErrorData as McpError;
 use rmcp::handler::server::router::tool::ToolRoute;
@@ -89,50 +91,64 @@ fn handle(
     })
 }
 
-/// The context `request` runs on: the configured one, for a `source`
-/// call a fresh one over the named source, or for a `publish` call a
-/// fresh one scoped to the pending publishes, listed on each call so
-/// the set is current. A `publish` or `source` call where the
-/// configuration does not provide for it is refused.
+/// The context `request` runs on: the configured one, for a `native`
+/// or `stored_remote` call a fresh one over what it names, or for a
+/// `publish` call a fresh one scoped to the pending publishes, listed
+/// on each call so the set is current. A call where the configuration
+/// does not provide for it is refused.
 async fn context_for(
     config: &QueryConfig,
     request: &QueryRequest<'_>,
 ) -> Result<Arc<SessionContext>, McpError> {
     match request {
         QueryRequest::Sql(_) | QueryRequest::Page { .. } => Ok(Arc::clone(&config.context)),
-        QueryRequest::SourceSql { source, .. } => {
-            let Some(config) = &config.source else {
-                return Err(McpError::invalid_params(
-                    "`source` does not apply here: this tool reads its own scope alone",
-                    None,
-                ));
-            };
-            source_context(config, source).await.map(Arc::new)
+        QueryRequest::NativeSql { native, .. } => {
+            let config = source_config(config, "native")?;
+            native_context(config, native).map(Arc::new)
+        }
+        QueryRequest::StoredRemoteSql { remote, .. } => {
+            let config = source_config(config, "stored_remote")?;
+            stored_remote_context(config, remote).await.map(Arc::new)
         }
         QueryRequest::PublishSql(_) => publish_context(config).await.map(Arc::new),
     }
 }
 
-/// A context over `source` in place of the main store. A store is
-/// opened read only, so nothing in its repository is written; a
-/// driver source has no write path. A source that cannot be opened is
-/// an invalid request naming why.
-async fn source_context(config: &SourceConfig, source: &str) -> Result<SessionContext, McpError> {
-    let refused =
-        |reason: String| McpError::invalid_params(format!("source {source}: {reason}"), None);
-    match QuerySource::from_spec(source) {
-        QuerySource::Store(path) => {
-            let store = Store::open_read_only(path, &config.cache_root)
-                .map_err(|e| refused(e.to_string()))?;
-            Ok(ContextBuilder::new(Some(Arc::new(Mutex::new(store))))
-                .build()
-                .await)
-        }
-        QuerySource::Driver(spec) => ContextBuilder::new(None)
-            .cache_root(&config.cache_root)
-            .build_source(spec)
-            .map_err(|e| refused(e.to_string())),
-    }
+/// What a call reading `param` in place of the main store needs, or
+/// the refusal of a tool not configured for one.
+fn source_config<'a>(config: &'a QueryConfig, param: &str) -> Result<&'a SourceConfig, McpError> {
+    config.source.as_ref().ok_or_else(|| {
+        McpError::invalid_params(
+            format!("`{param}` does not apply here: this tool reads its own scope alone"),
+            None,
+        )
+    })
+}
+
+/// A context over the native source `native` in place of the main
+/// store. A native source has no write path. One that cannot be
+/// opened is an invalid request naming why.
+fn native_context(config: &SourceConfig, native: &str) -> Result<SessionContext, McpError> {
+    ContextBuilder::new(None)
+        .cache_root(&config.cache_root)
+        .build_source(native)
+        .map_err(|e| McpError::invalid_params(format!("native {native}: {e}"), None))
+}
+
+/// A context over the objects fetched from `remote` in place of the
+/// main store's own. The store is opened on the remote's tracking
+/// refs, which are read and never written, and nothing is fetched. A
+/// remote that is not configured or was never fetched is an invalid
+/// request naming why.
+async fn stored_remote_context(
+    config: &SourceConfig,
+    remote: &str,
+) -> Result<SessionContext, McpError> {
+    let store = Store::open_stored_remote(&config.store, &config.cache_root, remote)
+        .map_err(|e| McpError::invalid_params(format!("stored_remote {remote}: {e}"), None))?;
+    Ok(ContextBuilder::new(Some(Arc::new(Mutex::new(store))))
+        .build()
+        .await)
 }
 
 async fn publish_context(config: &QueryConfig) -> Result<SessionContext, McpError> {
@@ -153,41 +169,50 @@ async fn publish_context(config: &QueryConfig) -> Result<SessionContext, McpErro
         .await)
 }
 
-/// One call: run new SQL over the sessions in scope, over a named
-/// source, or over the pending publishes, or read a page of a written
-/// result.
+/// One call: run new SQL over the sessions in scope, over a native
+/// source, over the objects fetched from a remote, or over the
+/// pending publishes, or read a page of a written result.
 #[derive(Debug, PartialEq, Eq)]
 pub enum QueryRequest<'a> {
     Sql(&'a str),
-    SourceSql { source: &'a str, sql: &'a str },
+    NativeSql { native: &'a str, sql: &'a str },
+    StoredRemoteSql { remote: &'a str, sql: &'a str },
     PublishSql(&'a str),
     Page { cursor: &'a str, page: usize },
 }
 
 /// Exactly one of `sql` and `cursor` is given; `page` goes with
-/// `cursor` and defaults to 1; `publish` and `source` go with `sql`,
-/// one or the other.
+/// `cursor` and defaults to 1; `publish`, `native`, and
+/// `stored_remote` go with `sql`, at most one of them.
 pub fn parse_request(params: &JsonObject) -> Result<QueryRequest<'_>, McpError> {
     let sql = params.get("sql").and_then(|v| v.as_str());
     let cursor = params.get("cursor").and_then(|v| v.as_str());
     let page = params.get("page").and_then(|v| v.as_u64());
     let publish = params.get("publish").and_then(|v| v.as_bool());
-    let source = params.get("source").and_then(|v| v.as_str());
+    let native = params.get("native").and_then(|v| v.as_str());
+    let stored_remote = params.get("stored_remote").and_then(|v| v.as_str());
     if publish.is_some() && sql.is_none() {
         return Err(McpError::invalid_params(
             "`publish` applies to `sql`, not `cursor`",
             None,
         ));
     }
-    if source.is_some() && sql.is_none() {
-        return Err(McpError::invalid_params(
-            "`source` applies to `sql`, not `cursor`",
-            None,
-        ));
+    for (name, given) in [("native", native), ("stored_remote", stored_remote)] {
+        if given.is_some() && sql.is_none() {
+            return Err(McpError::invalid_params(
+                format!("`{name}` applies to `sql`, not `cursor`"),
+                None,
+            ));
+        }
     }
-    if source.is_some() && publish == Some(true) {
+    let scopes = [
+        native.is_some(),
+        stored_remote.is_some(),
+        publish == Some(true),
+    ];
+    if scopes.into_iter().filter(|given| *given).count() > 1 {
         return Err(McpError::invalid_params(
-            "give `source` or `publish`, not both",
+            "give one of `native`, `stored_remote`, and `publish`, not several",
             None,
         ));
     }
@@ -203,9 +228,10 @@ pub fn parse_request(params: &JsonObject) -> Result<QueryRequest<'_>, McpError> 
                 None,
             )),
             None if publish == Some(true) => Ok(QueryRequest::PublishSql(sql)),
-            None => Ok(match source {
-                Some(source) => QueryRequest::SourceSql { source, sql },
-                None => QueryRequest::Sql(sql),
+            None => Ok(match (native, stored_remote) {
+                (Some(native), _) => QueryRequest::NativeSql { native, sql },
+                (None, Some(remote)) => QueryRequest::StoredRemoteSql { remote, sql },
+                (None, None) => QueryRequest::Sql(sql),
             }),
         },
         (None, Some(cursor)) => match page {
@@ -242,7 +268,8 @@ async fn execute_with_cap(
     cache.sweep();
     match request {
         QueryRequest::Sql(sql)
-        | QueryRequest::SourceSql { sql, .. }
+        | QueryRequest::NativeSql { sql, .. }
+        | QueryRequest::StoredRemoteSql { sql, .. }
         | QueryRequest::PublishSql(sql) => {
             let df = match context.sql(sql).await {
                 Ok(df) => df,
@@ -777,7 +804,8 @@ mod tests {
         assert_eq!(properties["cursor"]["type"], "string");
         assert_eq!(properties["page"]["type"], "integer");
         assert_eq!(properties["publish"]["type"], "boolean");
-        assert_eq!(properties["source"]["type"], "string");
+        assert_eq!(properties["native"]["type"], "string");
+        assert_eq!(properties["stored_remote"]["type"], "string");
     }
 
     /// The help menu embedded in the description stays in sync with the
@@ -888,142 +916,161 @@ mod tests {
         assert_eq!(e.code, rmcp::model::ErrorCode::INVALID_PARAMS);
     }
 
-    /// `source` goes with `sql` and names what the SQL reads; with a
-    /// cursor or beside `publish` it is an invalid request.
+    /// `native` and `stored_remote` go with `sql` and name what the SQL
+    /// reads; with a cursor, beside `publish`, or together they are an
+    /// invalid request.
     #[test]
-    fn parse_request_reads_source_with_sql() {
+    fn parse_request_reads_native_and_stored_remote_with_sql() {
         let object = |v: serde_json::Value| match v {
             serde_json::Value::Object(o) => o,
             _ => unreachable!(),
         };
         assert_eq!(
-            parse_request(&object(json!({"sql": "SELECT 1", "source": "gage:/s"}))).unwrap(),
-            QueryRequest::SourceSql {
-                source: "gage:/s",
+            parse_request(&object(json!({"sql": "SELECT 1", "stored_remote": "acme"}))).unwrap(),
+            QueryRequest::StoredRemoteSql {
+                remote: "acme",
                 sql: "SELECT 1"
             }
         );
         assert_eq!(
             parse_request(&object(
-                json!({"sql": "SELECT 1", "source": "claude:", "publish": false})
+                json!({"sql": "SELECT 1", "native": "claude:", "publish": false})
             ))
             .unwrap(),
-            QueryRequest::SourceSql {
-                source: "claude:",
+            QueryRequest::NativeSql {
+                native: "claude:",
                 sql: "SELECT 1"
             }
         );
         for bad in [
-            json!({"cursor": "c", "source": "gage:/s"}),
-            json!({"sql": "SELECT 1", "source": "gage:/s", "publish": true}),
+            json!({"cursor": "c", "native": "claude:"}),
+            json!({"cursor": "c", "stored_remote": "acme"}),
+            json!({"sql": "SELECT 1", "native": "claude:", "publish": true}),
+            json!({"sql": "SELECT 1", "stored_remote": "acme", "publish": true}),
+            json!({"sql": "SELECT 1", "native": "claude:", "stored_remote": "acme"}),
         ] {
             let e = parse_request(&object(bad.clone())).unwrap_err();
             assert_eq!(e.code, rmcp::model::ErrorCode::INVALID_PARAMS, "{bad}");
         }
     }
 
-    /// A `source` call naming a store reads that store and not the
-    /// configured one, and writes nothing to its repository: hooks
-    /// behind this build stay as they are. A source that cannot be
-    /// opened, and a `source` call on a tool not configured for one,
-    /// are refused.
+    /// A `stored_remote` call reads the objects fetched from the named
+    /// remote and none of the store's own, and writes no ref. A remote
+    /// that is not configured or was never fetched, and a call on a
+    /// tool not configured for one, are refused.
     #[tokio::test]
-    async fn source_calls_read_the_named_store_without_writing_it() {
-        use gage_store::{NoteInput, NoteStore, NoteValue};
+    async fn stored_remote_calls_read_the_fetched_objects_alone() {
+        use gage_store::{NoteInput, NoteStore, NoteValue, RemoteStore};
 
         let dir = tempfile::tempdir().unwrap();
         let cache_root = dir.path().join("cache");
-        let other = dir.path().join("other.git");
-        gage_store::init(&other).unwrap();
-        {
-            let store = Store::open_with_cache_root(&other, &cache_root).unwrap();
+        let note = |path: &Path, value: &str| {
+            gage_store::init(path).unwrap();
+            let store = Store::open_with_cache_root(path, &cache_root).unwrap();
             NoteStore::from(&store)
                 .create(NoteInput {
                     name: "comment",
-                    value: NoteValue::Text("from the other store".into()),
+                    value: NoteValue::Text(value.into()),
                     author: "user:t",
                     target: None,
                     metadata: None,
                     work_id: None,
                 })
                 .unwrap();
-        }
-        let hook = other.join("hooks").join("update");
-        let stale = "#!/bin/sh\nexit 0\n";
-        std::fs::write(&hook, stale).unwrap();
-        let unset = std::process::Command::new("git")
-            .arg("-C")
-            .arg(&other)
-            .args(["config", "--unset", "gage.hookVersion"])
-            .status()
+            store
+        };
+        let theirs = dir.path().join("theirs.git");
+        drop(note(&theirs, "from the remote"));
+        let ours = dir.path().join("ours.git");
+        let store = note(&ours, "from the main store");
+        let remotes = RemoteStore::from(&store);
+        remotes
+            .add("acme", theirs.to_str().unwrap(), false)
             .unwrap();
-        assert!(unset.success());
+        remotes
+            .add("idle", theirs.to_str().unwrap(), false)
+            .unwrap();
+        drop(store);
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&ours)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}");
+            String::from_utf8(out.stdout).unwrap()
+        };
+        git(&["fetch", "--quiet", "acme"]);
+        let refs_before = git(&["for-each-ref"]);
 
         let configured = Arc::new(context());
         let config = QueryConfig {
             context: Arc::clone(&configured),
             publish: None,
             source: Some(SourceConfig {
+                store: ours.clone(),
                 cache_root: cache_root.clone(),
             }),
         };
-        let source = format!("gage:{}", other.display());
-        let request = QueryRequest::SourceSql {
-            source: &source,
+        let request = QueryRequest::StoredRemoteSql {
+            remote: "acme",
             sql: "SELECT value FROM note",
         };
         let named = context_for(&config, &request).await.unwrap();
         assert!(!Arc::ptr_eq(&named, &configured));
         let (_cache_dir, cache) = cache();
         let result = execute(&named, &cache, request).await.unwrap();
-        assert!(
-            text_of(&result).contains("from the other store"),
-            "{}",
-            text_of(&result)
-        );
+        let text = text_of(&result);
+        assert!(text.contains("from the remote"), "{text}");
+        assert!(!text.contains("from the main store"), "{text}");
         drop(named);
-        assert_eq!(std::fs::read_to_string(&hook).unwrap(), stale);
+        assert_eq!(git(&["for-each-ref"]), refs_before);
 
-        let missing = format!("gage:{}", dir.path().join("absent.git").display());
-        let refused = context_for(
-            &config,
-            &QueryRequest::SourceSql {
-                source: &missing,
-                sql: "SELECT 1",
-            },
-        )
-        .await
-        .map(|_| ());
-        let Err(e) = refused else {
-            panic!("a source naming no store was accepted");
-        };
-        assert_eq!(e.code, rmcp::model::ErrorCode::INVALID_PARAMS);
-        assert!(e.message.contains("absent.git"), "{}", e.message);
+        for (remote, reason) in [("idle", "gage fetch idle"), ("nope", "remote not found")] {
+            let refused = context_for(
+                &config,
+                &QueryRequest::StoredRemoteSql {
+                    remote,
+                    sql: "SELECT 1",
+                },
+            )
+            .await
+            .map(|_| ());
+            let Err(e) = refused else {
+                panic!("stored_remote {remote} was accepted");
+            };
+            assert_eq!(e.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+            assert!(e.message.contains(reason), "{}", e.message);
+        }
 
         let without = QueryConfig {
             context: configured,
             publish: None,
             source: None,
         };
-        let refused = context_for(
-            &without,
-            &QueryRequest::SourceSql {
-                source: &source,
+        for request in [
+            QueryRequest::StoredRemoteSql {
+                remote: "acme",
                 sql: "SELECT 1",
             },
-        )
-        .await
-        .map(|_| ());
-        let Err(e) = refused else {
-            panic!("a source call on a scoped tool was accepted");
-        };
-        assert_eq!(e.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+            QueryRequest::NativeSql {
+                native: "claude:",
+                sql: "SELECT 1",
+            },
+        ] {
+            let refused = context_for(&without, &request).await.map(|_| ());
+            let Err(e) = refused else {
+                panic!("{request:?} on a scoped tool was accepted");
+            };
+            assert_eq!(e.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+        }
     }
 
-    /// A `source` call naming a driver source serves that source's
-    /// sessions under the session tables, with no store table.
+    /// A `native` call serves the named source's sessions under the
+    /// session tables, with no store table.
     #[tokio::test]
-    async fn source_calls_read_a_driver_source() {
+    async fn native_calls_read_a_driver_source() {
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path().join("claude").join("projects").join("-w-proj");
         std::fs::create_dir_all(&project).unwrap();
@@ -1040,12 +1087,13 @@ mod tests {
             context: Arc::new(context()),
             publish: None,
             source: Some(SourceConfig {
+                store: dir.path().join("store.git"),
                 cache_root: dir.path().join("cache"),
             }),
         };
-        let source = format!("claude:{}", dir.path().join("claude").display());
-        let request = QueryRequest::SourceSql {
-            source: &source,
+        let native = format!("claude:{}", dir.path().join("claude").display());
+        let request = QueryRequest::NativeSql {
+            native: &native,
             sql: "SELECT id FROM session",
         };
         let named = context_for(&config, &request).await.unwrap();

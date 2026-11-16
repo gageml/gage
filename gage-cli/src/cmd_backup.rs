@@ -48,18 +48,17 @@ pub struct BackupArgs {
     ///
     /// Replaces the configured backup.sources list for this run.
     #[arg(
-        short,
         long,
         value_name = "SOURCE",
         long_help = format!("Add sessions from SOURCE before backup (repeatable)\n\n\
 Replaces the configured backup.sources list for this run.\n\n{SOURCE_HELP}")
     )]
-    source: Vec<String>,
+    native: Vec<String>,
 
     /// Back up stored sessions only
     ///
     /// Sends the store as it is; no source is read first.
-    #[arg(short = 'S', long, conflicts_with = "source")]
+    #[arg(short = 'S', long, conflicts_with = "native")]
     stored: bool,
 
     /// Replace diverged objects and tags on remote
@@ -90,10 +89,10 @@ pub async fn main(args: BackupArgs) -> Result<(), CliError> {
     let config = Config::load_user().context("gage backup")?;
     let sources: Vec<String> = if args.stored {
         Vec::new()
-    } else if args.source.is_empty() {
+    } else if args.native.is_empty() {
         config.backup.sources.clone()
     } else {
-        args.source.clone()
+        args.native.clone()
     };
     let max_bytes = config.storage.max_session_size.bytes();
     let store = Store::open(&gage_store::store_path()).context("gage backup")?;
@@ -251,7 +250,7 @@ fn push_set(diff: &RemoteDiff, force: bool, prune: bool) -> PushSet {
 }
 
 /// The preview: how many objects and tags are sent, how many the
-/// remote already has, and what is left alone.
+/// remote already has, and what is left alone or withheld.
 fn summary_lines(diff: &RemoteDiff, set: &PushSet) -> Vec<String> {
     let sent = set.send.iter().chain(&set.force);
     let (objects, tags) = sent.fold((0, 0), |(objects, tags), name| {
@@ -273,6 +272,12 @@ fn summary_lines(diff: &RemoteDiff, set: &PushSet) -> Vec<String> {
         lines.push(format!(
             "{} only on the remote",
             count(diff.remote_only.len(), "ref")
+        ));
+    }
+    if diff.withheld > 0 {
+        lines.push(format!(
+            "{} withheld (linking sessions fetched from a remote)",
+            count(diff.withheld, "ref")
         ));
     }
     lines
@@ -361,6 +366,7 @@ mod tests {
             diverged: vec![format!("{OBJECT_REFS}div")],
             remote_only: vec![format!("{OBJECT_REFS}only"), format!("{TAG_REFS}old")],
             same: 4,
+            withheld: 0,
         }
     }
 
@@ -383,6 +389,15 @@ mod tests {
                 "1 ref diverged",
                 "2 refs only on the remote",
             ]
+        );
+
+        let withheld = RemoteDiff {
+            withheld: 2,
+            ..self::diff()
+        };
+        assert_eq!(
+            summary_lines(&withheld, &plain).last().unwrap(),
+            "2 refs withheld (linking sessions fetched from a remote)"
         );
 
         let all = push_set(&diff, true, true);

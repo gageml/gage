@@ -55,9 +55,9 @@ const PUSH_HELP: &str = "gage push sends these objects, and everything they link
                          pushed.";
 
 /// Paragraph under the short line of every `--fetch` option
-const FETCH_HELP: &str = "gage fetch takes these objects, and everything they link, when no \
-                          object is named. Each one is recorded as given and resolved against \
-                          what remote has when fetched.";
+const FETCH_HELP: &str = "gage fetch, gage merge, and gage pull take these objects, and \
+                          everything they link, when no object is named. Each one is recorded \
+                          as given and resolved against what remote has when fetched.";
 
 const PUSH_SHORT: &str = "Object to push (tag, ID, or prefix; repeatable)";
 const FETCH_SHORT: &str = "Object to fetch (tag, ID, or prefix; repeatable)";
@@ -119,7 +119,7 @@ pub struct RemoteEditArgs {
     #[arg(long, conflicts_with = "no_backup")]
     backup: bool,
 
-    /// Clear the backup target mark
+    /// Clear backup target mark
     #[arg(long)]
     no_backup: bool,
 
@@ -127,8 +127,8 @@ pub struct RemoteEditArgs {
         long,
         value_name = "OBJECT",
         conflicts_with_all = ["add_push", "remove_push", "no_push"],
-        help = "Replace objects to push (tag, ID, or prefix; repeatable)",
-        long_help = format!("Replace objects to push (tag, ID, or prefix; repeatable)\n\n{PUSH_HELP}")
+        help = "Objects pushed (tag, ID, or prefix; repeatable)",
+        long_help = format!("Objects pushed (tag, ID, or prefix; repeatable)\n\n{PUSH_HELP}")
     )]
     push: Vec<String>,
 
@@ -140,7 +140,7 @@ pub struct RemoteEditArgs {
     #[arg(long, value_name = "OBJECT", conflicts_with = "no_push")]
     remove_push: Vec<String>,
 
-    /// Clear the objects to push
+    /// Clear objects to push
     #[arg(long)]
     no_push: bool,
 
@@ -148,8 +148,8 @@ pub struct RemoteEditArgs {
         long,
         value_name = "OBJECT",
         conflicts_with_all = ["add_fetch", "remove_fetch", "no_fetch"],
-        help = "Replace objects to fetch (tag, ID, or prefix; repeatable)",
-        long_help = format!("Replace objects to fetch (tag, ID, or prefix; repeatable)\n\n{FETCH_HELP}")
+        help = "Objects fetched (tag, ID, or prefix; repeatable)",
+        long_help = format!("Objects fetched (tag, ID, or prefix; repeatable)\n\n{FETCH_HELP}")
     )]
     fetch: Vec<String>,
 
@@ -161,7 +161,7 @@ pub struct RemoteEditArgs {
     #[arg(long, value_name = "OBJECT", conflicts_with = "no_fetch")]
     remove_fetch: Vec<String>,
 
-    /// Clear the objects to fetch
+    /// Clear objects to fetch
     #[arg(long)]
     no_fetch: bool,
 

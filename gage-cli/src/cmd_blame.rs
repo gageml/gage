@@ -36,11 +36,11 @@ pub struct BlameArgs {
     lines: Option<LineSelection>,
 
     /// Session source
-    #[arg(short, long, value_name = "SOURCE", long_help = format!("Session source\n\n{SOURCE_HELP}"))]
-    source: Option<String>,
+    #[arg(long, value_name = "SOURCE", long_help = format!("Session source\n\n{SOURCE_HELP}"))]
+    native: Option<String>,
 
     /// Use stored sessions
-    #[arg(short = 'S', long, conflicts_with = "source")]
+    #[arg(short = 'S', long, conflicts_with = "native")]
     stored: bool,
 
     /// Output JSON
@@ -90,7 +90,7 @@ async fn blame(args: &BlameArgs) -> Result<Blamed, CliError> {
             .await
     } else {
         let registry = source::driver_registry();
-        let spec = source::resolve_source(&registry, args.source.as_deref())
+        let spec = source::resolve_source(&registry, args.native.as_deref())
             .map_err(|e| anyhow::anyhow!("gage blame: {e}"))?
             .1;
         ContextBuilder::new(None)

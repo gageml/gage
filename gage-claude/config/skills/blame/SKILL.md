@@ -28,9 +28,9 @@ deliberate over it.
    (`10-20,42`).
 
 2. Run the query through the `mcp__plugin_gage_gage__query` tool with its
-   `source` parameter set to `claude:`, and read the rows. `claude:` names
+   `native` parameter set to `claude:`, and read the rows. `claude:` names
    the native Claude Code sessions in the default location. Every query in
-   steps 2 to 4 takes the same `source`.
+   steps 2 to 4 takes the same `native`.
 
    ```sql
    SELECT line, line_end, session_id, session_lines, tool_use_id, match
@@ -85,7 +85,7 @@ deliberate over it.
    and the selection.
 
 5. If a session is not in the native source, which happens once Claude Code
-   has pruned it, repeat steps 2 to 4 without the `source` parameter. The
+   has pruned it, repeat steps 2 to 4 without the `native` parameter. The
    same queries then read the stored sessions.
 
 6. Answer from the record. State the rationale as the record gives it, and

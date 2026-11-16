@@ -8,7 +8,7 @@ description:
 The `gage backup` command backs up the store. It adds every session from each
 configured source to the store, then sends every object, tag, and key to a
 remote added with `gage remote add --backup`. Restoring is
-[`gage fetch`](/docs/commands/fetch).
+[`gage pull`](/docs/commands/pull).
 
 ```cli
 gage backup [OPTIONS] [REPOSITORY]
@@ -19,7 +19,7 @@ exactly one backup remote exists.
 
 | Option                  | Description                                                        |
 | ----------------------- | ------------------------------------------------------------------ |
-| `-s, --source <SOURCE>` | Add sessions from this source before the backup (repeatable). Replaces the configured `backup.sources` list for this run. |
+| `--native <SOURCE>`     | Add sessions from this source before the backup (repeatable). Replaces the configured `backup.sources` list for this run. |
 | `-S, --stored`          | Back up stored sessions only. No source is read first.            |
 | `--force`               | Replace diverged objects and tags on the remote                    |
 | `--prune`               | Delete objects and tags that are only on the remote                |
@@ -33,6 +33,11 @@ A diverged object is one the remote holds with a history the store's copy does
 not continue, as every object is after a store is deleted and rebuilt from its
 sources. Without `--force`, diverged objects are listed, left alone, and
 reported as an error once the rest is sent.
+
+An object that links a session fetched from a remote and not merged is
+withheld, as is a tag that names it. A backup leaves withheld objects and tags
+out and reports their count. See
+[`gage scan --stored-remote`](/docs/commands/scan).
 
 `--prune` deletes the objects and tags that the remote holds and the store does
 not. An object deleted in the store is kept as a deletion record and is backed

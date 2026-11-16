@@ -13,13 +13,17 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use gage_core::cache::{ensure_corpus_dir, store_corpus_dir, store_source_url};
+use gage_core::cache::{
+    ensure_corpus_dir, ensure_stored_remote_corpus_dir, store_corpus_dir, store_source_url,
+    stored_remote_corpus_dir,
+};
 use gage_core::config::default_cache_root;
 
 use crate::StoreError;
 use crate::admin::{STORE_VERSION, exists, migrate, ref_generations, refresh_hooks};
 use crate::git::{CatFile, CatFileCell, git_cmd, git_in, run};
 use crate::index::ObjectIndex;
+use crate::refs::RefRoot;
 use crate::sqlite_index::SqliteIndex;
 
 /// The object index file inside a store's corpus directory under the
@@ -70,6 +74,11 @@ pub struct Store {
     path: PathBuf,
     /// The cache root the object index is kept under
     cache_root: PathBuf,
+    /// The directory under the cache root holding the object index
+    /// and every other state derived from what this store reads
+    corpus_dir: PathBuf,
+    /// The ref namespace objects, tags, and keys are read under
+    refs: RefRoot,
     version: u32,
     /// Whether the repository carries Gage's `gage.version` stamp. A
     /// stamped repository is one Gage created and configures; an
@@ -139,7 +148,7 @@ impl Store {
     /// As [`Store::open`], with the object index kept under
     /// `cache_root`.
     pub fn open_with_cache_root(path: &Path, cache_root: &Path) -> Result<Store, StoreError> {
-        Store::open_as(path, cache_root, Access::Write)
+        Store::open_as(path, cache_root, Access::Write, RefRoot::local())
     }
 
     /// Open the store at `path` without writing its repository, for a
@@ -149,10 +158,43 @@ impl Store {
     /// it, and its hooks are left as they are. The object index, kept
     /// under `cache_root`, is written as on any open.
     pub fn open_read_only(path: &Path, cache_root: &Path) -> Result<Store, StoreError> {
-        Store::open_as(path, cache_root, Access::Read)
+        Store::open_as(path, cache_root, Access::Read, RefRoot::local())
     }
 
-    fn open_as(path: &Path, cache_root: &Path, access: Access) -> Result<Store, StoreError> {
+    /// Open what the store at `path` holds of the remote `remote`: the
+    /// objects and tags a fetch wrote under the remote's tracking
+    /// refs, read as a store of their own. Nothing is fetched, and
+    /// the repository is not written. Every write through the handle
+    /// fails with [`StoreError::StoredRemoteWrite`]. The object index
+    /// is kept under `cache_root` in a corpus directory apart from the
+    /// store's own. A name no remote has is
+    /// [`StoreError::RemoteNotFound`], and a remote nothing was
+    /// fetched from is [`StoreError::RemoteNotFetched`].
+    pub fn open_stored_remote(
+        path: &Path,
+        cache_root: &Path,
+        remote: &str,
+    ) -> Result<Store, StoreError> {
+        let refs = RefRoot::tracking(remote);
+        let located = locate(path);
+        if !exists(&located) {
+            return Err(StoreError::NotFound(located));
+        }
+        if !has_remote(&located, remote)? {
+            return Err(StoreError::RemoteNotFound(remote.to_string()));
+        }
+        if !has_refs_under(&located, &refs.objects())? {
+            return Err(StoreError::RemoteNotFetched(remote.to_string()));
+        }
+        Store::open_as(path, cache_root, Access::Read, refs)
+    }
+
+    fn open_as(
+        path: &Path,
+        cache_root: &Path,
+        access: Access,
+        refs: RefRoot,
+    ) -> Result<Store, StoreError> {
         let path = &locate(path);
         if !exists(path) {
             return Err(StoreError::NotFound(path.to_path_buf()));
@@ -182,15 +224,28 @@ impl Store {
         if owned && access == Access::Write {
             refresh_hooks(path)?;
         }
-        let corpus_dir = store_corpus_dir(cache_root, path);
-        ensure_corpus_dir(&corpus_dir, &store_source_url(path))
-            .map_err(|e| StoreError::Index(format!("create {}: {e}", corpus_dir.display())))?;
+        let source_url = store_source_url(path);
+        let (corpus_dir, ensured) = match refs.remote() {
+            None => {
+                let dir = store_corpus_dir(cache_root, path);
+                let ensured = ensure_corpus_dir(&dir, &source_url);
+                (dir, ensured)
+            }
+            Some(remote) => {
+                let dir = stored_remote_corpus_dir(cache_root, path, remote);
+                let ensured = ensure_stored_remote_corpus_dir(&dir, &source_url, remote);
+                (dir, ensured)
+            }
+        };
+        ensured.map_err(|e| StoreError::Index(format!("create {}: {e}", corpus_dir.display())))?;
         let store = Store {
             path: path.to_path_buf(),
             cache_root: cache_root.to_path_buf(),
+            index: Box::new(SqliteIndex::open(&corpus_dir.join(OBJECTS_FILE))?),
+            corpus_dir,
+            refs,
             version,
             owned,
-            index: Box::new(SqliteIndex::open(&index_path(cache_root, path))?),
             cat_file: RefCell::new(CatFile::spawn(path)?),
             wrote: Cell::new(false),
             deleted: Cell::new(false),
@@ -219,10 +274,13 @@ impl Store {
     }
 
     /// A second handle on this store, opened at the same path with
-    /// the same cache root. Its index is a separate connection to the
-    /// same file.
+    /// the same cache root and ref namespace. Its index is a separate
+    /// connection to the same file.
     pub fn reopen(&self) -> Result<Store, StoreError> {
-        Store::open_with_cache_root(&self.path, &self.cache_root)
+        match self.refs.remote() {
+            None => Store::open_with_cache_root(&self.path, &self.cache_root),
+            Some(remote) => Store::open_stored_remote(&self.path, &self.cache_root, remote),
+        }
     }
 
     pub fn path(&self) -> &Path {
@@ -234,9 +292,34 @@ impl Store {
         &self.cache_root
     }
 
+    /// The directory holding the object index and every other state
+    /// derived from what this store reads.
+    pub fn corpus_dir(&self) -> &Path {
+        &self.corpus_dir
+    }
+
     /// The object index file.
     pub fn index_path(&self) -> PathBuf {
-        index_path(&self.cache_root, &self.path)
+        self.corpus_dir.join(OBJECTS_FILE)
+    }
+
+    /// The ref namespace this store reads.
+    pub fn refs(&self) -> &RefRoot {
+        &self.refs
+    }
+
+    /// The remote whose fetched objects this store reads; `None` for
+    /// a store that reads its own.
+    pub fn stored_remote(&self) -> Option<&str> {
+        self.refs.remote()
+    }
+
+    /// Fail a write to a store that reads a remote's tracking refs.
+    pub(crate) fn require_local(&self) -> Result<(), StoreError> {
+        match self.refs.remote() {
+            None => Ok(()),
+            Some(remote) => Err(StoreError::StoredRemoteWrite(remote.to_string())),
+        }
     }
 
     /// The store's `gage.version`, or the generation of a guest's
@@ -251,6 +334,33 @@ impl Store {
     pub fn is_owned(&self) -> bool {
         self.owned
     }
+}
+
+/// Whether the repository at `path` configures a remote named `name`.
+fn has_remote(path: &Path, name: &str) -> Result<bool, StoreError> {
+    match run(git_in(
+        path,
+        ["config", "--get", &format!("remote.{name}.url")],
+    )) {
+        Ok(_) => Ok(true),
+        // `git config --get` exits 1 when the key is absent.
+        Err(StoreError::Git { status, .. }) if status.code() == Some(1) => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
+/// Whether the repository at `path` holds a ref under `namespace`.
+fn has_refs_under(path: &Path, namespace: &str) -> Result<bool, StoreError> {
+    let first = run(git_in(
+        path,
+        [
+            "for-each-ref",
+            "--count=1",
+            "--format=%(refname)",
+            namespace,
+        ],
+    ))?;
+    Ok(!first.trim().is_empty())
 }
 
 /// What an open may do to the repository
@@ -315,6 +425,7 @@ mod tests {
     use super::*;
     use crate::admin::{HOOK_VERSION, UPDATE_HOOK, UPDATE_HOOK_PATH};
     use crate::test_support::{cache_root_for, init_for_test, open};
+    use crate::{NoteInput, NoteStore, NoteValue, RemoteStore, TagStore};
 
     #[test]
     fn open_reads_version() {
@@ -618,6 +729,129 @@ mod tests {
                 .unwrap()
                 .trim(),
             "0"
+        );
+    }
+
+    /// Two stores under `dir`: `theirs` holding one note, and `ours`
+    /// holding another note and the remote `acme` naming `theirs`.
+    /// Returns the two paths and the two note ids, theirs first.
+    fn ours_and_theirs(dir: &Path) -> (PathBuf, PathBuf, String, String) {
+        let note = |store: &Store, value: &str| {
+            NoteStore::from(store)
+                .create(NoteInput {
+                    name: "n",
+                    value: NoteValue::Text(value.to_string()),
+                    author: "user:test",
+                    target: None,
+                    metadata: None,
+                    work_id: None,
+                })
+                .unwrap()
+        };
+        let theirs = dir.join("theirs.git");
+        init_for_test(&theirs);
+        let their_note = note(&open(&theirs).unwrap(), "theirs");
+        let ours = dir.join("ours.git");
+        init_for_test(&ours);
+        let store = open(&ours).unwrap();
+        let our_note = note(&store, "ours");
+        RemoteStore::from(&store)
+            .add("acme", theirs.to_str().unwrap(), false)
+            .unwrap();
+        (ours, theirs, their_note, our_note)
+    }
+
+    fn fetch_tracking(store: &Path, remote: &str) {
+        run(git_in(store, ["fetch", "--quiet", remote])).unwrap();
+    }
+
+    fn note_ids(store: &Store) -> Vec<String> {
+        store
+            .list_object_refs()
+            .unwrap()
+            .into_iter()
+            .map(|r| r.id)
+            .collect()
+    }
+
+    #[test]
+    fn a_stored_remote_reads_the_tracking_refs_and_nothing_local() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (ours, _theirs, their_note, our_note) = ours_and_theirs(tmp.path());
+        fetch_tracking(&ours, "acme");
+        let cache = cache_root_for(&ours);
+
+        let remote = Store::open_stored_remote(&ours, &cache, "acme").unwrap();
+        assert_eq!(remote.stored_remote(), Some("acme"));
+        assert_eq!(note_ids(&remote), vec![their_note.clone()]);
+        assert_eq!(
+            NoteStore::from(&remote).get(&their_note).unwrap().value,
+            NoteValue::Text("theirs".into())
+        );
+        assert!(matches!(
+            remote.resolve_id(&our_note),
+            Err(StoreError::ObjectNotFound(_))
+        ));
+
+        let local = open(&ours).unwrap();
+        assert_eq!(local.stored_remote(), None);
+        assert_eq!(note_ids(&local), vec![our_note]);
+        assert!(matches!(
+            local.resolve_id(&their_note),
+            Err(StoreError::ObjectNotFound(_))
+        ));
+        assert_ne!(remote.corpus_dir(), local.corpus_dir());
+        assert_ne!(remote.index_path(), local.index_path());
+    }
+
+    #[test]
+    fn a_stored_remote_refuses_every_write() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (ours, _theirs, their_note, _) = ours_and_theirs(tmp.path());
+        fetch_tracking(&ours, "acme");
+        let refs_before = run(git_in(&ours, ["for-each-ref"])).unwrap();
+        let remote = Store::open_stored_remote(&ours, &cache_root_for(&ours), "acme").unwrap();
+
+        let refused = |e: StoreError| matches!(&e, StoreError::StoredRemoteWrite(n) if n == "acme");
+        let created = NoteStore::from(&remote).create(NoteInput {
+            name: "n",
+            value: NoteValue::Text("new".into()),
+            author: "user:test",
+            target: None,
+            metadata: None,
+            work_id: None,
+        });
+        assert!(refused(created.unwrap_err()));
+        assert!(refused(remote.delete_object(&their_note).unwrap_err()));
+        assert!(refused(
+            TagStore::from(&remote)
+                .add("t", &their_note, false)
+                .unwrap_err()
+        ));
+        assert!(refused(remote.rebuild_key_refs().unwrap_err()));
+        drop(remote);
+        assert_eq!(run(git_in(&ours, ["for-each-ref"])).unwrap(), refs_before);
+    }
+
+    #[test]
+    fn a_stored_remote_needs_a_remote_that_was_fetched() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (ours, _theirs, _, _) = ours_and_theirs(tmp.path());
+        let cache = cache_root_for(&ours);
+
+        let err = Store::open_stored_remote(&ours, &cache, "nope").unwrap_err();
+        assert!(
+            matches!(&err, StoreError::RemoteNotFound(n) if n == "nope"),
+            "{err}"
+        );
+        let err = Store::open_stored_remote(&ours, &cache, "acme").unwrap_err();
+        assert!(
+            matches!(&err, StoreError::RemoteNotFetched(n) if n == "acme"),
+            "{err}"
+        );
+        assert_eq!(
+            err.to_string(),
+            "remote acme has no fetched objects: run gage fetch acme"
         );
     }
 }

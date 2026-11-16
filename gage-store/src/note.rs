@@ -15,7 +15,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
 use crate::index::{ObjectQuery, Order, SelectedTip};
-use crate::object::{EditOutcome, Object, ObjectTree, object_ref, require_type, resolve_target};
+use crate::object::{
+    EditOutcome, Object, ObjectTree, object_ref, require_target_commit, require_type,
+    resolve_target,
+};
 use crate::{Store, StoreError};
 
 pub const OBJECT_TYPE: &str = "gage::note";
@@ -164,7 +167,10 @@ impl NoteStore<'_> {
     /// note's id, `scan` the writing scan's id, and `target_commit`,
     /// when given, the commit `target.link` names in place of the
     /// target's tip: a scan links the version it read. The target is
-    /// validated as on [`NoteStore::create`].
+    /// validated as on [`NoteStore::create`], except that a target
+    /// this store holds no ref for is accepted when `target_commit` is
+    /// a live commit of it: a scan of sessions fetched from a remote
+    /// targets sessions the store holds only under tracking refs.
     pub fn write_to_dir(
         &self,
         dir: &Path,
@@ -174,10 +180,14 @@ impl NoteStore<'_> {
         target_commit: Option<&str>,
     ) -> Result<(), StoreError> {
         let link = match input.target {
-            Some(url) => {
-                let tip = resolve_target(self.store, url)?;
-                Some(target_commit.map_or(tip, String::from))
-            }
+            Some(url) => match (resolve_target(self.store, url), target_commit) {
+                (Ok(tip), commit) => Some(commit.map_or(tip, String::from)),
+                (Err(StoreError::TargetNotFound(_)), Some(commit)) => {
+                    require_target_commit(self.store, url, commit)?;
+                    Some(commit.to_string())
+                }
+                (Err(e), _) => return Err(e),
+            },
             None => None,
         };
         let attrs = NoteAttrs {

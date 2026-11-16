@@ -24,8 +24,9 @@ scanner group, and sessions from the past 30 days capped at 20.
 
 | Option                          | Description                                                         |
 | ------------------------------- | ------------------------------------------------------------------- |
-| `--source <SOURCE>`             | Session source, as described in [`gage session`](/docs/commands/session) |
+| `--native <SOURCE>`             | Session source, as described in [`gage session`](/docs/commands/session) |
 | `-S, --stored`                  | Scan stored sessions                                                |
+| `-R, --stored-remote <NAME>`    | Scan sessions fetched from a remote                                 |
 | `-s, --scanner <SCANNER>`       | Scanner to run, as a name or path (repeatable)                      |
 | `-g, --group <NAME>`            | Scanner group to run (repeatable)                                   |
 | `-d, --dataset <DATASET>`       | Scan an existing dataset (ID or prefix)                             |
@@ -63,6 +64,29 @@ An existing dataset passed with `--dataset` is scanned as it is; use
 to prepare it. `--ignore-missing-attachments` lets a task that needs an
 attachment the dataset lacks run and fail on its own. Without it, the scan does
 not start.
+
+`--stored-remote` names a remote of the store. The command selects among the
+sessions that [`gage fetch`](/docs/commands/fetch) brought from that remote and
+that are not merged into the store. It fetches nothing, and a remote that
+nothing was fetched from is an error that names `gage fetch`. The session
+selection options apply to the fetched sessions. The scan's dataset, notes, and
+issues are written to the store. The dataset links each fetched session at the
+commit the remote holds, and the session stays apart from the store's own
+sessions. `--stored-remote` excludes `--native`, `--stored`, `--dataset`, and
+`--no-dataset`.
+
+An object that links a fetched session is withheld:
+[`gage push`](/docs/commands/push) refuses it and
+[`gage backup`](/docs/commands/backup) leaves it out, because sending it would
+send the remote's session. The dataset of such a scan is withheld, and so are
+its notes on the sessions, the issues that cite those notes, and the scan
+itself. Merging the sessions with [`gage merge`](/docs/commands/merge) ends the
+withholding.
+
+```cli
+gage fetch acme --all
+gage scan --stored-remote acme --since 7d
+```
 
 `--no-progress` is the output when stdout is not a terminal.
 

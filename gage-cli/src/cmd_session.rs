@@ -85,7 +85,7 @@ pub enum SessionCommand {
 
     /// Find sessions by message text
     ///
-    /// Searches message text in the default source, in each --source,
+    /// Searches message text in the default source, in each --native,
     /// and in the store with --stored, and lists the matching messages
     /// best match first. Bare terms match any of them; "a AND b",
     /// "+a", "-a", a quoted phrase, and a field term such as
@@ -234,9 +234,8 @@ pub struct SessionFindArgs {
 
     /// Session sources to search (repeatable)
     #[arg(
-        id = "source",
-        short = 's',
-        long = "source",
+        id = "native",
+        long = "native",
         value_name = "SOURCE",
         action = clap::ArgAction::Append,
         long_help = format!("Session sources to search (repeatable)\n\n{}", source::SOURCE_HELP),
@@ -323,7 +322,7 @@ pub async fn list(
     if args.dataset.is_some() {
         if source.is_some() {
             return Err(CliError::message(
-                "gage session list: --source does not apply with --dataset; a dataset holds stored sessions",
+                "gage session list: --native does not apply with --dataset; a dataset holds stored sessions",
             ));
         }
         if stored {
@@ -333,7 +332,7 @@ pub async fn list(
     } else if args.share.is_some() {
         if source.is_some() {
             return Err(CliError::message(
-                "gage session list: --source does not apply with --share; a share holds stored sessions",
+                "gage session list: --native does not apply with --share; a share holds stored sessions",
             ));
         }
         if stored {
@@ -1255,7 +1254,7 @@ fn in_list_predicate(col: &str, values: &[String]) -> String {
 /// One body of sessions a search covers
 #[derive(Clone)]
 enum Corpus {
-    /// A session source, by its `--source` value; empty is the
+    /// A session source, by its `--native` value; empty is the
     /// default source
     Native(String),
     Stored,
@@ -1630,7 +1629,7 @@ pub async fn delete(
     if stored {
         if source.is_some() {
             return Err(CliError::message(
-                "gage session delete: --source does not apply with --stored; sessions are \
+                "gage session delete: --native does not apply with --stored; sessions are \
                  deleted from the store",
             ));
         }

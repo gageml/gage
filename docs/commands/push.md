@@ -27,4 +27,8 @@ A deleted object, a republished session, and a share that lost a deleted member
 replace what the remote holds. When the remote holds a commit this store has
 not fetched, the push stops. `--force` replaces that commit and nothing else.
 
-To copy data in the other direction, see [`gage fetch`](/docs/commands/fetch).
+An object that links a session fetched from a remote and not merged is
+withheld. A push whose objects include a withheld one stops before anything is
+sent. See [`gage scan --stored-remote`](/docs/commands/scan).
+
+To copy data in the other direction, see [`gage pull`](/docs/commands/pull).

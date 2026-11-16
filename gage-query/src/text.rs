@@ -30,7 +30,9 @@ use datafusion::error::{DataFusionError, Result};
 use datafusion::logical_expr::TableProviderFilterPushDown;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::prelude::Expr;
-use gage_core::cache::{STORE_SCHEME, ensure_corpus_dir, store_corpus_dir};
+use gage_core::cache::{
+    STORE_SCHEME, ensure_corpus_dir, store_corpus_dir, stored_remote_corpus_dir,
+};
 use gage_core::config::default_cache_root;
 use gage_index::{LockMode, MessageRow, TextIndex};
 use gage_session::filter::{is_literal_membership, literal_members};
@@ -350,13 +352,17 @@ pub struct StoreTextStatus {
 impl StoreTextIndex {
     /// The index of `store`, under `cache_root` or the default root.
     pub fn new(store: Arc<Mutex<Store>>, cache_root: Option<PathBuf>) -> Self {
-        let store_path = store
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .path()
-            .to_path_buf();
         let cache_root = cache_root.unwrap_or_else(default_cache_root);
-        let corpus_dir = store_corpus_dir(&cache_root, &store_path);
+        let (store_path, corpus_dir) = {
+            let store = store
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let corpus_dir = match store.stored_remote() {
+                None => store_corpus_dir(&cache_root, store.path()),
+                Some(remote) => stored_remote_corpus_dir(&cache_root, store.path(), remote),
+            };
+            (store.path().to_path_buf(), corpus_dir)
+        };
         Self {
             sessions: Arc::new(SessionSet::all(store)),
             store_path,

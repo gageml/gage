@@ -232,7 +232,7 @@ impl Default for DriversConfig {
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct BackupConfig {
     /// Sources whose sessions are added to the store before each
-    /// backup. `gage backup --source` replaces the list for one run;
+    /// backup. `gage backup --native` replaces the list for one run;
     /// `--stored` skips it.
     #[serde(default)]
     pub sources: Vec<String>,

@@ -54,7 +54,7 @@ use tracing_subscriber::field::RecordFields;
 use tracing_subscriber::fmt::FormatFields;
 use tracing_subscriber::fmt::format::Writer;
 
-use crate::cmd_dataset::{self, AddView, link_stored};
+use crate::cmd_dataset::{self, AddView, link_fetched, link_stored};
 use crate::cmd_issue::event_label;
 use crate::cmd_note::{count_rows, target_cell, value_cell};
 use crate::cmd_session::{column, run_query};
@@ -188,13 +188,28 @@ pub struct ScanRunArgs {
         long,
         value_name = "SOURCE",
         long_help = format!("Session source\n\n{}", source::SOURCE_HELP),
-        conflicts_with_all = ["stored", "dataset", "no_dataset"],
+        conflicts_with_all = ["stored", "stored_remote", "dataset", "no_dataset"],
     )]
-    source: Option<String>,
+    native: Option<String>,
 
     /// Scan stored sessions
-    #[arg(short = 'S', long, conflicts_with_all = ["dataset", "no_dataset"])]
+    #[arg(short = 'S', long, conflicts_with_all = ["stored_remote", "dataset", "no_dataset"])]
     stored: bool,
+
+    /// Scan sessions fetched from remote
+    ///
+    /// Scans sessions that gage fetch brought from the remote NAME and
+    /// that are not merged into the store. Nothing is fetched. The
+    /// dataset and notes of the scan are written to the store, and
+    /// gage push and gage backup leave them out, since sending them
+    /// would send the sessions of the remote
+    #[arg(
+        short = 'R',
+        long,
+        value_name = "NAME",
+        conflicts_with_all = ["dataset", "no_dataset"],
+    )]
+    stored_remote: Option<String>,
 
     /// Scanner to run (name or path; repeatable)
     ///
@@ -1630,12 +1645,16 @@ enum Selected {
     },
     /// Ids of sessions in the store
     Stored { ids: Vec<String> },
+    /// Ids of sessions the store holds as fetched from a remote
+    StoredRemote { remote: String, ids: Vec<String> },
 }
 
 impl Selected {
     fn ids(&self) -> &[String] {
         match self {
-            Selected::Native { ids, .. } | Selected::Stored { ids } => ids,
+            Selected::Native { ids, .. }
+            | Selected::Stored { ids }
+            | Selected::StoredRemote { ids, .. } => ids,
         }
     }
 }
@@ -2011,7 +2030,7 @@ fn preview_scanners(scanners: &[Scanner<'_>]) -> Result<(), DialogError> {
 /// honors `--no-dataset`, otherwise prompts the session axis under
 /// an empty-and-not-`-y` call and runs `select_sessions` for the
 /// final session list: stored sessions under `--stored`, native
-/// sessions in `--source` otherwise.
+/// sessions in `--native` otherwise.
 async fn resolve_dataset_plan(
     args: &mut ScanRunArgs,
     store: &Store,
@@ -2036,23 +2055,37 @@ async fn resolve_dataset_plan(
     if args.sessions.is_empty() && args.filter.is_empty() && !args.yes {
         prompt_session_axis(&mut args.filter)?;
     }
-    let select = if args.stored {
-        SessionSelect::Stored(store)
-    } else {
-        SessionSelect::Native(args.source.as_deref())
+    let remote_store = match args.stored_remote.as_deref() {
+        Some(remote) => Some(open_stored_remote(store, remote)?),
+        None => None,
+    };
+    let select = match &remote_store {
+        Some(remote_store) => SessionSelect::Stored(remote_store),
+        None if args.stored => SessionSelect::Stored(store),
+        None => SessionSelect::Native(args.native.as_deref()),
     };
     let ids = select_sessions(select, &args.sessions, &args.filter)
         .await
         .map_err(SessionSelectError::into_dialog_error)?;
-    let selected = if args.stored {
-        Selected::Stored { ids }
-    } else {
-        Selected::Native {
-            source: args.source.clone(),
+    let selected = match &args.stored_remote {
+        Some(remote) => Selected::StoredRemote {
+            remote: remote.clone(),
             ids,
-        }
+        },
+        None if args.stored => Selected::Stored { ids },
+        None => Selected::Native {
+            source: args.native.clone(),
+            ids,
+        },
     };
     Ok(DatasetPlan::New { selected })
+}
+
+/// What `store` holds of the remote `remote`, opened as a store of
+/// its own that is read and never written.
+fn open_stored_remote(store: &Store, remote: &str) -> Result<Store, DialogError> {
+    Store::open_stored_remote(store.path(), store.cache_root(), remote)
+        .map_err(|e| DialogError::Failed(format!("--stored-remote {remote}: {e}")))
 }
 
 fn prompt_session_axis(filter: &mut SessionFilterArgs) -> Result<(), DialogError> {
@@ -2109,6 +2142,14 @@ async fn preview_dataset(plan: &DatasetPlan, store: &Store) -> Result<(), Dialog
         } => {
             let lines =
                 stored_session_lines(store, ids).map_err(|e| DialogError::Failed(e.to_string()))?;
+            preview_sessions(&lines, IdKind::Gage, None)?;
+        }
+        DatasetPlan::New {
+            selected: Selected::StoredRemote { remote, ids },
+        } => {
+            dialog::step_value("Remote", remote)?;
+            let lines = stored_session_lines(&open_stored_remote(store, remote)?, ids)
+                .map_err(|e| DialogError::Failed(e.to_string()))?;
             preview_sessions(&lines, IdKind::Gage, None)?;
         }
         DatasetPlan::None => {
@@ -2171,6 +2212,16 @@ async fn materialize_dataset(
                         .collect::<Result<Vec<SessionRecord>, _>>()
                         .map_err(|e| DialogError::Failed(e.to_string()))?;
                     link_stored(store, &id, &records, &mut |event| view.on(event))?;
+                }
+                Selected::StoredRemote { remote, ids } => {
+                    let fetched = open_stored_remote(store, &remote)?;
+                    let sessions = SessionStore::from(&fetched);
+                    let records = ids
+                        .iter()
+                        .map(|id| sessions.get(id))
+                        .collect::<Result<Vec<SessionRecord>, _>>()
+                        .map_err(|e| DialogError::Failed(e.to_string()))?;
+                    link_fetched(store, &id, &records, &mut |event| view.on(event))?;
                 }
             }
             let placed = view.finish()?;
@@ -2308,12 +2359,13 @@ mod tests {
 
     use clap::Parser;
     use gage_core::uuid::new_uuid;
-    use gage_store::{ScanStore, Store};
+    use gage_session::SourceOptions;
+    use gage_store::{RemoteStore, ScanStore, Store};
 
     use super::*;
     use crate::{Cli, Command};
 
-    /// `--source` and `--stored` select the sessions a scan's dataset
+    /// `--native` and `--stored` select the sessions a scan's dataset
     /// is built from. Each excludes the other and the options that
     /// name an existing dataset or no dataset; the subcommands are
     /// unaffected.
@@ -2333,24 +2385,131 @@ mod tests {
         let args = run_args(&["--stored", "abc", "def"]);
         assert!(args.stored);
         assert_eq!(args.sessions, ["abc", "def"]);
-        let args = run_args(&["--source", "claude:/tmp/claude", "--since", "7d"]);
-        assert_eq!(args.source.as_deref(), Some("claude:/tmp/claude"));
+        let args = run_args(&["--native", "claude:/tmp/claude", "--since", "7d"]);
+        assert_eq!(args.native.as_deref(), Some("claude:/tmp/claude"));
         assert_eq!(args.filter.since, Some(Duration::from_secs(7 * 86_400)));
         let args = run_args(&["-S", "--all"]);
         assert!(args.stored && args.filter.all);
+        let args = run_args(&["--stored-remote", "acme", "abc"]);
+        assert_eq!(args.stored_remote.as_deref(), Some("acme"));
+        assert_eq!(args.sessions, ["abc"]);
+        let args = run_args(&["-R", "acme", "--all"]);
+        assert_eq!(args.stored_remote.as_deref(), Some("acme"));
         Cli::try_parse_from(["gage", "scan", "list"]).unwrap();
         for argv in [
-            vec!["--source", "claude:/tmp/claude", "--stored"],
+            vec!["--native", "claude:/tmp/claude", "--stored"],
+            vec!["--native", "claude:/tmp/claude", "--stored-remote", "acme"],
+            vec!["--stored", "--stored-remote", "acme"],
+            vec!["--stored-remote", "acme", "--dataset", "abc"],
+            vec!["--stored-remote", "acme", "--no-dataset", "-y"],
             vec!["--stored", "--dataset", "abc"],
             vec!["--stored", "--no-dataset", "-y"],
-            vec!["--source", "claude:/tmp/claude", "--no-dataset"],
-            vec!["--source", "claude:/tmp/claude", "--dataset", "abc"],
+            vec!["--native", "claude:/tmp/claude", "--no-dataset"],
+            vec!["--native", "claude:/tmp/claude", "--dataset", "abc"],
         ] {
             assert!(
                 Cli::try_parse_from([&["gage", "scan"], &argv[..]].concat()).is_err(),
                 "{argv:?} parsed"
             );
         }
+    }
+
+    /// Write a one-message Claude session `id` under `claude_root` and
+    /// add it to `store`.
+    fn add_stored(store: &Store, claude_root: &Path, id: &str) -> SessionRecord {
+        let project_dir = claude_root.join("projects").join("-w-proj");
+        fs::create_dir_all(&project_dir).unwrap();
+        fs::write(
+            project_dir.join(format!("{id}.jsonl")),
+            concat!(
+                r#"{"type":"user","uuid":"u1","timestamp":"2025-01-01T00:00:00Z","message":{"role":"user","content":"hello"}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        let spec = format!("claude:{}", claude_root.display());
+        let drivers = source::driver_registry();
+        let driver = drivers.driver_for(&spec).unwrap();
+        let native_source = driver
+            .open_source(SourceOptions::new(&spec).cache_root(claude_root.join("cache")))
+            .unwrap();
+        let mut native = native_source.open_native(id).unwrap();
+        let sessions = SessionStore::from(store);
+        let outcome = sessions.add(driver.as_ref(), native.as_mut()).unwrap();
+        sessions.at_commit(&outcome.commit_sha).unwrap()
+    }
+
+    /// `--stored-remote` selects among the sessions fetched from the
+    /// remote and none of the store's own. The scan's dataset is
+    /// written to the store, links each selected session at the
+    /// commit the remote's tracking ref names, and is withheld from
+    /// push and backup. The session gains no ref in the store.
+    #[tokio::test]
+    async fn a_stored_remote_scan_links_fetched_sessions_into_a_withheld_dataset() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = tmp.path().join("cache");
+        let claude_root = tmp.path().join("claude");
+        let theirs = tmp.path().join("theirs.git");
+        gage_store::init(&theirs).unwrap();
+        let fetched = add_stored(
+            &Store::open_with_cache_root(&theirs, &cache).unwrap(),
+            &claude_root,
+            "11111111-2222-3333-4444-555555555555",
+        );
+        let ours = tmp.path().join("ours.git");
+        gage_store::init(&ours).unwrap();
+        let store = Store::open_with_cache_root(&ours, &cache).unwrap();
+        let own = add_stored(&store, &claude_root, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
+        RemoteStore::from(&store)
+            .add("acme", theirs.to_str().unwrap(), false)
+            .unwrap();
+
+        let run_args = |argv: &[&str]| {
+            let cli = Cli::try_parse_from([&["gage", "scan"], argv].concat()).unwrap();
+            let Command::Scan(ScanArgs { run_args, .. }) = cli.command else {
+                panic!("expected a scan run");
+            };
+            run_args
+        };
+        let mut args = run_args(&["--stored-remote", "acme", "--all", "-y"]);
+        let Err(DialogError::Failed(unfetched)) = resolve_dataset_plan(&mut args, &store).await
+        else {
+            panic!("a remote nothing was fetched from was scanned");
+        };
+        assert!(unfetched.contains("gage fetch acme"), "{unfetched}");
+
+        let fetch = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&ours)
+            .args(["fetch", "--quiet", "acme"])
+            .status()
+            .unwrap();
+        assert!(fetch.success());
+        let Ok(plan) = resolve_dataset_plan(&mut args, &store).await else {
+            panic!("the fetched sessions were not selected");
+        };
+        let DatasetPlan::New {
+            selected: Selected::StoredRemote { remote, ids },
+        } = &plan
+        else {
+            panic!("expected a selection of fetched sessions");
+        };
+        assert_eq!(remote, "acme");
+        assert_eq!(ids, &[fetched.id.clone()]);
+
+        let Ok((commit, _)) = materialize_dataset(plan, "SCAN1", &store, &[], false).await else {
+            panic!("the dataset was not written");
+        };
+        let datasets = DatasetStore::from(&store);
+        let members = datasets.sessions_at(&commit.unwrap()).unwrap();
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0].commit_sha, fetched.commit_sha);
+        let sessions = SessionStore::from(&store);
+        assert!(sessions.get(&fetched.id).is_err());
+        assert!(sessions.get(&own.id).is_ok());
+        let dataset = datasets.query().tips().unwrap().remove(0).id;
+        let withheld: Vec<String> = store.withheld_ids().unwrap().into_iter().collect();
+        assert_eq!(withheld, [dataset]);
     }
 
     /// Write a stored scan whose one task ran one agent per entry of

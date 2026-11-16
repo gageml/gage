@@ -134,7 +134,7 @@ pub async fn main(args: PushArgs) -> Result<(), CliError> {
     if !plan.unverified.is_empty() {
         return Err(CliError::message(format!(
             "gage push: {remote} holds a commit of {} that this store has not fetched; \
-             fetch first (gage fetch {remote}), or replace it with --force",
+             pull first (gage pull {remote}), or replace it with --force",
             count(plan.unverified.len(), "object")
         )));
     }
@@ -177,7 +177,7 @@ pub async fn main(args: PushArgs) -> Result<(), CliError> {
         .context("gage push")?;
     if !status.success() {
         return Err(CliError::message(format!(
-            "gage push: push to {remote} was rejected; fetch and retry: gage fetch {remote}"
+            "gage push: push to {remote} was rejected; pull and retry: gage pull {remote}"
         )));
     }
     println!("Pushed {} refs to {remote}", set.len());
@@ -298,7 +298,7 @@ fn plan_push(
 /// The named objects and everything they link, transitively.
 fn closure(store: &Arc<Mutex<Store>>, ids: &[String]) -> Result<Vec<IdMatch>, StoreError> {
     let store = store.lock().unwrap();
-    store.link_closure(ids)
+    store.sendable_closure(ids)
 }
 
 /// Ids of the live notes whose target is one of `targets`. The index

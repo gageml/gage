@@ -193,6 +193,15 @@ pub trait ObjectIndex: Send {
     /// id order.
     fn ids_with_prefix(&self, prefix: &str) -> Result<Vec<IdMatch>, StoreError>;
 
+    /// Ids of the objects the index holds a commit of and no ref for,
+    /// in id order: objects reached only through a link.
+    fn unreferenced_ids(&self) -> Result<Vec<String>, StoreError>;
+
+    /// Ids of the refs whose tip reaches a commit of one of the
+    /// objects `ids` through `first-parent` and link edges, in id
+    /// order.
+    fn refs_reaching(&self, ids: &[String]) -> Result<Vec<String>, StoreError>;
+
     /// Start a transaction. Every `put` and `set_tip` until `commit`
     /// or `rollback` is applied as one unit.
     fn begin(&self) -> Result<(), StoreError>;
@@ -304,10 +313,14 @@ impl Store {
     /// not published. `previous_tip` is the ref value the update
     /// requires; empty means the ref must not exist yet.
     ///
-    /// Nothing is read back from the repository. That holds only while
-    /// what this records equals what [`Store::index_commit`] records
-    /// for the same commit on a rebuild, row for row;
-    /// `rebuild_matches_write_through_after_gc` pins it.
+    /// The written object is not read back from the repository. That
+    /// holds only while what this records equals what
+    /// [`Store::index_commit`] records for the same commit on a
+    /// rebuild, row for row; `rebuild_matches_write_through_after_gc`
+    /// pins it. A linked commit the index does not hold is read and
+    /// indexed here, as a rebuild's walk would reach it: a commit of
+    /// an object held only under a remote's tracking refs was never
+    /// written through this store.
     pub(crate) fn record_write(
         &self,
         object: &Object,
@@ -315,10 +328,14 @@ impl Store {
         previous_tip: &str,
         key: Option<&KeyRefUpdate>,
     ) -> Result<(), StoreError> {
+        self.require_local()?;
         self.wrote.set(true);
         let attrs = extract_attrs(object);
         self.in_index_transaction(|| {
             self.index.put(object, links, &attrs)?;
+            for sha in links.iter().flat_map(|link| &link.shas) {
+                self.index_from(sha)?;
+            }
             self.index
                 .set_tip(&object.header.id, Some(&object.commit_sha))?;
             run(git_in(
@@ -548,6 +565,12 @@ mod tests {
         fn ids_with_prefix(&self, prefix: &str) -> Result<Vec<IdMatch>, StoreError> {
             self.inner().ids_with_prefix(prefix)
         }
+        fn unreferenced_ids(&self) -> Result<Vec<String>, StoreError> {
+            self.inner().unreferenced_ids()
+        }
+        fn refs_reaching(&self, ids: &[String]) -> Result<Vec<String>, StoreError> {
+            self.inner().refs_reaching(ids)
+        }
         fn begin(&self) -> Result<(), StoreError> {
             self.inner().begin()
         }
@@ -611,6 +634,12 @@ mod tests {
         }
         fn ids_with_prefix(&self, prefix: &str) -> Result<Vec<IdMatch>, StoreError> {
             self.inner().ids_with_prefix(prefix)
+        }
+        fn unreferenced_ids(&self) -> Result<Vec<String>, StoreError> {
+            self.inner().unreferenced_ids()
+        }
+        fn refs_reaching(&self, ids: &[String]) -> Result<Vec<String>, StoreError> {
+            self.inner().refs_reaching(ids)
         }
         fn begin(&self) -> Result<(), StoreError> {
             self.inner().begin()

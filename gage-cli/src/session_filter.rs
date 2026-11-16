@@ -84,7 +84,7 @@ pub struct SessionFilterArgs {
 }
 
 /// Where `select_sessions` reads its sessions. A command that takes
-/// `--source` and `--stored` maps them onto these two; a command
+/// `--native` and `--stored` maps them onto these two; a command
 /// without `--stored` always selects native sessions.
 pub enum SessionSelect<'a> {
     /// Native sessions in a source; `None` is the default source.

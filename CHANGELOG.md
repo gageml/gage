@@ -18,6 +18,12 @@ Pending release.
 - Experimental `checks` scanner applies the `general` and `code-review` checks
   to each session in one agent call
 
+### Other changes
+
+- `gage fetch` fetches from a remote without changing the store's objects, and
+  no longer accepts a URL. `gage merge` merges what was fetched, and `gage pull`
+  does both in one run, which is what `gage fetch` did before
+
 ## [0.3.1]
 
 Pending release

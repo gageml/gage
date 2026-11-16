@@ -40,9 +40,9 @@ file under `~/.codex/sessions/`, or under `$CODEX_HOME/sessions/` when
 `CODEX_HOME` is set. Name the `codex` source to read them:
 
 ```cli
-gage session list --source codex:
-gage session view --source codex: [<SESSION_ID>]
-gage session add --source codex: <SESSION_ID>
+gage session list --native codex:
+gage session view --native codex: [<SESSION_ID>]
+gage session add --native codex: <SESSION_ID>
 ```
 
 A Codex session is listed, viewed, queried, and stored as a Claude Code session

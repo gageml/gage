@@ -20,7 +20,7 @@ gage index [OPTIONS]
 
 | Option                  | Description                                  |
 | ----------------------- | -------------------------------------------- |
-| `-s, --source <SOURCE>` | Session source whose index to maintain       |
+| `--native <SOURCE>`     | Session source whose index to maintain       |
 | `-S, --stored`          | Maintain the index of stored sessions        |
 | `--rebuild`             | Rebuild the index                            |
 | `--status`              | Show index status                            |

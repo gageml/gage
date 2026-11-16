@@ -86,7 +86,6 @@ pub use crate::repl::{TvfInfo, exec_command, run_repl};
 use crate::rows::RowCache;
 pub use crate::scope::ScanScope;
 use crate::scope::SessionSet;
-pub use crate::source::QuerySource;
 use crate::source::SourceSpec;
 use crate::stored_rows::{RowKind, StoredRowsTable};
 use crate::system_cols::SkipSystemCols;

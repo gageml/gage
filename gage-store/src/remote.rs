@@ -134,6 +134,10 @@ pub struct RemoteDiff {
     pub remote_only: Vec<String>,
     /// On the remote at the local commit.
     pub same: usize,
+    /// In the store and withheld: refs of objects whose links reach a
+    /// session held only as fetched from a remote, and tags naming
+    /// them. They are in none of the lists above.
+    pub withheld: usize,
 }
 
 const PUSH_KEY: &str = "gage-push";
@@ -641,9 +645,12 @@ impl RemoteStore<'_> {
     /// including one the store does not have, is a divergence, which
     /// covers a remote that is ahead of the store.
     pub fn diff_remote(&self, repository: &Repository) -> Result<RemoteDiff, StoreError> {
-        let local = self.gage_refs()?;
+        let (local, withheld) = self.sendable_refs()?;
         let advertised = self.ls_remote(repository)?;
-        let mut diff = RemoteDiff::default();
+        let mut diff = RemoteDiff {
+            withheld,
+            ..RemoteDiff::default()
+        };
         for (name, sha) in &local {
             match advertised.get(name) {
                 None => diff.new.push(name.clone()),
@@ -679,12 +686,42 @@ impl RemoteStore<'_> {
             .any(|c| c == ancestor))
     }
 
-    /// Every object and tag ref of this store as ref name to commit
-    /// SHA: the set `backup` sends. Key refs are not included: a key
-    /// ref is this store's index of which live object carries a key,
-    /// and a restoring store derives its own from `attrs.key` in the
-    /// object tree.
+    /// Every object and tag ref of this store that `backup` sends, as
+    /// ref name to commit SHA. Key refs are not included: a key ref is
+    /// this store's index of which live object carries a key, and a
+    /// restoring store derives its own from `attrs.key` in the object
+    /// tree. Withheld objects and the tags naming them are not
+    /// included either.
     pub fn gage_refs(&self) -> Result<BTreeMap<String, String>, StoreError> {
+        Ok(self.sendable_refs()?.0)
+    }
+
+    /// The refs [`RemoteStore::gage_refs`] returns, and the number of
+    /// object and tag refs left out as withheld.
+    fn sendable_refs(&self) -> Result<(BTreeMap<String, String>, usize), StoreError> {
+        let withheld = self.store.withheld_ids()?;
+        let mut refs = self.object_and_tag_refs()?;
+        if withheld.is_empty() {
+            return Ok((refs, 0));
+        }
+        let total = refs.len();
+        let mut kept = BTreeMap::new();
+        while let Some((name, sha)) = refs.pop_first() {
+            let id = match name.strip_prefix(OBJECT_REFS) {
+                Some(id) => id.to_string(),
+                None => self.store.read_header(&sha)?.id,
+            };
+            if !withheld.contains(&id) {
+                kept.insert(name, sha);
+            }
+        }
+        let left_out = total - kept.len();
+        Ok((kept, left_out))
+    }
+
+    /// Every object and tag ref of this store as ref name to commit
+    /// SHA.
+    fn object_and_tag_refs(&self) -> Result<BTreeMap<String, String>, StoreError> {
         let out = run(git_in(
             self.store.path(),
             [
@@ -1460,6 +1497,7 @@ mod tests {
                 diverged: vec![diverged],
                 remote_only: vec![remote_only],
                 same: 1,
+                withheld: 0,
             }
         );
     }

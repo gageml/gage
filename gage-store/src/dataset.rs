@@ -774,6 +774,58 @@ impl DatasetStore<'_> {
         Ok(outcomes)
     }
 
+    /// Link sessions at the given commits as members of the given
+    /// dataset in a single commit. Each commit is a live session's,
+    /// and need not be one this store holds a ref for: a session
+    /// fetched from a remote is linked at the commit its tracking ref
+    /// names. Outcomes are as on [`DatasetStore::sessions_link`], in
+    /// `commits` order. A dataset linking a session the store holds
+    /// only as fetched is withheld from push and backup.
+    pub fn sessions_link_commits(
+        &self,
+        dataset_id: &str,
+        commits: &[String],
+    ) -> Result<Vec<DatasetSessionAddOutcome>, StoreError> {
+        if commits.is_empty() {
+            return Ok(Vec::new());
+        }
+        let dataset = self.current(dataset_id)?;
+        let mut members = members(&dataset);
+        let mut member_ids: Vec<String> = Vec::with_capacity(members.len());
+        for sha in &members {
+            member_ids.push(self.store.read_object(sha)?.header.id);
+        }
+
+        let sessions = SessionStore::from(self.store);
+        let mut outcomes: Vec<DatasetSessionAddOutcome> = Vec::with_capacity(commits.len());
+        for commit in commits {
+            let header = self.store.read_header(commit)?;
+            if header.is_tombstone() {
+                return Err(StoreError::ObjectDeleted(header.id));
+            }
+            let record = sessions.at_commit(commit)?;
+            let outcome = match member_ids
+                .iter()
+                .position(|m| m == &record.id)
+                .and_then(|idx| members.get(idx))
+            {
+                Some(sha) if *sha == record.commit_sha => SessionOutcome::Unchanged,
+                Some(_) => SessionOutcome::Updated,
+                None => SessionOutcome::Added,
+            };
+            let session_num =
+                place_member(&mut members, &mut member_ids, &record.id, record.commit_sha);
+            outcomes.push(DatasetSessionAddOutcome {
+                session_num,
+                id: record.id,
+                outcome,
+            });
+        }
+        let message = format_session_commit_message(&outcomes);
+        self.write_members(&dataset, members, &message)?;
+        Ok(outcomes)
+    }
+
     /// Unlink sessions from the given dataset in a single commit. Each
     /// id or prefix resolves to a session object, live or removed,
     /// that is a current member; a non-member is
@@ -1025,8 +1077,8 @@ mod tests {
     use super::*;
     use crate::git::{git_in, run};
     use crate::object::object_ref;
-    use crate::test_support::open_store;
-    use crate::{NoteInput, NoteStore, NoteValue};
+    use crate::test_support::{init_for_test, open, open_store};
+    use crate::{NoteInput, NoteStore, NoteValue, RemoteStore, Repository, TagStore};
     use gage_session::{
         ContentSink, DriverError, SessionAttrs, Source, SourceOptions, StoredSession,
         WrittenContent,
@@ -1523,6 +1575,110 @@ mod tests {
         let listed = datasets.sessions_list(&dataset).unwrap();
         assert_eq!(listed.len(), 2);
         assert_eq!(listed[0].native_size, 7);
+    }
+
+    /// A session held only under a remote's tracking refs is linked at
+    /// its commit and read back through the dataset. The dataset, and
+    /// a scan note pinned to the session, are withheld from push and
+    /// backup until the store holds a ref of its own for the session.
+    #[test]
+    fn sessions_link_commits_links_a_fetched_session_and_withholds_what_links_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let theirs = tmp.path().join("theirs.git");
+        init_for_test(&theirs);
+        let fetched = SessionStore::from(&open(&theirs).unwrap())
+            .add(&FakeDriver, &mut fake("s1", "a\n"))
+            .unwrap();
+
+        let (store, _fsck) = open_store(tmp.path());
+        RemoteStore::from(&store)
+            .add("acme", theirs.to_str().unwrap(), false)
+            .unwrap();
+        run(git_in(store.path(), ["fetch", "--quiet", "acme"])).unwrap();
+        let store = store.reopen().unwrap();
+        let datasets = DatasetStore::from(&store);
+        let own = datasets.create().unwrap();
+        let dataset = datasets.create().unwrap();
+        assert!(store.withheld_ids().unwrap().is_empty());
+
+        let outcomes = datasets
+            .sessions_link_commits(&dataset, slice::from_ref(&fetched.commit_sha))
+            .unwrap();
+        assert_eq!(outcomes[0].id, fetched.id);
+        assert_eq!(outcomes[0].outcome, SessionOutcome::Added);
+        assert!(matches!(
+            store.resolve_id(&fetched.id),
+            Err(StoreError::ObjectNotFound(_))
+        ));
+        let members = datasets.sessions(&dataset).unwrap();
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0].commit_sha, fetched.commit_sha);
+        let again = datasets
+            .sessions_link_commits(&dataset, slice::from_ref(&fetched.commit_sha))
+            .unwrap();
+        assert_eq!(again[0].outcome, SessionOutcome::Unchanged);
+
+        let notes = NoteStore::from(&store);
+        let url = format!("session:{}", fetched.id);
+        let input = NoteInput {
+            name: "finding",
+            value: NoteValue::Text("v".into()),
+            author: "task:s:t",
+            target: Some(&url),
+            metadata: None,
+            work_id: None,
+        };
+        let dir = tmp.path().join("notes");
+        let unpinned = notes.write_to_dir(&dir.join("a"), "notea", &input, "SCAN1", None);
+        assert!(matches!(unpinned, Err(StoreError::TargetNotFound(_))));
+        let dataset_tip = rev_parse(&store, &dataset);
+        let mispinned =
+            notes.write_to_dir(&dir.join("b"), "noteb", &input, "SCAN1", Some(&dataset_tip));
+        assert!(matches!(mispinned, Err(StoreError::TargetNotFound(_))));
+        let id = "notecnotecnotecnotecnotec0";
+        notes
+            .write_to_dir(
+                &dir.join(id),
+                id,
+                &input,
+                "SCAN1",
+                Some(&fetched.commit_sha),
+            )
+            .unwrap();
+        notes.create_from_dir(&dir.join(id)).unwrap();
+        assert_eq!(
+            notes.get(id).unwrap().target_commit,
+            Some(fetched.commit_sha.clone())
+        );
+
+        let withheld: Vec<String> = store.withheld_ids().unwrap().into_iter().collect();
+        let mut expected = vec![dataset.clone(), id.to_string()];
+        expected.sort();
+        assert_eq!(withheld, expected);
+        assert!(!withheld.contains(&own));
+
+        // A backup sends neither the withheld objects nor a tag naming
+        // one, and counts what it left out
+        TagStore::from(&store).add("held", &dataset, false).unwrap();
+        let diff = RemoteStore::from(&store)
+            .diff_remote(&Repository::from_remote("acme"))
+            .unwrap();
+        assert_eq!(diff.withheld, 3);
+        assert_eq!(diff.new, vec![object_ref(&own)]);
+
+        // A push of a withheld object is refused, and of another is not
+        let refused = store.sendable_closure(slice::from_ref(&dataset));
+        assert!(matches!(refused, Err(StoreError::Withheld(id)) if id == dataset));
+        let sendable = store.sendable_closure(slice::from_ref(&own)).unwrap();
+        assert_eq!(sendable.len(), 1);
+
+        run(git_in(
+            store.path(),
+            ["update-ref", &object_ref(&fetched.id), &fetched.commit_sha],
+        ))
+        .unwrap();
+        let store = store.reopen().unwrap();
+        assert!(store.withheld_ids().unwrap().is_empty());
     }
 
     #[test]

@@ -28,10 +28,10 @@ use std::str::FromStr;
 use gage_core::uuid::{new_ulid, new_uuid, ulid_timestamp_ms};
 use serde::{Deserialize, Serialize};
 
-use crate::fetch::Side;
 use crate::git::{EntryKind, TreeEntry};
 use crate::index::{ObjectQuery, Order, SelectedTip};
 use crate::key::{resolve_key, validate_key};
+use crate::merge::Side;
 use crate::note::OBJECT_TYPE as NOTE_TYPE;
 use crate::object::{EditOutcome, FIRST_PARENT_FILE, Object, ObjectTree, object_ref, require_type};
 use crate::writer::{TreeInput, mktree, write_blob};

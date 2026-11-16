@@ -22,7 +22,7 @@ use std::fs;
 use std::path::Path;
 use std::time::Duration;
 
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
 
 use crate::StoreError;
 use crate::index::{IdMatch, IndexCounts, ObjectIndex, ObjectQuery, Order, SelectedTip};
@@ -404,6 +404,55 @@ impl ObjectIndex for SqliteIndex {
             matches.push(row.map_err(sql_err)?);
         }
         Ok(matches)
+    }
+
+    fn unreferenced_ids(&self) -> Result<Vec<String>, StoreError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT DISTINCT o.id FROM object o \
+                 WHERE NOT EXISTS (SELECT 1 FROM ref r WHERE r.id = o.id) \
+                 ORDER BY o.id",
+            )
+            .map_err(sql_err)?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(sql_err)?;
+        let mut ids = Vec::new();
+        for row in rows {
+            ids.push(row.map_err(sql_err)?);
+        }
+        Ok(ids)
+    }
+
+    fn refs_reaching(&self, ids: &[String]) -> Result<Vec<String>, StoreError> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        // The walk runs from the named objects' commits up to whatever
+        // names them, so its cost follows what reaches them and not
+        // the size of the store.
+        let placeholders = vec!["?"; ids.len()].join(", ");
+        let sql = format!(
+            "WITH RECURSIVE reaching(sha) AS ( \
+                 SELECT sha FROM object WHERE id IN ({placeholders}) \
+                 UNION \
+                 SELECT l.commit_sha FROM link l JOIN reaching r ON l.target_sha = r.sha \
+                 UNION \
+                 SELECT o.sha FROM object o JOIN reaching r ON o.first_parent_sha = r.sha \
+             ) \
+             SELECT r.id FROM ref r WHERE r.tip_sha IN (SELECT sha FROM reaching) \
+             ORDER BY r.id"
+        );
+        let mut stmt = self.conn.prepare(&sql).map_err(sql_err)?;
+        let rows = stmt
+            .query_map(params_from_iter(ids), |row| row.get::<_, String>(0))
+            .map_err(sql_err)?;
+        let mut found = Vec::new();
+        for row in rows {
+            found.push(row.map_err(sql_err)?);
+        }
+        Ok(found)
     }
 }
 

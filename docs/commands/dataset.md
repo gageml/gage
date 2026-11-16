@@ -30,7 +30,7 @@ linked into the new dataset in a single step.
 
 | Option                    | Description                                                  |
 | ------------------------- | ------------------------------------------------------------ |
-| `-s, --source <SOURCE>`   | Session source, as described in [`gage session`](/docs/commands/session) |
+| `--native <SOURCE>`       | Session source, as described in [`gage session`](/docs/commands/session) |
 | `-p, --project <PROJECT>` | Limit sessions to a project path or name                     |
 | `--touches <DIR>`         | Limit sessions to those that touch a directory, as described in [`gage session add`](/docs/commands/session#session-add) |
 | `--since <SINCE>`         | Select sessions modified within a duration (e.g. `1h`, `30m`, `7d`) |
@@ -63,7 +63,7 @@ DATASET` on every member's native ID.
 
 | Option                  | Description                                 |
 | ----------------------- | ------------------------------------------- |
-| `-s, --source <SOURCE>` | Session source                              |
+| `--native <SOURCE>`     | Session source                              |
 | `--max-size <SIZE>`     | Maximum stored size per session             |
 | `-y, --yes`             | Skip confirmation prompt                    |
 

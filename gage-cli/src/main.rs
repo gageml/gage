@@ -53,8 +53,10 @@ mod cmd_fetch;
 mod cmd_index;
 mod cmd_init;
 mod cmd_issue;
+mod cmd_merge;
 mod cmd_note;
 mod cmd_publish;
+mod cmd_pull;
 mod cmd_push;
 mod cmd_query;
 mod cmd_remote;
@@ -143,21 +145,20 @@ enum Command {
     Session {
         /// Session source
         #[arg(
-            short = 's',
             long,
             value_name = "SOURCE",
             long_help = format!("Session source\n\n{SOURCE_HELP}"),
             global = true,
             display_order = 1
         )]
-        source: Option<String>,
+        native: Option<String>,
 
         /// Operate on stored sessions
         #[arg(
             short = 'S',
             long,
             global = true,
-            conflicts_with = "source",
+            conflicts_with = "native",
             display_order = 2
         )]
         stored: bool,
@@ -246,17 +247,32 @@ enum Command {
     /// store is sent only by `gage backup`.
     Push(cmd_push::PushArgs),
 
-    /// Fetch objects from a remote or URL
+    /// Fetch objects from a remote
     ///
-    /// Adopts the named objects and what they link, or the whole
-    /// remote with --all. Reports what could not be merged.
+    /// Fetches the named objects and what they link, or the whole
+    /// remote with --all, and keeps them apart from the objects of
+    /// the store. `gage merge` merges what was fetched.
     Fetch(cmd_fetch::FetchArgs),
+
+    /// Merge fetched objects into store
+    ///
+    /// Merges the named objects and what they link, or everything
+    /// fetched from the remote with --all. Reports what could not be
+    /// merged. The remote is not contacted.
+    Merge(cmd_merge::MergeArgs),
+
+    /// Fetch and merge objects from a remote or URL
+    ///
+    /// Fetches the named objects and what they link, or the whole
+    /// remote with --all, and merges them. Reports what could not be
+    /// merged.
+    Pull(cmd_pull::PullArgs),
 
     /// Back up store to a remote
     ///
     /// Adds every session from each configured source to the store,
     /// then sends every object, tag, and key to a remote added with
-    /// `--backup`. Restoring is `gage fetch`.
+    /// `--backup`. Restoring is `gage pull`.
     Backup(cmd_backup::BackupArgs),
 
     /// Query sessions with SQL
@@ -375,7 +391,7 @@ async fn main() -> ExitCode {
                 cmd_remote::RemoteCommand::Delete(args) => cmd_remote::delete(args),
             },
             Command::Session {
-                source,
+                native: source,
                 stored,
                 command,
             } => match command {
@@ -438,6 +454,8 @@ async fn main() -> ExitCode {
             Command::Dev { command } => cmd_dev::run(command),
             Command::Push(args) => cmd_push::main(args).await,
             Command::Fetch(args) => cmd_fetch::main(args),
+            Command::Merge(args) => cmd_merge::main(args),
+            Command::Pull(args) => cmd_pull::main(args),
             Command::Backup(args) => cmd_backup::main(args).await,
         }
     };
@@ -524,6 +542,7 @@ async fn run_mcp() -> anyhow::Result<()> {
                     },
                 }),
                 source: Some(SourceConfig {
+                    store: store_path(),
                     cache_root: default_cache_root(),
                 }),
             }),

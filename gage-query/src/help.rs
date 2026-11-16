@@ -62,16 +62,24 @@ fn help_schema() -> SchemaRef {
 const HELP: &[HelpTopic] = &[
     HelpTopic {
         topic: "source",
-        short: "reading another store or a native source in place of the main store",
-        full: r#"A query reads one source. With no source named it is the main store. The query
-tool's source parameter, or --source on gage query, names another, and the query
-then reads that source and nothing of the main store:
+        short: "reading a native source or a remote's fetched objects in place of the main store",
+        full: r#"A query reads one source. With none named it is the main store. Two parameters
+of the query tool each name another, and the query then reads that source and
+nothing of the main store. Give one or the other, not both.
 
-gage:<path>     the Gage store at <path>, with every store table
+native, or --native on gage query, names a native source:
+
 claude:<path>   the Claude Code sessions under <path>/projects
 claude:         the Claude Code sessions in the default location
 codex:<path>    the Codex sessions under <path>/sessions
 codex:          the Codex sessions in the default location
+
+stored_remote, or --stored-remote on gage query, names a remote of the main
+store. The query reads the objects gage fetch brought from that remote, which
+are kept apart from the main store's own until gage merge merges them. Every
+store table is present, holding the remote's sessions, notes, issues, scans, and
+datasets. Nothing is fetched by a query: the rows are the remote as of the last
+gage fetch.
 
 A named source is read only. The write tools write the main store alone, and an
 id read from another source is not a target for them.
