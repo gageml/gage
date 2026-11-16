@@ -14,7 +14,7 @@ Install Gage:
 :::tab[Linux/macOS]{group=platform}
 
 ```shell
-curl https://raw.githubusercontent.com/gageml/gage/refs/heads/release/scripts/install.sh | sh
+curl -fsSL https://gage.io/install.sh | sh
 ```
 
 :::

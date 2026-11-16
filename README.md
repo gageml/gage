@@ -35,8 +35,8 @@ them.
 - Checks the work done in sessions against your project's own rules.
 - Cites evidence for every issue, down to the session entry behind it.
 - Resolves issues in an interactive Claude Code session that you control.
-- Runs locally and stores its data under `~/.gage/`. Nothing leaves your
-  machine unless you push or publish it.
+- Runs locally and stores its data under `~/.gage/`. Nothing leaves your machine
+  unless you push or publish it.
 - Queries sessions, notes, and issues with SQL in the PostgreSQL dialect.
 - Ships scanners as readable source under [scanners](/scanners).
 
@@ -52,7 +52,7 @@ handled through Claude Code according to your Anthropic plan.
 
 ```shell
 # Install Gage
-curl https://raw.githubusercontent.com/gageml/gage/refs/heads/release/scripts/install.sh | sh
+curl -fsSL https://gage.io/install.sh | sh
 
 # Install the Claude Code plugin
 gage init
@@ -160,7 +160,7 @@ planned.
 ### Prebuilt binary
 
 ```shell
-curl https://raw.githubusercontent.com/gageml/gage/refs/heads/release/scripts/install.sh | sh
+curl -fsSL https://gage.io/install.sh | sh
 ```
 
 The script installs the `gage` binary to `~/.local/bin`, or to `$XDG_BIN_HOME`
@@ -218,9 +218,9 @@ Gage writes all of its data to files under `~/.gage/`. These include:
 
 ### Does Gage "phone home" for any reason?
 
-No. Gage runs locally and writes all state under `~/.gage/`. Gage sends data
-to another location only when you run a command that does so, such as
-`gage push`, `gage backup`, or `gage publish`.
+No. Gage runs locally and writes all state under `~/.gage/`. Gage sends data to
+another location only when you run a command that does so, such as `gage push`,
+`gage backup`, or `gage publish`.
 
 Gage provides tools to Claude Code over a local MCP server. Claude is free to
 use these tools within the constraints of user-defined permissions (allow and

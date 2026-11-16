@@ -2,7 +2,7 @@
 # gage installer
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/gageml/gage/main/scripts/install.sh | sh
+#   curl -fsSL https://gage.io/install.sh | sh
 #
 # Environment overrides:
 #   GAGE_VERSION       install a specific tag (default: latest release, prereleases included)
