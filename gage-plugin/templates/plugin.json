@@ -1,0 +1,6 @@
+{
+  "name": "gage",
+  "version": "{{ version }}",
+  "description": "Coding agent session analysis - scan for and resolve issues",
+  "author": { "name": "Gage" }
+}

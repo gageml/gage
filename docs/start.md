@@ -26,7 +26,8 @@ Windows support planned ---
 
 :::
 
-Initialize the Claude Code plugin:
+Set up Gage in your coding agent. Gage supports Claude Code and Codex, and sets
+itself up in each one that is installed:
 
 ```cli
 gage init

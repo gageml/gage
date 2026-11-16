@@ -1215,10 +1215,10 @@ enum Prompt {
         reason: StatusReason,
         editor: TextArea,
     },
-    /// Confirm launching an interactive Claude Code resolve session.
+    /// Confirm launching an interactive resolve session.
     /// `y` scopes the session to the issue, `a` leaves it unscoped
     /// (all pending and open issues); either suspends the view and
-    /// hands the terminal to claude, and the view resumes when the
+    /// hands the terminal to the harness, and the view resumes when the
     /// session ends.
     Resolve { issue: Box<IssueItem> },
     /// Reopen a closed issue with the status picked in the actions
@@ -2623,9 +2623,9 @@ fn draw_prompt(frame: &mut Frame, prompt: &mut Prompt, enhanced_keys: bool) {
             dialog::draw_wrapped_options(
                 frame,
                 &[
-                    "You are about to start a resolve session in Claude Code. \
+                    "You are about to start a resolve session in your coding agent. \
                      When finished, exit the session to return here.",
-                    "Start Claude Code?",
+                    "Start the session?",
                 ],
                 rows,
             );

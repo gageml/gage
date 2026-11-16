@@ -1,6 +1,0 @@
-{
-  "name": "gage",
-  "version": "%VERSION%",
-  "description": "Claude Code session analysis - scan for and resolve issues",
-  "author": { "name": "Gage" }
-}

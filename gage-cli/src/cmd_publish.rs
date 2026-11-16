@@ -1,5 +1,5 @@
 //! `gage publish`: the pending-publish life cycle commands, and the
-//! publish of selected sessions through Claude Code when no
+//! publish of selected sessions through a coding agent when no
 //! subcommand is given.
 //!
 //! `init` stages a pending publish per selected session and writes
@@ -158,9 +158,9 @@ pub struct PublishRunArgs {
     /// under an ID derived from session, filters, and segments. A
     /// session published before with same inputs is written again
     /// when it changed, left as it is when it did not, and skipped
-    /// when its published copy was removed. Claude Code runs publish
-    /// skill only when a filter, a segment, or a description needs a
-    /// model. Without it, Claude Code opens an interactive session
+    /// when its published copy was removed. A coding agent runs
+    /// publish skill only when a filter, a segment, or a description
+    /// needs a model. Without it, an interactive agent session opens
     /// with skill and arguments given.
     #[arg(short, long)]
     batch: bool,
@@ -558,8 +558,9 @@ pub async fn run(args: PublishArgs) -> Result<(), CliError> {
     }
 }
 
-/// Publish the selected sessions through Claude Code. The dialog
-/// shows the inputs given, asks for a description and a model, and
+/// Publish the selected sessions through the default driver's
+/// harness. The dialog shows the inputs given, asks for a
+/// description and a model, and
 /// spells the inputs as skill arguments; the skill session runs after
 /// it, since the harness owns the terminal from then on.
 async fn publish_sessions(args: PublishRunArgs) -> Result<(), CliError> {
@@ -636,7 +637,7 @@ async fn publish_sessions(args: PublishRunArgs) -> Result<(), CliError> {
     };
     let session = SkillSession {
         name: "Publish sessions",
-        skill: "gage:publish",
+        skill: "publish",
         args: &setup.skill_args,
         model: setup.model.as_deref(),
         extra_args: &args.extra_args,
@@ -653,7 +654,7 @@ async fn publish_sessions(args: PublishRunArgs) -> Result<(), CliError> {
 /// published is placed in the shares given. The publish runs in this
 /// process when nothing in it needs a model. When a filter contributes
 /// redaction instructions, or a segment or a description is given,
-/// Claude Code runs the publish skill over the sessions left to
+/// the harness runs the publish skill over the sessions left to
 /// publish.
 async fn publish_batch(args: PublishRunArgs) -> Result<(), CliError> {
     let fail = |e: String| CliError::message(format!("gage publish: {e}"));
@@ -778,7 +779,7 @@ async fn publish_batch(args: PublishRunArgs) -> Result<(), CliError> {
     };
     let session = SkillSession {
         name: "Publish sessions",
-        skill: "gage:publish",
+        skill: "publish",
         args: &setup.skill_args,
         model: setup.model.as_deref(),
         extra_args: &args.extra_args,

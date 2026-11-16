@@ -8,7 +8,9 @@ use std::process::Command;
 
 use gage_session::{SkillMode, SkillSession};
 
-use crate::driver::{MCP_SERVER_NAME, PLUGIN_NAME};
+use gage_plugin::skill_prompt;
+
+use crate::plugin::{SKILL_SIGIL, TOOL_PREFIX};
 use crate::proc::find_claude;
 
 /// The `claude` command that runs `session`. An interactive session
@@ -18,7 +20,8 @@ use crate::proc::find_claude;
 /// Gage skill uses: `gage publish` and `gage session` commands and
 /// the Gage MCP tools. `model` maps to `--model`; `None` passes none,
 /// so claude applies its own model resolution. The extra arguments
-/// pass to claude verbatim, ahead of the prompt.
+/// pass to claude verbatim, ahead of the prompt, which is the skill's
+/// slash command.
 pub(crate) fn skill_command(session: &SkillSession<'_>) -> io::Result<Command> {
     let claude_bin = find_claude()?;
     Ok(build_skill_command(&claude_bin, session))
@@ -39,7 +42,7 @@ fn build_skill_command(claude_bin: &Path, session: &SkillSession<'_>) -> Command
         cmd.arg("--model").arg(model);
     }
     cmd.args(session.extra_args);
-    cmd.arg(skill_prompt(session.skill, session.args));
+    cmd.arg(skill_prompt(SKILL_SIGIL, session.skill, session.args));
     cmd
 }
 
@@ -48,31 +51,8 @@ fn batch_allowed_tools() -> [String; 3] {
     [
         "Bash(gage publish *)".to_string(),
         "Bash(gage session *)".to_string(),
-        format!("mcp__plugin_{PLUGIN_NAME}_{MCP_SERVER_NAME}"),
+        TOOL_PREFIX.trim_end_matches('_').to_string(),
     ]
-}
-
-/// The prompt that invokes `skill` with `args`: the slash command and
-/// each argument as one shell word, so the skill can hand them to a
-/// `gage` command as given.
-fn skill_prompt(skill: &str, args: &[String]) -> String {
-    let mut prompt = format!("/{skill}");
-    for arg in args {
-        prompt.push(' ');
-        prompt.push_str(&shell_word(arg));
-    }
-    prompt
-}
-
-/// `arg` as one POSIX shell word: as is when it is made of safe
-/// characters, otherwise single-quoted with each `'` closed, escaped,
-/// and reopened.
-fn shell_word(arg: &str) -> String {
-    let safe = |c: char| c.is_ascii_alphanumeric() || "-_./:@=+,%".contains(c);
-    if !arg.is_empty() && arg.chars().all(safe) {
-        return arg.to_string();
-    }
-    format!("'{}'", arg.replace('\'', r"'\''"))
 }
 
 #[cfg(test)]
@@ -89,7 +69,7 @@ mod tests {
     ) -> SkillSession<'a> {
         SkillSession {
             name: "Resolve Gage issues",
-            skill: "gage:resolve",
+            skill: "resolve",
             args,
             model,
             extra_args: extra,
@@ -149,7 +129,7 @@ mod tests {
         let skill_args = ["--stored".to_string(), "abc".to_string()];
         let session = SkillSession {
             name: "Publish sessions",
-            skill: "gage:publish",
+            skill: "publish",
             args: &skill_args,
             model: None,
             extra_args: &[],
@@ -165,22 +145,6 @@ mod tests {
                 "mcp__plugin_gage_gage",
                 "/gage:publish --stored abc"
             ]
-        );
-    }
-
-    /// An argument with spaces or quotes reaches the skill as one
-    /// shell word.
-    #[test]
-    fn skill_arguments_are_shell_words() {
-        let words = [
-            "--description".to_string(),
-            "For the blog's readers".to_string(),
-            String::new(),
-            "a/b:c@d".to_string(),
-        ];
-        assert_eq!(
-            skill_prompt("gage:publish", &words),
-            r"/gage:publish --description 'For the blog'\''s readers' '' a/b:c@d"
         );
     }
 

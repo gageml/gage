@@ -7,20 +7,15 @@
 use std::io;
 use std::process::{Command, Output};
 
+use gage_plugin::PLUGIN_ID;
 use serde::Deserialize;
 
 use crate::proc::find_claude;
 
-/// Plugin id as installed by `gage init` (see [`crate::plugin`]) and
-/// reported by `claude plugin list --json`.
-pub const PLUGIN_ID: &str = "gage@gage";
-
-/// Plugin version this build of `gage` was compiled with. Sourced from
-/// the workspace `Cargo.toml` and substituted into the plugin's
-/// `plugin.json` at install time (see [`crate::plugin`]), so a fresh
-/// `gage init` after any workspace version bump brings the installed
-/// plugin into line with this constant.
-pub const EXPECTED_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// Plugin version this build of `gage` installs. `gage init` writes
+/// it into the plugin's `plugin.json`, so an init after a version
+/// bump brings the installed plugin into line with it.
+pub const EXPECTED_VERSION: &str = gage_plugin::VERSION;
 
 #[derive(Debug)]
 pub enum PreflightError {

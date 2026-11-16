@@ -47,7 +47,7 @@ pub fn run(args: ResolveArgs) -> Result<(), CliError> {
     };
     let session = SkillSession {
         name: "Resolve Gage issues",
-        skill: "gage:resolve",
+        skill: "resolve",
         args: &setup.ids,
         model: setup.model.as_deref(),
         extra_args: &args.extra_args,

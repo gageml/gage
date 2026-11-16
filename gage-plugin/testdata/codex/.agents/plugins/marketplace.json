@@ -1,0 +1,13 @@
+{
+  "name": "gage",
+  "metadata": {
+    "description": "Gage plugin marketplace (managed by `gage init`)."
+  },
+  "owner": { "name": "Gage" },
+  "plugins": [
+    {
+      "name": "gage",
+      "source": "./"
+    }
+  ]
+}

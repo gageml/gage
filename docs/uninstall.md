@@ -6,7 +6,7 @@ Gage does not yet have an uninstaller.
 
 To manually uninstall Gage run these steps.
 
-##### Step 1. Uninstall Claude Code plugin
+##### Step 1. Remove the plugin from your coding agents
 
 ```cli
 gage init --remove

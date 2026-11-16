@@ -1,13 +1,16 @@
 ---
 title: gage status
 description:
-  Command reference for gage status, which shows Claude Code login, plugin,
-  session corpus, and storage status
+  Command reference for gage status, which shows each driver's agent, login,
+  and plugin, the session corpus, and storage status
 ---
 
-The `gage status` command shows the state of a Gage installation: the Claude
-Code login, whether the Gage plugin is registered, the available session
-corpus, and storage use under `~/.gage`.
+The `gage status` command shows the state of a Gage installation: for each
+driver, the coding agent it works with, its login, and whether the Gage plugin
+is registered; the available session corpus; and storage use under `~/.gage`.
+
+An agent that is not installed is shown as not installed. It is reported as a
+problem only when its driver is the default driver.
 
 ```cli
 gage status [OPTIONS]

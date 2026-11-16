@@ -419,6 +419,50 @@ impl Config {
         Ok(true)
     }
 
+    /// The default driver the config file at `path` names itself. A
+    /// missing file, and a file that leaves the setting to its
+    /// default, name none.
+    pub fn named_default_driver(path: &Path) -> io::Result<Option<String>> {
+        let text = match fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let table: toml::Table = toml::from_str(&text).map_err(io::Error::other)?;
+        let named = table
+            .get("drivers")
+            .and_then(|drivers| drivers.get("default"))
+            .and_then(toml::Value::as_str);
+        Ok(named.map(String::from))
+    }
+
+    /// Make `driver` the default driver in the config file at `path`,
+    /// whether or not the file names one. A file that names another
+    /// has that one value replaced, and the rest of its text stays as
+    /// written. Returns whether the file changed.
+    pub fn set_default_driver(path: &Path, driver: &str) -> io::Result<bool> {
+        match Self::named_default_driver(path)? {
+            None => Self::name_default_driver(path, driver),
+            Some(named) if named == driver => Ok(false),
+            Some(_) => {
+                let text = fs::read_to_string(path)?;
+                let mut doc: toml_edit::DocumentMut = text.parse().map_err(io::Error::other)?;
+                let slot = doc
+                    .get_mut("drivers")
+                    .and_then(|drivers| drivers.get_mut("default"))
+                    .and_then(toml_edit::Item::as_value_mut)
+                    .expect("a named default should be a value");
+                // A comment on the setting's line is the old value's
+                // decoration and moves to the new one
+                let decor = slot.decor().clone();
+                *slot = toml_edit::Value::from(driver);
+                *slot.decor_mut() = decor;
+                fs::write(path, doc.to_string())?;
+                Ok(true)
+            }
+        }
+    }
+
     /// True if the named scanner is enabled per this config. Entries
     /// in `enable` / `disable` may contain `*` wildcards that match any
     /// run of characters.
@@ -487,6 +531,45 @@ mod tests {
         std::fs::write(&path, written).unwrap();
         assert!(!Config::name_default_driver(&path, "claude").unwrap());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), written);
+    }
+
+    #[test]
+    fn the_named_default_driver_is_what_the_file_says_and_not_the_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        assert_eq!(Config::named_default_driver(&path).unwrap(), None);
+        std::fs::write(&path, "[drivers.codex.models]\nsmall = \"x\"\n").unwrap();
+        assert_eq!(Config::named_default_driver(&path).unwrap(), None);
+        std::fs::write(&path, "[drivers]\ndefault = \"codex\"\n").unwrap();
+        assert_eq!(
+            Config::named_default_driver(&path).unwrap().as_deref(),
+            Some("codex")
+        );
+    }
+
+    #[test]
+    fn setting_the_default_driver_replaces_a_named_one_and_keeps_the_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let written = "# kept\n[drivers]\ndefault = \"claude\" # mine\n\n[backup]\nsources = []\n";
+        std::fs::write(&path, written).unwrap();
+        assert!(Config::set_default_driver(&path, "codex").unwrap());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            written.replace("\"claude\"", "\"codex\"")
+        );
+        assert!(!Config::set_default_driver(&path, "codex").unwrap());
+    }
+
+    #[test]
+    fn setting_the_default_driver_names_one_where_the_file_names_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        assert!(Config::set_default_driver(&path, "codex").unwrap());
+        assert_eq!(
+            Config::named_default_driver(&path).unwrap().as_deref(),
+            Some("codex")
+        );
     }
 
     #[test]

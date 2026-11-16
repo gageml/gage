@@ -10,20 +10,38 @@ conventions in _[Keep a Changelog]_. Release versions use [semantic versioning].
 
 ### Enhancements
 
-**Codex sessions**
+**Codex**
 
 **IMPORTANT:** This is a preview release of Codex support.
 
 - The `codex:` session source reads Codex CLI sessions: `gage session list`,
   `gage session view`, `gage session add`, `gage blame`, and `gage query` work
   on them as they do on Claude Code sessions
-- The `drivers.default` setting names the driver that a session source with no
-  scheme goes to. `gage init` writes it, and the default stays `claude`
+- `gage init` sets Gage up in every installed coding agent it has a driver for,
+  Claude Code and Codex, and no longer fails when Claude Code is not installed.
+  `--driver` names the drivers to set up, and `gage init --remove` removes Gage
+  from the same agents
+- The Gage plugin installs into Codex with its MCP tools and the `blame`,
+  `publish`, and `resolve` skills
+- Scanner agents run on Codex. A model with the `codex` scheme, as in
+  `codex:small`, or a size when `codex` is the default driver, runs the agent on
+  Codex over sessions of either driver. Codex reports no cost for an agent
+- `gage resolve` and `gage publish` start their session in the default driver's
+  coding agent, Claude Code or Codex
+- An issue assigned from a Codex session records that session as its holder
+- The `drivers.default` setting names the driver that a session source or an
+  agent model with no scheme goes to. `gage init` writes it when the config
+  names none, asks when more than one driver is set up, and replaces it with
+  `--default`
 - A scanner agent's model takes a driver scheme, as in `claude:small`, which
   names the driver that runs the agent. A scan can read one driver's sessions
   while its agents run on another
 - `drivers.<driver>.models.<size>` settings name the model a driver uses for the
   `small`, `medium`, and `large` model sizes
+- `gage status` shows the coding agent, login, and plugin of each driver. An
+  agent that is not installed is shown as not installed and is a problem only
+  for the default driver. A plugin of another version than the build's is a
+  problem that `gage init` fixes
 
 **Remotes**
 

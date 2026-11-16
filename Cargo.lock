@@ -2439,11 +2439,11 @@ dependencies = [
  "chrono",
  "gage-core",
  "gage-corpus",
+ "gage-plugin",
  "gage-session",
  "jsonschema",
  "libc",
  "regex",
- "rust-embed",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -2499,16 +2499,21 @@ name = "gage-codex"
 version = "0.4.0"
 dependencies = [
  "arrow",
+ "async-trait",
  "chrono",
  "gage-core",
  "gage-corpus",
+ "gage-plugin",
  "gage-session",
+ "libc",
  "regex",
  "serde",
  "serde_json",
  "serde_yaml",
  "tempfile",
+ "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -2521,6 +2526,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "toml 0.8.23",
+ "toml_edit",
  "twox-hash",
  "uuid",
 ]
@@ -2603,6 +2609,17 @@ dependencies = [
  "tower",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "gage-plugin"
+version = "0.4.0"
+dependencies = [
+ "minijinja",
+ "rust-embed",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

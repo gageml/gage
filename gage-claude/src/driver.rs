@@ -22,6 +22,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::SystemTime;
 
 use gage_core::config::{default_cache_root, plugin_marketplace_dir};
+use gage_plugin::{MARKETPLACE_NAME, MCP_SERVER_NAME, PLUGIN_ID, write_mcp_json, write_plugin};
 use gage_session::{
     AgentSession, AgentSpec, AuthInfo, ContentSchema, ContentSink, ContentSource, DecodedEntry,
     Derivation, Driver, DriverError, DriverStatus, DriverTables, Entry, EntryBody, EntryCodec,
@@ -32,6 +33,7 @@ use gage_session::{
     WrittenContent, split_scheme,
 };
 use serde::Deserialize;
+use serde_json::Map;
 
 use crate::body;
 use crate::codec::codec;
@@ -55,20 +57,12 @@ use crate::skill::skill_command;
 use gage_corpus::tables::{EntryTable, MessageTable, SessionTable, ToolUseFileTable, ToolUseTable};
 use gage_corpus::{decoded_entries, format_project_slug, write_derived};
 
-/// MCP server name under which Gage registers in `.mcp.json`.
-pub(crate) const MCP_SERVER_NAME: &str = "gage";
-/// The plugin's name, the first half of [`PLUGIN_ID`]. Claude Code
-/// names a plugin's MCP tools `mcp__plugin_<plugin>_<server>__<tool>`.
-pub(crate) const PLUGIN_NAME: &str = "gage";
-/// Plugin identifier Claude Code uses: `<plugin>@<marketplace>`.
-const PLUGIN_ID: &str = "gage@gage";
-
 pub(crate) const NAME: &str = "claude";
 /// The environment variable in which Claude Code names the session a
 /// process it started belongs to
 const SESSION_ID_VAR: &str = "CLAUDE_CODE_SESSION_ID";
 /// The harness's display name
-const HARNESS_NAME: &str = "Claude Code";
+pub(crate) const HARNESS_NAME: &str = "Claude Code";
 const SCHEMES: &[&str] = &["claude"];
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub(crate) const SESSION_TYPE: &str = "claude";
@@ -324,9 +318,27 @@ impl Driver for ClaudeDriver {
         Ok(Box::new(ClaudeHarnessSession(child)))
     }
 
+    fn harness_name(&self) -> &'static str {
+        HARNESS_NAME
+    }
+
+    fn harness_path(&self) -> Option<PathBuf> {
+        find_claude().ok()
+    }
+
+    /// A CLI that is not installed is absent, and nothing more is
+    /// asked of it: its login and plugin are not reported.
     fn status(&self) -> Result<DriverStatus, DriverError> {
+        let harness = harness_status();
+        if harness.absent().is_some() {
+            return Ok(DriverStatus {
+                harness,
+                auth: Field::Unsupported,
+                install: Field::Unsupported,
+            });
+        }
         Ok(DriverStatus {
-            harness: harness_status(),
+            harness,
             auth: auth_status(),
             install: install_status(),
         })
@@ -347,9 +359,8 @@ impl Driver for ClaudeDriver {
         let mut notes = Vec::new();
 
         ui.step("Writing plugin files");
-        plugin::write_plugin_files_to(&marketplace).map_err(DriverError::Io)?;
-        plugin::write_marketplace_manifest_to(&marketplace).map_err(DriverError::Io)?;
-        plugin::write_mcp_json(&marketplace, mcp_cmd).map_err(DriverError::Io)?;
+        write_plugin(&marketplace, &plugin::target()).map_err(DriverError::Io)?;
+        write_mcp_json(&marketplace, mcp_cmd, Map::new()).map_err(DriverError::Io)?;
         notes.push(format!("plugin materialized at {}", marketplace.display()));
         ui.step_done();
 
@@ -363,7 +374,7 @@ impl Driver for ClaudeDriver {
                 &marketplace.to_string_lossy(),
             ],
         )?;
-        notes.push("marketplace 'gage' registered".into());
+        notes.push(format!("marketplace '{MARKETPLACE_NAME}' registered"));
         ui.step_done();
 
         ui.step("Installing plugin");
@@ -390,7 +401,7 @@ impl Driver for ClaudeDriver {
         ui.step("Removing marketplace");
         run_claude_best_effort(
             &claude_bin,
-            &["plugin", "marketplace", "remove", "gage"],
+            &["plugin", "marketplace", "remove", MARKETPLACE_NAME],
             ui,
         );
         ui.step_done();
@@ -417,9 +428,8 @@ fn harness_status() -> Field<HarnessInfo> {
     let path = match find_claude() {
         Ok(path) => path,
         Err(_) => {
-            return Field::Problem {
-                info: None,
-                message: format!("{HARNESS_NAME} not found on PATH"),
+            return Field::Absent {
+                message: format!("{HARNESS_NAME} not installed"),
                 remedy: format!("Install {HARNESS_NAME}"),
             };
         }

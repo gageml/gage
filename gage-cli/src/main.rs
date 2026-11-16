@@ -129,13 +129,17 @@ const GAGE_LOG_TARGETS: &[&str] = &[
 
 #[derive(Subcommand)]
 enum Command {
-    /// Register Gage with Claude Code
+    /// Set up Gage in installed coding agents
+    ///
+    /// Creates the store when there is none and installs the Gage
+    /// plugin, an MCP server and skills, in each coding agent Gage
+    /// has a driver for. Run it again after upgrading Gage.
     Init(cmd_init::InitArgs),
 
     /// Run scanners on sessions
     Scan(cmd_scan::ScanArgs),
 
-    /// Resolve issues in a Claude Code session
+    /// Resolve issues in a coding agent session
     ///
     /// Starts an interactive session that resolves pending issues,
     /// then walks through open issues as directed.

@@ -45,8 +45,11 @@ async fn report(args: StatusArgs) -> Result<String, CliError> {
     let mut out = String::new();
     let mut problems = Vec::new();
     w(&mut out, format!("{}", style("Drivers").bold()));
-    for driver in driver_registry().drivers() {
-        write_driver(&mut out, &mut problems, driver.as_ref());
+    let registry = driver_registry();
+    let default = registry.default().map(|d| d.name());
+    for driver in registry.drivers() {
+        let is_default = default == Some(driver.name());
+        write_driver(&mut out, &mut problems, driver.as_ref(), is_default);
     }
     out.push('\n');
     write_counts(&mut out, &mut problems).await?;
@@ -61,8 +64,15 @@ async fn report(args: StatusArgs) -> Result<String, CliError> {
 
 /// One driver's block: its name, then its harness, login, and Gage
 /// plugin each on a labeled line, with every problem collected
-/// for the closing list.
-fn write_driver(out: &mut String, problems: &mut Vec<String>, driver: &dyn Driver) {
+/// for the closing list. A harness that is not installed is shown as
+/// such and is a problem only for the default driver, the one a
+/// source or a model with no scheme goes to.
+fn write_driver(
+    out: &mut String,
+    problems: &mut Vec<String>,
+    driver: &dyn Driver,
+    is_default: bool,
+) {
     w(out, format!("  {}", driver.name()));
     let status = match driver.status() {
         Ok(status) => status,
@@ -86,6 +96,12 @@ fn write_driver(out: &mut String, problems: &mut Vec<String>, driver: &dyn Drive
     {
         problems.push(problem_text(problem));
     }
+    if is_default && let Some((message, remedy)) = harness.absent() {
+        problems.push(problem_text((
+            &format!("{message}, and {} is the default driver", driver.name()),
+            remedy,
+        )));
+    }
 }
 
 /// Write `label` and the field's value: the rendered info, a
@@ -96,6 +112,7 @@ fn write_field<T>(out: &mut String, label: &str, field: &Field<T>, render: fn(&T
     let lines = match field {
         Field::Ok(info) => render(info),
         Field::Problem { message, .. } => vec![message.clone()],
+        Field::Absent { message, .. } => vec![format!("{}", style(message).dim())],
         Field::Unsupported => return,
     };
     for (i, line) in lines.into_iter().enumerate() {
@@ -117,11 +134,7 @@ fn harness_lines(h: &HarnessInfo) -> Vec<String> {
 }
 
 fn auth_lines(a: &AuthInfo) -> Vec<String> {
-    let mut lines = vec![
-        a.account
-            .clone()
-            .unwrap_or_else(|| "unknown account".into()),
-    ];
+    let mut lines = vec![a.account.clone().unwrap_or_else(|| "signed in".into())];
     for (label, value) in [
         ("plan", &a.plan),
         ("org", &a.org),
@@ -282,7 +295,82 @@ fn w(out: &mut String, line: String) {
 
 #[cfg(test)]
 mod tests {
+    use gage_session::{
+        ContentSink, ContentSource, DriverError, NativeSession, Source, SourceOptions,
+        StoredSession, WrittenContent,
+    };
+
     use super::*;
+
+    /// A driver that reports `status` and does nothing else
+    struct Reports(DriverStatus);
+
+    impl Driver for Reports {
+        fn name(&self) -> &'static str {
+            "reports"
+        }
+        fn version(&self) -> &'static str {
+            "0"
+        }
+        fn schemes(&self) -> &'static [&'static str] {
+            &["reports"]
+        }
+        fn open_source(&self, _options: &SourceOptions) -> Result<Box<dyn Source>, DriverError> {
+            Err(DriverError::Other("not used".into()))
+        }
+        fn split_session_url(&self, _session_url: &str) -> Result<(String, String), DriverError> {
+            Err(DriverError::Other("not used".into()))
+        }
+        fn write_native(
+            &self,
+            _session: &mut dyn NativeSession,
+            _sink: &mut dyn ContentSink,
+        ) -> Result<WrittenContent, DriverError> {
+            Err(DriverError::Other("not used".into()))
+        }
+        fn read_stored(
+            &self,
+            _native_id: String,
+            _content_format: &str,
+            _source: Box<dyn ContentSource>,
+        ) -> Result<Box<dyn StoredSession>, DriverError> {
+            Err(DriverError::Other("not used".into()))
+        }
+        fn status(&self) -> Result<DriverStatus, DriverError> {
+            Ok(self.0.clone())
+        }
+    }
+
+    fn not_installed() -> Reports {
+        Reports(DriverStatus {
+            harness: Field::Absent {
+                message: "Agent not installed".to_string(),
+                remedy: "Install Agent".to_string(),
+            },
+            auth: Field::Unsupported,
+            install: Field::Unsupported,
+        })
+    }
+
+    #[test]
+    fn a_harness_that_is_not_installed_is_shown_and_is_no_problem() {
+        let mut out = String::new();
+        let mut problems = Vec::new();
+        write_driver(&mut out, &mut problems, &not_installed(), false);
+        assert!(out.contains("Agent not installed"), "{out}");
+        assert!(problems.is_empty(), "{problems:?}");
+    }
+
+    #[test]
+    fn a_default_driver_whose_harness_is_not_installed_is_a_problem() {
+        let mut out = String::new();
+        let mut problems = Vec::new();
+        write_driver(&mut out, &mut problems, &not_installed(), true);
+        assert_eq!(
+            problems,
+            ["Agent not installed, and reports is the default driver - Install Agent"]
+        );
+    }
 
     #[test]
     fn storage_line_names_the_given_root() {
