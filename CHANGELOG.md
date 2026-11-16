@@ -6,25 +6,63 @@ conventions in _[Keep a Changelog]_. Release versions use [semantic versioning].
 [Keep a Changelog]: https://keepachangelog.com/en/1.1.0/
 [semantic versioning]: https://semver.org/spec/v2.0.0.html
 
-## [0.3.2]
-
-Pending release.
+## [0.4.0]
 
 ### Enhancements
 
+**Codex sessions**
+
+**IMPORTANT:** This is a preview release of Codex support.
+
 - The `codex:` session source reads Codex CLI sessions: `gage session list`,
-  `gage session view`, `gage session add`, and `gage query` work on them as they
-  do on Claude Code sessions
+  `gage session view`, `gage session add`, `gage blame`, and `gage query` work
+  on them as they do on Claude Code sessions
+- The `drivers.default` setting names the driver that a session source with no
+  scheme goes to. `gage init` writes it, and the default stays `claude`
+- A scanner agent's model takes a driver scheme, as in `claude:small`, which
+  names the driver that runs the agent. A scan can read one driver's sessions
+  while its agents run on another
+- `drivers.<driver>.models.<size>` settings name the model a driver uses for the
+  `small`, `medium`, and `large` model sizes
+
+**Remotes**
+
+- `gage fetch` fetches from a remote without changing the store's objects.
+  `gage merge` merges what was fetched, and `gage pull` does both in one run
+- `-R, --stored-remote <NAME>` reads the sessions fetched from a remote and not
+  yet merged. `gage session list`, `view`, and `find`, `gage query`,
+  `gage blame`, `gage index`, and `gage scan` accept it, as does the `query`
+  tool through its `stored_remote` parameter
+- `gage scan --stored-remote` scans fetched sessions and writes its dataset,
+  notes, and issues to the store. These objects are withheld until the sessions
+  are merged: `gage push` refuses them and `gage backup` leaves them out
+- `-N` is the short form of `--native` on every command that takes a session
+  source
+
+**Scans**
+
 - Experimental `checks` scanner applies the `general` and `code-review` checks
   to each session in one agent call
+- `gage scan list` and the scan view report a cost of "unknown" in place of
+  `$0.00+` when no agent reported a cost
+
+### Fixes
+
+- The `issue_assign` tool is always listed. It was left out when the server
+  started without `CLAUDE_CODE_SESSION_ID` set, and a call whose session cannot
+  be named is now refused with a message that says so
 
 ### Other changes
 
-- `gage fetch` fetches from a remote without changing the store's objects, and
-  no longer accepts a URL. `gage merge` merges what was fetched, and `gage pull`
-  does both in one run, which is what `gage fetch` did before
-
-## [0.4.0]
+- `gage fetch` no longer merges and no longer accepts a URL, and its `--ours`
+  and `--theirs` options moved to `gage merge`. `gage pull` does what
+  `gage fetch` did before
+- `--native <SOURCE>` replaces `-s, --source` on every command that takes a
+  session source. The `query` tool's `source` parameter is renamed `native` to
+  match
+- `gage query` no longer reads another store through a `gage:<path>` source.
+  `--stored-remote` reads a remote's fetched objects instead
+- `gage remote rename` is faster
 
 ## [0.3.1]
 
