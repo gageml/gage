@@ -8,183 +8,96 @@
 
 ## Design rules
 
-- If the codebase shows a consistent design construct, use that as the starting
-  point for design proposals.
+- If there are design inconsistencies in the codebase, report them. Stop for
+  resolution only when the inconsistency affects the design of the current task.
+  Otherwise follow the dominant pattern and continue.
 
-- If there are design inconsistencies in the codebase, bring those to user's
-  attention for resolution. Proceed only when inconsistencies are resolved.
-
-- If you sense the user may misunderstand something in a design decision, bring
-  that topic to the user's attention before proceeding. In such cases the user
-  may be proceeding under false impressions that should be clarified before
-  proceeding.
-
-- The user determines the design after due consideration. Follow clearly
-  communicated design decisions as stated. Ask for clarification if you are
-  unsure about the user's intentions.
+- If the user appears to misunderstand something a design decision depends on,
+  raise it before proceeding.
 
 ## Rust Rules
 
 These rules apply to ALL Rust code in this workspace. They are non-negotiable.
 
-- **IMPORTANT: Do not ignore errors!** - The principle: when you discard a
-  `Result`'s `Err`, you are asserting "no signal here worth surfacing." That
-  assertion has to be defensible. The test: name the failure mode you are
-  discarding and why it doesn't matter. If you can't name it, you don't get to
-  discard it.
+- **Do not ignore errors.** Discarding a `Result`'s `Err` asserts that the
+  failure carries no signal worth surfacing. Name the failure mode discarded and
+  why it does not matter. If you cannot name it, propagate or handle the error.
+  Clippy rejects `let _ = result;` and a bare `.ok();`. The same rule covers the
+  forms clippy does not catch: `.filter_map(|r| r.ok())`, `.is_ok()` or
+  `.is_err()` used to collapse a fallible operation into a `bool`, and a match
+  arm that drops `Err(e)`.
 
-  Always wrong (no defensible reading):
-  - `.filter_map(|r| r.ok())` - collection-shaped burial; items vanish with no
-    diagnostic
-  - `let _ = result;` or bare `.ok();` as a statement - discards a `Result` you
-    should have examined
-  - `fn foo() -> bool { result.is_ok() }` - collapses a fallible operation into
-    yes/no; return `Result`
-  - Matching `Ok(x)` and explicitly dropping `Err(e)` to silence a real failure
+  Discarding is permitted when the `Err` is structurally meaningless at the call
+  site: env var probes, dynamic-type downcasts (Rune, serde `Value`),
+  best-effort enrichment whose absence adjacent output already covers, and
+  `result.ok()?` in a function whose documented contract is `Option`. Prefer the
+  `Option`-shaped API when one exists (`env::var_os` over `env::var`).
 
-  Permitted when the `Err` variant is structurally meaningless at this call
-  site - i.e. the API exposes `Result` for type-system reasons, not because
-  there is information to act on:
-  - `if let Ok(x) = result { ... }` - env var probes, dynamic-type downcasts
-    (Rune, serde Value), best-effort enrichment whose absence is already covered
-    by adjacent output
-  - `result.ok()?` inside a function whose own signature returns `Option` and
-    where "absent" is the documented contract
-  - Prefer the `Option`-shaped API when one exists (`env::var_os` over
-    `env::var`)
-
-- **Handle errors at the call site.** When you call a function that returns
-  `Result`, you must address the error --- propagate it with `?`, handle both
-  arms, or panic with `.unwrap()` / `.expect()`. Don't accept a well-designed
-  fallible API and then drop the error on the floor.
-
-- `unwrap()` vs `expect()`
-  - Use `.unwrap()` when a panic's location alone is enough to diagnose the
-    failure. "This works or the world ends." No non-obvious precondition
-    required.
-
-  - Use `.expect("<should happen>")` ONLY when an internal assumption made at
-    the call site is non-obvious and a bare panic wouldn't reveal it. The
-    argument states what should happen. It does NOT state the error. It does NOT
-    state the obvious, "this should work". If there is no non-obvious argument,
-    use `.unwrap()`.
-
-  - WRONG: `.expect("failed to open file")` - restating the error
-  - WRONG: `.expect("should work")` / `.expect("unwrap failed")` - stating the
-    obvious
-  - RIGHT: `.expect("config should be loaded before server start")` - names a
-    precondition that, if violated, tells you the root cause
-  - RIGHT: `fs::create_dir_all(p).unwrap()` - if the filesystem is read-only the
-    panic location alone is sufficient - no `expect` message would add value
-
-  This is the "expect as precondition" style recommended by
-  [std::error Common Message Styles]. Keep `expect` messages as short as
-  possible while still naming the precondition.
-  - Good: `"splitn should yield >= one substr"`
-  - Bad:
-    `"splitn(2, ' ') always yields at least one element per the API contract"`
-
-  Other patterns to avoid:
-  - `.is_ok()` / `.is_err()` to discard a `Result` - same rule as above; if you
-    actually need the boolean (rare), name the discarded variant
+- **`unwrap()` vs `expect()`.** Use `.unwrap()` when the panic location alone
+  diagnoses the failure. Use `.expect("...")` only when the call site relies on
+  a non-obvious precondition. The message names that precondition as what should
+  hold, in as few words as possible. It does not restate the error or state the
+  obvious.
+  - WRONG: `.expect("failed to open file")`
+  - WRONG: `.expect("should work")`
+  - RIGHT: `.expect("config should be loaded before server start")`
+  - RIGHT: `.expect("splitn should yield >= one substr")`
+  - RIGHT: `fs::create_dir_all(p).unwrap()`
 
 - Run `just check` before declaring any change complete. It runs the full gate —
   clippy (no warnings), fmt, tests — as one command; partial verification is not
   an option.
 
-- **New or changed behavior gets a test.** A passing gate proves only that the
-  existing tests still pass; it says nothing about behavior no test exercises. A
-  change that adds or alters behavior adds a regression test that covers the new
-  path. Manual smoke runs and `just check` are not a substitute. When a change
-  genuinely cannot be tested, say so and why rather than leaving the gap silent.
+- **New or changed behavior gets a test.** A change that adds or alters behavior
+  adds a test that covers the new path. `just check` and manual runs are not a
+  substitute. When a change cannot be tested, say so and why.
 
-- **A failing assertion is fixed or raised, never deleted to pass the gate.** A
-  test that fails is reporting either a bug in the code or a stale expectation.
-  Diagnose which. Correct the code or correct the assertion to the right
-  expected value. Deleting the assertion, or weakening it until it passes,
-  discards the signal and hides the defect. When the right expectation is
-  unclear, raise it with the user instead of removing the check.
+- **Do not delete or weaken a failing assertion to pass the gate.** Fix the code
+  or correct the expectation. When the right expectation is unclear, raise it
+  with the user.
 
-- **Prefer imports over fully qualified references.** Keep symbol use short to
-  improve readability. The test: before writing `a::b::C` inline, look at the
-  file's `use` block. If the module or item is already imported, use the short
-  form; if not, add the import alongside the existing ones - the import block is
-  the file's established convention and new code follows it.
-
-  For std modules, import the module, not the item, when the item name would
-  collide with the prelude: `use std::io;` then `io::Result<T>`, never
-  `use std::io::Result;`.
-
-  - WRONG: `fn prompt_window(initial: Window) -> std::io::Result<Window>` in a
-    file whose header already imports four other `std` modules
-  - RIGHT: `use std::io;` in the import block, `io::Result<Window>` at use
-
-  Not violations: trait imports scoped to a function body (`use std::io::Write;`
-  inside the one function that writes), and aliased imports for disambiguation
-  (`use crate::style as s;`). Existing fully-qualified references elsewhere in
-  the codebase are fixed opportunistically when the surrounding code is being
-  edited, not swept.
+- **Prefer imports over fully qualified references.** Before writing `a::b::C`
+  inline, check the file's `use` block. Use the short form if the item is
+  imported, and add the import if it is not. For a std item whose name collides
+  with the prelude, import the module: `use std::io;` then `io::Result<T>`,
+  never `use std::io::Result;`. A trait import scoped to a function body and an
+  aliased import for disambiguation are not violations. Fix existing fully
+  qualified references only when editing the surrounding code.
 
 - Use the _Stepdown Rule_ when ordering functions. Define functions below where
   they are first called, so code reads top-down like a narrative. This takes
   priority over grouping by visibility.
 
-- Constructor naming - Match the prefix to what the function does. Sources:
-  [Rust API Guidelines C-CTOR] and the constructor rows of
-  [Rust API Guidelines C-CASE].
-  - `new(...)` - primary constructor; minimal/required arguments only. When a
-    type has both `new()` and `Default`, they must produce the same value
-    (C-CTOR; clippy `new_without_default`).
-  - `with_xxx(...)` - alternate constructor that _configures_ the new value
-    (`Vec::with_capacity`, `BufReader::with_capacity`). C-CASE names this form
-    `with_more_details`. Use it when the arguments are options or parameters,
-    not the source data the value is built from.
-  - `from_xxx(...)` - _conversion_ constructor. C-CTOR defines it as building
-    the type from a value of a different type; the argument is the source data
-    the new value is derived from (parse, decode, reinterpret). Extra
-    disambiguating arguments are permitted (`u64::from_str_radix`,
-    `io::Error::from_raw_os_error`). `Target::from_columns(row) -> Target`
-    qualifies; `MessageTable::from_session(id, path)` does not, because the
-    arguments locate the data rather than being the data. Clippy
-    `wrong_self_convention` requires `from_` functions to take no `self`.
-  - Domain verbs (`open`, `connect`, `bind`) are accepted by C-CTOR for resource
-    types where the verb is clearer than `new`.
-  - Avoid `for_xxx` - prefer `with_xxx` for the same role. This is a project
-    convention with no counterpart in the API Guidelines.
-  - Do not define an inherent `from_str(&str)`; implement `FromStr` (clippy
-    `should_implement_trait`).
+- **Constructor naming** follows the Rust API Guidelines (C-CTOR, C-CASE). These
+  points are the ones most often missed:
+  - `from_xxx(...)` takes the source data the value is built from.
+    `Target::from_columns(row)` qualifies. `MessageTable::from_session(id, path)`
+    does not, because the arguments locate the data rather than being the data.
+  - `with_xxx(...)` takes options or parameters that configure the new value,
+    not source data.
+  - A domain verb (`open`, `connect`, `bind`) names the constructor of a
+    resource type when the verb is clearer than `new`.
+  - Do not use `for_xxx`. Use `with_xxx` for the same role.
 
-- **No banner/section-header comments.** Do not cordon off regions of a file
-  with comments like `// -- TableProvider --`, `// === helpers ===`,
-  `// --- User content ---`, or `// -------- Phase N --------`. They impose an
-  arbitrary taxonomy on the file that fights the Stepdown Rule (order of
-  use/call). If a group of items needs a label to be findable, the right fix is
-  ordering, naming, or splitting the file - not a banner. The reader infers
-  structure from the code itself.
+- **No banner comments.** Do not divide a file with comments like
+  `// --- helpers ---`. If a group of items needs a label to be findable, fix
+  the ordering, the naming, or the file split.
 
-- **Comments do not cite documents.** Source code is the only current
-  documentation. Design notes, plans, READMEs, footnotes, and files under
-  `.local.*` are not kept in sync with the code and are stale on arrival. A
-  comment never directs the reader to a markdown file, a design document, a
-  section title, or a footnote. A comment that has something to say states it in
-  place.
+- **Comments do not cite documents.** A comment never directs the reader to a
+  markdown file, a design document, a plan, a section title, or a footnote,
+  because those are not kept in sync with the code. State the content in place.
   - WRONG: `// see watermarks.md`
-  - WRONG: `/// See footnote 2 of gage-bench/results/store/README.md.`
-  - WRONG: `// (see PLAN.md "After implementation")`
   - RIGHT:
     `/// The whole diff is one index transaction. One commit per object took 11.6 s on the bench population; one transaction takes 251 ms.`
 
-  Functional references are not comments and are unaffected: `include_str!`
-  paths, config-file discovery (`CLAUDE.md`, `SKILL.md`), and test fixtures.
+  Functional references are unaffected: `include_str!` paths, config-file
+  discovery (`CLAUDE.md`, `SKILL.md`), and test fixtures.
 
-- **Comment only what the code cannot say.** A comment is warranted when the
-  code is non-obvious and cannot be simplified without a cost to performance or
-  correctness: a performance optimization and its measured effect, a non-trivial
-  algorithm, an invariant the type system does not enforce, a workaround for an
-  external behavior. Clear, well-named, conceptually sound code needs no
-  comment. A comment that restates what readable code already says is removed.
-  The remedy for unclear code is clearer code, not a description of the unclear
-  code.
+- **Comment only what the code cannot say.** A comment is warranted for a
+  performance optimization and its measured effect, a non-trivial algorithm, an
+  invariant the type system does not enforce, or a workaround for an external
+  behavior. Do not restate readable code. Make unclear code clearer instead of
+  describing it.
 
 - **Comment punctuation.** A doc comment (`///`, `//!`) ends with a period. A
   line comment (`//`) ends with a period when it contains a verb or spans more
@@ -199,71 +112,44 @@ These rules apply to ALL Rust code in this workspace. They are non-negotiable.
   period on every comment except an inline block comment. The deviation is
   intentional.
 
-- **Use `Path` / `PathBuf` for filesystem paths, not `&str` / `String`.**
-  Function parameters, struct fields, and return values that represent a
-  filesystem path take `&Path` (borrow) or return/store `PathBuf` (owned). Don't
-  `to_string_lossy().into_owned()` a path just to fit it into a `String` field -
-  store the `PathBuf` directly and let the display happen at the rendering
-  boundary.
-  - RIGHT: `fn find_claude() -> Result<PathBuf, _>`,
-    `pub session_path: PathBuf`, `fn run(claude_bin: &Path, ...)`
-  - WRONG: `fn find_claude() -> Result<String, _>` followed by
-    `Command::new(&claude_bin)` - `Command::new` already accepts `AsRef<OsStr>`,
-    so the `String` round-trip is pure loss
-  - WRONG: `pub session_path: String` populated via
-    `path.to_string_lossy().into_owned()` - silently drops non-UTF-8 components
-    and forces every reader to re-parse
+- **Filesystem paths are `&Path` / `PathBuf`, not `&str` / `String`.** Store the
+  `PathBuf` and convert for display at the rendering boundary. `rust-embed`
+  asset keys, HTTP URI paths, JSON field paths, and strings built for human
+  display are not filesystem paths.
 
-  Exceptions (these are NOT filesystem paths and `&str` / `String` is correct):
-  - `rust-embed` asset keys (forced forward-slash regardless of host OS)
-  - HTTP URI paths (use `&str` / `String`, not `Path`)
-  - JSON field paths like `"message.content"`
-  - Display strings explicitly intended for human output (e.g. a `~`-substituted
-    config path)
-
-- **Rune boundary: borrow, don't take.** At the Rust/Rune boundary,
-  `rune::from_value::<T>()`, `FromValue::from_value`, and `Value::downcast` are
-  _takes_ when `T` is an `Any` type - and in Rune that includes `String`, `Vec`,
-  and `Object`, not just `#[derive(Any)]` externals. A take moves the contents
-  out of the value's storage cell. Cloning the `Value` first does not help: a
-  clone is a second handle to the same cell. If the script still holds a
-  variable referring to that cell, its next read fails at runtime with "Cannot
-  read, value has snapshot M-000000 and is not available for reading" - Rune's
-  use-after-move.
-
+- **Rune boundary: borrow, don't take.** `rune::from_value::<T>()`,
+  `FromValue::from_value`, and `Value::downcast` move the contents out of the
+  value's storage cell when `T` is an `Any` type, which in Rune includes
+  `String`, `Vec`, and `Object`. Cloning the `Value` first does not help,
+  because a clone is a second handle to the same cell. The script's next read of
+  that value fails at runtime.
   - Registered functions take `Ref<T>` / `Mut<T>` parameters (or `&Value`),
     never an `Any` type by value, and never accept a container whose elements
     they will downcast.
   - Read through `Value::borrow_ref::<T>()` / `borrow_string_ref()` and clone
-    what you need. Scalars (bool/int/float/char) are stored inline, not in a
-    cell: use `as_bool()`, `as_integer::<T>()`, `as_float()`.
+    what you need. Scalars are stored inline: use `as_bool()`,
+    `as_integer::<T>()`, `as_float()`.
   - `clippy.toml` disallows the take-shaped methods. A deliberate take needs
     `#[expect(clippy::disallowed_methods, reason = "...")]` where the reason
-    names why the take is safe - e.g. the function holds the only live handle,
-    as with a VM execution's return value.
+    names why the take is safe.
   - A Rust function newly exposed to Rune that accepts values gets a test
     asserting the caller's value is still readable afterwards (see
-    `parse_sessions_leaves_caller_values_readable` in gage-runtime).
+    `functions_leave_the_caller_values_readable` in gage-runtime).
 
-- Clap help text. `gage-cli/src/help_lint.rs` enforces the mechanical rules;
-  `cargo test -p gage-cli help_text` reports every violation.
-  - Short help is one line, and a rendered line is 79 columns or fewer. Detail
-    goes in long help after a blank line, and long help opens with the short
-    line.
-  - No trailing period, no backticks, no single quotes. A literal value takes
-    double quotes: `Close issue as "wontfix"`.
-  - No `the`. A noun already in context stands bare: `Add sessions to dataset`.
-    `a`/`an` stays when the noun is new: `Read message from a file`.
+- **Clap help text.** `gage-cli/src/help_lint.rs` enforces the mechanical rules,
+  and `cargo test -p gage-cli help_text` reports every violation. The lint
+  checks: a rendered line of 79 columns or fewer; long help that opens with the
+  short line and a blank line; no trailing period, backticks, single quotes, or
+  `the`; qualifiers in one trailing parenthetical, separated by `; `, drawn from
+  the lint's `TOPIC_ORDER` list in that order; `repeatable` on a repeating
+  option; and a default stated in the text and never rendered by clap. The rules
+  below are not checked:
+  - A literal value takes double quotes: `Close issue as "wontfix"`. `a`/`an`
+    stays when the noun is new: `Read message from a file`.
   - A positional that names the command's object reads `Xxx to yyy`:
     `Issues to close`, `Dataset to show`.
-  - Qualifiers go in one trailing parenthetical, topics separated by `; `, in
-    this order: value type, `repeatable`, `default x`. The types are
-    `ID or prefix`, `name, ID, or prefix`, `tag, ID, or prefix`, `path or name`,
-    `name or path`, and `glob`. Nothing else goes in a parenthetical.
-    `Scanner to run (name or path; repeatable)`,
-    `Number of items to show (default 20)`.
-  - A default is stated in the text, never by clap: set `hide_default_value` and
-    `hide_possible_values`, and list enum values in long help.
+  - Set `hide_default_value` and `hide_possible_values`, and list enum values in
+    long help.
   - No implementation vocabulary. A Git term appears only as the public spec,
     spelled out: `Git ref naming rules`.
   - A paragraph used by more than one arg is one `const` referenced through
@@ -282,30 +168,7 @@ These rules apply to ALL Rust code in this workspace. They are non-negotiable.
     list command puts its own filters first, then `--more`, `--all`, `--limit`,
     and `--full-id` last.
 
-References for the Rust rules:
-
-- [Rust API Guidelines C-CTOR] - constructors: `new`, `_with_foo`, `from_`,
-  domain verbs, `new`/`Default` parity
-- [Rust API Guidelines C-CASE] - casing and constructor name forms (RFC 430)
-- [Rust API Guidelines C-CONV] - ad-hoc conversion methods `as_`, `to_`, `into_`
-- [Rust API Guidelines C-GETTER] - no `get_` prefix; `_mut` suffix
-- [std::error Common Message Styles] - `expect` message style
-- [Rust Style Guide comments] - comment formatting and punctuation
-- [Rust Style Guide items] - `use` grouping and ordering
-- Clippy lints: [wrong_self_convention], [new_ret_no_self],
-  [should_implement_trait], [new_without_default]
-
-[Rust API Guidelines C-CTOR]: https://rust-lang.github.io/api-guidelines/predictability.html#constructors-are-static-inherent-methods-c-ctor
-[Rust API Guidelines C-CASE]: https://rust-lang.github.io/api-guidelines/naming.html#casing-conforms-to-rfc-430-c-case
-[Rust API Guidelines C-CONV]: https://rust-lang.github.io/api-guidelines/naming.html#ad-hoc-conversions-follow-as_-to_-into_-conventions-c-conv
-[Rust API Guidelines C-GETTER]: https://rust-lang.github.io/api-guidelines/naming.html#getter-names-follow-rust-convention-c-getter
-[std::error Common Message Styles]: https://doc.rust-lang.org/std/error/index.html#common-message-styles
 [Rust Style Guide comments]: https://doc.rust-lang.org/style-guide/index.html#comments
-[Rust Style Guide items]: https://doc.rust-lang.org/style-guide/items.html
-[wrong_self_convention]: https://rust-lang.github.io/rust-clippy/master/index.html#wrong_self_convention
-[new_ret_no_self]: https://rust-lang.github.io/rust-clippy/master/index.html#new_ret_no_self
-[should_implement_trait]: https://rust-lang.github.io/rust-clippy/master/index.html#should_implement_trait
-[new_without_default]: https://rust-lang.github.io/rust-clippy/master/index.html#new_without_default
 
 ## Store schema rules
 
@@ -313,10 +176,10 @@ These rules keep a store readable by every Gage build that touches it. A store
 is shared: `gage fetch` brings in objects other builds wrote, so an older build
 reading a newer object is a normal condition, not an upgrade-window edge case.
 
-When applying a rule, confirm with the user before applying it. There may be a
-reason for an exception. When raising the point, cite the rule below and explain
-why you intent to apply it. Proceed only after the user has explicitly granted
-permission.
+Confirm with the user before a `type` version bump, a generation bump, an
+`INDEX_SCHEMA_VERSION` bump, a `HOOK_VERSION` bump, or any departure from a rule
+below. Cite the rule and explain the reason. Apply the other rules without
+asking, and name each rule applied in the summary of the change.
 
 - **An attribute added to an existing type is optional and defaulted forever.**
   The field carries `#[serde(default, skip_serializing_if = ..)]` and every
