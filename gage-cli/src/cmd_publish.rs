@@ -1551,7 +1551,7 @@ fn resolve_shares(
 /// Every group in `groups` is one some filter lists. A group outside
 /// them is a usage error in clap's layout, since the argument accepts
 /// any text and the groups are the registry's to decide.
-fn check_groups(
+pub(crate) fn check_groups(
     command: &str,
     registry: &FilterRegistry,
     groups: &[String],

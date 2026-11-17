@@ -29,6 +29,7 @@ use tabled::{
 };
 
 use crate::cmd_note::count_rows;
+use crate::cmd_publish::check_groups;
 use crate::cmd_session::{column, run_query};
 use crate::cmd_tag::TAG_HELP;
 use crate::dialog::{self, DialogError};
@@ -45,15 +46,20 @@ version comparators separated by spaces, as \"secret >=1.2 <2, language\". Every
 have been published with every listed filter at an accepted version. Given whole; replaces \
 share's filters.";
 
+/// The paragraph on what `--group` selects.
+const GROUP_HELP: &str = "Requires every filter that lists group; see gage publish \
+--list-filters for groups each filter lists. Share stores selected filters and not group. A \
+filter --filters also names takes its entry from --filters. A group no filter lists is an error.";
+
 #[derive(Subcommand)]
 pub enum ShareCommand {
     /// Add a share
     ///
     /// Without sessions, adds an empty share. With sessions, adds a
-    /// share holding those sessions, each checked against
-    /// --filters before anything is written. Dialog prompts for each
-    /// of --description, --filters, and --tag that is not given; every
-    /// answer is optional.
+    /// share holding those sessions, each checked against filters
+    /// --group and --filters select before anything is written. Dialog
+    /// prompts for each of --description, filters, and --tag that is
+    /// not given; every answer is optional.
     Add(ShareAddArgs),
 
     /// List shares
@@ -97,6 +103,15 @@ pub struct ShareAddArgs {
     #[arg(short, long, value_name = "TEXT")]
     description: Option<String>,
 
+    /// Filter group to require (repeatable)
+    #[arg(
+        short,
+        long,
+        value_name = "GROUP",
+        long_help = format!("Filter group to require (repeatable)\n\n{GROUP_HELP}")
+    )]
+    group: Vec<String>,
+
     /// Filters every member was published with
     #[arg(
         short,
@@ -116,7 +131,8 @@ pub struct ShareAddArgs {
 
     /// Skip confirmation prompt
     ///
-    /// Without --description, --filters, or --tag, none is given.
+    /// Without --description, --group, --filters, or --tag, none is
+    /// given.
     #[arg(short, long)]
     yes: bool,
 }
@@ -220,12 +236,24 @@ pub fn add(args: ShareAddArgs) -> Result<(), CliError> {
         args.description.as_deref(),
         args.filters.as_deref(),
     )?;
+    // The registry is loaded only when a group needs it
+    let filters = if args.group.is_empty() {
+        given.filters
+    } else {
+        let registry = FilterRegistry::load();
+        check_groups(command, &registry, &args.group)?;
+        group_filters(&registry, &args.group, given.filters)
+    };
     let records = resolve_sessions(command, &store, &args.sessions)?;
     dialog::run("Add share", || {
         let tags = TagStore::from(&store);
+        let description = description_step(given.description, args.yes)?;
+        if !args.group.is_empty() {
+            dialog::step_list("Groups", args.group.iter().cloned())?;
+        }
         let attrs = ShareAttrs {
-            description: description_step(given.description, args.yes)?,
-            filters: filters_step(given.filters, args.yes)?,
+            description,
+            filters: filters_step(filters, args.yes)?,
         };
         let tag = tag_step(args.tag.clone(), args.yes)?;
         // A tag that cannot be added is reported before the share
@@ -279,7 +307,37 @@ fn description_step(given: Option<String>, yes: bool) -> Result<Option<String>, 
     }
 }
 
-/// The "Filters" step. No `--filters` entries is the option not given.
+/// The filters `groups` select in listing order, each once as a bare
+/// name, then each of `specs`, replacing a selected filter of the same
+/// name or following the rest.
+fn group_filters(registry: &FilterRegistry, groups: &[String], specs: Vec<String>) -> Vec<String> {
+    let mut filters: Vec<String> = Vec::new();
+    for group in groups {
+        for def in registry.group_members(group) {
+            if !filters.contains(&def.name) {
+                filters.push(def.name.clone());
+            }
+        }
+    }
+    for spec in specs {
+        match filters
+            .iter_mut()
+            .find(|f| spec_name(f) == spec_name(&spec))
+        {
+            Some(selected) => *selected = spec,
+            None => filters.push(spec),
+        }
+    }
+    filters
+}
+
+/// The filter name of a spec entry: its first token.
+fn spec_name(entry: &str) -> &str {
+    entry.split_whitespace().next().unwrap_or_default()
+}
+
+/// The "Filters" step. No filters from `--group` and `--filters` is
+/// filters not given.
 fn filters_step(given: Vec<String>, yes: bool) -> Result<Vec<String>, DialogError> {
     match InputStep::new(Some(given).filter(|f| !f.is_empty()), yes) {
         InputStep::Show(filters) => {
@@ -801,6 +859,66 @@ mod tests {
         };
         assert!(args.force);
         assert_eq!(args.description, None);
+    }
+
+    fn registry() -> FilterRegistry {
+        let builtin = std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../filters"));
+        FilterRegistry::load_from_roots(&builtin, vec![builtin.clone()])
+    }
+
+    /// `--group` repeats and sits beside `--filters`.
+    #[test]
+    fn group_is_repeatable_on_add() {
+        let ShareCommand::Add(args) =
+            share_command(&["add", "-g", "public", "--group", "reading", "-f", "secret"])
+        else {
+            panic!("not add");
+        };
+        assert_eq!(args.group, ["public", "reading"]);
+        assert_eq!(args.filters.as_deref(), Some("secret"));
+    }
+
+    /// A group selects its members as bare names, each once across
+    /// groups; a `--filters` entry replaces a member of the same name
+    /// in place, and any other entry follows.
+    #[test]
+    fn groups_expand_to_member_names_and_filters_entries_replace_them() {
+        let registry = registry();
+        let members: Vec<String> = registry
+            .group_members("public")
+            .iter()
+            .map(|d| d.name.clone())
+            .collect();
+        assert!(!members.is_empty(), "public has no members");
+
+        let groups = ["public".to_string(), "public".to_string()];
+        assert_eq!(group_filters(&registry, &groups, Vec::new()), members);
+
+        let first = members[0].clone();
+        let filters = group_filters(
+            &registry,
+            &groups[..1],
+            vec![format!("{first} >=1.2 <2"), "not-a-member".into()],
+        );
+        let mut expected = members.clone();
+        expected[0] = format!("{first} >=1.2 <2");
+        expected.push("not-a-member".into());
+        assert_eq!(filters, expected);
+    }
+
+    /// A group no filter lists fails before any dialog opens, as
+    /// `gage publish` reports it.
+    #[test]
+    fn unknown_group_is_a_usage_error() {
+        let rendered = match check_groups("gage share add", &registry(), &["everyone".into()]) {
+            Err(CliError::Usage(e)) => e.render().to_string(),
+            Err(_) => panic!("not a usage error"),
+            Ok(()) => panic!("everyone passed"),
+        };
+        assert!(
+            rendered.contains("invalid value 'everyone' for '--group <GROUP>'"),
+            "{rendered}"
+        );
     }
 
     /// A bad entry in the spec fails before any dialog opens.
