@@ -59,7 +59,7 @@ pub struct FetchArgs {
     /// Required when no object is named and remote records no fetch
     /// default. The fetch still previews the
     /// counts and asks to continue
-    #[arg(long, conflicts_with = "objects")]
+    #[arg(short, long, conflicts_with = "objects")]
     all: bool,
 
     /// List what remote has without fetching

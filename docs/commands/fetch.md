@@ -23,7 +23,7 @@ default. Pass `--all` to fetch the whole remote.
 
 | Option      | Description                                                        |
 | ----------- | ------------------------------------------------------------------ |
-| `--all`     | Fetch every object and tag from the remote. The fetch previews the counts and asks to continue. |
+| `-a, --all` | Fetch every object and tag from the remote. The fetch previews the counts and asks to continue. |
 | `--list`    | List what the remote has without fetching                          |
 | `-y, --yes` | Skip confirmation prompt                                           |
 
