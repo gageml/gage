@@ -3863,6 +3863,7 @@ mod tests {
                 id: "s1".into(),
                 value: serde_json::json!({}),
                 pending: false,
+                remote: false,
             },
             entries: Vec::new(),
             turns: Vec::new(),

@@ -244,6 +244,9 @@ pub struct Session {
     /// A pending publish working tree rather than a stored object; a
     /// note cannot target it
     pub pending: bool,
+    /// A session fetched from a remote and not merged; it is read
+    /// only, so a note cannot target it
+    pub remote: bool,
 }
 
 pub struct Entry {
@@ -433,6 +436,7 @@ mod tests {
                 id: "s1".to_string(),
                 value: json!({}),
                 pending: false,
+                remote: false,
             },
             entries: (1..=5)
                 .map(|line| Entry {

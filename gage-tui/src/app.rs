@@ -672,6 +672,9 @@ Add the session to the store to write notes for it.";
 
 const PENDING_NOTES_UNAVAILABLE: &str = "Notes cannot be added to pending publish sessions.";
 
+const REMOTE_NOTES_UNAVAILABLE: &str = "Notes cannot be added to sessions fetched from a remote. \
+Merge the remote with gage merge to write notes for its sessions.";
+
 fn new_editor(text: &str) -> TextArea {
     TextArea::new(text)
 }
@@ -724,6 +727,8 @@ impl AppState {
         // notes for it
         let (notes_writable, notes_notice) = if doc.session.pending {
             (false, PENDING_NOTES_UNAVAILABLE)
+        } else if doc.session.remote {
+            (false, REMOTE_NOTES_UNAVAILABLE)
         } else {
             (notes_writable, NOTES_UNAVAILABLE)
         };
@@ -2419,6 +2424,7 @@ mod tests {
                 id: "s1".into(),
                 value: serde_json::json!({}),
                 pending: false,
+                remote: false,
             },
             entries: Vec::new(),
             turns: Vec::new(),
@@ -2673,6 +2679,7 @@ mod tests {
                 id: "s1".into(),
                 value: serde_json::json!({}),
                 pending: false,
+                remote: false,
             },
             entries: (1..=count)
                 .map(|line| Entry {
@@ -3554,6 +3561,26 @@ mod tests {
             .expect("the notice should be on screen");
         assert!(rows[first + 1].contains("to the store"), "{text}");
         assert!(rows.iter().any(|r| r.contains("Enter dismiss")), "{text}");
+    }
+
+    /// A session fetched from a remote takes no notes: the note key
+    /// shows the remote notice, which names `gage merge`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_remote_session_refuses_notes_with_its_own_notice() {
+        let backend = test_backend().await;
+        let mut doc = doc_with_entries(1);
+        doc.session.remote = true;
+        let mut state = AppState::new(doc, &ViewOptions::default(), DocSource::Backend, true);
+        press(&mut state, &backend, KeyCode::Char('n'));
+        assert!(matches!(
+            state.dialog,
+            Dialog::NotesUnavailable(REMOTE_NOTES_UNAVAILABLE)
+        ));
+        let mut terminal = Terminal::new(TestBackend::new(70, 20)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let text = screen(&terminal);
+        assert!(text.contains("sessions fetched from a"), "{text}");
+        assert!(text.contains("gage merge"), "{text}");
     }
 
     /// A pending publish takes no notes even over the store backend:

@@ -141,6 +141,7 @@ struct NoteAttrs {
 impl NoteStore<'_> {
     /// Create a note. Returns the new note's id.
     pub fn create(&self, input: NoteInput) -> Result<String, StoreError> {
+        self.store.require_local()?;
         let target_sha = match input.target {
             Some(url) => Some(resolve_target(self.store, url)?),
             None => None,

@@ -46,10 +46,13 @@ enum Kind {
     Native { driver: Arc<dyn Driver> },
     /// The store: sessions are objects and notes target them. With
     /// `pending`, the sessions are the pending publish working trees,
-    /// which are not objects and take no notes.
+    /// which are not objects and take no notes. With `remote`, the
+    /// store reads the objects fetched from a remote, which are read
+    /// only: their notes are shown and none is written.
     Stored {
         store: Arc<Mutex<Store>>,
         pending: bool,
+        remote: bool,
     },
 }
 
@@ -130,11 +133,17 @@ impl Backend {
 
     /// Over a store handle the caller shares with other readers.
     pub async fn shared(store: Arc<Mutex<Store>>) -> Backend {
+        let remote = store
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .stored_remote()
+            .is_some();
         Backend {
             ctx: ContextBuilder::new(Some(Arc::clone(&store))).build().await,
             kind: Kind::Stored {
                 store,
                 pending: false,
+                remote,
             },
             registry: Arc::new(DriverRegistry::builtin()),
         }
@@ -152,6 +161,7 @@ impl Backend {
             kind: Kind::Stored {
                 store,
                 pending: true,
+                remote: false,
             },
             registry: Arc::new(DriverRegistry::builtin()),
         }
@@ -162,10 +172,22 @@ impl Backend {
         matches!(self.kind, Kind::Native { .. })
     }
 
-    /// True when notes can be read and written: the store backend
-    /// over stored sessions
+    /// True when notes can be written: the store backend over the
+    /// store's own sessions
     pub fn supports_notes(&self) -> bool {
-        matches!(self.kind, Kind::Stored { pending: false, .. })
+        matches!(
+            self.kind,
+            Kind::Stored {
+                pending: false,
+                remote: false,
+                ..
+            }
+        )
+    }
+
+    /// True over the sessions fetched from a remote
+    fn is_remote(&self) -> bool {
+        matches!(self.kind, Kind::Stored { remote: true, .. })
     }
 
     /// True over the pending publish working trees
@@ -228,6 +250,7 @@ impl Backend {
             id: session_id.to_string(),
             value,
             pending: self.is_pending(),
+            remote: self.is_remote(),
         })
     }
 
@@ -673,15 +696,15 @@ impl Backend {
 
     fn store(&self) -> Result<MutexGuard<'_, Store>, Box<dyn Error>> {
         match &self.kind {
-            Kind::Stored {
-                store,
-                pending: false,
-            } => Ok(store
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())),
             Kind::Stored { pending: true, .. } => {
                 Err("notes cannot target a pending publish session".into())
             }
+            Kind::Stored { remote: true, .. } => {
+                Err("notes cannot target a session fetched from a remote".into())
+            }
+            Kind::Stored { store, .. } => Ok(store
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())),
             Kind::Native { .. } => Err("notes require a stored session".into()),
         }
     }

@@ -793,6 +793,21 @@ mod tests {
             Err(StoreError::ObjectNotFound(_))
         ));
 
+        // A note write through the handle is refused as a write to
+        // the remote's objects, whatever its target.
+        let refused = NoteStore::from(&remote).create(NoteInput {
+            name: "n",
+            value: NoteValue::Text("x".into()),
+            author: "user:test",
+            target: Some(&format!("note:{their_note}")),
+            metadata: None,
+            work_id: None,
+        });
+        assert!(
+            matches!(&refused, Err(StoreError::StoredRemoteWrite(name)) if name == "acme"),
+            "{refused:?}"
+        );
+
         let local = open(&ours).unwrap();
         assert_eq!(local.stored_remote(), None);
         assert_eq!(note_ids(&local), vec![our_note]);
