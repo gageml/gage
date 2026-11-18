@@ -566,18 +566,6 @@ impl Source for CodexSource {
         }))
     }
 
-    fn delete_native(&self, _native_id: &str) -> Result<(), DriverError> {
-        Err(DriverError::Other(
-            "deleting a Codex session is not supported".into(),
-        ))
-    }
-
-    fn move_native(&self, _native_id: &str, _project: &Path) -> Result<(), DriverError> {
-        Err(DriverError::Other(
-            "moving a Codex session is not supported".into(),
-        ))
-    }
-
     fn project_name(&self, path: &Path) -> Result<String, DriverError> {
         let canonical = match fs::canonicalize(path) {
             Ok(c) => c,

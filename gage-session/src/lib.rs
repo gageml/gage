@@ -465,14 +465,26 @@ pub trait Source: Send + Sync {
     fn open_native(&self, native_id: &str) -> Result<Box<dyn NativeSession>, DriverError>;
 
     /// Remove a native session and any content stored alongside it.
-    /// An unknown id is an error.
-    fn delete_native(&self, native_id: &str) -> Result<(), DriverError>;
+    /// An unknown id is an error. The default is that the source does
+    /// not delete sessions.
+    fn delete_native(&self, _native_id: &str) -> Result<(), DriverError> {
+        Err(DriverError::Other(format!(
+            "source {} does not delete sessions",
+            self.source()
+        )))
+    }
 
     /// Move a native session into the project at `project`, an existing
     /// directory, and record `project` as the session's working
     /// directory. An unknown id, a session already in that project, and
-    /// a destination that already holds the id are errors.
-    fn move_native(&self, native_id: &str, project: &Path) -> Result<(), DriverError>;
+    /// a destination that already holds the id are errors. The default
+    /// is that the source does not move sessions.
+    fn move_native(&self, _native_id: &str, _project: &Path) -> Result<(), DriverError> {
+        Err(DriverError::Other(format!(
+            "source {} does not move sessions",
+            self.source()
+        )))
+    }
 
     /// The project name this driver assigns to a directory. Matches
     /// the `project` column of the `session` table.
@@ -1088,12 +1100,6 @@ mod tests {
         fn open_native(&self, _native_id: &str) -> Result<Box<dyn NativeSession>, DriverError> {
             unimplemented!()
         }
-        fn delete_native(&self, _native_id: &str) -> Result<(), DriverError> {
-            unimplemented!()
-        }
-        fn move_native(&self, _native_id: &str, _project: &Path) -> Result<(), DriverError> {
-            unimplemented!()
-        }
         fn project_name(&self, _path: &Path) -> Result<String, DriverError> {
             unimplemented!()
         }
@@ -1110,5 +1116,20 @@ mod tests {
         let source = BareSource("claude:/tmp/foo".to_string());
         let err = source.is_session_live("abc").unwrap_err();
         assert!(matches!(err, SessionLiveError::Unknown(_)), "{err}");
+    }
+
+    #[test]
+    fn deleting_and_moving_a_session_default_to_refusals() {
+        let source = BareSource("claude:/tmp/foo".to_string());
+        let err = source.delete_native("abc").unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "source claude:/tmp/foo does not delete sessions"
+        );
+        let err = source.move_native("abc", Path::new("/tmp")).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "source claude:/tmp/foo does not move sessions"
+        );
     }
 }
