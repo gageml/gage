@@ -3,8 +3,8 @@
 //! The repository is a configured remote. With objects named, those
 //! objects and everything they link are fetched; with `--all`, every
 //! Gage ref the remote advertises is. With neither, the objects are
-//! the ones the remote records as its fetch default; a remote with
-//! none needs one of the two, or `--list` to see what the remote has
+//! the ones the remote records as its fetch default, and a remote
+//! with none is fetched whole. `--list` shows what the remote has
 //! without fetching.
 //!
 //! A fetch writes the remote's tracking refs and stops: no object of
@@ -51,14 +51,14 @@ pub struct FetchArgs {
     /// Tag names, object IDs, or unique ID prefixes as the remote
     /// has them. Everything an object links is fetched with it. With
     /// none, objects that remote records as its fetch default are
-    /// fetched; pass --all to fetch the whole remote
+    /// fetched, and a remote with no fetch default is fetched whole
     objects: Vec<String>,
 
     /// Fetch every object and tag from remote
     ///
-    /// Required when no object is named and remote records no fetch
-    /// default. The fetch still previews the
-    /// counts and asks to continue
+    /// Fetches the whole remote in place of its fetch default. A
+    /// remote that records no fetch default is fetched whole without
+    /// it. The fetch still previews the counts and asks to continue
     #[arg(short, long, conflicts_with = "objects")]
     all: bool,
 
@@ -86,8 +86,11 @@ pub fn main(args: FetchArgs) -> Result<(), CliError> {
             .map_err(CliError::from);
     }
     require_remote(&repository).context("gage fetch")?;
-    let objects = selected_objects(&remotes, &repository, args.objects, args.all, "fetch")
-        .context("gage fetch")?;
+    // A fetch changes no object of the store, so with nothing named
+    // and no fetch default it takes the whole remote
+    let objects = chosen_objects(&remotes, &repository, args.objects, args.all)
+        .context("gage fetch")?
+        .unwrap_or(Objects::All);
     let source = FetchSource::from(repository);
 
     // The dialog previews and confirms; the fetch runs after it, so
@@ -140,10 +143,10 @@ pub enum Objects {
     Named(Vec<String>),
 }
 
-/// The objects a run takes: every one under `--all`, the named ones,
-/// or with neither the fetch default of `repository`. A URL records
-/// no default, and a remote may record none; either is an error that
-/// names `verb`, the run's own word for what it does.
+/// The objects a merge or pull takes: every one under `--all`, the
+/// named ones, or with neither the fetch default of `repository`. A
+/// URL records no default, and a remote may record none; either is an
+/// error that names `verb`, the run's own word for what it does.
 pub fn selected_objects(
     remotes: &RemoteStore<'_>,
     repository: &Repository,
@@ -151,24 +154,36 @@ pub fn selected_objects(
     all: bool,
     verb: &str,
 ) -> anyhow::Result<Objects> {
+    chosen_objects(remotes, repository, objects, all)?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "name objects to {verb}, or pass --all to {verb} every object; \
+             gage fetch --list shows what a remote has"
+        )
+    })
+}
+
+/// The objects the arguments or the fetch default of `repository`
+/// choose: every one under `--all`, the named ones, or with neither
+/// the fetch default. `None` when nothing chooses: a URL records no
+/// default, and a remote may record none.
+fn chosen_objects(
+    remotes: &RemoteStore<'_>,
+    repository: &Repository,
+    objects: Vec<String>,
+    all: bool,
+) -> anyhow::Result<Option<Objects>> {
     if all {
-        return Ok(Objects::All);
+        return Ok(Some(Objects::All));
     }
     if !objects.is_empty() {
-        return Ok(Objects::Named(objects));
+        return Ok(Some(Objects::Named(objects)));
     }
     let default = if repository.is_remote() {
         remotes.get(repository.name())?.fetch
     } else {
         Vec::new()
     };
-    if default.is_empty() {
-        anyhow::bail!(
-            "name objects to {verb}, or pass --all to {verb} every object; \
-             gage fetch --list shows what a remote has"
-        );
-    }
-    Ok(Objects::Named(default))
+    Ok((!default.is_empty()).then_some(Objects::Named(default)))
 }
 
 /// Print what the remote advertises without fetching: its tags in
@@ -547,7 +562,8 @@ pub mod tests {
 
     /// With no object and no --all, a run takes the remote's fetch
     /// default as it was recorded. A remote with none and a URL have
-    /// no default.
+    /// no default: a merge or pull is refused, and nothing is chosen
+    /// for a fetch, which then takes the whole remote.
     #[test]
     fn a_run_with_no_object_takes_the_fetch_default_of_the_remote() {
         let tmp = tempfile::tempdir().unwrap();
@@ -572,6 +588,9 @@ pub mod tests {
         for none in ["bare", "/srv/url.git"] {
             let err = objects(none, false).err().unwrap().to_string();
             assert!(err.contains("name objects to fetch"), "{none}: {err}");
+            let repository = remotes.resolve(none).unwrap();
+            let chosen = chosen_objects(&remotes, &repository, Vec::new(), false).unwrap();
+            assert!(chosen.is_none(), "{none}");
         }
     }
 
