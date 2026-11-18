@@ -1,7 +1,7 @@
 //! `query`: SQL over the context the service was configured with,
-//! or over what the call names in its place, a native source or the
-//! objects fetched from a remote, either of which is read and never
-//! written.
+//! or over what the call names in its place, a native source, another
+//! store, or the objects fetched from a remote, each of which is read
+//! and never written.
 //!
 //! Every result is written once to the query cache as an Arrow IPC
 //! file named by a cursor, and every call returns one page of it. A
@@ -91,11 +91,11 @@ fn handle(
     })
 }
 
-/// The context `request` runs on: the configured one, for a `native`
-/// or `stored_remote` call a fresh one over what it names, or for a
-/// `publish` call a fresh one scoped to the pending publishes, listed
-/// on each call so the set is current. A call where the configuration
-/// does not provide for it is refused.
+/// The context `request` runs on: the configured one, for a `native`,
+/// `gage_store`, or `stored_remote` call a fresh one over what it
+/// names, or for a `publish` call a fresh one scoped to the pending
+/// publishes, listed on each call so the set is current. A call where
+/// the configuration does not provide for it is refused.
 async fn context_for(
     config: &QueryConfig,
     request: &QueryRequest<'_>,
@@ -106,9 +106,17 @@ async fn context_for(
             let config = source_config(config, "native")?;
             native_context(config, native).map(Arc::new)
         }
-        QueryRequest::StoredRemoteSql { remote, .. } => {
+        QueryRequest::StoreSql { gage_store, .. } => {
+            let config = source_config(config, "gage_store")?;
+            store_context(config, gage_store).await.map(Arc::new)
+        }
+        QueryRequest::StoredRemoteSql {
+            remote, gage_store, ..
+        } => {
             let config = source_config(config, "stored_remote")?;
-            stored_remote_context(config, remote).await.map(Arc::new)
+            stored_remote_context(config, *gage_store, remote)
+                .await
+                .map(Arc::new)
         }
         QueryRequest::PublishSql(_) => publish_context(config).await.map(Arc::new),
     }
@@ -135,16 +143,35 @@ fn native_context(config: &SourceConfig, native: &str) -> Result<SessionContext,
         .map_err(|e| McpError::invalid_params(format!("native {native}: {e}"), None))
 }
 
-/// A context over the objects fetched from `remote` in place of the
-/// main store's own. The store is opened on the remote's tracking
+/// A context over the store at `gage_store` in place of the main
+/// store, as `GAGE_STORE` names one for a command. The store is
+/// opened read only, so a store of another version is refused and not
+/// migrated. One that cannot be opened is an invalid request naming
+/// why.
+async fn store_context(
+    config: &SourceConfig,
+    gage_store: &str,
+) -> Result<SessionContext, McpError> {
+    let store = Store::open_read_only(Path::new(gage_store), &config.cache_root)
+        .map_err(|e| McpError::invalid_params(format!("gage_store {gage_store}: {e}"), None))?;
+    Ok(ContextBuilder::new(Some(Arc::new(Mutex::new(store))))
+        .build()
+        .await)
+}
+
+/// A context over the objects fetched from `remote` in place of a
+/// store's own: the store at `gage_store` when the call names one,
+/// else the main store. The store is opened on the remote's tracking
 /// refs, which are read and never written, and nothing is fetched. A
 /// remote that is not configured or was never fetched is an invalid
 /// request naming why.
 async fn stored_remote_context(
     config: &SourceConfig,
+    gage_store: Option<&str>,
     remote: &str,
 ) -> Result<SessionContext, McpError> {
-    let store = Store::open_stored_remote(&config.store, &config.cache_root, remote)
+    let path = gage_store.map_or(config.store.as_path(), Path::new);
+    let store = Store::open_stored_remote(path, &config.cache_root, remote)
         .map_err(|e| McpError::invalid_params(format!("stored_remote {remote}: {e}"), None))?;
     Ok(ContextBuilder::new(Some(Arc::new(Mutex::new(store))))
         .build()
@@ -170,20 +197,37 @@ async fn publish_context(config: &QueryConfig) -> Result<SessionContext, McpErro
 }
 
 /// One call: run new SQL over the sessions in scope, over a native
-/// source, over the objects fetched from a remote, or over the
-/// pending publishes, or read a page of a written result.
+/// source, over another store, over the objects fetched from a remote
+/// of the main store or of another, or over the pending publishes, or
+/// read a page of a written result.
 #[derive(Debug, PartialEq, Eq)]
 pub enum QueryRequest<'a> {
     Sql(&'a str),
-    NativeSql { native: &'a str, sql: &'a str },
-    StoredRemoteSql { remote: &'a str, sql: &'a str },
+    NativeSql {
+        native: &'a str,
+        sql: &'a str,
+    },
+    StoreSql {
+        gage_store: &'a str,
+        sql: &'a str,
+    },
+    StoredRemoteSql {
+        remote: &'a str,
+        gage_store: Option<&'a str>,
+        sql: &'a str,
+    },
     PublishSql(&'a str),
-    Page { cursor: &'a str, page: usize },
+    Page {
+        cursor: &'a str,
+        page: usize,
+    },
 }
 
 /// Exactly one of `sql` and `cursor` is given; `page` goes with
-/// `cursor` and defaults to 1; `publish`, `native`, and
-/// `stored_remote` go with `sql`, at most one of them.
+/// `cursor` and defaults to 1; `publish`, `native`, `gage_store`,
+/// and `stored_remote` go with `sql`. `native` and `publish` each
+/// stand alone; `gage_store` and `stored_remote` go together, the
+/// remote then being one of that store.
 pub fn parse_request(params: &JsonObject) -> Result<QueryRequest<'_>, McpError> {
     let sql = params.get("sql").and_then(|v| v.as_str());
     let cursor = params.get("cursor").and_then(|v| v.as_str());
@@ -191,13 +235,18 @@ pub fn parse_request(params: &JsonObject) -> Result<QueryRequest<'_>, McpError> 
     let publish = params.get("publish").and_then(|v| v.as_bool());
     let native = params.get("native").and_then(|v| v.as_str());
     let stored_remote = params.get("stored_remote").and_then(|v| v.as_str());
+    let gage_store = params.get("gage_store").and_then(|v| v.as_str());
     if publish.is_some() && sql.is_none() {
         return Err(McpError::invalid_params(
             "`publish` applies to `sql`, not `cursor`",
             None,
         ));
     }
-    for (name, given) in [("native", native), ("stored_remote", stored_remote)] {
+    for (name, given) in [
+        ("native", native),
+        ("stored_remote", stored_remote),
+        ("gage_store", gage_store),
+    ] {
         if given.is_some() && sql.is_none() {
             return Err(McpError::invalid_params(
                 format!("`{name}` applies to `sql`, not `cursor`"),
@@ -205,14 +254,21 @@ pub fn parse_request(params: &JsonObject) -> Result<QueryRequest<'_>, McpError> 
             ));
         }
     }
+    if gage_store == Some("") {
+        return Err(McpError::invalid_params(
+            "`gage_store` is empty: give the path of a store",
+            None,
+        ));
+    }
     let scopes = [
         native.is_some(),
-        stored_remote.is_some(),
+        stored_remote.is_some() || gage_store.is_some(),
         publish == Some(true),
     ];
     if scopes.into_iter().filter(|given| *given).count() > 1 {
         return Err(McpError::invalid_params(
-            "give one of `native`, `stored_remote`, and `publish`, not several",
+            "`native` and `publish` each stand alone: only `gage_store` and `stored_remote` \
+             go together",
             None,
         ));
     }
@@ -228,10 +284,15 @@ pub fn parse_request(params: &JsonObject) -> Result<QueryRequest<'_>, McpError> 
                 None,
             )),
             None if publish == Some(true) => Ok(QueryRequest::PublishSql(sql)),
-            None => Ok(match (native, stored_remote) {
-                (Some(native), _) => QueryRequest::NativeSql { native, sql },
-                (None, Some(remote)) => QueryRequest::StoredRemoteSql { remote, sql },
-                (None, None) => QueryRequest::Sql(sql),
+            None => Ok(match (native, stored_remote, gage_store) {
+                (Some(native), _, _) => QueryRequest::NativeSql { native, sql },
+                (None, Some(remote), gage_store) => QueryRequest::StoredRemoteSql {
+                    remote,
+                    gage_store,
+                    sql,
+                },
+                (None, None, Some(gage_store)) => QueryRequest::StoreSql { gage_store, sql },
+                (None, None, None) => QueryRequest::Sql(sql),
             }),
         },
         (None, Some(cursor)) => match page {
@@ -269,6 +330,7 @@ async fn execute_with_cap(
     match request {
         QueryRequest::Sql(sql)
         | QueryRequest::NativeSql { sql, .. }
+        | QueryRequest::StoreSql { sql, .. }
         | QueryRequest::StoredRemoteSql { sql, .. }
         | QueryRequest::PublishSql(sql) => {
             let df = match context.sql(sql).await {
@@ -806,6 +868,7 @@ mod tests {
         assert_eq!(properties["publish"]["type"], "boolean");
         assert_eq!(properties["native"]["type"], "string");
         assert_eq!(properties["stored_remote"]["type"], "string");
+        assert_eq!(properties["gage_store"]["type"], "string");
     }
 
     /// The help menu embedded in the description stays in sync with the
@@ -916,11 +979,12 @@ mod tests {
         assert_eq!(e.code, rmcp::model::ErrorCode::INVALID_PARAMS);
     }
 
-    /// `native` and `stored_remote` go with `sql` and name what the SQL
-    /// reads; with a cursor, beside `publish`, or together they are an
-    /// invalid request.
+    /// `native`, `gage_store`, and `stored_remote` go with `sql` and
+    /// name what the SQL reads. `gage_store` and `stored_remote` go
+    /// together; any of them with a cursor, any other pairing, and an
+    /// empty `gage_store` are an invalid request.
     #[test]
-    fn parse_request_reads_native_and_stored_remote_with_sql() {
+    fn parse_request_reads_the_named_source_with_sql() {
         let object = |v: serde_json::Value| match v {
             serde_json::Value::Object(o) => o,
             _ => unreachable!(),
@@ -929,6 +993,28 @@ mod tests {
             parse_request(&object(json!({"sql": "SELECT 1", "stored_remote": "acme"}))).unwrap(),
             QueryRequest::StoredRemoteSql {
                 remote: "acme",
+                gage_store: None,
+                sql: "SELECT 1"
+            }
+        );
+        assert_eq!(
+            parse_request(&object(
+                json!({"sql": "SELECT 1", "gage_store": "/srv/zuni.git"})
+            ))
+            .unwrap(),
+            QueryRequest::StoreSql {
+                gage_store: "/srv/zuni.git",
+                sql: "SELECT 1"
+            }
+        );
+        assert_eq!(
+            parse_request(&object(json!(
+                {"sql": "SELECT 1", "gage_store": "/srv/zuni.git", "stored_remote": "acme"}
+            )))
+            .unwrap(),
+            QueryRequest::StoredRemoteSql {
+                remote: "acme",
+                gage_store: Some("/srv/zuni.git"),
                 sql: "SELECT 1"
             }
         );
@@ -948,6 +1034,10 @@ mod tests {
             json!({"sql": "SELECT 1", "native": "claude:", "publish": true}),
             json!({"sql": "SELECT 1", "stored_remote": "acme", "publish": true}),
             json!({"sql": "SELECT 1", "native": "claude:", "stored_remote": "acme"}),
+            json!({"cursor": "c", "gage_store": "/srv/zuni.git"}),
+            json!({"sql": "SELECT 1", "gage_store": "/srv/zuni.git", "publish": true}),
+            json!({"sql": "SELECT 1", "gage_store": "/srv/zuni.git", "native": "claude:"}),
+            json!({"sql": "SELECT 1", "gage_store": ""}),
         ] {
             let e = parse_request(&object(bad.clone())).unwrap_err();
             assert_eq!(e.code, rmcp::model::ErrorCode::INVALID_PARAMS, "{bad}");
@@ -1015,6 +1105,7 @@ mod tests {
         };
         let request = QueryRequest::StoredRemoteSql {
             remote: "acme",
+            gage_store: None,
             sql: "SELECT value FROM note",
         };
         let named = context_for(&config, &request).await.unwrap();
@@ -1027,11 +1118,58 @@ mod tests {
         drop(named);
         assert_eq!(git(&["for-each-ref"]), refs_before);
 
+        // `gage_store` names another store to read in place of the
+        // configured one, and with `stored_remote` a remote of it.
+        let elsewhere = QueryConfig {
+            context: Arc::clone(&configured),
+            publish: None,
+            source: Some(SourceConfig {
+                store: dir.path().join("main.git"),
+                cache_root: cache_root.clone(),
+            }),
+        };
+        for (remote, expected, absent) in [
+            (None, "from the main store", "from the remote"),
+            (Some("acme"), "from the remote", "from the main store"),
+        ] {
+            let gage_store = ours.to_str().unwrap();
+            let sql = "SELECT value FROM note";
+            let request = match remote {
+                None => QueryRequest::StoreSql { gage_store, sql },
+                Some(remote) => QueryRequest::StoredRemoteSql {
+                    remote,
+                    gage_store: Some(gage_store),
+                    sql,
+                },
+            };
+            let named = context_for(&elsewhere, &request).await.unwrap();
+            let text = text_of(&execute(&named, &cache, request).await.unwrap());
+            assert!(text.contains(expected), "{text}");
+            assert!(!text.contains(absent), "{text}");
+        }
+        assert_eq!(git(&["for-each-ref"]), refs_before);
+        let missing = dir.path().join("missing.git");
+        let refused = context_for(
+            &elsewhere,
+            &QueryRequest::StoreSql {
+                gage_store: missing.to_str().unwrap(),
+                sql: "SELECT 1",
+            },
+        )
+        .await
+        .map(|_| ());
+        let Err(e) = refused else {
+            panic!("a gage_store that is not a store was accepted");
+        };
+        assert_eq!(e.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+        assert!(e.message.contains("gage_store"), "{}", e.message);
+
         for (remote, reason) in [("idle", "gage fetch idle"), ("nope", "remote not found")] {
             let refused = context_for(
                 &config,
                 &QueryRequest::StoredRemoteSql {
                     remote,
+                    gage_store: None,
                     sql: "SELECT 1",
                 },
             )
@@ -1052,6 +1190,11 @@ mod tests {
         for request in [
             QueryRequest::StoredRemoteSql {
                 remote: "acme",
+                gage_store: None,
+                sql: "SELECT 1",
+            },
+            QueryRequest::StoreSql {
+                gage_store: ours.to_str().unwrap(),
                 sql: "SELECT 1",
             },
             QueryRequest::NativeSql {
