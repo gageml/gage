@@ -24,7 +24,7 @@ records as its fetch default. Pass `--all` to pull the whole remote.
 
 | Option      | Description                                                        |
 | ----------- | ------------------------------------------------------------------ |
-| `--all`     | Pull every object and tag from the remote. The pull previews the counts and asks to continue. |
+| `-a, --all` | Pull every object and tag from the remote. The pull previews the counts and asks to continue. |
 | `--ours`    | Keep the local side on conflict                                    |
 | `--theirs`  | Take the remote side on conflict                                   |
 | `-y, --yes` | Skip confirmation prompt                                           |
