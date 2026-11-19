@@ -23,7 +23,7 @@ remote. A remote that has not been fetched is an error that names `gage fetch`.
 
 | Option      | Description                                                        |
 | ----------- | ------------------------------------------------------------------ |
-| `--all`     | Merge every fetched object and tag. The merge previews the counts and asks to continue. |
+| `-a, --all` | Merge every fetched object and tag. The merge previews the counts and asks to continue. |
 | `--ours`    | Keep the local side on conflict                                    |
 | `--theirs`  | Take the remote side on conflict                                   |
 | `-y, --yes` | Skip confirmation prompt                                           |

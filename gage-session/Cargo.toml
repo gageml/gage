@@ -12,7 +12,10 @@ datafusion = { workspace = true }
 indexmap = { version = "2", features = ["serde"] }
 regex = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true, features = ["raw_value"] }
+# `float_roundtrip` parses a float to the nearest double. Without it a
+# float of 16 or more digits can parse one step off and encode with a
+# different last digit.
+serde_json = { workspace = true, features = ["float_roundtrip", "raw_value"] }
 serde_json_path = "0.7"
 tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", optional = true }

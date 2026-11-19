@@ -17,6 +17,10 @@ description = "Page of the cursor's result to return, starting at 1 (default 1).
 type = "string"
 description = "Run sql over this native source instead of the main store, read only: a driver's scheme and a path, as in claude:<path> for the Claude Code sessions under <path>/projects or codex:<path> for the Codex sessions under <path>/sessions, and the scheme alone, claude: or codex:, for those in the default location. Goes with sql."
 
+[parameters.gage_store]
+type = "string"
+description = "Run sql over the Gage store at this path instead of the main store, read only: the path of a store, as the GAGE_STORE environment variable gives one to a gage command. Every table is present. With stored_remote, the remote is one of this store. Goes with sql."
+
 [parameters.stored_remote]
 type = "string"
 description = "Run sql over the objects fetched from this remote instead of the main store's own, read only: the name of a remote, whose objects gage fetch brought into the store without merging them. Every table is present. Nothing is fetched. Goes with sql."
@@ -43,7 +47,7 @@ functions' call signatures, the column and table semantics, the full-text query
 syntax, and the dialect limits. Read a topic with
 `SELECT full FROM help WHERE topic = '<topic>'`. The topics:
 
-source: reading a native source or a remote's fetched objects in place of the main store
+source: reading a native source, another store, or a remote's fetched objects in place of the main store
 message_text: full-text message search and its query syntax
 blame: the session call that wrote each line of a file
 json: reading raw, input_raw, result_raw, and content_schema

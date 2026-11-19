@@ -267,8 +267,9 @@ enum Command {
     /// Fetch objects from a remote
     ///
     /// Fetches the named objects and what they link, or the whole
-    /// remote with --all, and keeps them apart from the objects of
-    /// the store. `gage merge` merges what was fetched.
+    /// remote when none is named and the remote records no fetch
+    /// default, and keeps them apart from the objects of the store.
+    /// `gage merge` merges what was fetched.
     Fetch(cmd_fetch::FetchArgs),
 
     /// Merge fetched objects into store

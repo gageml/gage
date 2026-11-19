@@ -51,6 +51,9 @@ conventions in _[Keep a Changelog]_. Release versions use [semantic versioning].
   yet merged. `gage session list`, `view`, and `find`, `gage query`,
   `gage blame`, `gage index`, and `gage scan` accept it, as does the `query`
   tool through its `stored_remote` parameter
+- The `query` tool's `gage_store` parameter reads the store at a path in place
+  of the main store, as `GAGE_STORE` does for a command. With `stored_remote`,
+  the remote is one of that store
 - `gage scan --stored-remote` scans fetched sessions and writes its dataset,
   notes, and issues to the store. These objects are withheld until the sessions
   are merged: `gage push` refuses them and `gage backup` leaves them out

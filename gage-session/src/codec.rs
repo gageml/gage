@@ -476,6 +476,16 @@ mod tests {
         assert_eq!(decode("1E3").to_string(), "1000.0");
     }
 
+    /// A float in its shortest form comes back as written however
+    /// many digits that form has. Both numbers are from Claude Code
+    /// sessions.
+    #[test]
+    fn a_long_float_round_trips() {
+        for text in ["14.622697958000005", "9129.245015172533"] {
+            assert_eq!(decode(text).to_string(), text, "{text}");
+        }
+    }
+
     /// Pointers resolve through objects and arrays with the RFC 6901
     /// escapes, `pointer_mut` edits in place, and `remove` takes a
     /// member out while its siblings keep their order.

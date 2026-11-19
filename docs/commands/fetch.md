@@ -7,8 +7,8 @@ description:
 
 The `gage fetch` command fetches objects from a remote and keeps them apart
 from the objects of the store. It fetches the named objects and what they link,
-or the whole remote with `--all`. The store's own objects do not change until
-[`gage merge`](/docs/commands/merge) merges what was fetched.
+or the whole remote when no object is named. The store's own objects do not
+change until [`gage merge`](/docs/commands/merge) merges what was fetched.
 
 ```cli
 gage fetch [OPTIONS] <REMOTE> [OBJECTS]...
@@ -19,11 +19,12 @@ URL or path is not accepted, because a fetch is kept under the remote's name.
 Use [`gage pull`](/docs/commands/pull) to fetch and merge a URL in one run.
 Objects are tag names, object IDs, or unique ID prefixes as the remote has them.
 With no objects, the command fetches the objects the remote records as its fetch
-default. Pass `--all` to fetch the whole remote.
+default, and a remote that records no fetch default is fetched whole. Pass
+`--all` to fetch the whole remote in place of its fetch default.
 
 | Option      | Description                                                        |
 | ----------- | ------------------------------------------------------------------ |
-| `-a, --all` | Fetch every object and tag from the remote. The fetch previews the counts and asks to continue. |
+| `-a, --all` | Fetch every object and tag from the remote in place of its fetch default. The fetch previews the counts and asks to continue. |
 | `--list`    | List what the remote has without fetching                          |
 | `-y, --yes` | Skip confirmation prompt                                           |
 

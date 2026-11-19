@@ -62,10 +62,11 @@ fn help_schema() -> SchemaRef {
 const HELP: &[HelpTopic] = &[
     HelpTopic {
         topic: "source",
-        short: "reading a native source or a remote's fetched objects in place of the main store",
-        full: r#"A query reads one source. With none named it is the main store. Two parameters
+        short: "reading a native source, another store, or a remote's fetched objects in place of the main store",
+        full: r#"A query reads one source. With none named it is the main store. Three parameters
 of the query tool each name another, and the query then reads that source and
-nothing of the main store. Give one or the other, not both.
+nothing of the main store. native stands alone. gage_store and stored_remote go
+together, and the remote is then one of the store gage_store names.
 
 native, or --native on gage query, names a native source:
 
@@ -74,8 +75,13 @@ claude:         the Claude Code sessions in the default location
 codex:<path>    the Codex sessions under <path>/sessions
 codex:          the Codex sessions in the default location
 
+gage_store names another Gage store by its path, as the GAGE_STORE environment
+variable does for a gage command. Every store table is present, holding that
+store's sessions, notes, issues, scans, and datasets. A store of another version
+than this build's is refused.
+
 stored_remote, or --stored-remote on gage query, names a remote of the main
-store. The query reads the objects gage fetch brought from that remote, which
+store, or of the store gage_store names. The query reads the objects gage fetch brought from that remote, which
 are kept apart from the main store's own until gage merge merges them. Every
 store table is present, holding the remote's sessions, notes, issues, scans, and
 datasets. Nothing is fetched by a query: the rows are the remote as of the last
