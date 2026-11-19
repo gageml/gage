@@ -20,6 +20,10 @@ check:
 test:
     cargo test
 
+# Validate session drivers against upstream sessions (downloads them)
+validate *args:
+    cargo run -p gage-validate -- run {{args}}
+
 # Install Gage
 install:
     cargo install --path gage-cli

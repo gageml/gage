@@ -19,6 +19,7 @@ members = [
     "gage-session",
     "gage-store",
     "gage-tui",
+    "gage-validate",
 ]
 resolver = "2"
 

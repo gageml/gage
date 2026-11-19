@@ -2797,6 +2797,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "gage-validate"
+version = "0.4.0"
+dependencies = [
+ "arrow",
+ "clap",
+ "datafusion",
+ "gage-core",
+ "gage-registry",
+ "gage-session",
+ "gage-store",
+ "regex",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "toml 0.8.23",
+ "uuid",
+]
+
+[[package]]
 name = "generator"
 version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"

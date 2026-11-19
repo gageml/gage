@@ -1,0 +1,73 @@
+# The upstream sources of native session files a validation run
+# downloads. Nothing here is redistributed: each run fetches the
+# source's latest revision and reads the files in place. `license` is
+# the source's own statement, kept for the record.
+
+[[source]]
+name = "claude-code-log"
+harness = "claude"
+git = "https://github.com/daaain/claude-code-log"
+license = "MIT"
+include = ["test/test_data/real_projects/*/*.jsonl"]
+
+[[source]]
+name = "entire-claude"
+harness = "claude"
+git = "https://github.com/entireio/cli"
+license = "MIT"
+include = ["transcript/testdata/claude_full*.jsonl"]
+
+[[source]]
+name = "git-ai-claude"
+harness = "claude"
+git = "https://github.com/git-ai-project/git-ai"
+license = "Apache-2.0"
+include = [
+    "tests/fixtures/example-claude-code.jsonl",
+    "tests/fixtures/claude-*.jsonl",
+]
+
+[[source]]
+name = "agentsview-claude"
+harness = "claude"
+git = "https://github.com/wesm/agentsview"
+license = "MIT"
+include = ["internal/parser/testdata/claude/*.jsonl"]
+
+[[source]]
+name = "ctx-codex"
+harness = "codex"
+git = "https://github.com/ctxrs/ctx"
+license = "Apache-2.0"
+include = [
+    "tests/fixtures/provider-history/codex-*/**/*.jsonl",
+    "crates/ctx-history-provider-codex/src/codex/nativepath/tests/fixtures/*.jsonl",
+]
+
+[[source]]
+name = "ccusage-codex"
+harness = "codex"
+git = "https://github.com/ryoppippi/ccusage"
+license = "MIT"
+include = ["rust/crates/ccusage/tests/fixtures/codex/*.jsonl"]
+
+[[source]]
+name = "git-ai-codex"
+harness = "codex"
+git = "https://github.com/git-ai-project/git-ai"
+license = "Apache-2.0"
+include = ["tests/fixtures/codex-session-*.jsonl"]
+
+[[source]]
+name = "agentsview-codex"
+harness = "codex"
+git = "https://github.com/wesm/agentsview"
+license = "MIT"
+include = ["internal/parser/testdata/codex/*.jsonl"]
+
+[[source]]
+name = "entire-codex"
+harness = "codex"
+git = "https://github.com/entireio/cli"
+license = "MIT"
+include = ["transcript/testdata/codex_full.jsonl"]
