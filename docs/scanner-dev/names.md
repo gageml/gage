@@ -11,7 +11,7 @@ scan record, the logs, and the task list show the same pair.
 A scanner with one task names it `main`. There is nothing to tell apart, and the
 scanner name already says what the task is for.
 
-```rune
+```rust (rune)
 pub const SCANNER = #{
     name: "hello",
     tasks: #{ main: #{} },
@@ -28,7 +28,7 @@ each project's rule and manifest files, a `summarize_projects` task that
 writes project summary notes, and a `scan_sessions` task that reads those
 summaries and writes findings.
 
-```rune
+```rust (rune)
 pub const SCANNER = #{
     name: "code-review",
     tasks: #{

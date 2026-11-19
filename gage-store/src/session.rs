@@ -2487,7 +2487,10 @@ pub(crate) mod tests {
         assert!(reachable(&object_ref(&share), &second));
 
         let third = sessions.replace_from_dir(&write("a\nb\n")).unwrap();
-        assert_eq!(store.walk_parent_chain(&third).unwrap(), [third.clone()]);
+        assert_eq!(
+            store.walk_parent_chain(&third).unwrap(),
+            slice::from_ref(&third)
+        );
         assert_eq!(sessions.get(&id).unwrap().commit_sha, third);
         for old in [&first, &second] {
             assert!(!reachable(&object_ref(&id), old));

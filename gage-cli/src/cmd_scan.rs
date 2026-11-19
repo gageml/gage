@@ -2498,7 +2498,7 @@ mod tests {
             panic!("expected a selection of fetched sessions");
         };
         assert_eq!(remote, "acme");
-        assert_eq!(ids, &[fetched.id.clone()]);
+        assert_eq!(ids, std::slice::from_ref(&fetched.id));
 
         let Ok((commit, _)) = materialize_dataset(plan, "SCAN1", &store, &[], false).await else {
             panic!("the dataset was not written");

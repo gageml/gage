@@ -1044,7 +1044,7 @@ mod tests {
         let open = shares
             .create(&ShareAttrs::default(), slice::from_ref(&o))
             .unwrap();
-        assert_eq!(member_ids(&store, &open), [o.clone()]);
+        assert_eq!(member_ids(&store, &open), slice::from_ref(&o));
 
         // A bare name accepts a filter recorded without a version
         let lenient = shares

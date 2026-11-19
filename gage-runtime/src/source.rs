@@ -246,8 +246,6 @@ pub fn decode_name(name: &str) -> Vec<u8> {
 mod tests {
     use super::*;
 
-    /// A file marking a scanner directory whose tests are skipped
-
     fn write_scanner(dir: &Path, name: &str, source: &str) -> PathBuf {
         let path = dir.join(name);
         fs::create_dir_all(path.parent().unwrap()).unwrap();

@@ -1572,7 +1572,7 @@ mod tests {
         let grandchild = note(&store, "grandchild", Some(&format!("note:{child}")));
 
         let ids: Vec<String> = store
-            .link_closure(&[grandchild.clone()])
+            .link_closure(std::slice::from_ref(&grandchild))
             .unwrap()
             .into_iter()
             .map(|m| m.id)
@@ -1590,7 +1590,9 @@ mod tests {
 
         // A tombstone has no links, so the closure ends at it
         NoteStore::from(&store).delete(&child).unwrap();
-        let closure = store.link_closure(&[grandchild.clone()]).unwrap();
+        let closure = store
+            .link_closure(std::slice::from_ref(&grandchild))
+            .unwrap();
         let ids: Vec<&str> = closure.iter().map(|m| m.id.as_str()).collect();
         assert_eq!(ids, [grandchild.as_str(), child.as_str()]);
         assert!(closure[1].deleted);
@@ -1820,7 +1822,7 @@ mod tests {
         assert_eq!(object.header.created_ms, live.header.created_ms);
         assert_eq!(
             store.walk_parent_chain(&replaced).unwrap(),
-            [replaced.clone()]
+            std::slice::from_ref(&replaced)
         );
 
         let tomb = store.delete(&object, "test: delete").unwrap();

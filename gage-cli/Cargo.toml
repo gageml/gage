@@ -22,7 +22,6 @@ gage-index = { path = "../gage-index" }
 gage-log = { path = "../gage-log" }
 humantime = "2"
 libc = "0.2"
-notify = "8"
 strsim = "0.11"
 tabled = { version = "0.22", features = ["ansi"] }
 textwrap = "0.16"
@@ -38,7 +37,6 @@ gage-runtime = { path = "../gage-runtime" }
 gage-scan = { path = "../gage-scan" }
 gage-session = { path = "../gage-session" }
 gage-store = { path = "../gage-store" }
-num_cpus = "1"
 rand = "0.9"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
