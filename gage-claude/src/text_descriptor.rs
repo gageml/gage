@@ -173,7 +173,7 @@ mod tests {
     use gage_session::{EntryValue, TextValue, TypedValues};
 
     fn decoded(line: &str) -> EntryValue {
-        serde_json::from_str(line).unwrap()
+        line.parse().unwrap()
     }
 
     fn pointers(found: &TypedValues) -> Vec<String> {
@@ -282,7 +282,7 @@ mod tests {
             if line.trim().is_empty() {
                 continue;
             }
-            let Ok(value) = serde_json::from_str::<EntryValue>(line) else {
+            let Ok(value) = line.parse::<EntryValue>() else {
                 continue;
             };
             let every = all.text_values(&value);

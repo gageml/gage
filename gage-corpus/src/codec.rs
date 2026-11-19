@@ -28,7 +28,7 @@ impl EntryCodec for JsonlCodec {
     fn decode(&self, raw: &[u8]) -> Result<EntryValue, DriverError> {
         let text = str::from_utf8(raw)
             .map_err(|e| DriverError::Other(format!("entry is not UTF-8: {e}")))?;
-        match serde_json::from_str(text) {
+        match text.parse() {
             Ok(value) => Ok(value),
             Err(e) if is_torn_object(text, &e) => {
                 Ok(EntryValue::invalid_entry(&e.to_string(), text))

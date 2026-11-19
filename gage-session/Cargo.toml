@@ -13,8 +13,9 @@ indexmap = { version = "2", features = ["serde"] }
 regex = { workspace = true }
 serde = { workspace = true }
 # `float_roundtrip` parses a float to the nearest double. Without it a
-# float of 16 or more digits can parse one step off and encode with a
-# different last digit.
+# float of 16 or more digits can parse one step off, and its value as
+# a `serde_json::Value` prints with a different last digit than the
+# session has. `raw_value` writes an entry's number as its own text.
 serde_json = { workspace = true, features = ["float_roundtrip", "raw_value"] }
 serde_json_path = "0.7"
 tracing = { workspace = true }

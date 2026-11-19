@@ -101,6 +101,21 @@ mod tests {
         );
     }
 
+    /// A line's numbers encode as they were written. A harness in
+    /// JavaScript writes `0.000005` and `100000000000000000000`, which
+    /// are not the shortest forms, and other writers pad or use an
+    /// exponent.
+    #[test]
+    fn a_line_with_numbers_in_any_form_round_trips_byte_for_byte() {
+        let line = concat!(
+            r#"{"type":"assistant","costUSD":0.000005,"durationMs":100000000000000000000,"#,
+            r#""usage":{"input_tokens":12,"ratio":1.50,"scale":1E3,"tiny":1e-7,"#,
+            r#""zeros":[-0,-0.0,1.0,0.0000099]}}"#
+        );
+        let failures = round_trip_failures(line);
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
     /// A torn line, an object cut short with the next entry's bytes
     /// after it or with nothing after it, decodes to an invalid entry
     /// naming the error and holding the line, and encodes back to the

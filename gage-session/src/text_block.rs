@@ -480,7 +480,7 @@ mod tests {
     use super::*;
 
     fn entry(line: &str) -> EntryValue {
-        serde_json::from_str(line).unwrap()
+        line.parse().unwrap()
     }
 
     fn descriptor() -> TextDescriptor {
