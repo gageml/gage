@@ -235,7 +235,7 @@ pub struct BackupConfig {
     /// backup. `gage backup --native` replaces the list for one run;
     /// `--stored` skips it.
     #[serde(default)]
-    pub sources: Vec<String>,
+    pub native: Vec<String>,
 }
 
 /// Session storage settings.
@@ -509,7 +509,7 @@ mod tests {
     fn naming_the_default_driver_appends_to_a_config_and_keeps_its_text() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        let written = "# kept\n[backup]\nsources = [\"claude:\"]";
+        let written = "# kept\n[backup]\nnative = [\"claude:\"]";
         std::fs::write(&path, written).unwrap();
         assert!(Config::name_default_driver(&path, "claude").unwrap());
         let text = std::fs::read_to_string(&path).unwrap();
@@ -517,10 +517,7 @@ mod tests {
             text,
             format!("{written}\n\n[drivers]\ndefault = \"claude\"\n")
         );
-        assert_eq!(
-            Config::load_from(&path).unwrap().backup.sources,
-            ["claude:"]
-        );
+        assert_eq!(Config::load_from(&path).unwrap().backup.native, ["claude:"]);
     }
 
     #[test]
@@ -551,7 +548,7 @@ mod tests {
     fn setting_the_default_driver_replaces_a_named_one_and_keeps_the_text() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        let written = "# kept\n[drivers]\ndefault = \"claude\" # mine\n\n[backup]\nsources = []\n";
+        let written = "# kept\n[drivers]\ndefault = \"claude\" # mine\n\n[backup]\nnative = []\n";
         std::fs::write(&path, written).unwrap();
         assert!(Config::set_default_driver(&path, "codex").unwrap());
         assert_eq!(
