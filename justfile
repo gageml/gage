@@ -12,7 +12,7 @@ clippy:
 
 # Full verification gate: clippy, fmt, tests
 check:
-    cargo clippy -- -D warnings
+    cargo clippy --all-targets -- -D warnings
     cargo fmt
     cargo test
 
