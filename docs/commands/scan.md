@@ -40,6 +40,7 @@ scanner group, and sessions from the past 30 days capped at 20.
 | `--agent-jobs <N>`              | Agents to run at once across all tasks (default 8)                  |
 | `--invalidate`                  | Ignore prior work: scan every session in full and carry no notes forward |
 | `--ignore-missing-attachments`  | Start the scan when a required attachment is missing                |
+| `--ignore-missing-harness`      | Start the scan when the default driver's harness is missing         |
 | `-t, --tag <NAME>`              | Tag the new scan run                                                |
 | `--force-tag`                   | Move the tag if it exists                                           |
 | `--no-progress`                 | Print task output as it happens instead of the progress view        |
@@ -64,6 +65,12 @@ An existing dataset passed with `--dataset` is scanned as it is; use
 to prepare it. `--ignore-missing-attachments` lets a task that needs an
 attachment the dataset lacks run and fail on its own. Without it, the scan does
 not start.
+
+A scan asks the default driver whether its harness, such as Claude Code or
+Codex, is installed and logged in before it starts. `--ignore-missing-harness`
+skips that question, so a scan whose tasks start no agents runs without a
+harness. An agent that a task starts on a missing harness fails on its own.
+Without the option, the scan does not start.
 
 `--stored-remote` names a remote of the store. The command selects among the
 sessions that [`gage fetch`](/docs/commands/fetch) brought from that remote and

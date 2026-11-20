@@ -404,6 +404,10 @@ pub struct ScanConfig<'a> {
     /// attachment of the dataset. The miss is a warning instead of
     /// an error, and the task runs and fails on its own.
     pub ignore_missing_attachments: bool,
+    /// Run when the default driver's harness cannot start agents. The
+    /// driver is not asked before the scan starts. It is asked when
+    /// its first agent starts, and a refusal fails that agent alone.
+    pub ignore_missing_harness: bool,
 }
 
 /// What a finished scan wrote.
@@ -457,8 +461,13 @@ pub async fn scan(
     let attachment_warnings = check_attachments(store, config, scanners, &plan)?;
     // The default driver runs every agent whose model names no other,
     // so it is asked before anything is written. A driver a model
-    // names is asked when its first agent starts.
-    let default_driver = config.drivers.default();
+    // names is asked when its first agent starts, and so is the
+    // default driver of a scan that ignores a missing harness.
+    let default_driver = if config.ignore_missing_harness {
+        None
+    } else {
+        config.drivers.default()
+    };
     if let Some(driver) = &default_driver {
         driver.scan_ready().map_err(ScanError::NotReady)?;
     }
@@ -1350,6 +1359,7 @@ mod tests {
             cache_root: Some(root.with_file_name("cache")),
             invalidate: false,
             ignore_missing_attachments: false,
+            ignore_missing_harness: true,
         };
         let outcome = scan(store, &config, scanners, cancel, |e| events.push(e)).await;
         (outcome, events)
@@ -1976,6 +1986,7 @@ mod tests {
             cache_root: Some(tmp.path().join("cache")),
             invalidate: false,
             ignore_missing_attachments: false,
+            ignore_missing_harness: false,
         };
         let outcome = scan(
             &store,
@@ -2051,6 +2062,7 @@ mod tests {
             cache_root: Some(tmp.path().join("cache")),
             invalidate: false,
             ignore_missing_attachments: false,
+            ignore_missing_harness: false,
         };
         let outcome = scan(
             &store,
@@ -2105,6 +2117,7 @@ mod tests {
             cache_root: Some(tmp.path().join("cache")),
             invalidate: false,
             ignore_missing_attachments: false,
+            ignore_missing_harness: false,
         };
         let outcome = scan(
             &store,
@@ -2178,6 +2191,7 @@ mod tests {
             cache_root: Some(tmp.path().join("cache")),
             invalidate: false,
             ignore_missing_attachments: false,
+            ignore_missing_harness: false,
         };
         let outcome = scan(
             &store,
@@ -2249,6 +2263,7 @@ mod tests {
             cache_root: Some(tmp.path().join("cache")),
             invalidate: false,
             ignore_missing_attachments: false,
+            ignore_missing_harness: false,
         };
         let outcome = scan(
             &store,
@@ -2389,6 +2404,7 @@ mod tests {
             cache_root: Some(tmp.path().join("cache")),
             invalidate: false,
             ignore_missing_attachments: false,
+            ignore_missing_harness: false,
         };
         let outcome = scan(
             &store,
@@ -3145,6 +3161,7 @@ mod tests {
             cache_root: Some(tmp.path().join("cache")),
             invalidate: false,
             ignore_missing_attachments: false,
+            ignore_missing_harness: true,
         };
         let outcome = scan(
             &store,
@@ -3243,6 +3260,7 @@ mod tests {
             cache_root: Some(tmp.path().join("cache")),
             invalidate: false,
             ignore_missing_attachments: false,
+            ignore_missing_harness: true,
         };
         let outcome = scan(
             &store,
@@ -3304,6 +3322,7 @@ mod tests {
             cache_root: Some(tmp.path().join("cache")),
             invalidate: false,
             ignore_missing_attachments: false,
+            ignore_missing_harness: true,
         };
         let outcome = scan(
             &store,
@@ -3566,6 +3585,7 @@ mod tests {
             cache_root: Some(tmp.path().join("cache")),
             invalidate: false,
             ignore_missing_attachments: false,
+            ignore_missing_harness: true,
         };
         let mut events = Vec::new();
         let outcome = scan(
@@ -3799,6 +3819,7 @@ mod tests {
             cache_root: Some(tmp.path().join("cache")),
             invalidate: false,
             ignore_missing_attachments: false,
+            ignore_missing_harness: true,
         };
         let outcome = scan(
             &store,
@@ -3903,6 +3924,7 @@ mod tests {
             cache_root: Some(tmp.path().join("cache")),
             invalidate: false,
             ignore_missing_attachments: false,
+            ignore_missing_harness: true,
         };
         let outcome = scan(
             &store,
@@ -4090,6 +4112,7 @@ mod tests {
             cache_root: Some(tmp.path().join("cache")),
             invalidate: false,
             ignore_missing_attachments: false,
+            ignore_missing_harness: true,
         };
         let outcome = scan(
             &store,
@@ -4340,6 +4363,7 @@ mod tests {
                     cache_root: Some(root.with_file_name("cache")),
                     invalidate: false,
                     ignore_missing_attachments: false,
+                    ignore_missing_harness: true,
                 };
                 let outcome = scan(
                     store,
@@ -4593,6 +4617,7 @@ mod tests {
             cache_root: Some(tmp.path().join("cache")),
             invalidate: false,
             ignore_missing_attachments: false,
+            ignore_missing_harness: true,
         };
         let outcome = scan(
             &store,
@@ -4655,6 +4680,7 @@ mod tests {
             cache_root: Some(scans_dir.with_file_name("cache")),
             invalidate: false,
             ignore_missing_attachments: false,
+            ignore_missing_harness: true,
         };
         let mut events = Vec::new();
         let err = scan(
@@ -4740,6 +4766,7 @@ mod tests {
             cache_root: Some(tmp.path().join("cache")),
             invalidate: false,
             ignore_missing_attachments: false,
+            ignore_missing_harness: true,
         };
         let mut events = Vec::new();
         let outcome = scan(
@@ -4827,6 +4854,7 @@ mod tests {
             cache_root: Some(scans_dir.with_file_name("cache")),
             invalidate: false,
             ignore_missing_attachments: false,
+            ignore_missing_harness: false,
         };
         let mut events = Vec::new();
         let err = scan(
@@ -4841,6 +4869,111 @@ mod tests {
         assert_eq!(err.to_string(), "Not logged in. Run `login` first.");
         assert!(!scans_dir.exists(), "nothing is written before the check");
         assert!(events.is_empty(), "{events:?}");
+    }
+
+    /// A scan that ignores a missing harness does not ask its default
+    /// driver before it starts, so a scanner that starts no agent runs
+    /// on a driver that cannot start one.
+    #[tokio::test]
+    async fn a_scan_that_ignores_a_missing_harness_starts_without_asking_the_default_driver() {
+        let (_dir, compiled) = compile_source(HELLO);
+        let unready = Arc::new(NotReadyDriver::new());
+        let (tmp, store) = open_store();
+        let config = ScanConfig {
+            id: &new_uuid(),
+            scans_dir: &tmp.path().join("scans"),
+            gage_version: "test-version",
+            dataset: None,
+            jobs: 1,
+            agent_jobs: 1,
+            drivers: only(unready.clone()),
+            cache_root: Some(tmp.path().join("cache")),
+            invalidate: false,
+            ignore_missing_attachments: false,
+            ignore_missing_harness: true,
+        };
+        let mut events = Vec::new();
+        let outcome = scan(
+            &store,
+            &config,
+            &[compiled.unwrap()],
+            &CancellationToken::new(),
+            |e| events.push(e),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            outcome.attrs.tasks,
+            TaskCounts {
+                total: 1,
+                completed: 1,
+                failed: 0,
+            },
+            "{events:?}"
+        );
+        assert_eq!(unready.checks.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    /// With a missing harness ignored, the default driver is asked
+    /// when its first agent starts. Its refusal fails each agent with
+    /// the driver's own reason and leaves the scan running.
+    #[tokio::test]
+    async fn an_ignored_missing_harness_fails_its_agents_and_not_the_scan() {
+        const SCANNER: &str = r#"
+            use gage::call_agent;
+
+            pub const SCANNER = #{
+                name: "unready",
+                description: "Starts agents on a default driver that cannot start them",
+                tasks: #{ main: #{} },
+            };
+
+            pub async fn main() {
+                for _ in 0..2 {
+                    match call_agent("hello").model("medium").await {
+                        Ok(_) => println!("started"),
+                        Err(e) => println!("refused: {e:?}"),
+                    }
+                }
+            }
+        "#;
+
+        let (_dir, compiled) = compile_source(SCANNER);
+        let unready = Arc::new(NotReadyDriver::new());
+        let (tmp, store) = open_store();
+        let config = ScanConfig {
+            id: &new_uuid(),
+            scans_dir: &tmp.path().join("scans"),
+            gage_version: "test-version",
+            dataset: None,
+            jobs: 1,
+            agent_jobs: 8,
+            drivers: only(unready.clone()),
+            cache_root: Some(tmp.path().join("cache")),
+            invalidate: false,
+            ignore_missing_attachments: false,
+            ignore_missing_harness: true,
+        };
+        let mut events = Vec::new();
+        let outcome = scan(
+            &store,
+            &config,
+            &[compiled.unwrap()],
+            &CancellationToken::new(),
+            |e| events.push(e),
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome.attrs.tasks.failed, 0, "{events:?}");
+        let refused = r#"refused: Agent(General("Not logged in. Run `login` first."))"#;
+        assert_eq!(
+            outputs(&events),
+            [
+                &Output::Println(refused.into()),
+                &Output::Println(refused.into()),
+            ]
+        );
+        assert_eq!(unready.checks.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     /// An agent whose model carries a driver's scheme runs on that
@@ -4901,6 +5034,7 @@ mod tests {
             cache_root: Some(tmp.path().join("cache")),
             invalidate: false,
             ignore_missing_attachments: false,
+            ignore_missing_harness: true,
         };
         let outcome = scan(
             &store,
@@ -4979,6 +5113,7 @@ mod tests {
             cache_root: Some(tmp.path().join("cache")),
             invalidate: false,
             ignore_missing_attachments: false,
+            ignore_missing_harness: false,
         };
         let outcome = scan(
             &store,
@@ -5063,6 +5198,7 @@ mod tests {
                     cache_root: Some(root.with_file_name("cache")),
                     invalidate: false,
                     ignore_missing_attachments: false,
+                    ignore_missing_harness: true,
                 };
                 let outcome = scan(
                     store,
@@ -5207,6 +5343,7 @@ mod tests {
             cache_root: Some(tmp.path().join("cache")),
             invalidate: false,
             ignore_missing_attachments: false,
+            ignore_missing_harness: true,
         };
         let outcome = scan(
             &store,
@@ -5436,6 +5573,7 @@ mod tests {
             cache_root: Some(tmp.path().join("cache")),
             invalidate,
             ignore_missing_attachments: false,
+            ignore_missing_harness: true,
         };
         let outcome = scan(
             store,
@@ -6163,6 +6301,7 @@ mod tests {
             cache_root: Some(tmp.path().join("cache")),
             invalidate: false,
             ignore_missing_attachments: false,
+            ignore_missing_harness: true,
         };
         let outcome = scan(
             &store,
@@ -6247,6 +6386,7 @@ mod tests {
             cache_root: Some(tmp.path().join("cache")),
             invalidate: false,
             ignore_missing_attachments: false,
+            ignore_missing_harness: true,
         };
         let mut events = Vec::new();
         let outcome = scan(

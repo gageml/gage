@@ -73,6 +73,9 @@ conventions in _[Keep a Changelog]_. Release versions use [semantic versioning].
   to each session in one agent call
 - `gage scan list` and the scan view report a cost of "unknown" in place of
   `$0.00+` when no agent reported a cost
+- `gage scan --ignore-missing-harness` starts a scan when the default driver's
+  harness is not installed or not logged in. A scan whose tasks start no agents
+  then runs without a harness
 
 ### Fixes
 

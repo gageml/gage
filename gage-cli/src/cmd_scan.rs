@@ -276,6 +276,14 @@ pub struct ScanRunArgs {
     #[arg(long)]
     ignore_missing_attachments: bool,
 
+    /// Run when harness is missing
+    ///
+    /// A task that starts an agent on a harness that is not installed
+    /// or not logged in runs anyway, and the agent fails on its own.
+    /// Without this option the scan does not start.
+    #[arg(long)]
+    ignore_missing_harness: bool,
+
     /// Tag new scan run
     #[arg(short, long, value_name = "NAME", long_help = format!("Tag new scan run\n\n{TAG_HELP}"))]
     tag: Option<String>,
@@ -1613,6 +1621,7 @@ struct ScanPrep {
     agent_jobs: usize,
     invalidate: bool,
     ignore_missing_attachments: bool,
+    ignore_missing_harness: bool,
     /// The tag for the scan run, checked before the run starts
     tag: Option<String>,
     force_tag: bool,
@@ -1766,6 +1775,7 @@ async fn prepare_scan_dialog(
         agent_jobs: args.agent_jobs,
         invalidate: args.invalidate,
         ignore_missing_attachments: args.ignore_missing_attachments,
+        ignore_missing_harness: args.ignore_missing_harness,
         tag: args.tag,
         force_tag: args.force_tag,
         progress_ui,
@@ -1802,6 +1812,7 @@ async fn run_prepared(prep: ScanPrep, store: &Store) -> Result<(), CliError> {
         cache_root: None,
         invalidate: prep.invalidate,
         ignore_missing_attachments: prep.ignore_missing_attachments,
+        ignore_missing_harness: prep.ignore_missing_harness,
     };
     let result = if !prep.progress_ui {
         // Headless: scanner output streams to stdout as it happens,
