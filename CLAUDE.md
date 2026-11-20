@@ -1,10 +1,37 @@
 ## General rules
 
-- Push changes to a topic branch only. Never push to `main`, `gar1t-dev`, or
-  `release`.
+- Never push to `main`, `build`, or `release` without the user's approval.
 
 - Do not push without the user's approval. Approval covers the push it was
   given for and does not carry over to later pushes.
+
+## Branch and pull request rules
+
+Work reaches `main` through a feature branch and a pull request. The repository
+is managed with `jj`, where a branch is a bookmark.
+
+- **Start each piece of work from current `main`.** Run `jj git fetch`, then
+  `jj new main`.
+
+- **One feature branch per change.** Name the branch for the change in
+  lowercase words joined by hyphens: `codec-number-text`, `docs-refresh`. Create
+  it with `jj bookmark create <name> -r <commit>`.
+
+- **Push the feature branch, then open a pull request against `main`.** Push
+  with `jj git push --bookmark <name>`. The pull request check must
+  pass before the merge.
+
+- **Bring a branch up to date by rebasing it.** When `main` has moved, run
+  `jj rebase -b <name> -d main` and push the branch again. Do not merge `main`
+  into a feature branch.
+
+- **Merge through the pull request.** After the merge, run `jj git fetch` to
+  update local `main`. Do not move `main` locally and push it in place of a
+  pull request unless the user asks for that.
+
+- **Delete a merged branch.** Run `jj bookmark delete <name>`, then
+  `jj git push --deleted`. Deleting a remote branch is a push and needs the
+  user's approval.
 
 ## Design rules
 
