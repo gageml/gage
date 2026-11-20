@@ -389,6 +389,11 @@ impl InstallUi for SpinnerUi {
 
 #[cfg(test)]
 mod tests {
+    use gage_session::{
+        ContentSink, ContentSource, DriverError, NativeSession, Source, SourceOptions,
+        StoredSession, WrittenContent,
+    };
+
     use super::*;
 
     fn candidate(name: &str, harness: &str, installed: bool) -> Candidate {
@@ -399,14 +404,56 @@ mod tests {
         }
     }
 
-    /// Pi is a driver that reads and stores sessions and has no
-    /// harness for Gage to be set up in.
+    /// A driver that reads and stores a harness's sessions and sets
+    /// Gage up in nothing
+    struct ReadOnly;
+
+    impl Driver for ReadOnly {
+        fn name(&self) -> &'static str {
+            "readonly"
+        }
+        fn version(&self) -> &'static str {
+            "0"
+        }
+        fn schemes(&self) -> &'static [&'static str] {
+            &["readonly"]
+        }
+        fn open_source(&self, _options: &SourceOptions) -> Result<Box<dyn Source>, DriverError> {
+            Err(DriverError::Other("not used".into()))
+        }
+        fn split_session_url(&self, _session_url: &str) -> Result<(String, String), DriverError> {
+            Err(DriverError::Other("not used".into()))
+        }
+        fn write_native(
+            &self,
+            _session: &mut dyn NativeSession,
+            _sink: &mut dyn ContentSink,
+        ) -> Result<WrittenContent, DriverError> {
+            Err(DriverError::Other("not used".into()))
+        }
+        fn read_stored(
+            &self,
+            _native_id: String,
+            _content_format: &str,
+            _source: Box<dyn ContentSource>,
+        ) -> Result<Box<dyn StoredSession>, DriverError> {
+            Err(DriverError::Other("not used".into()))
+        }
+    }
+
+    /// Every bundled driver has a harness Gage is set up in.
+    #[test]
+    fn every_bundled_driver_is_a_candidate() {
+        let registry = DriverRegistry::builtin();
+        let names: Vec<String> = candidates(&registry).into_iter().map(|c| c.name).collect();
+        assert_eq!(names, ["claude", "codex", "pi"]);
+    }
+
     #[test]
     fn a_driver_with_no_harness_to_set_up_is_not_a_candidate() {
-        let registry = DriverRegistry::builtin();
-        assert!(registry.for_name("pi").is_some());
-        let names: Vec<String> = candidates(&registry).into_iter().map(|c| c.name).collect();
-        assert_eq!(names, ["claude", "codex"]);
+        let registry = DriverRegistry::new().add(Arc::new(ReadOnly));
+        assert!(registry.for_name("readonly").is_some());
+        assert!(candidates(&registry).is_empty());
     }
 
     fn both() -> Vec<Candidate> {

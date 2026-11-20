@@ -25,6 +25,7 @@ use std::env;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{self, Path, PathBuf};
+use std::process::Child;
 use std::sync::{Arc, OnceLock};
 use std::time::SystemTime;
 
@@ -34,11 +35,14 @@ use gage_corpus::{
     CorpusSessionAttrs, Fingerprint, IndexStore, LockMode, SessionInfo, SessionReader,
     decoded_entries, format_project_slug, project_slug, write_derived,
 };
+use gage_plugin::{MCP_SERVER_NAME, write_plugin};
 use gage_session::{
-    ContentSchema, ContentSink, ContentSource, DecodedEntry, Derivation, Driver, DriverError,
-    DriverTables, Entry, EntryBody, EntryCodec, EntryValue, MaintenanceOutcome, MaintenanceStatus,
-    MessageTextFilter, MessageTextHit, NativeLookupError, NativeSession, SessionAttrs, Source,
-    SourceOptions, StoredSession, SummaryAttrs, ToolUse, WrittenContent, split_scheme,
+    AgentSession, AgentSpec, ContentSchema, ContentSink, ContentSource, DecodedEntry, Derivation,
+    Driver, DriverError, DriverStatus, DriverTables, Entry, EntryBody, EntryCodec, EntryValue,
+    Field, HarnessSession, HostContext, InstallReport, InstallUi, MaintenanceOutcome,
+    MaintenanceStatus, MessageTextFilter, MessageTextHit, ModelChoices, ModelSizes,
+    NativeLookupError, NativeSession, SessionAttrs, SkillSession, Source, SourceOptions,
+    StoredSession, SummaryAttrs, ToolUse, WrittenContent, split_scheme,
 };
 use serde_json::Value;
 
@@ -47,7 +51,11 @@ use crate::codec::codec;
 use crate::content_schema;
 use crate::corpus::{PiCorpus, working_dir};
 use crate::derive::{SUMMARY_VERSION, derive_entry, derive_session_from};
+use crate::harness::{self, HARNESS_NAME};
 use crate::home::Location;
+use crate::model::{DEFAULT_MODEL, default_sizes, model_choices, resolved_model};
+use crate::plugin;
+use crate::skill::skill_command;
 use crate::tool_use::ToolUseCollector;
 
 pub(crate) const NAME: &str = "pi";
@@ -64,13 +72,39 @@ const CONTENT_PATH: &str = "session.jsonl";
 /// The summary attribute holding the version of Pi's session format
 /// a session file is in
 const FORMAT_VERSION_ATTR: &str = "format_version";
+/// The variable in which Pi names the session to the shell commands
+/// the session runs
+const SESSION_ID_VAR: &str = "PI_SESSION_ID";
 
-#[derive(Default)]
-pub struct PiDriver;
+pub struct PiDriver {
+    /// The model each size resolves to
+    models: ModelSizes,
+}
 
 impl PiDriver {
     pub fn new() -> Self {
-        Self
+        Self::with_models(&ModelSizes::default())
+    }
+
+    /// A driver whose sizes resolve to `overrides` where it sets a
+    /// model, and to the defaults elsewhere.
+    pub fn with_models(overrides: &ModelSizes) -> Self {
+        Self {
+            models: default_sizes().overridden_by(overrides),
+        }
+    }
+
+    /// The model an agent runs on when its spec names none. Pi signs
+    /// in to each model provider on its own, so this is the model the
+    /// driver's sign-in checks ask about.
+    fn default_model(&self) -> String {
+        resolved_model(Some(DEFAULT_MODEL), &self.models)
+    }
+}
+
+impl Default for PiDriver {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -137,8 +171,151 @@ impl Driver for PiDriver {
         content_schema::content_schemas()
     }
 
+    /// Pi names the session in the environment of each shell command
+    /// the session runs. It names it nowhere for an MCP server: the
+    /// server's environment is Pi's own, and a tool call carries
+    /// nothing of the session. The session is one in the default
+    /// location.
+    fn current_session(&self, host: &HostContext<'_>) -> Result<Option<String>, DriverError> {
+        let Some(id) = host.var(SESSION_ID_VAR).filter(|id| !id.is_empty()) else {
+            return Ok(None);
+        };
+        let root = resolve_location("")?.root;
+        Ok(Some(format!("{NAME}:{}/{id}", root.display())))
+    }
+
+    fn model_sizes(&self) -> ModelSizes {
+        self.models.clone()
+    }
+
+    fn model_choices(&self) -> ModelChoices {
+        model_choices()
+    }
+
+    /// Spawn a `pi --mode json` child; see [`crate::agent`]. Requires
+    /// a tokio runtime.
+    fn start_agent(&self, spec: AgentSpec) -> Result<Box<dyn AgentSession>, DriverError> {
+        Ok(Box::new(crate::agent::start(spec, &self.models)?))
+    }
+
+    /// A scan's agents need `pi` and working credentials for the
+    /// provider of the model they run on. The model asked about is
+    /// the default one; an agent whose spec names a model of another
+    /// provider is refused by Pi when it starts.
+    fn scan_ready(&self) -> Result<(), DriverError> {
+        harness::check_auth(&self.default_model()).map_err(DriverError::Other)
+    }
+
+    /// Start the skill session. Gage must be installed in Pi at this
+    /// build's version, and a session that names a model needs
+    /// working credentials for it. Pi has no sandbox: a batch
+    /// session's `gage` commands run as the user.
+    fn start_skill_session(
+        &self,
+        session: &SkillSession<'_>,
+    ) -> Result<Box<dyn HarnessSession>, DriverError> {
+        let pi = harness::require_pi().map_err(DriverError::Other)?;
+        plugin::check_plugin().map_err(DriverError::Other)?;
+        if let Some(model) = session.model {
+            harness::check_auth(&resolved_model(Some(model), &self.models))
+                .map_err(DriverError::Other)?;
+        }
+        let child = skill_command(&pi, session, &self.models)
+            .spawn()
+            .map_err(DriverError::Io)?;
+        Ok(Box::new(PiHarnessSession(child)))
+    }
+
     fn harness_name(&self) -> &'static str {
-        "Pi"
+        HARNESS_NAME
+    }
+
+    fn harness_path(&self) -> Option<PathBuf> {
+        harness::find_pi()
+    }
+
+    /// The CLI, its sign-in for the default model's provider, and
+    /// Gage's install. A CLI that is not installed is absent, and
+    /// nothing more is asked of it.
+    fn status(&self) -> Result<DriverStatus, DriverError> {
+        let harness = harness::harness_status();
+        let (auth, install) = match &harness {
+            Field::Ok(info) => (
+                harness::auth_status(&info.path, &self.default_model()),
+                plugin::install_status(),
+            ),
+            _ => (Field::Unsupported, Field::Unsupported),
+        };
+        Ok(DriverStatus {
+            harness,
+            auth,
+            install,
+        })
+    }
+
+    /// Render the plugin as a Pi package, have Pi load it from there,
+    /// and register the MCP server. Pi loads a local package from
+    /// where it is and replaces a server registration of the same
+    /// name, so an install over an earlier one removes nothing first.
+    fn system_init(
+        &self,
+        mcp_cmd: &[&str],
+        ui: &mut dyn InstallUi,
+    ) -> Result<InstallReport, DriverError> {
+        if mcp_cmd.is_empty() {
+            return Err(DriverError::Other(
+                "system_init: mcp_cmd must name an executable".into(),
+            ));
+        }
+        let pi = harness::require_pi().map_err(DriverError::Other)?;
+        let dir = plugin::plugin_dir();
+        let mut notes = Vec::new();
+
+        ui.step("Writing Pi package files");
+        write_plugin(&dir, &plugin::target()).map_err(DriverError::Io)?;
+        notes.push(format!("package materialized at {}", dir.display()));
+        ui.step_done();
+
+        ui.step("Installing Pi package");
+        plugin::run_strict(&pi, &["install".as_ref(), dir.as_os_str()])?;
+        notes.push("package installed".to_string());
+        ui.step_done();
+
+        ui.step("Registering Pi MCP server");
+        plugin::run_strict(&pi, &plugin::mcp_add_args(mcp_cmd))?;
+        notes.push(format!("MCP server '{MCP_SERVER_NAME}' registered"));
+        ui.step_done();
+
+        Ok(InstallReport {
+            registered_as: MCP_SERVER_NAME.to_string(),
+            notes,
+        })
+    }
+
+    /// Remove the package from Pi's settings, the MCP server's
+    /// registration, and the package's files. Each removal Pi refuses
+    /// is a warning: before a first install nothing is there to
+    /// remove.
+    fn system_remove(&self, ui: &mut dyn InstallUi) -> Result<(), DriverError> {
+        let pi = harness::require_pi().map_err(DriverError::Other)?;
+        let dir = plugin::plugin_dir();
+        ui.step("Uninstalling Pi package");
+        let commands = [
+            vec!["remove".as_ref(), dir.as_os_str()],
+            plugin::mcp_remove_args().to_vec(),
+        ];
+        for args in commands {
+            if let Err(said) = plugin::run_lenient(&pi, &args)? {
+                ui.warn(&said);
+            }
+        }
+        if let Err(e) = fs::remove_dir_all(&dir)
+            && e.kind() != io::ErrorKind::NotFound
+        {
+            return Err(DriverError::Io(e));
+        }
+        ui.step_done();
+        Ok(())
     }
 
     /// The session file is stored as it is read here, whatever
@@ -250,6 +427,23 @@ pub struct PiSource {
 }
 
 impl PiSource {
+    /// The session an agent of this location ran as, by its id, for
+    /// storing it. `None` when Pi wrote no session file for the id.
+    pub(crate) fn agent_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<PiNativeSession>, DriverError> {
+        if !self.sessions()?.contains_key(session_id) {
+            return Ok(None);
+        }
+        Ok(Some(PiNativeSession {
+            source: self.session_url(session_id),
+            info: self.session(session_id)?,
+            store: Arc::clone(&self.store),
+            attrs: OnceCell::new(),
+        }))
+    }
+
     fn open(options: &SourceOptions) -> Result<Self, DriverError> {
         let source = options.url();
         let location = resolve_location(source)?;
@@ -492,6 +686,35 @@ pub struct PiNativeSession {
     attrs: OnceCell<CorpusSessionAttrs>,
 }
 
+impl PiNativeSession {
+    /// The session file
+    pub(crate) fn path(&self) -> &Path {
+        &self.info.src
+    }
+
+    /// Record `project` as the session's project in place of the slug
+    /// of the directory it started in.
+    pub(crate) fn set_project(&mut self, project: String) {
+        if let Some(attrs) = self.attrs.get_mut() {
+            attrs.project = project.clone();
+        }
+        self.info.project = project;
+    }
+}
+
+/// The skill session's `pi` process.
+struct PiHarnessSession(Child);
+
+impl HarnessSession for PiHarnessSession {
+    fn wait(&mut self) -> io::Result<i32> {
+        Ok(self.0.wait()?.code().unwrap_or(-1))
+    }
+
+    fn kill(&mut self) -> io::Result<()> {
+        self.0.kill()
+    }
+}
+
 impl NativeSession for PiNativeSession {
     fn id(&self) -> &str {
         &self.info.id
@@ -710,6 +933,91 @@ mod tests {
         let session = source.open_native("flat").unwrap();
         assert_eq!(session.attrs().project_name(), Some("-w-tree"));
         assert_eq!(session.attrs().title(), Some("Pick a name"));
+    }
+
+    /// A session one of Gage's agent runs wrote is the run's: a
+    /// listing leaves it out, and the run reads it by its id to store
+    /// it, under the project it was given.
+    #[test]
+    fn an_agent_runs_session_is_listed_only_with_agents_shown() {
+        let dir = tempfile::tempdir().unwrap();
+        let run_cwd = gage_core::config::gage_home()
+            .join("tmp")
+            .join("run-1")
+            .join("cwd");
+        let agent = V3_BRANCH.replace("/w/tree", run_cwd.to_str().unwrap());
+        assert_ne!(agent, V3_BRANCH);
+        seed(dir.path(), "agent", &agent);
+        seed(dir.path(), "users", V3_BRANCH);
+
+        let source = source_for(dir.path());
+        assert_eq!(source.find_native("").unwrap(), "users");
+
+        let mut options = options_for(dir.path(), dir.path());
+        options.show_agents(true);
+        let source = PiDriver::new().open_source(&options).unwrap();
+        assert_eq!(source.find_native("age").unwrap(), "agent");
+        let pi = source.as_any().downcast_ref::<PiSource>().unwrap();
+        assert!(pi.agent_session("missing").unwrap().is_none());
+        let mut session = pi.agent_session("agent").unwrap().unwrap();
+        assert_eq!(session.id(), "agent");
+        assert!(
+            session
+                .path()
+                .ends_with("2025-06-01T10-00-00-000Z_agent.jsonl")
+        );
+        session.set_project("given".to_string());
+        assert_eq!(session.attrs().project_name(), Some("given"));
+    }
+
+    #[test]
+    fn the_current_session_is_the_one_the_environment_names() {
+        let driver = PiDriver::new();
+        let none = driver
+            .current_session(&HostContext::with_vars(&[]))
+            .unwrap();
+        assert_eq!(none, None);
+
+        let vars = [(SESSION_ID_VAR, "s-env")];
+        let url = driver
+            .current_session(&HostContext::with_vars(&vars))
+            .unwrap()
+            .unwrap();
+        let (source, id) = driver.split_session_url(&url).unwrap();
+        assert_eq!(id, "s-env");
+        assert_eq!(
+            source,
+            format!("pi:{}", resolve_location("").unwrap().root.display())
+        );
+
+        // A tool call names no session, whatever it carries
+        let meta = serde_json::json!({"progressToken": 1});
+        let host = HostContext::with_vars(&[]).serving_call(meta.as_object().unwrap());
+        assert_eq!(driver.current_session(&host).unwrap(), None);
+    }
+
+    #[test]
+    fn model_sizes_are_the_defaults_with_the_configured_ones_over_them() {
+        let defaults = PiDriver::new().model_sizes();
+        assert_eq!(
+            defaults.small.as_deref(),
+            Some("anthropic/claude-haiku-4-5")
+        );
+        assert_eq!(
+            defaults.medium.as_deref(),
+            Some("anthropic/claude-sonnet-4-6")
+        );
+        let overrides = ModelSizes {
+            medium: Some("openai/gpt-6.1-terra".to_string()),
+            ..ModelSizes::default()
+        };
+        let driver = PiDriver::with_models(&overrides);
+        assert_eq!(
+            driver.model_sizes().medium.as_deref(),
+            Some("openai/gpt-6.1-terra")
+        );
+        assert_eq!(driver.model_sizes().small, defaults.small);
+        assert_eq!(driver.default_model(), "openai/gpt-6.1-terra");
     }
 
     #[test]

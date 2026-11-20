@@ -8,9 +8,7 @@ use std::process::Command;
 
 use gage_session::{SkillMode, SkillSession};
 
-use gage_plugin::skill_prompt;
-
-use crate::plugin::{SKILL_SIGIL, TOOL_PREFIX};
+use crate::plugin::{TOOL_PREFIX, target};
 use crate::proc::find_claude;
 
 /// The `claude` command that runs `session`. An interactive session
@@ -42,7 +40,7 @@ fn build_skill_command(claude_bin: &Path, session: &SkillSession<'_>) -> Command
         cmd.arg("--model").arg(model);
     }
     cmd.args(session.extra_args);
-    cmd.arg(skill_prompt(SKILL_SIGIL, session.skill, session.args));
+    cmd.arg(target().skill_prompt(session.skill, session.args));
     cmd
 }
 

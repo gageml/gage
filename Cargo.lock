@@ -2605,17 +2605,23 @@ name = "gage-pi"
 version = "0.4.0"
 dependencies = [
  "arrow",
+ "async-trait",
  "chrono",
  "gage-core",
  "gage-corpus",
+ "gage-plugin",
  "gage-session",
  "gage-store",
  "jsonschema",
+ "libc",
  "regex",
+ "serde",
  "serde_json",
  "serde_yaml",
  "tempfile",
+ "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

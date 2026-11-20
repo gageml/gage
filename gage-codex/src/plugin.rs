@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use gage_core::config::gage_home;
-use gage_plugin::{PLUGIN_ID, PluginTarget, VERSION};
+use gage_plugin::{PLUGIN_ID, PluginTarget, SkillNames, VERSION};
 use gage_session::{DriverError, Field, InstallInfo};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -17,9 +17,6 @@ use crate::harness::HARNESS_NAME;
 
 /// What Codex puts in front of an MCP tool's name: `mcp__<server>__`
 pub(crate) const TOOL_PREFIX: &str = "mcp__gage__";
-
-/// What invokes a skill in a Codex prompt
-pub(crate) const SKILL_SIGIL: &str = "$";
 
 /// The Gage variables the MCP server needs from the environment
 /// `gage init` ran in. Codex starts an MCP server with a short fixed
@@ -34,10 +31,11 @@ pub(crate) fn target() -> PluginTarget<'static> {
         agent: HARNESS_NAME,
         tool_prefix: TOOL_PREFIX,
         source_scheme: NAME,
-        skill_sigil: SKILL_SIGIL,
+        skill_names: SkillNames::Namespaced,
+        skill_invoke: "$",
         subagents: None,
         plugin_manifest: ".codex-plugin/plugin.json",
-        marketplace_manifest: ".agents/plugins/marketplace.json",
+        marketplace_manifest: Some(".agents/plugins/marketplace.json"),
     }
 }
 

@@ -45,15 +45,34 @@ fn handle(
                 None,
             ));
         };
+        let harness =
+            ctx.request_context.peer.peer_info().map(|client| {
+                format!("{} {}", client.client_info.name, client.client_info.version)
+            });
         // rmcp moves the request's `_meta` into the request context
         // before dispatch
-        execute(config, &ctx.request_context.meta.0, params)
+        execute(
+            config,
+            &ctx.request_context.meta.0,
+            harness.as_deref(),
+            params,
+        )
     })
 }
 
-/// Why a call is refused when its session cannot be named
-const NO_SESSION: &str = "issue_assign could not identify this session, so it has no holder to \
-     record. The harness did not name the session in the server's environment or in the call.";
+/// Why a call is refused when its session cannot be named. `harness`
+/// is the name and version the harness gave for itself when it
+/// connected, which tells the reader which harness names no session.
+fn no_session(harness: Option<&str>) -> String {
+    let harness = match harness {
+        Some(harness) => format!("The harness ({harness})"),
+        None => "The harness".to_string(),
+    };
+    format!(
+        "issue_assign could not identify this session, so it has no holder to record. \
+         {harness} did not name the session in the server's environment or in the call."
+    )
+}
 
 /// What one call asks for, parsed
 #[derive(Debug, PartialEq, Eq)]
@@ -65,19 +84,24 @@ enum Request {
 }
 
 /// Parse the call and apply it for the session the call comes from,
-/// named from the call's request `_meta`. A call that violates the
-/// declared parameters is an invalid-params error; a store refusal,
-/// and a session that cannot be named, is a result the model reads.
+/// named from the call's request `_meta`. `harness` is what the
+/// harness making the call said it is, when it said. A call that
+/// violates the declared parameters is an invalid-params error; a
+/// store refusal, and a session that cannot be named, is a result the
+/// model reads.
 pub fn execute(
     config: &IssueAssignConfig,
     meta: &JsonObject,
+    harness: Option<&str>,
     params: JsonObject,
 ) -> Result<CallToolResult, McpError> {
     let request = parse_request(&params)?;
     let session = match (config.current_session)(meta) {
         Ok(Some(session)) => session,
-        Ok(None) => return Ok(domain_error(NO_SESSION.to_string())),
-        Err(reason) => return Ok(domain_error(format!("{NO_SESSION} ({reason})"))),
+        Ok(None) => return Ok(domain_error(no_session(harness))),
+        Err(reason) => {
+            return Ok(domain_error(format!("{} ({reason})", no_session(harness))));
+        }
     };
     let session = session.as_str();
     let store = config.writer.store();
@@ -211,7 +235,7 @@ mod tests {
 
     /// `execute` for a call with no request `_meta`
     fn execute(config: &IssueAssignConfig, params: JsonObject) -> Result<CallToolResult, McpError> {
-        super::execute(config, &JsonObject::new(), params)
+        super::execute(config, &JsonObject::new(), None, params)
     }
 
     #[test]
@@ -228,17 +252,28 @@ mod tests {
         };
         let id = issue(&writer, "Something", IssueStatus::Open);
 
-        let r = super::execute(&config, &JsonObject::new(), object(json!({"issue": id}))).unwrap();
+        let r = super::execute(
+            &config,
+            &JsonObject::new(),
+            Some("pi 1.5.2"),
+            object(json!({"issue": id})),
+        )
+        .unwrap();
         assert_eq!(r.is_error, Some(true), "{}", text_of(&r));
         assert!(
             text_of(&r).contains("could not identify this session"),
             "{}",
             text_of(&r)
         );
+        assert!(
+            text_of(&r).contains("The harness (pi 1.5.2) did not name the session"),
+            "{}",
+            text_of(&r)
+        );
         assert_eq!(status(&writer, &id), IssueStatus::Open);
 
         let meta = object(json!({"session": "session a"}));
-        let r = super::execute(&config, &meta, object(json!({"issue": id}))).unwrap();
+        let r = super::execute(&config, &meta, None, object(json!({"issue": id}))).unwrap();
         assert_eq!(r.is_error, Some(false), "{}", text_of(&r));
         let store = writer.store.lock().unwrap();
         let full = IssueStore::from(&*store).get(&id).unwrap();

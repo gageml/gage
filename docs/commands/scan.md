@@ -66,8 +66,8 @@ to prepare it. `--ignore-missing-attachments` lets a task that needs an
 attachment the dataset lacks run and fail on its own. Without it, the scan does
 not start.
 
-A scan asks the default driver whether its harness, such as Claude Code or
-Codex, is installed and logged in before it starts. `--ignore-missing-harness`
+A scan asks the default driver whether its harness, such as Claude Code, Codex,
+or Pi, is installed and logged in before it starts. `--ignore-missing-harness`
 skips that question, so a scan whose tasks start no agents runs without a
 harness. An agent that a task starts on a missing harness fails on its own.
 Without the option, the scan does not start.

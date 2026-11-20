@@ -14,13 +14,28 @@ conventions in _[Keep a Changelog]_. Release versions use [semantic versioning].
 
 - The `pi:` session source reads Pi coding agent sessions: `gage session list`,
   `gage session view`, `gage session add`, and `gage query` work on them as they
-  do on Claude Code sessions. Gage reads and stores Pi sessions; it is not set
-  up in Pi and does not run agents on it
+  do on Claude Code sessions
+- `gage init` sets Gage up in Pi: it installs the Gage skills as a Pi package
+  and registers the Gage MCP server. The skills are named `gage-blame`,
+  `gage-publish`, and `gage-resolve` in Pi. `gage init --remove` removes both,
+  and `gage status` shows Pi's version, its sign-in, and the install
+- Pi can be the default driver. Scan agents run on Pi, and `gage resolve` and
+  `gage publish` start Pi sessions
+- The `drivers.pi.models` settings name the model of each size for Pi. They
+  default to Anthropic models
+- A `gage` command run from a Pi session's shell knows the session it runs in.
+  The `issue_assign` tool does not work in Pi, which does not name the session
+  to an MCP server
 
 **Sessions**
 
 - A session source can be a scheme alone, which is the default directory of that
   scheme: `--native claude` is `--native claude:`
+
+**Issues**
+
+- When the `issue_assign` tool cannot identify the session a call comes from,
+  its error names the coding agent that made the call and its version
 
 **Remotes**
 

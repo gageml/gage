@@ -52,13 +52,21 @@ impl Location {
                 sessions_dir: dir,
             });
         }
-        let root = var_path(AGENT_DIR_VAR)
-            .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".pi/agent")))?;
+        let root = agent_dir()?;
         Some(Self {
             sessions_dir: root.join(SESSIONS_DIR),
             root,
         })
     }
+}
+
+/// The Pi agent directory, where Pi keeps its settings, its MCP
+/// server registrations, and its sessions: the one the environment
+/// names, else `.pi/agent` under the user's home directory. `None`
+/// when the environment names neither.
+pub(crate) fn agent_dir() -> Option<PathBuf> {
+    var_path(AGENT_DIR_VAR)
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".pi/agent")))
 }
 
 fn var_path(name: &str) -> Option<PathBuf> {

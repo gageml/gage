@@ -112,5 +112,33 @@ with these differences:
 - A line that is not a JSON object fails the session with a read error. Pi
   itself passes over such a line.
 - `gage session move` and `gage session delete` do not apply to Pi sessions.
-- Gage is not set up in Pi and does not run scan agents on it. `gage init`
-  leaves Pi alone.
+
+### Gage in Pi
+
+[`gage init`](/docs/commands/init) sets Gage up in Pi, and Pi can be the
+default driver. Gage works in Pi as it does in Claude Code, with these
+differences:
+
+- The Gage skills are named `gage-blame`, `gage-publish`, and `gage-resolve`,
+  and a skill is invoked as `/skill:gage-blame`. Pi keeps the skills of every
+  package under one set of names.
+- The `issue_assign` tool does not work in a Pi session. Pi does not tell an MCP
+  server which session a tool call comes from, so the tool has no session to
+  record as the holder and returns an error that says so.
+- Pi signs in to each model provider on its own. `gage status` and the check a
+  scan makes before it starts ask about the provider of the `medium` model.
+- The model sizes default to Anthropic models. A Pi user of another provider
+  sets the sizes in the config file; see
+  [`gage config`](/docs/commands/config#settings). Pi names a model as
+  `<provider>/<id>`.
+- Pi has no sandbox and asks for no permission before a tool call. A scan agent
+  given no built-in tools can only call the tools its scanner serves. A scan
+  agent given `bash`, `write`, or `edit`, and a `gage resolve` or `gage publish`
+  session, act as the user.
+- A scan agent takes one prompt and no later message, and a limit on its turns
+  is not applied.
+- Pi adds the working directory to every system prompt. A scan agent whose
+  scanner asks for no system prompt gets one that says nothing else.
+- A scan agent's session is written under Pi's own sessions directory while the
+  agent runs, and is removed when the agent's session has been stored. Session
+  listings leave it out.

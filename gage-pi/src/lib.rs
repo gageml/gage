@@ -7,17 +7,23 @@
 //! entry, and from format version 2 on an entry names its parent, so
 //! one file holds every branch of the session.
 //!
-//! The driver reads and stores sessions. It does not delete or move
-//! them, install Gage into Pi, or run agents on it.
+//! The driver reads and stores sessions, installs Gage into Pi, and
+//! runs agents and skill sessions on it. It does not delete or move
+//! sessions.
 
+mod agent;
 mod body;
 mod codec;
 mod content_schema;
 mod corpus;
 mod derive;
 pub mod driver;
+mod harness;
 mod home;
+mod model;
+mod plugin;
 mod session_file;
+mod skill;
 mod text_descriptor;
 mod tool_use;
 

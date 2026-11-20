@@ -26,8 +26,8 @@ Windows support planned ---
 
 :::
 
-Set up Gage in your coding agent. Gage supports Claude Code and Codex, and sets
-itself up in each one that is installed:
+Set up Gage in your coding agent. Gage supports Claude Code, Codex, and Pi, and
+sets itself up in each one that is installed:
 
 ```cli
 gage init

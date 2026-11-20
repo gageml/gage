@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use gage_corpus::{Corpus, DerivedSession, Result, SessionInfo, project_slug};
 
+use crate::agent::is_agent_cwd;
 use crate::derive::{SUMMARY_VERSION, derive_session};
 use crate::driver::{CONTENT_FORMAT, NAME, SESSION_TYPE};
 use crate::home::Location;
@@ -67,7 +68,11 @@ impl Corpus for PiCorpus {
     /// within one working directory only, so a user who names sessions
     /// can give two the same id. The newest file has the id and the
     /// others are not listed.
-    fn sessions(&self, _show_agents: bool) -> io::Result<Vec<SessionInfo>> {
+    ///
+    /// A session one of Gage's own agent runs is writing is listed
+    /// only with `show_agents`. It is told by the working directory
+    /// its header names, which is the run's.
+    fn sessions(&self, show_agents: bool) -> io::Result<Vec<SessionInfo>> {
         let mut by_id: HashMap<String, SessionInfo> = HashMap::new();
         for file in session_files(&self.location.sessions_dir)? {
             let header = match read_header(&file.path) {
@@ -77,6 +82,9 @@ impl Corpus for PiCorpus {
                 Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
                 Err(e) => return Err(e),
             };
+            if !show_agents && header.cwd.as_deref().is_some_and(is_agent_cwd) {
+                continue;
+            }
             let session = SessionInfo {
                 id: file.id,
                 src: file.path,

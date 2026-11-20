@@ -77,7 +77,7 @@ fn bundled_with(models: &HashMap<String, ModelSizes>) -> Vec<Arc<dyn Driver>> {
     vec![
         Arc::new(ClaudeDriver::with_models(models_of("claude"))),
         Arc::new(CodexDriver::with_models(models_of("codex"))),
-        Arc::new(PiDriver::new()),
+        Arc::new(PiDriver::with_models(models_of("pi"))),
     ]
 }
 
@@ -379,9 +379,8 @@ mod tests {
         assert!(url.starts_with("codex:") && url.ends_with("/t2"), "{url}");
     }
 
-    /// Pi is a driver Gage reads and stores sessions of and does not
-    /// run inside, so it is routed to by scheme and names no session
-    /// as the current one.
+    /// A Pi source is routed to the Pi driver by its scheme, and a
+    /// session Pi names in the environment is the Pi driver's.
     #[test]
     fn a_pi_source_goes_to_the_pi_driver() {
         let registry = bundled_with(&HashMap::new())
@@ -395,7 +394,12 @@ mod tests {
         assert_eq!((source.as_str(), id.as_str()), ("pi:/a/agent", "s1"));
         let pi = registry.for_name("pi").unwrap();
         assert_eq!(pi.harness_name(), "Pi");
-        assert_eq!(pi.harness_path(), None);
+        let vars = [("PI_SESSION_ID", "s1")];
+        let url = registry
+            .current_session(&HostContext::with_vars(&vars))
+            .unwrap()
+            .unwrap();
+        assert!(url.starts_with("pi:") && url.ends_with("/s1"), "{url}");
     }
 
     #[test]

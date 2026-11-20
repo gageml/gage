@@ -6,10 +6,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use gage_core::config::gage_home;
-use gage_plugin::skill_prompt;
 use gage_session::{ModelSizes, SkillMode, SkillSession};
 
-use crate::plugin::SKILL_SIGIL;
+use crate::plugin::target;
 
 /// The `codex` command that runs `session`. The prompt is the skill's
 /// mention and its arguments. An interactive session is `codex` with
@@ -45,7 +44,7 @@ pub(crate) fn skill_command(
         cmd.arg("--model").arg(sizes.get(model).unwrap_or(model));
     }
     cmd.args(session.extra_args);
-    cmd.arg(skill_prompt(SKILL_SIGIL, session.skill, session.args));
+    cmd.arg(target().skill_prompt(session.skill, session.args));
     cmd
 }
 

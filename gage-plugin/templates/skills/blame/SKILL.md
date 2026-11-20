@@ -1,4 +1,7 @@
 ---
+{% if named_skills %}
+name: {{ skill_name("blame") }}
+{% endif %}
 description: |
   Consult the session record behind a piece of code. Use whenever the user
   asks why code is the way it is, what the reasoning or intent behind a
@@ -97,6 +100,6 @@ deliberate over it.
 
 ## Invoked directly
 
-`{{ invoke }}gage:blame FILE[:LINES] [question]` runs the procedure on the named file
+`{{ skill_invocation("blame") }} FILE[:LINES] [question]` runs the procedure on the named file
 and lines. With no lines, the whole file is blamed; with a question, the
 answer addresses it.

@@ -1,13 +1,10 @@
 //! Claude Code as the Gage plugin is rendered for it.
 
-use gage_plugin::{PluginTarget, SubagentModels};
+use gage_plugin::{PluginTarget, SkillNames, SubagentModels};
 
 /// What Claude Code puts in front of a Gage MCP tool's name: a
 /// plugin's MCP tools are `mcp__plugin_<plugin>_<server>__<tool>`.
 pub(crate) const TOOL_PREFIX: &str = "mcp__plugin_gage_gage__";
-
-/// What invokes a skill at the start of a Claude Code prompt
-pub(crate) const SKILL_SIGIL: &str = "/";
 
 /// The plugin for Claude Code: its sub-agents run on models pinned
 /// here, since a definition names one model and not a size.
@@ -16,13 +13,14 @@ pub(crate) fn target() -> PluginTarget<'static> {
         agent: crate::driver::HARNESS_NAME,
         tool_prefix: TOOL_PREFIX,
         source_scheme: crate::driver::NAME,
-        skill_sigil: SKILL_SIGIL,
+        skill_names: SkillNames::Namespaced,
+        skill_invoke: "/",
         subagents: Some(SubagentModels {
             reconcile: "claude-sonnet-4-6",
             redact: "claude-haiku-5-5",
         }),
         plugin_manifest: ".claude-plugin/plugin.json",
-        marketplace_manifest: ".claude-plugin/marketplace.json",
+        marketplace_manifest: Some(".claude-plugin/marketplace.json"),
     }
 }
 

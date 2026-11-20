@@ -7,9 +7,9 @@ description:
 
 The `gage init` command sets up Gage. It creates the store when there is none
 and installs the Gage plugin, an MCP server and skills, in each coding agent
-it can be set up in: Claude Code (`claude`) and Codex (`codex`). Run it again
-after upgrading Gage so each agent gets the plugin of the new version. Gage
-reads Pi sessions and is not set up in Pi.
+it can be set up in: Claude Code (`claude`), Codex (`codex`), and Pi (`pi`).
+Run it again after upgrading Gage so each agent gets the plugin of the new
+version.
 
 ```cli
 gage init [OPTIONS]
@@ -29,6 +29,14 @@ error.
 For Codex the plugin's MCP server is registered with its tools approved. Codex
 otherwise refuses a tool that changes anything when it runs without a person to
 ask.
+
+For Pi the plugin is installed in two parts. The skills are a Pi package that
+`gage init` writes under `~/.gage` and installs with `pi install`. Pi loads the
+package from that directory. The MCP server is registered with `pi mcp add`,
+with its tools declared to the model as Pi's own tools are. Pi keeps every skill
+under one set of names, so the Gage skills are named `gage-blame`,
+`gage-publish`, and `gage-resolve` in Pi, and a skill is invoked as
+`/skill:gage-blame`. See [Gage in Pi](/docs/sessions#gage-in-pi).
 
 ## Default driver
 

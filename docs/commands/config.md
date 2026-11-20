@@ -33,6 +33,9 @@ drivers.codex.models.large = "gpt-6.1-sol"
 drivers.codex.models.medium = "gpt-6.1-terra"
 drivers.codex.models.small = "gpt-6-luna"
 drivers.default = "claude"
+drivers.pi.models.large = "anthropic/claude-opus-4-8"
+drivers.pi.models.medium = "anthropic/claude-sonnet-4-6"
+drivers.pi.models.small = "anthropic/claude-haiku-4-5"
 issues.related_threshold = 0.2
 scanners.disable = []
 scanners.enable = []
@@ -93,3 +96,18 @@ size fails with Codex's message. Set the size to a model the plan has:
 medium = "gpt-5.6-terra"
 large = "gpt-5.6-terra"
 ```
+
+Pi reaches many model providers and names a model as `<provider>/<id>`. The
+sizes of the `pi` driver default to Anthropic models. A Pi user of another
+provider sets each size to a model of that provider, named as
+`pi --list-models` names it:
+
+```toml
+[drivers.pi.models]
+small = "anthropic/claude-haiku-5-5"
+medium = "anthropic/claude-sonnet-5-5"
+large = "anthropic/claude-opus-5-5"
+```
+
+`gage status` and the check a scan makes before it starts ask Pi whether it is
+signed in to the provider of the `medium` model.

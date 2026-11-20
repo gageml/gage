@@ -1,4 +1,7 @@
 ---
+{% if named_skills %}
+name: {{ skill_name("publish") }}
+{% endif %}
 description: |
     Publish a copy of a session for sharing. Use whenever the user asks to publish,
     share, redact, scrub, sanitize, or export a session, to prepare a session for a

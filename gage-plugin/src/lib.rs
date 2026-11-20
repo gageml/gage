@@ -5,16 +5,17 @@
 //! The files under `templates/` are Jinja templates. A driver
 //! describes its agent as a [`PluginTarget`]: what the agent is
 //! called, how it names Gage's MCP tools, which scheme its native
-//! sessions have, how a prompt invokes a skill, and whether it runs
-//! the plugin's sub-agents. [`write_plugin`] renders the templates for
+//! sessions have, how it names a skill and how a prompt invokes one,
+//! and whether it runs the plugin's sub-agents. [`write_plugin`] renders the templates for
 //! that target into a directory the agent installs from, and
 //! [`write_mcp_json`] writes the MCP server registration beside them.
 
+use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::Path;
 
-use minijinja::{AutoEscape, Environment, UndefinedBehavior, context};
+use minijinja::{AutoEscape, Environment, Error, ErrorKind, UndefinedBehavior, context};
 use rust_embed::RustEmbed;
 use serde_json::{Map, Value, json};
 
@@ -34,6 +35,11 @@ const MCP_PATH: &str = ".mcp.json";
 const PLUGIN_MANIFEST: &str = "plugin.json";
 const MARKETPLACE_MANIFEST: &str = "marketplace.json";
 const AGENTS_DIR: &str = "agents/";
+const SKILLS_DIR: &str = "skills/";
+
+/// The plugin's skills, by the names Gage gives them. An agent has
+/// its own name for each, which [`PluginTarget::skill_name`] gives.
+pub const SKILLS: &[&str] = &["blame", "publish", "resolve"];
 
 #[derive(RustEmbed)]
 #[folder = "templates/"]
@@ -49,8 +55,11 @@ pub struct PluginTarget<'a> {
     pub tool_prefix: &'a str,
     /// The scheme of the agent's native sessions, `claude`
     pub source_scheme: &'a str,
-    /// What invokes a skill at the start of a prompt, `/`
-    pub skill_sigil: &'a str,
+    /// How the agent names the plugin's skills
+    pub skill_names: SkillNames,
+    /// What a prompt puts in front of a skill's name to invoke it,
+    /// `/`
+    pub skill_invoke: &'a str,
     /// The models of the plugin's sub-agents. `None` for an agent
     /// that does not run them: the sub-agent definitions are left out
     /// and the skills do those steps in the main session.
@@ -59,8 +68,77 @@ pub struct PluginTarget<'a> {
     /// plugin root
     pub plugin_manifest: &'a str,
     /// Where the agent reads the marketplace manifest, relative to
-    /// the plugin root
-    pub marketplace_manifest: &'a str,
+    /// the plugin root. `None` for an agent that installs the plugin
+    /// from its own directory, with no marketplace.
+    pub marketplace_manifest: Option<&'a str>,
+}
+
+/// How an agent names the skills of a plugin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkillNames {
+    /// The agent names a skill by its plugin and its directory:
+    /// `gage:blame`
+    Namespaced,
+    /// The agent keeps every skill it has under one set of names and
+    /// reads a skill's from its `name` field, so the plugin's name is
+    /// part of the name written there: `gage-blame`
+    Global,
+}
+
+impl PluginTarget<'_> {
+    /// The name the agent has for the plugin's skill `skill`, one of
+    /// [`SKILLS`].
+    pub fn skill_name(&self, skill: &str) -> String {
+        match self.skill_names {
+            SkillNames::Namespaced => format!("{PLUGIN_NAME}:{skill}"),
+            SkillNames::Global => format!("{PLUGIN_NAME}-{skill}"),
+        }
+    }
+
+    /// What invokes the plugin's skill `skill` at the start of a
+    /// prompt: `/gage:blame`.
+    pub fn skill_invocation(&self, skill: &str) -> String {
+        format!("{}{}", self.skill_invoke, self.skill_name(skill))
+    }
+
+    /// The prompt that invokes the plugin's skill `skill` with
+    /// `args`: the skill's invocation, then each argument as one
+    /// shell word, so the skill can hand them to a `gage` command as
+    /// given.
+    pub fn skill_prompt(&self, skill: &str, args: &[String]) -> String {
+        let mut prompt = self.skill_invocation(skill);
+        for arg in args {
+            prompt.push(' ');
+            prompt.push_str(&shell_word(arg));
+        }
+        prompt
+    }
+
+    /// Where the file the template `name` renders goes, relative to
+    /// the plugin root. A manifest goes where the agent reads it, and
+    /// a skill of an agent with one set of skill names goes in a
+    /// directory of the name the agent has for it. `None` for a file
+    /// the agent does not take.
+    fn path_of(&self, name: &str) -> Option<String> {
+        if name.starts_with(AGENTS_DIR) && self.subagents.is_none() {
+            return None;
+        }
+        if name == PLUGIN_MANIFEST {
+            return Some(self.plugin_manifest.to_string());
+        }
+        if name == MARKETPLACE_MANIFEST {
+            return self.marketplace_manifest.map(String::from);
+        }
+        let skill_file = name
+            .strip_prefix(SKILLS_DIR)
+            .and_then(|rest| rest.split_once('/'));
+        match (self.skill_names, skill_file) {
+            (SkillNames::Global, Some((skill, file))) => {
+                Some(format!("{SKILLS_DIR}{}/{file}", self.skill_name(skill)))
+            }
+            _ => Some(name.to_string()),
+        }
+    }
 }
 
 /// The model each of the plugin's sub-agents runs on.
@@ -74,8 +152,8 @@ pub struct SubagentModels<'a> {
 
 /// Replace the contents of `root` with the plugin rendered for
 /// `target`: the skills, the sub-agent definitions when the target
-/// runs them, and the two manifests at the paths the target names.
-/// The directory is both the marketplace root and the plugin root.
+/// runs them, and the manifests at the paths the target names. The
+/// directory is both the marketplace root and the plugin root.
 pub fn write_plugin(root: &Path, target: &PluginTarget<'_>) -> io::Result<()> {
     if root.exists() {
         fs::remove_dir_all(root)?;
@@ -99,11 +177,17 @@ pub fn render(target: &PluginTarget<'_>) -> io::Result<Vec<(String, String)>> {
     env.set_keep_trailing_newline(true);
     env.set_trim_blocks(true);
     env.set_lstrip_blocks(true);
+    let names = skill_table(|skill| target.skill_name(skill));
+    env.add_function("skill_name", move |skill: &str| known_skill(&names, skill));
+    let invocations = skill_table(|skill| target.skill_invocation(skill));
+    env.add_function("skill_invocation", move |skill: &str| {
+        known_skill(&invocations, skill)
+    });
     let vars = context! {
         agent => target.agent,
         tool => target.tool_prefix,
         source => format!("{}:", target.source_scheme),
-        invoke => target.skill_sigil,
+        named_skills => target.skill_names == SkillNames::Global,
         subagents => target.subagents.is_some(),
         models => target.subagents.map(|m| context! {
             reconcile => m.reconcile,
@@ -113,23 +197,35 @@ pub fn render(target: &PluginTarget<'_>) -> io::Result<Vec<(String, String)>> {
     };
     let mut files = Vec::new();
     for name in Templates::iter() {
-        if name.starts_with(AGENTS_DIR) && target.subagents.is_none() {
+        let Some(path) = target.path_of(&name) else {
             continue;
-        }
+        };
         let file = Templates::get(&name).expect("iter names embedded files");
         let source = std::str::from_utf8(&file.data).map_err(io::Error::other)?;
         let text = env
             .render_str(source, &vars)
             .map_err(|e| io::Error::other(format!("plugin template {name}: {e}")))?;
-        let path = match name.as_ref() {
-            PLUGIN_MANIFEST => target.plugin_manifest.to_string(),
-            MARKETPLACE_MANIFEST => target.marketplace_manifest.to_string(),
-            other => other.to_string(),
-        };
         files.push((path, text));
     }
     files.sort();
     Ok(files)
+}
+
+/// What `of` gives for each of the plugin's skills, by the skill's
+/// name.
+fn skill_table(of: impl Fn(&str) -> String) -> HashMap<&'static str, String> {
+    SKILLS.iter().map(|skill| (*skill, of(skill))).collect()
+}
+
+/// The entry of `table` for `skill`. A template that names a skill
+/// the plugin does not have is a mistake in the template.
+fn known_skill(table: &HashMap<&'static str, String>, skill: &str) -> Result<String, Error> {
+    table.get(skill).cloned().ok_or_else(|| {
+        Error::new(
+            ErrorKind::InvalidOperation,
+            format!("{skill:?} is not a skill of the plugin"),
+        )
+    })
 }
 
 /// Write `.mcp.json` under `root`, registering the Gage MCP server
@@ -152,19 +248,6 @@ pub fn write_mcp_json(
     let text = serde_json::to_string_pretty(&doc).map_err(io::Error::other)?;
     fs::create_dir_all(root)?;
     fs::write(root.join(MCP_PATH), text)
-}
-
-/// The prompt that invokes the plugin's skill `skill` with `args` in
-/// an agent whose skill sigil is `sigil`: the sigil, the skill under
-/// the plugin's namespace, and each argument as one shell word, so
-/// the skill can hand them to a `gage` command as given.
-pub fn skill_prompt(sigil: &str, skill: &str, args: &[String]) -> String {
-    let mut prompt = format!("{sigil}{PLUGIN_NAME}:{skill}");
-    for arg in args {
-        prompt.push(' ');
-        prompt.push_str(&shell_word(arg));
-    }
-    prompt
 }
 
 /// `arg` as one POSIX shell word: as is when it is made of safe
@@ -191,13 +274,14 @@ mod tests {
             agent: "Claude Code",
             tool_prefix: "mcp__plugin_gage_gage__",
             source_scheme: "claude",
-            skill_sigil: "/",
+            skill_names: SkillNames::Namespaced,
+            skill_invoke: "/",
             subagents: Some(SubagentModels {
                 reconcile: "claude-sonnet-4-6",
                 redact: "claude-haiku-5-5",
             }),
             plugin_manifest: ".claude-plugin/plugin.json",
-            marketplace_manifest: ".claude-plugin/marketplace.json",
+            marketplace_manifest: Some(".claude-plugin/marketplace.json"),
         }
     }
 
@@ -207,10 +291,25 @@ mod tests {
             agent: "Codex",
             tool_prefix: "mcp__gage__",
             source_scheme: "codex",
-            skill_sigil: "$",
+            skill_names: SkillNames::Namespaced,
+            skill_invoke: "$",
             subagents: None,
             plugin_manifest: ".codex-plugin/plugin.json",
-            marketplace_manifest: ".agents/plugins/marketplace.json",
+            marketplace_manifest: Some(".agents/plugins/marketplace.json"),
+        }
+    }
+
+    /// Pi as its driver describes it
+    fn pi() -> PluginTarget<'static> {
+        PluginTarget {
+            agent: "Pi",
+            tool_prefix: "mcp__gage__",
+            source_scheme: "pi",
+            skill_names: SkillNames::Global,
+            skill_invoke: "/skill:",
+            subagents: None,
+            plugin_manifest: "package.json",
+            marketplace_manifest: None,
         }
     }
 
@@ -278,6 +377,41 @@ mod tests {
     #[test]
     fn the_codex_rendering_matches_its_snapshot() {
         assert_matches_snapshot("codex", &codex());
+    }
+
+    #[test]
+    fn the_pi_rendering_matches_its_snapshot() {
+        assert_matches_snapshot("pi", &pi());
+    }
+
+    /// An agent with one set of skill names gets each skill under the
+    /// plugin's name, in the directory, in the `name` field the agent
+    /// reads, and in the invocation the skill tells the user.
+    #[test]
+    fn a_skill_has_the_name_its_agent_gives_it() {
+        assert_eq!(claude().skill_name("blame"), "gage:blame");
+        assert_eq!(claude().skill_invocation("blame"), "/gage:blame");
+        assert_eq!(codex().skill_invocation("resolve"), "$gage:resolve");
+        assert_eq!(pi().skill_name("blame"), "gage-blame");
+        assert_eq!(pi().skill_invocation("resolve"), "/skill:gage-resolve");
+
+        let files = rendered(&pi());
+        for skill in SKILLS {
+            let text = &files[&format!("skills/gage-{skill}/SKILL.md")];
+            assert!(
+                text.starts_with(&format!("---\nname: gage-{skill}\n")),
+                "{skill}: {text}"
+            );
+        }
+        assert!(
+            files["skills/gage-blame/SKILL.md"]
+                .contains("`/skill:gage-blame FILE[:LINES] [question]`")
+        );
+        assert!(files.keys().all(|path| !path.contains("marketplace")));
+        for target in [claude(), codex()] {
+            let text = &rendered(&target)["skills/blame/SKILL.md"];
+            assert!(text.starts_with("---\ndescription:"), "{text}");
+        }
     }
 
     #[test]
@@ -365,9 +499,13 @@ mod tests {
             "a/b:c@d".to_string(),
         ];
         assert_eq!(
-            skill_prompt("/", "publish", &words),
+            claude().skill_prompt("publish", &words),
             r"/gage:publish --description 'For the blog'\''s readers' '' a/b:c@d"
         );
-        assert_eq!(skill_prompt("$", "resolve", &[]), "$gage:resolve");
+        assert_eq!(codex().skill_prompt("resolve", &[]), "$gage:resolve");
+        assert_eq!(
+            pi().skill_prompt("resolve", &words[3..]),
+            "/skill:gage-resolve a/b:c@d"
+        );
     }
 }

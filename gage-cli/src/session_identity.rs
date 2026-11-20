@@ -218,6 +218,10 @@ mod tests {
                 text_of(&refused).contains("could not identify this session"),
                 "{refused}"
             );
+            assert!(
+                text_of(&refused).contains("The harness (test 0)"),
+                "{refused}"
+            );
 
             let assigned = client
                 .request(

@@ -1,4 +1,7 @@
 ---
+{% if named_skills %}
+name: {{ skill_name("resolve") }}
+{% endif %}
 description:
   Resolve pending Gage issues, then take up an open issue and work it to a
   close.
