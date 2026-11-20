@@ -1,0 +1,45 @@
+# Run the verification gate (clippy, fmt, tests) on each pull request
+# and on each push to main. The toolchain comes from rust-toolchain.toml,
+# so a run here uses the same compiler as a local run.
+
+name: Check
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+# A newer push to the same pull request cancels the run in progress
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: check
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Rust
+        # With no arguments, installs the toolchain rust-toolchain.toml names
+        run: rustup toolchain install
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Test
+        run: cargo test --locked

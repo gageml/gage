@@ -19,7 +19,7 @@ exactly one backup remote exists.
 
 | Option                  | Description                                                        |
 | ----------------------- | ------------------------------------------------------------------ |
-| `-N, --native <SOURCE>`     | Add sessions from this source before the backup (repeatable). Replaces the configured `backup.sources` list for this run. |
+| `-N, --native <SOURCE>`     | Add sessions from this source before the backup (repeatable). Replaces the configured `backup.native` list for this run. |
 | `-S, --stored`          | Back up stored sessions only. No source is read first.            |
 | `--force`               | Replace diverged objects and tags on the remote                    |
 | `--prune`               | Delete objects and tags that are only on the remote                |
@@ -27,7 +27,7 @@ exactly one backup remote exists.
 
 A source is `SCHEME:PATH`, as described in
 [`gage session`](/docs/commands/session). The sources read by default are the
-`backup.sources` setting; see [`gage config`](/docs/commands/config#settings).
+`backup.native` setting; see [`gage config`](/docs/commands/config#settings).
 
 A diverged object is one the remote holds with a history the store's copy does
 not continue, as every object is after a store is deleted and rebuilt from its

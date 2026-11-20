@@ -25,7 +25,7 @@ Every setting is printed as `name = value` with its working value: the value in
 the config file, or the default when the file does not set it.
 
 ```toml
-backup.sources = []
+backup.native = []
 drivers.claude.models.large = "claude-opus-4-8"
 drivers.claude.models.medium = "claude-sonnet-4-6"
 drivers.claude.models.small = "claude-haiku-4-5"
@@ -69,7 +69,7 @@ is created with default values before the editor opens.
 | `scanners.disable`               | `[]`           | Scanners that never run by default. Takes precedence over `enable`. Entries may contain `*` wildcards.                                                                                  |
 | `issues.related_threshold`       | `0.2`          | Similarity score at or above which `gage issue show` lists an issue as related.                                                                                                         |
 | `storage.max_session_size`       | `"256MB"`      | Largest total content a single session may write to the store. Accepts a byte count or a `KB`, `MB`, or `GB` suffix. `--max-size` overrides it for one command.                         |
-| `backup.sources`                 | `[]`           | Session sources whose sessions `gage backup` adds to the store before each backup. `gage backup --native` replaces the list for one run.                                                |
+| `backup.native`                  | `[]`           | Session sources whose sessions `gage backup` adds to the store before each backup. `gage backup --native` replaces the list for one run.                                                |
 | `drivers.default`                | `"claude"`     | Driver that a session source with no scheme and a scanner agent model with no scheme go to. `gage init` writes it when the config file does not set it, and `gage init --default` replaces it. |
 | `drivers.<driver>.models.<size>` | driver default | Model that a driver uses for a model size. `<size>` is `small`, `medium`, or `large`. Scanner agents and `gage resolve` and `gage publish` sessions that name a size run on this model. |
 

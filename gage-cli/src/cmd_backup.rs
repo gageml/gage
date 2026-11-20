@@ -46,13 +46,13 @@ pub struct BackupArgs {
 
     /// Add sessions from SOURCE before backup (repeatable)
     ///
-    /// Replaces the configured backup.sources list for this run.
+    /// Replaces the configured backup.native list for this run.
     #[arg(
         short = 'N',
         long,
         value_name = "SOURCE",
         long_help = format!("Add sessions from SOURCE before backup (repeatable)\n\n\
-Replaces the configured backup.sources list for this run.\n\n{SOURCE_HELP}")
+Replaces the configured backup.native list for this run.\n\n{SOURCE_HELP}")
     )]
     native: Vec<String>,
 
@@ -91,7 +91,7 @@ pub async fn main(args: BackupArgs) -> Result<(), CliError> {
     let sources: Vec<String> = if args.stored {
         Vec::new()
     } else if args.native.is_empty() {
-        config.backup.sources.clone()
+        config.backup.native.clone()
     } else {
         args.native.clone()
     };

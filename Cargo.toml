@@ -83,6 +83,7 @@ indexing_slicing = "warn"
 # at opt-level 3. Workspace crates stay unoptimized and incremental.
 [profile.dev.package."*"]
 opt-level = 3
+debug = false
 
 # The distributed binary.
 [profile.release]

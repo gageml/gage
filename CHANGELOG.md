@@ -88,6 +88,8 @@ conventions in _[Keep a Changelog]_. Release versions use [semantic versioning].
 - `--native <SOURCE>` replaces `-s, --source` on every command that takes a
   session source. The `query` tool's `source` parameter is renamed `native` to
   match
+- The `backup.sources` setting is renamed `backup.native`. A config file that
+  sets `backup.sources` must be edited, because the old name is not read
 - `gage query` no longer reads another store through a `gage:<path>` source.
   `--stored-remote` reads a remote's fetched objects instead
 - `gage remote rename` is faster

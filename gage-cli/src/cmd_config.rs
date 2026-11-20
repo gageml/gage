@@ -177,7 +177,7 @@ mod tests {
         assert_eq!(
             names,
             [
-                "backup.sources",
+                "backup.native",
                 "drivers.default",
                 "issues.related_threshold",
                 "scanners.disable",
