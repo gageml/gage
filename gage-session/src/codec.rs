@@ -12,7 +12,9 @@ use std::fmt;
 use std::str::FromStr;
 
 use indexmap::IndexMap;
-use serde::de::{self, DeserializeOwned};
+use jstrict::Value as Parsed;
+use jstrict::parse::parse_str_value;
+use serde::de;
 use serde::ser::{self, SerializeMap, SerializeSeq};
 use serde::{Serialize, Serializer};
 use serde_json::value::RawValue;
@@ -408,12 +410,17 @@ impl FromStr for EntryValue {
     /// The one JSON value `text` holds, each number with its text.
     /// Text that is not JSON is the error `serde_json` gives for it.
     fn from_str(text: &str) -> Result<Self, Self::Err> {
-        if let Some(value) = Parser::new(text).document() {
-            return Ok(value);
+        // The parser's own error is dropped. `serde_json` names the
+        // same failure below, in the categories a codec tells a torn
+        // entry by.
+        if let Ok(value) = parse_str_value(text)
+            && let Some(entry) = entry_value(value, 0)
+        {
+            return Ok(entry);
         }
         serde_json::from_str::<Value>(text)?;
         Err(de::Error::custom(
-            "the entry parser does not read this JSON",
+            "entry is JSON to serde_json and not to the entry parser",
         ))
     }
 }
@@ -422,150 +429,42 @@ impl FromStr for EntryValue {
 /// its recursion limit.
 const MAX_DEPTH: usize = 127;
 
-/// Reads the structure of JSON text and has `serde_json` parse each
-/// string and number where it stands, which also says where the token
-/// ends, so a number's text is at hand. `serde_json` cannot read a
-/// whole entry and keep that text: its deserializer yields a number
-/// as a value, and its `arbitrary_precision` feature, which carries
-/// the digits, still rewrites `1E3` as `1e+3` and `-0` as `0`.
-///
-/// Every method is `None` when the text at the position is not what
-/// the method reads. The parser accepts the texts `serde_json` does,
-/// so the caller gets the error from `serde_json`.
-struct Parser<'a> {
-    text: &'a str,
-    pos: usize,
-}
-
-impl<'a> Parser<'a> {
-    fn new(text: &'a str) -> Self {
-        Self { text, pos: 0 }
-    }
-
-    fn document(mut self) -> Option<EntryValue> {
-        self.skip_whitespace();
-        let value = self.value(0)?;
-        self.skip_whitespace();
-        (self.pos == self.text.len()).then_some(value)
-    }
-
-    /// The value at the position, inside `depth` arrays and objects.
-    fn value(&mut self, depth: usize) -> Option<EntryValue> {
-        match self.peek()? {
-            b'{' => self.object(depth),
-            b'[' => self.array(depth),
-            b'"' => self.string().map(EntryValue::String),
-            b't' => self.literal("true", EntryValue::Bool(true)),
-            b'f' => self.literal("false", EntryValue::Bool(false)),
-            b'n' => self.literal("null", EntryValue::Null),
-            _ => self.number(),
+/// The entry value of a parsed value that sits inside `depth` arrays
+/// and objects. The parser keeps each number's text, every key an
+/// object is written with, and nesting of any depth. A key written
+/// twice keeps its first place and its last value here. `None` for
+/// what `serde_json` does not read: a number out of an `f64`'s range
+/// and nesting past [`MAX_DEPTH`].
+fn entry_value(value: Parsed, depth: usize) -> Option<EntryValue> {
+    Some(match value {
+        Parsed::Null => EntryValue::Null,
+        Parsed::Boolean(b) => EntryValue::Bool(b),
+        Parsed::Number(n) => {
+            n.as_str().parse::<Number>().ok()?;
+            EntryValue::Number(EntryNumber(n.as_str().into()))
         }
-    }
-
-    /// An object. A key written twice keeps its first place and its
-    /// last value.
-    fn object(&mut self, depth: usize) -> Option<EntryValue> {
-        if depth == MAX_DEPTH {
-            return None;
-        }
-        self.pos += 1;
-        let mut map = IndexMap::new();
-        self.skip_whitespace();
-        if self.eat(b'}') {
-            return Some(EntryValue::Object(map));
-        }
-        loop {
-            self.skip_whitespace();
-            let key = self.string()?;
-            self.skip_whitespace();
-            if !self.eat(b':') {
+        Parsed::String(s) => EntryValue::String(s.into_string()),
+        Parsed::Array(items) => {
+            if depth == MAX_DEPTH {
                 return None;
             }
-            self.skip_whitespace();
-            let value = self.value(depth + 1)?;
-            map.insert(key, value);
-            self.skip_whitespace();
-            if self.eat(b'}') {
-                return Some(EntryValue::Object(map));
-            }
-            if !self.eat(b',') {
+            let items = items.into_iter().map(|item| entry_value(item, depth + 1));
+            EntryValue::Array(items.collect::<Option<_>>()?)
+        }
+        Parsed::Object(object) => {
+            if depth == MAX_DEPTH {
                 return None;
             }
-        }
-    }
-
-    fn array(&mut self, depth: usize) -> Option<EntryValue> {
-        if depth == MAX_DEPTH {
-            return None;
-        }
-        self.pos += 1;
-        let mut items = Vec::new();
-        self.skip_whitespace();
-        if self.eat(b']') {
-            return Some(EntryValue::Array(items));
-        }
-        loop {
-            self.skip_whitespace();
-            items.push(self.value(depth + 1)?);
-            self.skip_whitespace();
-            if self.eat(b']') {
-                return Some(EntryValue::Array(items));
+            let mut map = IndexMap::with_capacity(object.len());
+            for entry in object {
+                map.insert(
+                    entry.key.into_string(),
+                    entry_value(entry.value, depth + 1)?,
+                );
             }
-            if !self.eat(b',') {
-                return None;
-            }
+            EntryValue::Object(map)
         }
-    }
-
-    fn string(&mut self) -> Option<String> {
-        if self.peek()? != b'"' {
-            return None;
-        }
-        self.token().map(|(string, _)| string)
-    }
-
-    fn literal(&mut self, word: &str, value: EntryValue) -> Option<EntryValue> {
-        let rest = self.text.get(self.pos..)?;
-        rest.starts_with(word).then(|| {
-            self.pos += word.len();
-            value
-        })
-    }
-
-    fn number(&mut self) -> Option<EntryValue> {
-        let (_, text) = self.token::<Number>()?;
-        Some(EntryValue::Number(EntryNumber(text.into())))
-    }
-
-    /// The token at the position as `serde_json` parses it, with its
-    /// text. The position moves past the token.
-    fn token<T: DeserializeOwned>(&mut self) -> Option<(T, &'a str)> {
-        let rest = self.text.get(self.pos..)?;
-        let mut tokens = serde_json::Deserializer::from_str(rest).into_iter::<T>();
-        let token = tokens.next()?.ok()?;
-        let text = rest.get(..tokens.byte_offset())?;
-        self.pos += text.len();
-        Some((token, text))
-    }
-
-    fn skip_whitespace(&mut self) {
-        while let Some(b' ' | b'\t' | b'\n' | b'\r') = self.peek() {
-            self.pos += 1;
-        }
-    }
-
-    /// Step over `byte` when it is next.
-    fn eat(&mut self, byte: u8) -> bool {
-        let found = self.peek() == Some(byte);
-        if found {
-            self.pos += 1;
-        }
-        found
-    }
-
-    fn peek(&self) -> Option<u8> {
-        self.text.as_bytes().get(self.pos).copied()
-    }
+    })
 }
 
 #[cfg(test)]
@@ -729,6 +628,56 @@ mod tests {
         }
     }
 
+    /// A string comes back as JavaScript writes it: the short
+    /// escapes, `\u` escapes for the other control characters, and
+    /// every other character as itself, DEL, the line separators,
+    /// and characters outside the basic plane among them. An escape
+    /// a writer need not use decodes to its character.
+    #[test]
+    fn a_string_keeps_its_text() {
+        for text in [
+            r#""line\nbreak \"quoted\" back\\slash\ttab\r\b\f""#,
+            r#""\u0000\u0001\u001f""#,
+            "\"\u{7f}\u{a0}\u{2028}\u{2029}\u{feff}\"",
+            "\"é 日本語 😀 𝒳\"",
+            r#"{"k\n\"é😀":"<>&'/"}"#,
+            "\"\"",
+        ] {
+            assert_eq!(decode(text).to_string(), text, "{text}");
+        }
+        assert_eq!(
+            decode(r#""\u007f\/é😀\u000a""#).to_string(),
+            "\"\u{7f}/é😀\\n\""
+        );
+    }
+
+    /// A line of megabytes decodes and comes back as written.
+    #[test]
+    fn a_long_line_round_trips() {
+        let chunk = r#"{"text":"some \"quoted\" text\n with é and 😀","n":[1.50,2,3E1]},"#;
+        let mut text = String::from(r#"{"type":"user","content":["#);
+        while text.len() < 4_000_000 {
+            text.push_str(chunk);
+        }
+        text.push_str(r#"0.000005]}"#);
+        assert_eq!(decode(&text).to_string(), text);
+    }
+
+    /// Nesting far past the limit is an error and not a stack
+    /// overflow, in JSON that closes and in JSON broken after the
+    /// nested part.
+    #[test]
+    fn very_deep_nesting_is_an_error() {
+        let depth = 1_000_000;
+        let closed = "[".repeat(depth) + &"]".repeat(depth);
+        let broken = format!("[{closed},x]");
+        let objects = r#"{"a":"#.repeat(depth) + "1" + &"}".repeat(depth);
+        for text in [closed, broken, objects] {
+            let err = text.parse::<EntryValue>().unwrap_err();
+            assert!(err.is_syntax(), "{err}");
+        }
+    }
+
     /// Text that is not one JSON value is the error `serde_json`
     /// gives for it: a number it does not read, a string it does not
     /// read, a broken structure, and nesting past its limit.
@@ -766,7 +715,19 @@ mod tests {
             r#"{1:1}"#,
             r#"{"a":1}{"b":2}"#,
             r#"{"a":"\ud83d"}"#,
+            r#"{"a":"\ud800x"}"#,
+            r#"{"a":"\udc00"}"#,
+            r#"{"a":"\ud800\ud800"}"#,
+            r#"{"a":"\ud83d\u0041"}"#,
             r#"{"a":"\x"}"#,
+            r#"{"a":"\u12"}"#,
+            "{\"a\":\"\u{0}\"}",
+            "\u{feff}{}",
+            "{}\u{a0}",
+            "[true\"a\"]",
+            "[\"a\"1]",
+            r#"{"a":"b""c":1}"#,
+            r#"{"type":"user","message":{"content":"Exit co{"type":"last-prompt"}"#,
             "\"open",
             "\"a\tb\"",
             too_deep.as_str(),
@@ -815,6 +776,29 @@ mod tests {
                 ("/b".to_string(), "6"),
             ]
         );
+    }
+
+    /// A number is not a string: the string walk yields the strings
+    /// of an entry and nothing for its numbers, in whatever form they
+    /// are written, so keeping a number's text adds nothing to the
+    /// text an entry is searched or redacted by.
+    #[test]
+    fn the_string_walk_leaves_numbers_out() {
+        let v = decode(concat!(
+            r#"{"cost":0.000005,"name":"n","scale":1E3,"zero":-0,"#,
+            r#""big":12345678901234567890,"list":[1.50,"s",7,{"k":"t","m":1e-7}],"#,
+            r#""digits":"0.000005"}"#
+        ));
+        assert_eq!(
+            v.strings(),
+            [
+                ("/name".to_string(), "n"),
+                ("/list/1".to_string(), "s"),
+                ("/list/3/k".to_string(), "t"),
+                ("/digits".to_string(), "0.000005"),
+            ]
+        );
+        assert_eq!(v.pointer("/cost").unwrap().as_str(), None);
     }
 
     /// A `serde_json::Value` converts both ways; the way in takes the

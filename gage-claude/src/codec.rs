@@ -116,6 +116,32 @@ mod tests {
         assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
+    /// A line's strings encode as JavaScript wrote them: short
+    /// escapes, `\u` escapes for other control characters, and every
+    /// other character as itself.
+    #[test]
+    fn a_line_with_escapes_and_wide_characters_round_trips_byte_for_byte() {
+        let line = concat!(
+            r#"{"type":"user","message":{"content":"a\nb \"q\" c\\d\te \u0001\u001f"#,
+            "\u{7f}\u{a0}\u{2028} é 日本語 😀",
+            r#""},"cwd":"C:\\Users\\é"}"#
+        );
+        let failures = round_trip_failures(line);
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    /// A string cut inside a surrogate pair, which JavaScript writes
+    /// as a lone `\ud83d`, is not text the codec decodes: the line is
+    /// an invalid entry and encodes back to its bytes.
+    #[test]
+    fn a_line_with_a_lone_surrogate_round_trips_as_an_invalid_entry() {
+        let codec = codec();
+        let line = r#"{"type":"user","message":{"content":"cut \ud83d"}}"#;
+        let value = codec.decode(line.as_bytes()).unwrap();
+        assert_eq!(value.invalid_entry_raw(), Some(line));
+        assert_eq!(codec.encode(&value).unwrap(), line.as_bytes());
+    }
+
     /// A torn line, an object cut short with the next entry's bytes
     /// after it or with nothing after it, decodes to an invalid entry
     /// naming the error and holding the line, and encodes back to the

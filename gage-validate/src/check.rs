@@ -5,13 +5,17 @@ use std::fmt;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::str;
 use std::sync::Arc;
 
 use arrow::array::Int64Array;
 use datafusion::prelude::SessionContext;
 use gage_registry::driver::DriverRegistry;
-use gage_session::{ContentSink, ContentSource, Derivation, Driver, Source, SourceOptions};
+use gage_session::{
+    ContentSink, ContentSource, Derivation, Driver, EntryValue, Source, SourceOptions,
+};
 use gage_store::{SessionStore, Store};
+use serde_json::Value;
 use tokio::runtime::Runtime;
 
 use crate::Error;
@@ -29,6 +33,9 @@ pub enum Check {
     StoredBytes,
     /// The stored session writes back the bytes the store holds
     Restore,
+    /// Each line reads to the value `serde_json` reads, or neither
+    /// reads it
+    ReaderAgreement,
     /// Each entry encodes to the native line it was decoded from
     Codec,
     /// The stored session yields its entry and tool use rows
@@ -44,6 +51,7 @@ impl fmt::Display for Check {
             Check::Store => "store",
             Check::StoredBytes => "stored bytes",
             Check::Restore => "restore",
+            Check::ReaderAgreement => "reader agreement",
             Check::Codec => "codec",
             Check::Rows => "rows",
             Check::NativeRows => "native rows",
@@ -189,6 +197,8 @@ impl Subject<'_> {
             });
         }
 
+        reader_agreement(content).map_err(failed(Check::ReaderAgreement))?;
+
         let codec = self.driver.codec(&format).map_err(failed(Check::Codec))?;
         let lines: Vec<&[u8]> = content.split(|b| *b == b'\n').collect();
         for entry in stored.entry_values() {
@@ -225,6 +235,44 @@ impl Subject<'_> {
             });
         }
         Ok(())
+    }
+}
+
+/// Read each line of `content` with the entry reader and with
+/// `serde_json`, and name the first line the two read differently. A
+/// blank line is no entry and is skipped, as a session reader skips
+/// it. A line neither reads, a torn write among them, is agreement:
+/// what becomes of it is the codec's to decide.
+fn reader_agreement(content: &[u8]) -> Result<(), String> {
+    for (index, line) in content.split(|b| *b == b'\n').enumerate() {
+        if line.trim_ascii().is_empty() {
+            continue;
+        }
+        // Why a reader refuses a line is dropped: the check compares
+        // whether each reads it, and what it reads.
+        let entry = str::from_utf8(line)
+            .ok()
+            .and_then(|text| text.parse::<EntryValue>().ok());
+        let json = serde_json::from_slice::<Value>(line).ok();
+        same_reading(entry.as_ref(), json.as_ref())
+            .map_err(|difference| format!("line {}: {difference}", index + 1))?;
+    }
+    Ok(())
+}
+
+/// Whether the entry reader and `serde_json` read one line alike:
+/// both refuse it, or both read it to the same value. The entry is
+/// compared as the `serde_json::Value` it converts to, in which a
+/// number is its value and an object has no key order. A number
+/// written `1.50` or `1E3` is therefore equal to the one `serde_json`
+/// read; that its text is kept is for the codec check to show.
+fn same_reading(entry: Option<&EntryValue>, json: Option<&Value>) -> Result<(), &'static str> {
+    match (entry, json) {
+        (None, None) => Ok(()),
+        (Some(_), None) => Err("the entry reader reads it and serde_json does not"),
+        (None, Some(_)) => Err("serde_json reads it and the entry reader does not"),
+        (Some(entry), Some(json)) if entry.to_json_value() == *json => Ok(()),
+        (Some(_), Some(_)) => Err("the entry reader reads another value than serde_json"),
     }
 }
 
@@ -331,6 +379,52 @@ mod tests {
         assert_eq!(result.failure, None);
         assert_eq!(result.harness_version.as_deref(), Some("2.0.0"));
         assert!(result.content_format.is_some());
+    }
+
+    /// Lines both readers take agree whatever the form of their
+    /// numbers, strings, spacing, and keys; so do a blank line, a torn
+    /// line, and a line that is not UTF-8, which neither reads.
+    #[test]
+    fn lines_both_readers_read_alike_agree() {
+        let content = concat!(
+            r#"{"type":"user","n":[0.000005,1E3,1.50,-0,-0.0,100000000000000000000,1e-7]}"#,
+            "\n\n  \r\n",
+            r#"{ "b" : "x\n\u00e9\ud83d\ude00" , "a" : 1 , "b" : 2 }"#,
+            "\n",
+            r#"{"type":"user","message":{"content":"Exit co{"type":"last-prompt"}"#,
+            "\n",
+            r#"{"type":"user","text":"cut \ud83d"}"#,
+            "\n",
+            r#"{"n":1e999}"#,
+            "\n",
+        );
+        assert_eq!(reader_agreement(content.as_bytes()), Ok(()));
+        assert_eq!(reader_agreement(b"{\"a\":\"\xff\"}\n"), Ok(()));
+        assert_eq!(check("claude", "any-name.jsonl", CLAUDE).failure, None);
+    }
+
+    /// A line one reader takes and the other refuses, and a line the
+    /// two read to different values, are differences. A number equal
+    /// in value and written another way is not.
+    #[test]
+    fn a_line_the_readers_read_differently_is_a_difference() {
+        let entry: EntryValue = r#"{"a":1.50,"b":[1E3]}"#.parse().unwrap();
+        let same = serde_json::json!({"b": [1000.0], "a": 1.5});
+        let other = serde_json::json!({"b": [1000.0], "a": 1.25});
+        assert_eq!(same_reading(Some(&entry), Some(&same)), Ok(()));
+        assert_eq!(same_reading(None, None), Ok(()));
+        assert_eq!(
+            same_reading(Some(&entry), Some(&other)),
+            Err("the entry reader reads another value than serde_json")
+        );
+        assert_eq!(
+            same_reading(Some(&entry), None),
+            Err("the entry reader reads it and serde_json does not")
+        );
+        assert_eq!(
+            same_reading(None, Some(&same)),
+            Err("serde_json reads it and the entry reader does not")
+        );
     }
 
     #[test]

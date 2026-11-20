@@ -493,6 +493,37 @@ mod tests {
         .unwrap()
     }
 
+    /// Numbers are not text values, and a typed path that selects a
+    /// number yields no literal for it, however the number is written.
+    #[test]
+    fn numbers_are_not_text_values_or_literals() {
+        let line = r#"{"type":"user","cost":0.000005,"scale":1E3,"zero":-0,"big":12345678901234567890,"note":"kept","list":[1.50,"s"]}"#;
+        let values = descriptor().text_values(&entry(line));
+        let texts: Vec<&str> = values.iter().map(|v| v.text.as_str()).collect();
+        assert_eq!(texts, ["kept", "s"]);
+
+        let typed = TextDescriptor::new(&[])
+            .unwrap()
+            .with_typed(
+                TypedSet::Pii,
+                &[
+                    "$.cost",
+                    "$.scale",
+                    "$.zero",
+                    "$.big",
+                    "$.list[*]",
+                    "$.note",
+                ],
+                &[],
+                &[],
+                &[],
+                &[],
+            )
+            .unwrap();
+        let found = typed.typed_values(TypedSet::Pii, &entry(line));
+        assert_eq!(found.literals, ["s", "kept"]);
+    }
+
     /// Strings come out in the order the line was written, not key
     /// order, with safe fields excluded.
     #[test]
