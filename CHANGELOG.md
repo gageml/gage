@@ -49,6 +49,12 @@ conventions in _[Keep a Changelog]_. Release versions use [semantic versioning].
   harness is not installed or not logged in. A scan whose tasks start no agents
   then runs without a harness
 
+### Fixes
+
+- A scanner tool handler that fails with a `gage::Error`, as `?` on a runtime
+  function such as `write_note` does, gives the agent the error's message. The
+  agent received "internal server error" before and could not correct its call
+
 ### Other changes
 
 - The `backup.sources` setting is renamed `backup.native`. A config file that

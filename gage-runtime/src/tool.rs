@@ -1134,7 +1134,9 @@ impl ToValue for InputsArg {
 
 /// The handler's return value, classified. The handler contract is a
 /// Rune `Result` whose arms hold a string or a JSON-encodable value;
-/// anything else is a fault.
+/// anything else is a fault. An `Err` holding a `gage::Error`, which
+/// is what `?` propagates from a runtime function, is the error
+/// result too, as the error's display text.
 struct HandlerOutcome(CustomToolOutcome);
 
 impl FromValue for HandlerOutcome {
@@ -1158,6 +1160,12 @@ impl FromValue for HandlerOutcome {
                 Ok(JsonValue::String(s)) => CustomToolOutcome::Error(s),
                 Ok(json) => CustomToolOutcome::Error(json.to_string()),
                 Err(e) => {
+                    if let Ok(err) = v.borrow_ref::<Error>() {
+                        return Ok(HandlerOutcome(CustomToolOutcome::Error(match &*err {
+                            Error::Args(message) => message.clone(),
+                            e => e.to_string(),
+                        })));
+                    }
                     tracing::error!(
                         error = %e,
                         "tool handler returned an error that cannot be encoded as JSON",
@@ -1495,6 +1503,52 @@ mod tests {
         assert_eq!(
             call(&defs[1], json!({}), json!({})).await,
             CustomToolOutcome::Error(r#"{"code":4}"#.into())
+        );
+    }
+
+    /// A runtime function's failure propagated with `?` reaches the
+    /// model as the error's text, so the model can correct the call.
+    #[tokio::test]
+    async fn a_propagated_gage_error_is_the_error_result_the_model_reads() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = scan_ctx(&tmp);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let sink = OutputSink {
+            scanner: "demo".into(),
+            task: "review".into(),
+            tx,
+        };
+        let (spec, _) = consume(
+            &tools(
+                r#"
+                use gage::{Input, Target, Tool, write_note};
+                async fn finding(inputs) {
+                    let note = write_note("finding", "text")
+                        .target(Target::session_lines(inputs.session_id, "1"))
+                        .await?;
+                    Ok(note.id)
+                }
+                pub fn main() {
+                    [Tool::new("finding", finding).input(Input::string("session_id")),
+                     Tool::new("typed", |inputs| Err(gage::Error::Args("bad lines")))]
+                }
+                "#,
+            ),
+            &ctx,
+            Some(&sink),
+            &no_tool_uses(),
+        )
+        .await
+        .unwrap();
+        let defs = spec.custom;
+        let outcome = call(&defs[0], json!({"session_id": "nosuchsession"}), json!({})).await;
+        let CustomToolOutcome::Error(message) = outcome else {
+            panic!("expected an error result, got {outcome:?}");
+        };
+        assert!(message.contains("nosuchsession"), "{message}");
+        assert_eq!(
+            call(&defs[1], json!({}), json!({})).await,
+            CustomToolOutcome::Error("bad lines".into())
         );
     }
 
