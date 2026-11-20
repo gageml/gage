@@ -86,7 +86,8 @@ fn install_dialog(args: &InitArgs) -> Result<DialogResult, DialogError> {
     let spinner = cli::spinner();
     spinner.start("Initializing store");
     match init_store() {
-        Ok(done) => spinner.stop(done),
+        Ok(Some(done)) => spinner.stop(done),
+        Ok(None) => spinner.clear(),
         Err(e) => {
             spinner.clear();
             return Err(e);
@@ -107,7 +108,7 @@ fn install_dialog(args: &InitArgs) -> Result<DialogResult, DialogError> {
     })?;
 
     for driver in drivers_named(&registry, &plan.drivers) {
-        let mut ui = SpinnerUi::default();
+        let mut ui = SpinnerUi::start(format!("Installing support for {}", driver.harness_name()));
         driver
             .system_init(&[gage_bin_str, "mcp"], &mut ui)
             .map_err(|e| DialogError::Other(anyhow::anyhow!("{}: {e}", driver.harness_name())))?;
@@ -284,8 +285,9 @@ fn prompt_default(registry: &DriverRegistry, names: &[String]) -> Result<String,
 /// opened, which validates its version and object format without
 /// running any git command that modifies it; `gage_store::init` on an
 /// existing store would rewrite `gage.version` and the update hook.
-/// Returns the line that records which happened.
-fn init_store() -> Result<&'static str, DialogError> {
+/// Returns the line that records a store created, and `None` for an
+/// existing store, which the dialog does not report.
+fn init_store() -> Result<Option<&'static str>, DialogError> {
     let path = gage_store::store_path();
     let init_err = |e: StoreError| {
         DialogError::Other(anyhow::anyhow!(
@@ -294,9 +296,9 @@ fn init_store() -> Result<&'static str, DialogError> {
         ))
     };
     match Store::open(&path) {
-        Ok(_) => Ok("Opened existing store"),
+        Ok(_) => Ok(None),
         Err(StoreError::NotFound(_)) => gage_store::init(&path)
-            .map(|_| "Created store")
+            .map(|_| Some("Created store"))
             .map_err(init_err),
         Err(e) => Err(init_err(e)),
     }
@@ -329,7 +331,7 @@ fn remove_dialog(args: &InitArgs) -> Result<DialogResult, DialogError> {
     dialog::confirm(args.yes, false)?;
 
     for driver in drivers_named(&registry, &names) {
-        let mut ui = SpinnerUi::default();
+        let mut ui = SpinnerUi::start(format!("Removing support for {}", driver.harness_name()));
         driver
             .system_remove(&mut ui)
             .map_err(|e| DialogError::Other(anyhow::anyhow!("{}: {e}", driver.harness_name())))?;
@@ -339,27 +341,33 @@ fn remove_dialog(args: &InitArgs) -> Result<DialogResult, DialogError> {
     Ok(DialogResult::from("Removed Gage"))
 }
 
-/// `InstallUi` sink that drives one dialog spinner at a time: each
-/// `step` starts one, `step_done` submits it as a step line, and a
-/// warning raised while a spinner runs is held until the spinner
-/// stops, since a log line written under an active spinner would
-/// overwrite its row.
-#[derive(Default)]
+/// `InstallUi` sink that shows one spinner for the whole of a
+/// driver's install or removal. The spinner shows the label of the
+/// driver's current step and leaves its own label when it stops.
+/// A warning is held until the spinner stops, since a log line written
+/// under an active spinner would overwrite its row.
 struct SpinnerUi {
-    current: Option<(cli::ProgressBar, String)>,
+    spinner: cli::ProgressBar,
+    label: String,
     pending: Vec<String>,
 }
 
 impl SpinnerUi {
-    fn finish(&mut self) {
-        if let Some((spinner, label)) = self.current.take() {
-            spinner.stop(label);
+    /// Start the spinner with `label`, which stays as the step line
+    /// once the spinner stops.
+    fn start(label: String) -> Self {
+        let spinner = cli::spinner();
+        spinner.start(&label);
+        Self {
+            spinner,
+            label,
+            pending: Vec::new(),
         }
-        self.flush();
     }
 
-    fn flush(&mut self) {
-        for message in self.pending.drain(..) {
+    fn finish(self) {
+        self.spinner.stop(self.label);
+        for message in self.pending {
             // cliclack's `warning` writer is best-effort; a terminal
             // write failure here is not actionable at install time.
             drop(cli::log::warning(message));
@@ -368,22 +376,15 @@ impl SpinnerUi {
 }
 
 impl InstallUi for SpinnerUi {
-    fn step(&mut self, label: &str) {
-        self.finish();
-        let spinner = cli::spinner();
-        spinner.start(label);
-        self.current = Some((spinner, label.to_string()));
+    fn step_start(&mut self, label: &str) {
+        self.spinner.set_message(label);
     }
 
-    fn step_done(&mut self) {
-        self.finish();
-    }
+    // The next step or the end of the install replaces the text.
+    fn step_done(&mut self) {}
 
     fn warn(&mut self, message: &str) {
         self.pending.push(message.to_string());
-        if self.current.is_none() {
-            self.flush();
-        }
     }
 }
 

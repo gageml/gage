@@ -271,17 +271,17 @@ impl Driver for PiDriver {
         let dir = plugin::plugin_dir();
         let mut notes = Vec::new();
 
-        ui.step("Writing Pi package files");
+        ui.step_start("Writing Pi package files");
         write_plugin(&dir, &plugin::target()).map_err(DriverError::Io)?;
         notes.push(format!("package materialized at {}", dir.display()));
         ui.step_done();
 
-        ui.step("Installing Pi package");
+        ui.step_start("Installing Pi package");
         plugin::run_strict(&pi, &["install".as_ref(), dir.as_os_str()])?;
         notes.push("package installed".to_string());
         ui.step_done();
 
-        ui.step("Registering Pi MCP server");
+        ui.step_start("Registering Pi MCP server");
         plugin::run_strict(&pi, &plugin::mcp_add_args(mcp_cmd))?;
         notes.push(format!("MCP server '{MCP_SERVER_NAME}' registered"));
         ui.step_done();
@@ -299,7 +299,7 @@ impl Driver for PiDriver {
     fn system_remove(&self, ui: &mut dyn InstallUi) -> Result<(), DriverError> {
         let pi = harness::require_pi().map_err(DriverError::Other)?;
         let dir = plugin::plugin_dir();
-        ui.step("Uninstalling Pi package");
+        ui.step_start("Uninstalling Pi package");
         let commands = [
             vec!["remove".as_ref(), dir.as_os_str()],
             plugin::mcp_remove_args().to_vec(),

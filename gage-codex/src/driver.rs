@@ -251,13 +251,13 @@ impl Driver for CodexDriver {
         let dir = plugin::plugin_dir();
         let mut notes = Vec::new();
 
-        ui.step("Writing Codex plugin files");
+        ui.step_start("Writing Codex plugin files");
         write_plugin(&dir, &plugin::target()).map_err(DriverError::Io)?;
         write_mcp_json(&dir, mcp_cmd, plugin::mcp_settings()).map_err(DriverError::Io)?;
         notes.push(format!("plugin materialized at {}", dir.display()));
         ui.step_done();
 
-        ui.step("Registering Codex plugin marketplace");
+        ui.step_start("Registering Codex plugin marketplace");
         remove_installed(&codex)?;
         plugin::run_strict(
             &codex,
@@ -271,7 +271,7 @@ impl Driver for CodexDriver {
         notes.push(format!("marketplace '{MARKETPLACE_NAME}' registered"));
         ui.step_done();
 
-        ui.step("Installing Codex plugin");
+        ui.step_start("Installing Codex plugin");
         plugin::run_strict(&codex, &["plugin", "add", PLUGIN_ID].map(OsStr::new))?;
         notes.push(format!("plugin {PLUGIN_ID} installed"));
         ui.step_done();
@@ -284,7 +284,7 @@ impl Driver for CodexDriver {
 
     fn system_remove(&self, ui: &mut dyn InstallUi) -> Result<(), DriverError> {
         let codex = harness::require_codex().map_err(DriverError::Other)?;
-        ui.step("Uninstalling Codex plugin");
+        ui.step_start("Uninstalling Codex plugin");
         for failure in remove_installed(&codex)? {
             ui.warn(&failure);
         }

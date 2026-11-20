@@ -376,8 +376,9 @@ pub trait HarnessSession: Send {
 /// as a no-op or a log line.
 pub trait InstallUi {
     /// Begin a step named by `label`.
-    fn step(&mut self, label: &str);
-    /// End the step most recently started with [`step`](Self::step).
+    fn step_start(&mut self, label: &str);
+    /// End the step most recently started with
+    /// [`step_start`](Self::step_start).
     fn step_done(&mut self);
     /// Record a non-fatal warning.
     fn warn(&mut self, message: &str);

@@ -12,6 +12,9 @@ conventions in _[Keep a Changelog]_. Release versions use [semantic versioning].
 
 - The confirmation prompt of `gage fetch` and `gage pull` selects "No" when it
   opens, where it selected "Yes" before
+- `gage init` shows one line for each coding agent it sets up or removes, such
+  as "Installing support for Claude Code", where it showed a line for each step
+- `gage init` no longer shows a line for a store that already exists
 
 ## [0.5.0]
 

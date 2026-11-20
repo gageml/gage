@@ -358,13 +358,13 @@ impl Driver for ClaudeDriver {
         let marketplace = plugin_marketplace_dir();
         let mut notes = Vec::new();
 
-        ui.step("Writing plugin files");
+        ui.step_start("Writing plugin files");
         write_plugin(&marketplace, &plugin::target()).map_err(DriverError::Io)?;
         write_mcp_json(&marketplace, mcp_cmd, Map::new()).map_err(DriverError::Io)?;
         notes.push(format!("plugin materialized at {}", marketplace.display()));
         ui.step_done();
 
-        ui.step("Registering plugin marketplace");
+        ui.step_start("Registering plugin marketplace");
         run_claude_strict(
             &claude_bin,
             &[
@@ -377,7 +377,7 @@ impl Driver for ClaudeDriver {
         notes.push(format!("marketplace '{MARKETPLACE_NAME}' registered"));
         ui.step_done();
 
-        ui.step("Installing plugin");
+        ui.step_start("Installing plugin");
         // Silent uninstall first: `plugin install` on an already-
         // installed plugin is a no-op and leaves the cached plugin.json
         // frozen at the prior installed version. Uninstall-then-install
@@ -395,10 +395,10 @@ impl Driver for ClaudeDriver {
 
     fn system_remove(&self, ui: &mut dyn InstallUi) -> Result<(), DriverError> {
         let claude_bin = find_claude().map_err(DriverError::Io)?;
-        ui.step("Uninstalling plugin");
+        ui.step_start("Uninstalling plugin");
         run_claude_best_effort(&claude_bin, &["plugin", "uninstall", PLUGIN_ID], ui);
         ui.step_done();
-        ui.step("Removing marketplace");
+        ui.step_start("Removing marketplace");
         run_claude_best_effort(
             &claude_bin,
             &["plugin", "marketplace", "remove", MARKETPLACE_NAME],
