@@ -44,8 +44,9 @@ use crate::error::CliError;
 use crate::human::{count, format_elapsed_ms};
 use crate::progress;
 use crate::session_filter::{
-    FILTER_ARG_NAMES, SessionFilterArgs, SessionLine, SessionSelect, SessionSelectError,
-    native_session_lines, preview_sessions, resolve_project_in, select_sessions, sql_str,
+    FILTER_ARG_NAMES, SINCE_HELP, STORED_LAST_ACTIVE, SessionFilterArgs, SessionLine,
+    SessionSelect, SessionSelectError, native_session_lines, preview_sessions, resolve_project_in,
+    select_sessions, sql_str,
 };
 use crate::size_limit::SizeLimitArgs;
 use crate::source;
@@ -90,7 +91,7 @@ pub enum SessionCommand {
     /// best match first. Bare terms match any of them; "a AND b",
     /// "+a", "-a", a quoted phrase, and a field term such as
     /// "type:assistant" narrow a search. --since searches only the
-    /// sessions modified within it; --user, --assistant, and --tool
+    /// sessions active within it; --user, --assistant, and --tool
     /// search only messages of those kinds, and --user with
     /// --assistant searches both. --all shows up to 1000 matches per
     /// source
@@ -104,8 +105,12 @@ pub struct SessionListArgs {
     #[arg(short = 'p', long, value_name = "PROJECT", allow_hyphen_values = true)]
     pub project: Option<String>,
 
-    /// Show sessions modified within SINCE
-    #[arg(long, value_parser = super::parse_duration)]
+    #[arg(
+        long,
+        value_parser = super::parse_duration,
+        help = "Show sessions active within SINCE",
+        long_help = format!("Show sessions active within SINCE\n\n{SINCE_HELP}"),
+    )]
     pub since: Option<Duration>,
 
     /// Only show empty sessions
@@ -263,8 +268,12 @@ pub struct SessionFindArgs {
     )]
     pub stored_remotes: Vec<String>,
 
-    /// Search sessions modified within SINCE
-    #[arg(long, value_parser = super::parse_duration)]
+    #[arg(
+        long,
+        value_parser = super::parse_duration,
+        help = "Search sessions active within SINCE",
+        long_help = format!("Search sessions active within SINCE\n\n{SINCE_HELP}"),
+    )]
     pub since: Option<Duration>,
 
     /// Search text typed by user
@@ -393,9 +402,9 @@ async fn list_native(source: Option<String>, args: SessionListArgs) -> Result<()
 
 /// List the sessions in the Gage store. The `session` table is bound
 /// to the store, so filters and limits are the same SQL as the native
-/// listing. Rows are in the store's `modified` order, newest first,
-/// and `--since` filters on it; the `Created` column shows when the
-/// session was first added.
+/// listing. Rows are in the store's `modified` order, newest first;
+/// `--since` filters on when a session was last active; the `Created`
+/// column shows when the session was first added.
 /// List the sessions of the store, or with `remote` the sessions
 /// fetched from that remote.
 async fn list_stored(remote: Option<&str>, args: SessionListArgs) -> Result<(), CliError> {
@@ -551,6 +560,15 @@ impl Listing {
             Listing::Dataset => "m.session_num ASC",
         }
     }
+
+    /// The time `--since` bounds: the session file's modification
+    /// time for a source, and the last activity of a stored session
+    fn since_time(self) -> &'static str {
+        match self {
+            Listing::Native => "modified",
+            Listing::Stored | Listing::Dataset => STORED_LAST_ACTIVE,
+        }
+    }
 }
 
 /// Run one SQL query for the shown rows and a second for the total
@@ -559,7 +577,8 @@ impl Listing {
 /// report a total. Both bindings select the same column list, but for
 /// the time shown: `modified`, the session file's modification time,
 /// for a native listing, which has no `created`, and `created` for the
-/// store. Rows order and `--since` filters on `modified` in both. The
+/// store. Rows order on `modified` in both, and `--since` filters on
+/// the listing's `since_time`. The
 /// list names columns only: a
 /// function in the projection makes DataFusion repartition the scan,
 /// which keeps the limit from reaching the walk.
@@ -570,7 +589,7 @@ async fn query_sessions(
     from: &str,
     predicates: &[String],
 ) -> datafusion::error::Result<(Vec<Row>, usize)> {
-    let where_clause = build_where_clause(args, predicates);
+    let where_clause = build_where_clause(args, listing, predicates);
     let limit_clause = match args.limit.fetch_limit() {
         Some(n) => format!(" LIMIT {n}"),
         None => String::new(),
@@ -600,10 +619,10 @@ async fn query_sessions(
     Ok((rows, total))
 }
 
-fn build_where_clause(args: &SessionListArgs, predicates: &[String]) -> String {
+fn build_where_clause(args: &SessionListArgs, listing: Listing, predicates: &[String]) -> String {
     let mut clauses: Vec<String> = predicates.to_vec();
     if let Some(d) = args.since {
-        clauses.push(since_predicate("modified", since_cutoff_ms(d)));
+        clauses.push(since_predicate(listing.since_time(), since_cutoff_ms(d)));
     }
     if args.empty {
         clauses.push("is_empty IS TRUE".to_string());
@@ -625,10 +644,10 @@ fn since_cutoff_ms(d: Duration) -> i64 {
         .saturating_sub(d.as_millis()) as i64
 }
 
-/// The predicate admitting a row whose `col` is at or after
+/// The predicate admitting a row whose `time` is at or after
 /// `cutoff_ms`
-fn since_predicate(col: &str, cutoff_ms: i64) -> String {
-    format!("{col} >= to_timestamp_millis({cutoff_ms})")
+fn since_predicate(time: &str, cutoff_ms: i64) -> String {
+    format!("{time} >= to_timestamp_millis({cutoff_ms})")
 }
 
 struct Row {
@@ -1193,7 +1212,7 @@ pub async fn find(args: SessionFindArgs) -> Result<(), CliError> {
         for (order, (corpus, ctx)) in corpora.iter().zip(&contexts).enumerate() {
             let mut predicates = kind_predicates.clone();
             if let Some(ms) = cutoff_ms {
-                let sessions = sessions_since(ctx, ms)
+                let sessions = sessions_since(ctx, corpus.since_time(), ms)
                     .await
                     .with_context(|| format!("gage session find: {}", corpus.describe()))?;
                 if sessions.is_empty() {
@@ -1314,12 +1333,16 @@ fn hits_sql(query: &str, predicates: &[String], fetch: usize) -> String {
     )
 }
 
-/// The ids of a corpus's sessions modified at or after `cutoff_ms`:
-/// the column `gage session list --since` filters on, the session
-/// file's modification time for a source and the store's `modified`
-/// marker for the store.
-async fn sessions_since(ctx: &SessionContext, cutoff_ms: i64) -> anyhow::Result<Vec<String>> {
-    let sql = sessions_since_sql(cutoff_ms);
+/// The ids of a corpus's sessions whose `time` is at or after
+/// `cutoff_ms`. `time` is what `gage session list --since` filters
+/// on: the session file's modification time for a source and the last
+/// activity of a stored session.
+async fn sessions_since(
+    ctx: &SessionContext,
+    time: &str,
+    cutoff_ms: i64,
+) -> anyhow::Result<Vec<String>> {
+    let sql = sessions_since_sql(time, cutoff_ms);
     let batches = run_query(ctx, &sql).await?;
     let mut ids = Vec::new();
     for batch in &batches {
@@ -1329,10 +1352,10 @@ async fn sessions_since(ctx: &SessionContext, cutoff_ms: i64) -> anyhow::Result<
     Ok(ids)
 }
 
-fn sessions_since_sql(cutoff_ms: i64) -> String {
+fn sessions_since_sql(time: &str, cutoff_ms: i64) -> String {
     format!(
         "SELECT id FROM session WHERE {}",
-        since_predicate("modified", cutoff_ms)
+        since_predicate(time, cutoff_ms)
     )
 }
 
@@ -1394,6 +1417,15 @@ impl Corpus {
         match self {
             Corpus::Native(_) => IdKind::Native,
             Corpus::Stored | Corpus::StoredRemote { .. } => IdKind::Gage,
+        }
+    }
+
+    /// The time `--since` bounds: the session file's modification
+    /// time for a source, and the last activity of a stored session
+    fn since_time(&self) -> &'static str {
+        match self {
+            Corpus::Native(_) => "modified",
+            Corpus::Stored | Corpus::StoredRemote { .. } => STORED_LAST_ACTIVE,
         }
     }
 }
@@ -2376,9 +2408,37 @@ mod tests {
         );
         assert!(hits_sql("q", &[], 5).contains("FROM (SELECT * FROM message_text('q') LIMIT 5) t"));
         assert_eq!(
-            sessions_since_sql(1_000),
+            sessions_since_sql("modified", 1_000),
             "SELECT id FROM session WHERE modified >= to_timestamp_millis(1000)"
         );
+        assert_eq!(
+            sessions_since_sql(STORED_LAST_ACTIVE, 1_000),
+            "SELECT id FROM session WHERE coalesce(to_timestamp_millis(\
+             CAST(json_extract(summary, '$.last_timestamp_ms') AS BIGINT)), modified) \
+             >= to_timestamp_millis(1000)"
+        );
+    }
+
+    /// `--since` bounds a stored or dataset listing by a session's
+    /// last activity and a native listing by its file's modification
+    /// time.
+    #[test]
+    fn list_since_bounds_stored_sessions_by_last_activity() {
+        let args = list_args(&["--since", "7d"]);
+        let native = build_where_clause(&args, Listing::Native, &[]);
+        assert!(
+            native.starts_with(" WHERE modified >= to_timestamp_millis("),
+            "{native}"
+        );
+        for listing in [Listing::Stored, Listing::Dataset] {
+            let stored = build_where_clause(&args, listing, &[]);
+            assert!(
+                stored.starts_with(&format!(
+                    " WHERE {STORED_LAST_ACTIVE} >= to_timestamp_millis("
+                )),
+                "{stored}"
+            );
+        }
     }
 
     /// --user and --assistant select typed text of either or both

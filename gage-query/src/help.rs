@@ -232,7 +232,12 @@ session that could not be read has NULL in every derived column and a summary of
 input_tokens is every prompt token sent, cached or not; output_tokens every
 token generated, reasoning included; cached_tokens the part of input served from
 cache. cost_usd is the harness's reported figure, absent when it reports none.
-Use these before reading usage out of raw."#,
+Use these before reading usage out of raw. first_timestamp_ms and
+last_timestamp_ms in summary are the times of the session's earliest and latest
+entries in epoch milliseconds, absent when no entry has a time. A stored
+session's modified is when the store last wrote it, not when it was last active;
+read that from
+to_timestamp_millis(CAST(json_extract(summary, '$.last_timestamp_ms') AS BIGINT))."#,
     },
     HelpTopic {
         topic: "tool_use_file",

@@ -59,7 +59,7 @@ gage session list [OPTIONS]
 | Option                    | Description                                              |
 | ------------------------- | -------------------------------------------------------- |
 | `-p, --project <PROJECT>` | Filter by project path or name                           |
-| `--since <SINCE>`         | Show sessions modified within a duration (e.g. `1h`, `30m`, `7d`) |
+| `--since <SINCE>`         | Show sessions active within a duration (e.g. `1h`, `30m`, `7d`) |
 | `--empty`                 | Only show empty sessions                                 |
 | `-d, --dataset <DATASET>` | List sessions in a dataset, in member order. Implies `--stored`. |
 | `--share <SHARE>`         | List sessions in a share, given as a tag, ID, or prefix. Implies `--stored`. |
@@ -67,6 +67,10 @@ gage session list [OPTIONS]
 | `-a, --all`               | Show all items                                           |
 | `-n, --limit <LIMIT>`     | Limit the number of items shown (default: 20)            |
 | `--full-id`               | Show the full session ID                                 |
+
+`--since` goes by the time of a stored session's last entry, or by the store's
+last write of it when no entry has a time, and by the last modification of a
+native session's file.
 
 ## session add
 
@@ -86,7 +90,7 @@ least one session argument or selection option is required.
 | `--share <SHARE>`         | Add the sessions to a share in the same step, given as a tag, ID, or prefix. A share that names filters admits published sessions only. |
 | `-p, --project <PROJECT>` | Limit sessions to a project path or name                     |
 | `--touches <DIR>`         | Limit sessions to those that touch a directory               |
-| `--since <SINCE>`         | Select sessions modified within a duration (e.g. `1h`, `30m`, `7d`) |
+| `--since <SINCE>`         | Select sessions active within a duration (e.g. `1h`, `30m`, `7d`) |
 | `-a, --all`               | Select every available session                               |
 | `-n, --limit <N>`         | Select the latest N sessions                                 |
 | `-r, --sample <N>`        | Select N sessions at random                                  |
@@ -99,8 +103,13 @@ A session touches a directory when it wrote or read a file in the directory or
 below it, or when it started there.
 
 `--limit` combines with `--since` to cap the sessions selected from the window.
-`--sample` draws from sessions modified in the past 30 days, or the window given
+`--sample` draws from sessions active in the past 30 days, or the window given
 with `--since`.
+
+A stored session is as recent as its last entry, or as the store's last write
+of it when no entry has a time. A native session is as recent as the last
+modification of its file. `--since`, `--limit`, and `--sample` all use this
+time.
 
 ## session delete
 
@@ -193,7 +202,7 @@ field term such as `type:assistant` narrow a search.
 
 | Option                | Description                                         |
 | --------------------- | --------------------------------------------------- |
-| `--since <SINCE>`     | Search sessions modified within a duration (e.g. `1h`, `30m`, `7d`) |
+| `--since <SINCE>`     | Search sessions active within a duration (e.g. `1h`, `30m`, `7d`) |
 | `-U, --user`          | Search text typed by the user                       |
 | `-A, --assistant`     | Search text written by the assistant                |
 | `-T, --tool`          | Search tool calls and results                       |
@@ -205,3 +214,7 @@ field term such as `type:assistant` narrow a search.
 
 `--user`, `--assistant`, and `--tool` search only messages of those kinds.
 `--user` with `--assistant` searches both.
+
+`--since` goes by the time of a stored session's last entry, or by the store's
+last write of it when no entry has a time, and by the last modification of a
+native session's file.

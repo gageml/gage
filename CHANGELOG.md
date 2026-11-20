@@ -58,6 +58,12 @@ conventions in _[Keep a Changelog]_. Release versions use [semantic versioning].
   the configured and `#{...}` values applied. The `params` column of the
   `scan_task` table holds them as a JSON object. A scan made before this has
   null there
+- `--since`, `--limit`, and `--sample` select stored sessions by the time of
+  their last entry. They went by the time the store last wrote the session, so a
+  rewrite of a session's metadata made an old session count as recent. This
+  applies to `gage scan --stored` and `--stored-remote`, to `gage publish`, and
+  to `--since` on `gage session list` and `gage session find` over stored
+  sessions. A session with no dated entry still goes by the store's time
 
 ### Other changes
 

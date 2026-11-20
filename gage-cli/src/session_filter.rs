@@ -37,6 +37,22 @@ use crate::source;
 /// to build an `ArgGroup` when at least one selection is required.
 pub const FILTER_ARG_NAMES: &[&str] = &["project", "touches", "since", "all", "limit", "sample"];
 
+/// What a `--since` value is and which time of a session it bounds,
+/// for the long help of every `--since` option.
+pub const SINCE_HELP: &str = "\
+SINCE is a duration such as 1h, 30m, or 7d. A stored session is as
+recent as its last entry, or as the store's last write of it when
+no entry has a time. A native session is as recent as the last
+modification of its file.";
+
+/// When a stored session was last active, as an expression over the
+/// store's `session` table: the latest entry timestamp its summary
+/// records, or the `modified` marker for a session whose summary
+/// records none. `modified` alone is when the store last wrote the
+/// object, which a rewrite of its metadata moves to the present.
+pub const STORED_LAST_ACTIVE: &str = "coalesce(to_timestamp_millis(\
+    CAST(json_extract(summary, '$.last_timestamp_ms') AS BIGINT)), modified)";
+
 #[derive(Args)]
 pub struct SessionFilterArgs {
     /// Limit sessions to project (path or name)
@@ -53,10 +69,13 @@ pub struct SessionFilterArgs {
     #[arg(long, value_name = "DIR")]
     pub touches: Option<PathBuf>,
 
-    /// Select sessions modified within SINCE
-    ///
-    /// SINCE is a duration such as 1h, 30m, or 7d.
-    #[arg(long, value_parser = crate::parse_duration, conflicts_with = "all")]
+    #[arg(
+        long,
+        value_parser = crate::parse_duration,
+        conflicts_with = "all",
+        help = "Select sessions active within SINCE",
+        long_help = format!("Select sessions active within SINCE\n\n{SINCE_HELP}"),
+    )]
     pub since: Option<Duration>,
 
     /// Select every available session
@@ -77,7 +96,7 @@ pub struct SessionFilterArgs {
 
     /// Select N sessions at random
     ///
-    /// Samples from sessions modified in the past 30 days, or the
+    /// Samples from sessions active in the past 30 days, or the
     /// window given with --since.
     #[arg(short = 'r', long, value_name = "N", conflicts_with = "all")]
     pub sample: Option<usize>,
@@ -173,8 +192,8 @@ impl SessionFilterArgs {
 /// store: a missing window defaults to the past 30
 /// days, and a missing limit defaults to 20 unless a window or
 /// `--project` was pinned (in which case the full filtered set is
-/// returned). The window is on `modified`: the session file's
-/// modification time for a source and the store's marker for the
+/// returned). The window and the order are on the session file's
+/// modification time for a source and on `STORED_LAST_ACTIVE` for the
 /// store. `--touches`
 /// counts as `--project` does for the default limit.
 pub async fn select_sessions(
@@ -182,7 +201,7 @@ pub async fn select_sessions(
     sessions: &[String],
     filter: &SessionFilterArgs,
 ) -> Result<Vec<String>, SessionSelectError> {
-    let ctx = match select {
+    let (ctx, time) = match select {
         SessionSelect::Native(source) => {
             let registry = source::driver_registry();
             let (driver, spec) =
@@ -197,9 +216,10 @@ pub async fn select_sessions(
                     .map_err(|e| SessionSelectError::Setup(format!("{spec}: {e}")))?;
                 return ids;
             }
-            ContextBuilder::new(None)
+            let ctx = ContextBuilder::new(None)
                 .build_source(&spec)
-                .map_err(|e| SessionSelectError::Setup(format!("{spec}: {e}")))?
+                .map_err(|e| SessionSelectError::Setup(format!("{spec}: {e}")))?;
+            (ctx, "modified")
         }
         SessionSelect::Stored(store) => {
             if !sessions.is_empty() {
@@ -213,9 +233,10 @@ pub async fn select_sessions(
             let store = store
                 .reopen()
                 .map_err(|e| SessionSelectError::Setup(e.to_string()))?;
-            ContextBuilder::new(Some(Arc::new(Mutex::new(store))))
+            let ctx = ContextBuilder::new(Some(Arc::new(Mutex::new(store))))
                 .build()
-                .await
+                .await;
+            (ctx, STORED_LAST_ACTIVE)
         }
     };
     let mut predicates = Vec::new();
@@ -239,7 +260,7 @@ pub async fn select_sessions(
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis();
-        predicates.push(format!("modified >= to_timestamp_millis({cutoff_ms})"));
+        predicates.push(format!("{time} >= to_timestamp_millis({cutoff_ms})"));
     }
 
     let window_pinned = filter.all || filter.since.is_some();
@@ -258,7 +279,7 @@ pub async fn select_sessions(
         sql.push_str(" WHERE ");
         sql.push_str(&predicates.join(" AND "));
     }
-    sql.push_str(" ORDER BY modified DESC");
+    sql.push_str(&format!(" ORDER BY {time} DESC"));
     if let Some(n) = limit {
         sql.push_str(&format!(" LIMIT {n}"));
     }
@@ -630,6 +651,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::time::Duration;
 
+    use chrono::{SecondsFormat, Utc};
     use console::style;
     use gage_core::style::IdKind;
     use gage_registry::driver::DriverRegistry;
@@ -898,7 +920,7 @@ mod tests {
 
     /// As `add_stored`, with an assistant message that calls `tool`
     /// when one is given: a tool name, its JSON input, and whether
-    /// the call has a result.
+    /// the call has a result. Every message is written now.
     fn add_stored_with_tool(
         store: &Store,
         claude_root: &Path,
@@ -906,25 +928,46 @@ mod tests {
         id: &str,
         tool: Option<(&str, &str, bool)>,
     ) -> String {
-        let project_dir = claude_root.join("projects").join(project);
-        fs::create_dir_all(&project_dir).unwrap();
-        let mut content = concat!(
-            r#"{"type":"user","uuid":"u1","timestamp":"2025-01-01T00:00:00Z","message":{"role":"user","content":"hello"}}"#,
-            "\n",
-        )
-        .to_string();
+        let now = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
+        let mut content = user_line(Some(&now));
         if let Some((name, input, answered)) = tool {
             content.push_str(&format!(
-                r#"{{"type":"assistant","uuid":"a1","parentUuid":"u1","timestamp":"2025-01-01T00:00:01Z","message":{{"role":"assistant","content":[{{"type":"tool_use","id":"toolu_1","name":"{name}","input":{input}}}]}}}}"#
+                r#"{{"type":"assistant","uuid":"a1","parentUuid":"u1","timestamp":"{now}","message":{{"role":"assistant","content":[{{"type":"tool_use","id":"toolu_1","name":"{name}","input":{input}}}]}}}}"#
             ));
             content.push('\n');
             if answered {
-                content.push_str(concat!(
-                    r#"{"type":"user","uuid":"u2","parentUuid":"a1","timestamp":"2025-01-01T00:00:02Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"ok"}]}}"#,
-                    "\n",
+                content.push_str(&format!(
+                    r#"{{"type":"user","uuid":"u2","parentUuid":"a1","timestamp":"{now}","message":{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"toolu_1","content":"ok"}}]}}}}"#
                 ));
+                content.push('\n');
             }
         }
+        add_stored_content(store, claude_root, project, id, &content)
+    }
+
+    /// The line of a user message written at `timestamp`, or of one
+    /// that records no time.
+    fn user_line(timestamp: Option<&str>) -> String {
+        let timestamp = match timestamp {
+            Some(t) => format!(r#""timestamp":"{t}","#),
+            None => String::new(),
+        };
+        format!(
+            r#"{{"type":"user","uuid":"u1",{timestamp}"message":{{"role":"user","content":"hello"}}}}"#
+        ) + "\n"
+    }
+
+    /// Write the Claude session `id` with `content` under `project`
+    /// in `claude_root` and add it to `store`; the stored id.
+    fn add_stored_content(
+        store: &Store,
+        claude_root: &Path,
+        project: &str,
+        id: &str,
+        content: &str,
+    ) -> String {
+        let project_dir = claude_root.join("projects").join(project);
+        fs::create_dir_all(&project_dir).unwrap();
         fs::write(project_dir.join(format!("{id}.jsonl")), content).unwrap();
         let spec = format!("claude:{}", claude_root.display());
         let registry = DriverRegistry::builtin();
@@ -1043,6 +1086,70 @@ mod tests {
             .len(),
             1
         );
+    }
+
+    /// A window and the latest-first order are on a stored session's
+    /// last activity, not on when the store wrote it. A session stored
+    /// now whose last message is old is outside a short window and
+    /// comes last; a session that records no time is dated by the
+    /// store's `modified` marker and is inside the window.
+    #[tokio::test]
+    async fn stored_selection_dates_a_session_by_its_last_activity() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("store.git");
+        gage_store::init(&path).unwrap();
+        let store = Store::open_with_cache_root(&path, &tmp.path().join("cache")).unwrap();
+        let claude_root = tmp.path().join("claude");
+        let recent = add_stored(
+            &store,
+            &claude_root,
+            "-w-proj",
+            "11111111-2222-3333-4444-555555555555",
+        );
+        let old = add_stored_content(
+            &store,
+            &claude_root,
+            "-w-proj",
+            "66666666-7777-8888-9999-000000000000",
+            &user_line(Some("2025-01-01T00:00:00Z")),
+        );
+        let undated = add_stored_content(
+            &store,
+            &claude_root,
+            "-w-proj",
+            "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            &user_line(None),
+        );
+        let select = |since, all| {
+            let filter = SessionFilterArgs {
+                project: None,
+                touches: None,
+                since,
+                all,
+                limit: None,
+                sample: None,
+            };
+            let store = &store;
+            async move {
+                select_sessions(SessionSelect::Stored(store), &[], &filter)
+                    .await
+                    .unwrap()
+            }
+        };
+
+        let within_a_day = select(Some(Duration::from_secs(86_400)), false).await;
+        assert_eq!(
+            sorted(within_a_day),
+            sorted(vec![recent.clone(), undated.clone()])
+        );
+        let within_default_window = select(None, false).await;
+        assert_eq!(
+            sorted(within_default_window),
+            sorted(vec![recent.clone(), undated.clone()])
+        );
+        let every = select(None, true).await;
+        assert_eq!(every.len(), 3);
+        assert_eq!(every.last(), Some(&old));
     }
 
     /// `--touches` selects a session whose project is the directory's

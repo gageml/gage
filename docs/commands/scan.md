@@ -32,7 +32,7 @@ scanner group, and sessions from the past 30 days capped at 20.
 | `-d, --dataset <DATASET>`       | Scan an existing dataset (ID or prefix)                             |
 | `-p, --project <PROJECT>`       | Limit sessions to a project, given as a directory path or a project slug as shown by `gage session list` |
 | `--touches <DIR>`               | Limit sessions to those that touch a directory                      |
-| `--since <SINCE>`               | Select sessions modified within a duration (e.g. `1h`, `30m`, `7d`) |
+| `--since <SINCE>`               | Select sessions active within a duration (e.g. `1h`, `30m`, `7d`)   |
 | `-a, --all`                     | Select every available session                                      |
 | `-n, --limit <N>`               | Select the latest N sessions                                        |
 | `-r, --sample <N>`              | Select N sessions at random                                         |
@@ -56,8 +56,13 @@ A session touches a directory when it wrote or read a file in the directory or
 below it, or when it started there.
 
 `--limit` combines with `--since` to cap the sessions selected from the window.
-`--sample` draws from sessions modified in the past 30 days, or the window given
+`--sample` draws from sessions active in the past 30 days, or the window given
 with `--since`.
+
+A stored session is as recent as its last entry, or as the store's last write
+of it when no entry has a time. A native session is as recent as the last
+modification of its file. `--since`, `--limit`, and `--sample` all use this
+time.
 
 A scan runs the attach tasks of the selected scanners on a dataset it creates.
 An existing dataset passed with `--dataset` is scanned as it is; use
