@@ -301,3 +301,8 @@ asking, and name each rule applied in the summary of the change.
   as a command, an option, a table, a column, or a tool, updates the docs that
   describe it in the same piece of work. Match the surrounding page: its
   structure, its terms, and its plain declarative sentences.
+
+- Record a notable change in `CHANGELOG.md` under the `## [unreleased]` section,
+  in the same piece of work. Never edit the section of a versioned release. If
+  the file has no `## [unreleased]` section, stop and say so. Do not create the
+  section and do not put the entry elsewhere.
