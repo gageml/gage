@@ -254,9 +254,12 @@ AND type = 'write' for the sessions that wrote it."#,
         short: "the note, session_note, and note_doc tables",
         full: r#"note (id, name, target, author, value, text, metadata, created, modified, scan,
 work_id). value is the note's JSON text; text is the plain-text form alone and is
-null for a structured note. target names what the note is on: session:<id>,
-session:<id>#<lines>, or attachment:<id>. scan is the scan the note was written
-during. Each name has a row in note_doc (note_name, doc, written_by) describing
+null for a structured note. target names the object the note is on as
+<type>:<id>, null when the note is on none. A scanner writes session:<id>,
+session:<id>#<lines>, or attachment:<id>; the note_write tool writes the two
+session forms; gage note add --target writes any stored object, as in
+note:<id>, issue:<id>, scan:<id>, or dataset:<id>. scan is the scan the note was
+written during. Each name has a row in note_doc (note_name, doc, written_by) describing
 what notes of that name hold. session_note (session_id, note_id, lines) is the
 session-targeted notes; lines is the cited line ranges as text, for example
 831-838 or 211-282,317, null when the note cites no lines."#,

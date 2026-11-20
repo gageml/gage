@@ -2,8 +2,9 @@
 title: Notes
 ---
 
-_Notes_ are values that scanners assign to sessions, session lines,
-attachments, and other stored objects as supporting evidence for issues.
+_Notes_ are values that scanners and people assign to sessions, session lines,
+attachments, and other stored objects. Scanner notes are the supporting evidence
+for issues.
 
 Scanners may write a lot of notes as they run. This information persists across
 scans. It's helpful to review notes over time before concluding there's an
@@ -23,6 +24,24 @@ gage note show <NOTE_ID>
 
 You can delete notes using `gage note delete`. In general this is not needed.
 Scanners benefit from having this note record across scans.
+
+## Targets
+
+A note's _target_ is the object the note is about. A note can have no target.
+What a note can target depends on how it is written:
+
+- A scanner's `write_note` targets a session, lines of a session, or an
+  attachment.
+- The `note_write` tool targets a session or lines of a session.
+- A note added in the session viewer targets the session or one of its
+  lines.
+- `gage note add --target` targets any stored object by ID or unique prefix: a
+  session, an attachment, a dataset, a scan, an issue, or another note. A line
+  selection applies to a session only.
+
+The `target` column of the `note` table holds the target as `<type>:<id>`, as in
+`session:<id>` or `issue:<id>`. Cited lines follow a session ID after `#`, as in
+`session:<id>#12-20`.
 
 ## Names and docs
 

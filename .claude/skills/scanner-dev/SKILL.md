@@ -208,8 +208,11 @@ let kinds = scan().notes().names(["*[finding]"]).unseen(KEY).await?;
 ```
 
 `write_note(name, value)` writes a note. The value is any Rune value. Builder:
-`.target(Target)`, `.metadata(object)`, `.carry_forward(KEY)`. A returned note
-has `id`, `name`, `value`, `author`, `target`, `metadata`, `created`.
+`.target(..)`, `.metadata(object)`, `.carry_forward(KEY)`. A target is a
+`Target`, a `Session`, or an `Attachment`: a note written by a scanner is on a
+session, lines of a session, or an attachment, and on no other object. A
+returned note has `id`, `name`, `value`, `author`, `target`, `metadata`,
+`created`.
 
 `scan().notes()` reads the scan's notes, narrowed by `.name(..)` or
 `.names([..])` and `.unseen(KEY)`/`.hwm(KEY)`.
