@@ -2,7 +2,11 @@
 
 A block is a short human owned and reviewed (AI assist is fine) claim of fact.
 
-Blocks serve as long running anchors for model state.
+Blocks serve as long running anchors for human understanding and model state.
+
+Blocks are different from rules. Rules are instructions to do or not do
+something. Blocks are principles, guidelines, or statements of fact that reflect
+careful deliberation by humans in all cases.
 
 It's important that blocks are human owned and carefully reviewed. Blocks must
 not be authored by models without careful, reasoned review by humans.

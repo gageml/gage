@@ -222,8 +222,8 @@ Gage writes all of its data to files under `~/.gage/`. These include:
 ### Does Gage "phone home" for any reason?
 
 No. Gage runs locally and writes all state under `~/.gage/`. Gage sends data to
-another location only when you run a command that does so, such as `gage push`,
-`gage backup`, or `gage publish`.
+another location only when you run a command that does so, such as `gage push`
+or `gage backup`.
 
 Gage provides tools to Claude Code over a local MCP server. Claude is free to
 use these tools within the constraints of user-defined permissions (allow and
@@ -231,6 +231,8 @@ deny). Gage tools do not open network connections or otherwise write outside of
 `~/.gage/`. Claude, however, may. This is the normal risk profile of running an
 agent. To minimize the risk of sensitive data exfiltration, follow the
 safeguards recommended by Anthropic.
+
+See [PRIVACY.md](PRIVACY.md) for the full privacy statement.
 
 ## Contributing
 
