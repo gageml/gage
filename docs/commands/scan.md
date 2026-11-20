@@ -72,6 +72,9 @@ skips that question, so a scan whose tasks start no agents runs without a
 harness. An agent that a task starts on a missing harness fails on its own.
 Without the option, the scan does not start.
 
+A scan agent on Pi is not sandboxed. See
+[Known issues](https://github.com/gageml/gage/blob/main/KNOWN_ISSUES.md#pi).
+
 `--stored-remote` names a remote of the store. The command selects among the
 sessions that [`gage fetch`](/docs/commands/fetch) brought from that remote and
 that are not merged into the store. It fetches nothing, and a remote that

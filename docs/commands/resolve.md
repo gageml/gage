@@ -10,6 +10,9 @@ coding agent: Claude Code, Codex, or Pi. It starts an interactive session that
 resolves pending issues, then walks through open issues as directed. For
 background, see [Issues](/docs/issues).
 
+A session in Pi cannot assign an issue. See
+[Known issues](https://github.com/gageml/gage/blob/main/KNOWN_ISSUES.md#pi).
+
 ```cli
 gage resolve [OPTIONS] [IDS]... [-- AGENT_ARGS...]
 ```

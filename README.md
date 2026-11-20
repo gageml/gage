@@ -203,6 +203,9 @@ Full documentation is available at [gage.io/docs](https://gage.io/docs/).
 - [Query](https://gage.io/docs/commands/query)
 - [Uninstall](https://gage.io/docs/uninstall)
 
+Problems that are known and not planned to be fixed are listed in
+[KNOWN_ISSUES.md](KNOWN_ISSUES.md).
+
 ## FAQ
 
 ### Where is Gage data stored?
