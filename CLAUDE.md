@@ -1,7 +1,6 @@
 ## General rules
 
-- Push changes to a topic branch only. Never push to `main`, `gar1t-dev`, or
-  `release`.
+- Push changes to a topic branch only. Never push to `main` or `release`.
 
 - Do not push without the user's approval. Approval covers the push it was
   given for and does not carry over to later pushes.
