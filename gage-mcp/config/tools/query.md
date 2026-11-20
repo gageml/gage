@@ -3,15 +3,15 @@ name = "query"
 
 [parameters.sql]
 type = "string"
-description = "SQL (DataFusion dialect) to run against the session data in scope. The result is written under a cursor and page 1 is returned. Give sql or cursor, not both."
+description = "SQL (DataFusion dialect) to run against the session data in scope. The result is stored under a cursor and page 1 is returned. Omit sql when reading a later page: a call has sql or cursor, never both."
 
 [parameters.cursor]
 type = "string"
-description = "Cursor of a result an earlier call returned, to read one of its pages. A result expires one hour after it was written."
+description = "Cursor from the first line of an earlier result, to read another of its pages. Send cursor and page alone, without sql: the result is already stored and the query is not re-run. A result expires one hour after it was written."
 
 [parameters.page]
 type = "integer"
-description = "Page of the cursor's result to return, starting at 1 (default 1). Goes with cursor."
+description = "Page of the cursor's result to return, starting at 1 (default 1). Used only with cursor, never with sql."
 
 [parameters.native]
 type = "string"
@@ -35,7 +35,8 @@ idempotent_hint = true
 +++
 
 Run SQL over the sessions in scope and the notes and issues they hold. Results
-are YAML pages naming their cursor and next page.
+are YAML pages. A result of more than one page ends with the arguments for its
+next page: cursor and page, sent without sql.
 
 Discover the schema through SQL. information_schema.tables lists the tables;
 information_schema.columns gives a table's columns and types;

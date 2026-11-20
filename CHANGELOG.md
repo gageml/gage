@@ -64,6 +64,10 @@ conventions in _[Keep a Changelog]_. Release versions use [semantic versioning].
   applies to `gage scan --stored` and `--stored-remote`, to `gage publish`, and
   to `--since` on `gage session list` and `gage session find` over stored
   sessions. A session with no dated entry still goes by the store's time
+- The `query` tool says how to read the next page of a result: a page that has
+  another ends with the arguments of the call that reads it, and the parameter
+  descriptions say that `cursor` and `page` are sent without `sql`. Agents sent
+  all three, which the tool refuses, and the refusal now says what to send
 
 ### Other changes
 

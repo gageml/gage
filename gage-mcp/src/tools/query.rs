@@ -274,7 +274,8 @@ pub fn parse_request(params: &JsonObject) -> Result<QueryRequest<'_>, McpError> 
     }
     match (sql, cursor) {
         (Some(_), Some(_)) => Err(McpError::invalid_params(
-            "give `sql` or `cursor`, not both",
+            "`sql` and `cursor` were both given. To read another page of a stored result, send \
+             only `cursor` and `page`; to run a new query, send only `sql`",
             None,
         )),
         (None, None) => Err(McpError::invalid_params("missing `sql` or `cursor`", None)),
@@ -431,7 +432,8 @@ fn render_page(
     );
     if page < count {
         text.push_str(&format!(
-            "To continue, call query with cursor {cursor} and page {}.",
+            "Next page: call this tool again with exactly these arguments, and no sql: \
+             {{\"cursor\": \"{cursor}\", \"page\": {}}}",
             page + 1
         ));
     }
@@ -713,7 +715,8 @@ mod tests {
             format!(
                 "cursor {cursor}: page 1 of 2, rows 1-1 of 2\n\
                  ```yaml\nline: 1\ntext: hello\n\n```\n\
-                 To continue, call query with cursor {cursor} and page 2."
+                 Next page: call this tool again with exactly these arguments, and no sql: \
+                 {{\"cursor\": \"{cursor}\", \"page\": 2}}"
             )
         );
 
