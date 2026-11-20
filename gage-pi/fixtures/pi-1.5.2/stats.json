@@ -1,7 +1,7 @@
 {
   "run": {
-    "file": "--tmp-gage-pi-fixtures-project--/2026-11-20T12-00-00-500Z_01a1f8d3-eafa-761f-b8f0-d10eaf4e7c6d.jsonl",
-    "sessionId": "01a1f8d3-eafa-761f-b8f0-d10eaf4e7c6d",
+    "file": "--tmp-gage-pi-fixtures-project--/2026-01-15T12-00-00-500Z_019bc186-defa-761f-b8f0-d10eaf4e7c6d.jsonl",
+    "sessionId": "019bc186-defa-761f-b8f0-d10eaf4e7c6d",
     "entries": 23,
     "userMessages": 3,
     "assistantMessages": 6,
@@ -17,8 +17,8 @@
     "cost": 0.019030750000000003
   },
   "branches": {
-    "file": "--tmp-gage-pi-fixtures-project--/2026-11-20T12-00-29-750Z_01a1f8d4-5d3c-761f-b8f0-d115219de458.jsonl",
-    "sessionId": "01a1f8d4-5d3c-761f-b8f0-d115219de458",
+    "file": "--tmp-gage-pi-fixtures-project--/2026-01-15T12-00-29-750Z_019bc187-513c-761f-b8f0-d115219de458.jsonl",
+    "sessionId": "019bc187-513c-761f-b8f0-d115219de458",
     "entries": 18,
     "userMessages": 3,
     "assistantMessages": 4,
@@ -34,8 +34,8 @@
     "cost": 0.009576000000000001
   },
   "fork": {
-    "file": "--tmp-gage-pi-fixtures-other-project--/2026-11-20T12-00-47-250Z_01a1f8d4-a198-761f-b8f0-d11826396ebe.jsonl",
-    "sessionId": "01a1f8d4-a198-761f-b8f0-d11826396ebe",
+    "file": "--tmp-gage-pi-fixtures-other-project--/2026-01-15T12-00-47-250Z_019bc187-9598-761f-b8f0-d11826396ebe.jsonl",
+    "sessionId": "019bc187-9598-761f-b8f0-d11826396ebe",
     "entries": 27,
     "userMessages": 4,
     "assistantMessages": 7,

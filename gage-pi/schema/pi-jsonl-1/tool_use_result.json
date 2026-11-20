@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "pi-jsonl 1 tool_use_result",
+  "description": "The result of one tool call as Pi recorded it, the tool_use table's result_raw column: the `message` of the toolResult entry that answers the call. The same shape for every tool; `details` is the tool's own.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["role", "toolCallId"],
+  "properties": {
+    "role": { "const": "toolResult" },
+    "toolCallId": { "type": "string", "description": "The tool_use table's id column" },
+    "toolName": { "type": "string" },
+    "content": { "type": ["array", "null"], "description": "Text and image blocks; the tool_use table's output column is the text", "items": { "type": "object", "additionalProperties": true, "properties": {
+      "type": { "type": "string" }, "text": { "type": "string" } } } },
+    "isError": { "type": "boolean", "description": "The tool_use table's is_error column" },
+    "details": { "description": "What the tool recorded beside its content: for edit, the diff it applied" },
+    "durationMs": { "type": "number" },
+    "usage": { "type": "object", "description": "Present when the tool ran a model of its own" },
+    "timestamp": { "type": "integer", "description": "Epoch milliseconds" }
+  }
+}

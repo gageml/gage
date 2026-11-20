@@ -43,6 +43,13 @@ conventions in _[Keep a Changelog]_. Release versions use [semantic versioning].
   for the default driver. A plugin of another version than the build's is a
   problem that `gage init` fixes
 
+**Pi**
+
+- The `pi:` session source reads Pi coding agent sessions:
+  `gage session list`, `gage session view`, `gage session add`, and
+  `gage query` work on them as they do on Claude Code sessions. Gage reads and
+  stores Pi sessions; it is not set up in Pi and does not run agents on it
+
 **Remotes**
 
 - `gage fetch` fetches from a remote without changing the store's objects.

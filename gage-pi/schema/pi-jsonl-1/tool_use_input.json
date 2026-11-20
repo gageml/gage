@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "pi-jsonl 1 tool_use_input",
+  "description": "The arguments of one tool call, the tool_use table's input_raw column: the `arguments` of a toolCall block. The shape is the tool's own parameters: $defs holds Pi's built-in tools by the tool_use table's name column. An extension's tool takes its own shape, which this document does not hold. A path is relative to the session's working directory unless absolute.",
+  "type": ["object", "null"],
+  "additionalProperties": true,
+  "$defs": {
+    "bash": { "type": "object", "additionalProperties": true, "required": ["command"], "properties": {
+      "command": { "type": "string" }, "timeout": { "type": "number", "description": "Seconds" } } },
+    "read": { "type": "object", "additionalProperties": true, "required": ["path"], "properties": {
+      "path": { "type": "string" }, "offset": { "type": "number" }, "limit": { "type": "number" } } },
+    "write": { "type": "object", "additionalProperties": true, "required": ["path", "content"], "properties": {
+      "path": { "type": "string" }, "content": { "type": "string" } } },
+    "edit": { "type": "object", "additionalProperties": true, "required": ["path"], "properties": {
+      "path": { "type": "string" },
+      "edits": { "type": "array", "items": { "type": "object", "additionalProperties": true, "properties": {
+        "oldText": { "type": "string" }, "newText": { "type": "string" } } } } } },
+    "find": { "type": "object", "additionalProperties": true, "required": ["pattern"], "properties": {
+      "pattern": { "type": "string", "description": "A glob" }, "path": { "type": "string" }, "limit": { "type": "number" } } },
+    "grep": { "type": "object", "additionalProperties": true, "required": ["pattern"], "properties": {
+      "pattern": { "type": "string" }, "path": { "type": "string" }, "glob": { "type": "string" },
+      "ignoreCase": { "type": "boolean" }, "literal": { "type": "boolean" },
+      "context": { "type": "number" }, "limit": { "type": "number" } } },
+    "ls": { "type": "object", "additionalProperties": true, "properties": {
+      "path": { "type": "string" }, "limit": { "type": "number" } } }
+  }
+}

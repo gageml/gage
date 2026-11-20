@@ -1043,11 +1043,14 @@ mod tests {
                 "claude-jsonl 1 entry",
                 "claude-jsonl 1 tool_use_input",
                 "claude-jsonl 1 tool_use_result",
+                "pi-jsonl 1 entry",
+                "pi-jsonl 1 tool_use_input",
+                "pi-jsonl 1 tool_use_result",
             ]
         );
         let schema = strings(
             &ctx,
-            "SELECT schema FROM content_schema WHERE name = 'entry'",
+            "SELECT schema FROM content_schema WHERE name = 'entry' ORDER BY content_format",
         )
         .await;
         let parsed: serde_json::Value = serde_json::from_str(&schema[0]).unwrap();

@@ -7,8 +7,9 @@ description:
 
 The `gage init` command sets up Gage. It creates the store when there is none
 and installs the Gage plugin, an MCP server and skills, in each coding agent
-Gage has a driver for: Claude Code (`claude`) and Codex (`codex`). Run it again
-after upgrading Gage so each agent gets the plugin of the new version.
+it can be set up in: Claude Code (`claude`) and Codex (`codex`). Run it again
+after upgrading Gage so each agent gets the plugin of the new version. Gage
+reads Pi sessions and is not set up in Pi.
 
 ```cli
 gage init [OPTIONS]

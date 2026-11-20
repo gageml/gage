@@ -1,0 +1,5 @@
+{"type":"session","version":3,"id":"44444444-4444-4444-8444-444444444444","timestamp":"2025-06-01T10:00:00.000Z","cwd":"/w/forked","parentSession":"/w/sessions/2025-06-01T10-00-00-000Z_22222222-2222-4222-8222-222222222222.jsonl"}
+{"type":"message","timestamp":"2025-06-01T10:00:01.000Z","message":{"role":"user","content":[{"type":"text","text":"Hello"}],"timestamp":1748772001000}}
+{"type":"model_change","timestamp":"2025-06-01T10:00:02.000Z","provider":"openai","modelId":"gpt-old"}
+{"type":"message","timestamp":"2025-06-01T10:00:03.000Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"A greeting."},{"type":"text","text":"Hi."}],"api":"openai-responses","provider":"openai","model":"gpt-old","usage":{"input":10,"output":2,"cacheRead":0,"cacheWrite":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"stop","timestamp":1748772003000}}
+{"type":"message","id":"b0000001","parentId":null,"timestamp":"2025-06-01T10:00:09.000Z","message":{"role":"user","content":"And again","timestamp":9}}

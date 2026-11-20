@@ -74,6 +74,8 @@ claude:<path>   the Claude Code sessions under <path>/projects
 claude:         the Claude Code sessions in the default location
 codex:<path>    the Codex sessions under <path>/sessions
 codex:          the Codex sessions in the default location
+pi:<path>       the Pi sessions under <path>/sessions, or under <path>
+pi:             the Pi sessions in the default location
 
 gage_store names another Gage store by its path, as the GAGE_STORE environment
 variable does for a gage command. Every store table is present, holding that
@@ -201,7 +203,18 @@ payload's type. The model calls its tools by writing a script to one exec tool,
 so a tool_use message holds the script. A tool_use row is what a script ran: a
 command (exec_command), an MCP call (mcp__<server>__<tool>), or a patch
 (apply_patch). Its result_raw is the item Codex recorded for it, and input_raw
-that item's input. content_schema has no rows for this format."#,
+that item's input. content_schema has no rows for this format.
+
+In pi-jsonl 1, a row's raw is one line of a Pi session file. Line 1 is the
+header, type session. entry.type is the line's type (message, model_change,
+usage, compaction, ...) and entry.subtype the role of a message, the customType
+of a custom entry, or the kind of a usage entry. One file holds every branch of
+a session: an entry names the one it follows in parentId, and the rows are every
+entry of every branch in file order. One assistant response is one row with all
+of its blocks, so a tool_use message can hold text and thinking too. usage is
+written once per request; sum it over rows:
+SELECT sum(CAST(json_extract(raw, '$.message.usage.output') AS BIGINT))
+FROM message WHERE session_id = '<ID>' AND type = 'assistant';"#,
     },
     HelpTopic {
         topic: "summary",

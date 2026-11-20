@@ -1,0 +1,5 @@
+{"type":"session","version":3,"id":"55555555-5555-4555-8555-555555555555","timestamp":"2025-06-01T10:00:00.000Z","cwd":"/w/torn"}
+{"type":"message","id":"c0000001","parentId":null,"timestamp":"2025-06-01T10:00:01.000Z","message":{"role":"user","content":"First","timestamp":1}}
+{"type":"message","id":"c0000002","parentId":"c0000001","timestamp":"2025-06-01T10:00:02.000Z","message":{"role":"assistant","content":[{"type":"te{"type":"message","id":"c0000003","parentId":"c0000001","timestamp":"2025-06-01T10:00:03.000Z","message":{"role":"user","content":"Second","timestamp":3}}
+
+{"type":"message","id":"c0000004","parentId":"c0000003","timestamp":"2025-06-01T10:00:04.000Z","message":{"role":"assistant","content":[{"type":"text","text":"Answer"}],"provider":"anthropic","model":"claude-new","usage":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"stop","timestamp":4}}

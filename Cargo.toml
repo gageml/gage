@@ -11,6 +11,7 @@ members = [
     "gage-publish",
     "gage-lsp",
     "gage-mcp",
+    "gage-pi",
     "gage-plugin",
     "gage-query",
     "gage-registry",

@@ -63,3 +63,54 @@ is, with these differences:
 - `gage session move` and `gage session delete` do not apply to Codex sessions.
 - Sessions that Codex has compressed, and a forked session's history from before
   the fork, are not read.
+
+## Pi sessions
+
+Gage also reads the sessions of the Pi coding agent. Pi writes each session to a
+file under `~/.pi/agent/sessions/`, or under `$PI_CODING_AGENT_DIR/sessions/`
+when `PI_CODING_AGENT_DIR` is set. When `PI_CODING_AGENT_SESSION_DIR` is set, it
+names the directory of session files itself. Name the `pi` source to read them:
+
+```cli
+gage session list --native pi:
+gage session view --native pi: [<SESSION_ID>]
+gage session add --native pi: <SESSION_ID>
+```
+
+`pi:<path>` reads another location. The path is a Pi agent directory, whose
+sessions are under `<path>/sessions`, or a directory of session files.
+
+A Pi session is listed, viewed, queried, and stored as a Claude Code session is,
+with these differences:
+
+- A session's project is named for the directory the session started in, in the
+  same form a Claude Code project has, so one directory is one project across
+  drivers.
+- A session's id is the one its file name carries, in the form
+  `<time>_<id>.jsonl` that Pi gives a session file. A file with another name is
+  not listed. Pi lets a user choose an id and keeps it unique within one project
+  only. When two files carry one id, the newest is the session and the others
+  are not listed.
+- A Pi session file holds every branch of the session. Every entry of every
+  branch is a row, in the order of the file, and the session's token totals and
+  cost cover all branches, as Pi's own totals do.
+- A session's cost is the sum of the costs Pi records for each model request.
+  Pi estimates a cost from the model's listed prices. A session none of whose
+  requests carries a cost has none.
+- A forked session repeats the entries of the session it was forked from, so
+  its totals include them. In a session forked into another project, a relative
+  path in a repeated tool call is resolved against the fork's directory.
+- A session's title is the name it was given in Pi, and its first prompt when
+  it has no name.
+- Sessions are found in the sessions directory and one level below it. A session
+  that Pi wrote somewhere else, through its `sessionDir` setting or
+  `--session <path>`, is found only when the source names its directory.
+- Session files of Pi's format versions 1 to 3 are read as they are. Pi rewrites
+  a file of an earlier version when it opens it, and the rewritten file updates
+  the stored session. A file of a later version is listed with a read error
+  that names the version.
+- A line that is not a JSON object fails the session with a read error. Pi
+  itself passes over such a line.
+- `gage session move` and `gage session delete` do not apply to Pi sessions.
+- Gage is not set up in Pi and does not run scan agents on it. `gage init`
+  leaves Pi alone.

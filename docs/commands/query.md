@@ -44,6 +44,8 @@ never written.
 | `claude:`       | The Claude Code sessions in the default location     |
 | `codex:<path>`  | The Codex sessions under `<path>/sessions`           |
 | `codex:`        | The Codex sessions in the default location           |
+| `pi:<path>`     | The Pi sessions under `<path>/sessions`, or `<path>` |
+| `pi:`           | The Pi sessions in the default location              |
 
 A session directory such as `claude:` holds native sessions, whether or not they
 are in the store. It has the `session`, `entry`, `message`, `tool_use`, and

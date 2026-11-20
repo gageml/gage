@@ -17,6 +17,7 @@ use std::sync::{Arc, OnceLock};
 use gage_claude::driver::ClaudeDriver;
 use gage_codex::driver::CodexDriver;
 use gage_core::config::DEFAULT_DRIVER;
+use gage_pi::driver::PiDriver;
 use gage_session::{
     Driver, DriverError, HostContext, ModelSizes, Source, SourceOptions, split_scheme,
 };
@@ -76,6 +77,7 @@ fn bundled_with(models: &HashMap<String, ModelSizes>) -> Vec<Arc<dyn Driver>> {
     vec![
         Arc::new(ClaudeDriver::with_models(models_of("claude"))),
         Arc::new(CodexDriver::with_models(models_of("codex"))),
+        Arc::new(PiDriver::new()),
     ]
 }
 
@@ -337,6 +339,24 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(url.starts_with("codex:") && url.ends_with("/t2"), "{url}");
+    }
+
+    /// Pi is a driver Gage reads and stores sessions of and does not
+    /// run inside, so it is routed to by scheme and names no session
+    /// as the current one.
+    #[test]
+    fn a_pi_source_goes_to_the_pi_driver() {
+        let registry = bundled_with(&HashMap::new())
+            .into_iter()
+            .fold(DriverRegistry::new(), DriverRegistry::add);
+        let names: Vec<&str> = registry.drivers().iter().map(|d| d.name()).collect();
+        assert_eq!(names, ["claude", "codex", "pi"]);
+        assert_eq!(registry.driver_for("pi:/a/agent").unwrap().name(), "pi");
+        let (source, id) = registry.split_session_url("pi:/a/agent/s1").unwrap();
+        assert_eq!((source.as_str(), id.as_str()), ("pi:/a/agent", "s1"));
+        let pi = registry.for_name("pi").unwrap();
+        assert_eq!(pi.harness_name(), "Pi");
+        assert_eq!(pi.harness_path(), None);
     }
 
     #[test]

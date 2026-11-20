@@ -12,7 +12,7 @@
 pub const CLAUDE: &str = "claude-jsonl 1";
 
 /// The `content_format` values whose sessions this crate shows
-pub const SUPPORTED: &[&str] = &[CLAUDE, "codex-rollout 1"];
+pub const SUPPORTED: &[&str] = &[CLAUDE, "codex-rollout 1", "pi-jsonl 1"];
 
 /// Panics unless `content_format` is one of [`SUPPORTED`]. A session
 /// in another format has no reader here, and rendering it would show

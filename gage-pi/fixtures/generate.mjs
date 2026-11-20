@@ -27,6 +27,11 @@ const PROJECT = path.join(WORK, "project");
 const OTHER_PROJECT = path.join(WORK, "other-project");
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
+// The version 1 session the daily tests use, and the name Pi would
+// have filed it under
+const LEGACY = path.join(HERE, "../testdata/v1-extended.jsonl");
+const LEGACY_NAME = "2025-06-01T10-00-00-000Z_11111111-1111-4111-8111-111111111111.jsonl";
+const MIGRATED = path.join(WORK, "migrated");
 const PACKAGE = "node_modules/@earendil-works/pi-coding-agent";
 
 if (process.env.GAGE_PI_FIXTURES_CHILD === "1") {
@@ -68,6 +73,7 @@ function launch() {
   fs.rmSync(out, { recursive: true, force: true });
   fs.mkdirSync(out, { recursive: true });
   fs.cpSync(path.join(AGENT_DIR, "sessions"), path.join(out, "sessions"), { recursive: true });
+  fs.cpSync(MIGRATED, path.join(out, "migrated"), { recursive: true });
   fs.copyFileSync(path.join(WORK, "stats.json"), path.join(out, "stats.json"));
   fs.rmSync(WORK, { recursive: true, force: true });
   console.log(`wrote ${path.relative(process.cwd(), out)}`);
@@ -115,6 +121,7 @@ async function generate() {
   const runFile = await agentRun(ctx);
   await branches(ctx);
   await fork(ctx, runFile);
+  migrate(ctx);
 
   fs.writeFileSync(path.join(WORK, "stats.json"), `${JSON.stringify(ctx.stats, null, 2)}\n`);
 }
@@ -245,6 +252,18 @@ async function fork(ctx, parentFile) {
   return finish(ctx, "fork", session);
 }
 
+// A hand-written file in format version 1, as Pi rewrites it on
+// opening it: each entry given an id and a parent, the header raised
+// to the current version, and the blank and unparsable lines dropped.
+function migrate(ctx) {
+  fs.mkdirSync(MIGRATED, { recursive: true });
+  const file = path.join(MIGRATED, LEGACY_NAME);
+  fs.copyFileSync(LEGACY, file);
+  const before = fs.readFileSync(file, "utf8");
+  ctx.pi.SessionManager.open(file);
+  if (fs.readFileSync(file, "utf8") === before) throw new Error("Pi did not migrate the file");
+}
+
 async function openSession(ctx, sessionManager, cwd = PROJECT) {
   const { pi, ai } = ctx;
   const core = ai.createFauxCore({
@@ -346,7 +365,7 @@ async function finish(ctx, name, session) {
 // after the last, and the random sources are seeded.
 function fixClockAndRandomness() {
   const RealDate = Date;
-  let now = RealDate.UTC(2026, 10, 20, 12, 0, 0);
+  let now = RealDate.UTC(2026, 0, 15, 12, 0, 0);
   const tick = () => {
     now += 250;
     return now;

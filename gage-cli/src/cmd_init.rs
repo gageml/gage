@@ -4,7 +4,7 @@ use clap::Args;
 use cliclack as cli;
 use gage_core::config::{Config, user_config_path};
 use gage_registry::driver::DriverRegistry;
-use gage_session::{Driver, InstallUi};
+use gage_session::{Driver, DriverStatus, Field, InstallUi};
 use gage_store::{Store, StoreError};
 
 use crate::dialog::{self, DialogError, DialogResult};
@@ -202,7 +202,7 @@ fn installed(candidates: &[Candidate], name: &str) -> Result<(), String> {
     let Some(candidate) = candidates.iter().find(|c| c.name == name) else {
         let names: Vec<&str> = candidates.iter().map(|c| c.name.as_str()).collect();
         return Err(format!(
-            "{name:?} is not a driver in this build; drivers: {}",
+            "{name:?} is not a driver Gage can be set up in; drivers: {}",
             names.join(", ")
         ));
     };
@@ -215,17 +215,34 @@ fn installed(candidates: &[Candidate], name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Every driver of the build, with whether its harness is installed
+/// Every driver of the build whose harness Gage can be set up in,
+/// with whether that harness is installed
 fn candidates(registry: &DriverRegistry) -> Vec<Candidate> {
     registry
         .drivers()
         .iter()
+        .filter(|driver| has_harness(driver.as_ref()))
         .map(|driver| Candidate {
             name: driver.name().to_string(),
             harness: driver.harness_name().to_string(),
             installed: driver.harness_path().is_some(),
         })
         .collect()
+}
+
+/// Whether `driver` has a harness for Gage to be set up in. A driver
+/// that only reads and stores a harness's sessions names no harness
+/// path and reports no harness in its status; one whose harness is
+/// not installed reports it absent.
+fn has_harness(driver: &dyn Driver) -> bool {
+    driver.harness_path().is_some()
+        || !matches!(
+            driver.status(),
+            Ok(DriverStatus {
+                harness: Field::Unsupported,
+                ..
+            })
+        )
 }
 
 fn drivers_named<'a>(
@@ -381,6 +398,16 @@ mod tests {
         }
     }
 
+    /// Pi is a driver that reads and stores sessions and has no
+    /// harness for Gage to be set up in.
+    #[test]
+    fn a_driver_with_no_harness_to_set_up_is_not_a_candidate() {
+        let registry = DriverRegistry::builtin();
+        assert!(registry.for_name("pi").is_some());
+        let names: Vec<String> = candidates(&registry).into_iter().map(|c| c.name).collect();
+        assert_eq!(names, ["claude", "codex"]);
+    }
+
     fn both() -> Vec<Candidate> {
         vec![
             candidate("claude", "Claude Code", true),
@@ -476,12 +503,12 @@ mod tests {
     #[test]
     fn an_unknown_or_uninstalled_driver_is_an_error() {
         let err = plan(&both(), &names(&["cursor"]), None, None, true).unwrap_err();
-        assert!(err.contains("not a driver in this build"), "{err}");
+        assert!(err.contains("not a driver Gage can be set up in"), "{err}");
         let err = plan(&codex_only(), &names(&["claude"]), None, None, true).unwrap_err();
         assert!(err.contains("Claude Code is not installed"), "{err}");
         let err = plan(&codex_only(), &[], None, Some("claude"), true).unwrap_err();
         assert!(err.contains("Claude Code is not installed"), "{err}");
         let err = plan(&both(), &[], None, Some("nope"), true).unwrap_err();
-        assert!(err.contains("not a driver in this build"), "{err}");
+        assert!(err.contains("not a driver Gage can be set up in"), "{err}");
     }
 }

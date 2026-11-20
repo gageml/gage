@@ -20,7 +20,9 @@ the default driver. Schemes are defined by drivers:
 PATH/projects; without PATH, the
           Claude Code home directory
   codex   Codex sessions under PATH/sessions; without PATH, the
-          Codex home directory";
+          Codex home directory
+  pi      Pi sessions under PATH/sessions, or under PATH when it has
+          no sessions directory; without PATH, the Pi agent directory";
 
 /// The drivers this CLI build registers. The default is the one the
 /// config names, once [`configure_drivers`] has run.

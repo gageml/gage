@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "pi-jsonl 1 entry",
+  "description": "One line of a Pi session file, the `raw` column of the entry and message tables. Partial: the fields listed are the common and useful ones; a line carries more. The first line is the header, type `session`; every later line is an entry. Measured on Pi 1.5.2, November 2026, with the shapes of format versions 1 and 2 that Pi still reads. Read a value with json_extract(raw, '$.path') after scoping rows to content_format 'pi-jsonl 1'.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["type"],
+  "properties": {
+    "type": {
+      "type": "string",
+      "description": "The entry kind, the entry table's type column: session (the header), message, model_change, thinking_level_change, usage, compaction, branch_summary, custom, custom_message, context_edit, label, session_info. An extension or a later Pi can write others."
+    },
+    "id": { "type": "string", "description": "On an entry: its id, the entry table's uuid column; usually 8 hex characters. Absent on entries of format version 1. On the header: the session id" },
+    "parentId": { "type": ["string", "null"], "description": "The id of the entry this one follows; null on a root. One file holds every branch of a session, so two entries can share a parent. Absent on entries of format version 1, which follow one another in file order" },
+    "timestamp": { "type": "string", "format": "date-time", "description": "RFC 3339; the entry table's timestamp column" },
+    "version": { "type": "integer", "description": "On the header: the format version, 2 or 3. Absent on a version 1 header" },
+    "cwd": { "type": "string", "description": "On the header: the working directory the session started in, which the session table's project column is the slug of" },
+    "parentSession": { "type": "string", "description": "On the header of a fork: the path of the session file it was forked from. A fork repeats its parent's entries" },
+    "message": {
+      "description": "On a message entry. The role is the entry table's subtype column.",
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["role"],
+      "properties": {
+        "role": { "type": "string", "description": "user, assistant, toolResult, system, bashExecution (a shell command the user ran from Pi), or custom (an extension's message; hookMessage before format version 3)" },
+        "content": {
+          "description": "A string, or content blocks. One assistant response is one entry holding all of its blocks",
+          "oneOf": [
+            { "type": "string" },
+            { "type": "array", "items": { "$ref": "#/$defs/block" } },
+            { "type": "null" }
+          ]
+        },
+        "timestamp": { "type": "integer", "description": "Epoch milliseconds" },
+        "provider": { "type": "string", "description": "On an assistant message" },
+        "model": { "type": "string", "description": "On an assistant message: the model asked. The session table's model column takes the first" },
+        "responseModel": { "type": "string", "description": "The model the provider reports as having answered" },
+        "stopReason": { "type": "string", "description": "On an assistant message: stop, length, toolUse, error, aborted, or deferred" },
+        "errorMessage": { "type": "string" },
+        "usage": { "$ref": "#/$defs/usage" },
+        "toolCallId": { "type": "string", "description": "On a toolResult message: the id of the toolCall block it answers" },
+        "toolName": { "type": "string" },
+        "isError": { "type": "boolean", "description": "On a toolResult message" },
+        "details": { "description": "On a toolResult message: what the tool recorded beside its content, in the tool's own shape" },
+        "sections": { "type": "object", "description": "On a system message: prompt sections by name. A string sets the section, null removes it; replaying the system messages in order gives the current prompt", "additionalProperties": { "type": ["string", "null"] } },
+        "toolsAdded": { "type": "array", "description": "On a system message: tool declarations added, each {name, description, parameters}" },
+        "toolsRemoved": { "type": "array", "description": "On a system message: tools removed, each {name}" },
+        "command": { "type": "string", "description": "On a bashExecution message" },
+        "output": { "type": "string", "description": "On a bashExecution message" },
+        "exitCode": { "type": ["integer", "null"], "description": "On a bashExecution message" },
+        "customType": { "type": "string", "description": "On a custom message: the extension's name for it" }
+      }
+    },
+    "provider": { "type": "string", "description": "On model_change and usage entries" },
+    "modelId": { "type": "string", "description": "On a model_change entry: the model selected" },
+    "model": { "type": "string", "description": "On a usage entry" },
+    "thinkingLevel": { "type": "string", "description": "On a thinking_level_change entry: off, minimal, low, medium, high, xhigh" },
+    "kind": { "type": "string", "description": "On a usage entry: what the request was for, such as cache_warm; the entry table's subtype column" },
+    "usage": { "$ref": "#/$defs/usage" },
+    "summary": { "type": "string", "description": "On compaction and branch_summary entries: the summary text, which is the message table's text" },
+    "firstKeptEntryId": { "type": "string", "description": "On a compaction entry: the first earlier entry the model still sees. Format version 1 has firstKeptEntryIndex, a line index with the header at 0" },
+    "tokensBefore": { "type": "integer", "description": "On a compaction entry" },
+    "systemMessage": { "type": "object", "description": "On a compaction entry: the whole prompt and tool set at the compaction, as one system message" },
+    "fromId": { "type": "string", "description": "On a branch_summary entry: the leaf of the branch that was left" },
+    "customType": { "type": "string", "description": "On custom and custom_message entries: the extension's name for the entry; the entry table's subtype column" },
+    "data": { "description": "On a custom entry: the extension's state" },
+    "content": { "description": "On a custom_message entry: a string or content blocks, sent to the model as a user message" },
+    "display": { "type": "boolean", "description": "On a custom_message entry" },
+    "targetId": { "type": "string", "description": "On label and context_edit entries: the entry labelled or edited" },
+    "label": { "type": "string", "description": "On a label entry; absent when the label is cleared" },
+    "replacement": { "type": ["object", "null"], "description": "On a context_edit entry: {content} the model sees in place of the target's, or null when the target is left out" },
+    "name": { "type": "string", "description": "On a session_info entry: the session's name, which is the session table's title when set" }
+  },
+  "$defs": {
+    "block": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["type"],
+      "properties": {
+        "type": { "type": "string", "description": "text, thinking, toolCall, or image" },
+        "text": { "type": "string", "description": "On a text block" },
+        "thinking": { "type": "string", "description": "On a thinking block; empty when the provider returned it encrypted" },
+        "id": { "type": "string", "description": "On a toolCall block: the call id, the tool_use table's id column" },
+        "name": { "type": "string", "description": "On a toolCall block: the tool" },
+        "arguments": { "type": "object", "description": "On a toolCall block: the value of the tool_use table's input_raw column" },
+        "data": { "type": "string", "description": "On an image block: base64" },
+        "mimeType": { "type": "string" }
+      }
+    },
+    "usage": {
+      "description": "The tokens and cost of one model request. On an assistant message, a toolResult message whose tool ran a model, a usage entry, and a compaction or branch_summary entry. Each request is written once; the session table's totals sum them over every branch.",
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "input": { "type": "integer", "description": "Prompt tokens neither read from nor written to a cache" },
+        "output": { "type": "integer" },
+        "cacheRead": { "type": "integer" },
+        "cacheWrite": { "type": "integer" },
+        "totalTokens": { "type": "integer" },
+        "cost": { "type": "object", "additionalProperties": true, "description": "US dollars, Pi's estimate from the model's listed prices", "properties": {
+          "input": { "type": "number" }, "output": { "type": "number" },
+          "cacheRead": { "type": "number" }, "cacheWrite": { "type": "number" },
+          "total": { "type": "number" } } }
+      }
+    }
+  }
+}
