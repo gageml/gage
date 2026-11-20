@@ -4,6 +4,7 @@
 .gage
 .jj
 .local.*
+CLAUDE.local.md
 
 # Rust
 target

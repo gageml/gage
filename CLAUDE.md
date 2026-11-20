@@ -1,9 +1,16 @@
 ## General rules
 
-- Commit changes to a topic branch and push that branch. Someone else merges
-  it. Never push to `main` or `release`.
+- Start each piece of work from current `main`. Do not base work on another
+  topic branch.
 
-- Push only the branch you are on, unless instructed otherwise.
+- Commit changes to a topic branch and push that branch. Someone else merges
+  it. Never push to `main`, `build`, or `release`.
+
+- The branch name states whether the work is finished. A name that starts with
+  `wip/` marks unfinished work. Any other name marks work that is finished and
+  ready to merge, and `just check` must pass before that push.
+
+- Push only your own branch. Never push another thread's branch.
 
 ## Design rules
 
