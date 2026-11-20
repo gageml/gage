@@ -321,7 +321,7 @@ pub fn plan_transfer(
         }
     };
 
-    dialog::confirm(yes, true)?;
+    dialog::confirm(yes, false)?;
     *plan = Some(TransferPlan { advertised, named });
     Ok(format!("Fetching from {remote}").into())
 }

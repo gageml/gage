@@ -8,6 +8,11 @@ conventions in _[Keep a Changelog]_. Release versions use [semantic versioning].
 
 ## [unreleased]
 
+### Other changes
+
+- The confirmation prompt of `gage fetch` and `gage pull` selects "No" when it
+  opens, where it selected "Yes" before
+
 ## [0.5.0]
 
 ### Enhancements
