@@ -134,6 +134,12 @@ pub struct CorpusSessionAttrs {
     /// the walk still lists it.
     #[serde(default)]
     pub read_error: Option<String>,
+    /// The version of the harness's file format the session file
+    /// records, for a harness whose files record one. A driver orders
+    /// two states of a session by it when a later format can hold
+    /// fewer lines.
+    #[serde(default)]
+    pub format_version: Option<u32>,
 }
 
 impl CorpusSessionAttrs {
@@ -219,7 +225,8 @@ impl SessionAttrs for CorpusSessionAttrs {
     }
 
     /// The token split the normalized totals fold together, the span
-    /// of entry timestamps, and the read error when there is one.
+    /// of entry timestamps, the format version when the file records
+    /// one, and the read error when there is one.
     fn extra_attrs(&self) -> Map<String, Value> {
         let mut extra = Map::new();
         if let Some(error) = &self.read_error {
@@ -239,6 +246,9 @@ impl SessionAttrs for CorpusSessionAttrs {
         }
         if let Some(ms) = self.last_timestamp_ms {
             extra.insert("last_timestamp_ms".to_string(), Value::from(ms));
+        }
+        if let Some(version) = self.format_version {
+            extra.insert("format_version".to_string(), Value::from(version));
         }
         extra
     }
@@ -363,5 +373,40 @@ impl DerivedRows {
                 Arc::new(self.message_types.finish()),
             ],
         )?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_format_version_is_an_extra_attribute_when_the_file_records_one() {
+        let attrs = CorpusSessionAttrs::default();
+        assert!(!attrs.extra_attrs().contains_key("format_version"));
+        let attrs = CorpusSessionAttrs {
+            format_version: Some(3),
+            ..Default::default()
+        };
+        assert_eq!(attrs.extra_attrs()["format_version"], Value::from(3));
+    }
+
+    /// The summary cache holds the attributes as a MessagePack array
+    /// in field order, so a file written before the last field existed
+    /// is one element short.
+    #[test]
+    fn a_cached_summary_written_without_the_format_version_still_reads() {
+        let attrs = CorpusSessionAttrs {
+            project: "p".to_string(),
+            line_count: 7,
+            ..Default::default()
+        };
+        let mut bytes = rmp_serde::to_vec(&attrs).unwrap();
+        assert_eq!(bytes[..3], [0xdc, 0, 18], "an array of the 18 fields");
+        bytes[2] = 17;
+        assert_eq!(bytes.pop(), Some(0xc0), "the format version, nil");
+        let read: CorpusSessionAttrs = rmp_serde::from_slice(&bytes).unwrap();
+        assert_eq!(read.line_count, 7);
+        assert_eq!(read.format_version, None);
     }
 }

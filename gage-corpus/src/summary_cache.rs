@@ -7,9 +7,9 @@
 //! path write; `IndexStore::session_attrs` reads.
 //!
 //! Validation is by mtime: a cache file whose mtime is at least the
-//! JSONL's mtime is treated as fresh. Session files only grow (the
-//! harness appends), so any write moves mtime forward and invalidates
-//! the cache.
+//! JSONL's mtime is treated as fresh. A harness appends to a session
+//! file or rewrites it in place, and either write moves mtime forward
+//! and invalidates the cache.
 //!
 //! A session is defined at the time it is read. A line appended after
 //! the read and before the cache write is not in the entry, and the
