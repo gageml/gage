@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: active
 ---
 
 # Object type version changes
@@ -18,9 +18,9 @@ A release of Gage MUST read, edit, and merge objects of every type version that
 an earlier release wrote.
 
 A release of Gage MUST refuse to read, edit, or merge an object whose type
-version is higher than the release supports. An earlier release therefore
-cannot use an object of a new type version, and such objects reach stores that
-run earlier releases through push, fetch, and merge.
+version is higher than the release supports. An earlier release therefore cannot
+use an object of a new type version, and such objects reach stores that run
+earlier releases through push, fetch, and merge.
 
 In practice, type versions should not change. A change to an object's layout
 MUST use these methods where they suffice:
@@ -43,5 +43,5 @@ The type version MUST be changed when these methods do not suffice:
 
 - An earlier release that ignores the change would behave incorrectly.
 
-An edit keeps the object's type version unless the edit requires the layout of
-a higher version.
+An edit keeps the object's type version unless the edit requires the layout of a
+higher version.

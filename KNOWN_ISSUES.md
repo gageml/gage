@@ -1,7 +1,9 @@
 # Known issues
 
 This file lists problems that are known to exist in Gage and that there is
-currently no plan to address. An entry is removed in the change that fixes it.
+currently no plan to address.
+
+If a known issue is fixed, it should be removed from this file.
 
 Each entry states what happens, when it happens, and the workaround if one
 exists.
