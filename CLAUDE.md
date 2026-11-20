@@ -1,9 +1,9 @@
 ## General rules
 
-- Push changes to a topic branch only. Never push to `main` or `release`.
+- Commit changes to a topic branch and push that branch. Someone else merges
+  it. Never push to `main` or `release`.
 
-- Do not push without the user's approval. Approval covers the push it was
-  given for and does not carry over to later pushes.
+- Push only the branch you are on, unless instructed otherwise.
 
 ## Design rules
 
