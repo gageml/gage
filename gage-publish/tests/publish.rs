@@ -155,7 +155,7 @@ fn add_native(store: &Store, claude: &std::path::Path, session: &str) -> Session
     fs::write(project_dir.join(format!("{NATIVE_ID}.jsonl")), session).unwrap();
     let spec = format!("claude:{}", claude.display());
     let registry = DriverRegistry::builtin();
-    let driver = registry.driver_for(&spec).unwrap();
+    let driver = registry.resolve_source(&spec).unwrap().0;
     let source = driver
         .open_source(SourceOptions::new(&spec).cache_root(claude.join("cache")))
         .unwrap();

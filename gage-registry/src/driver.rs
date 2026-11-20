@@ -4,8 +4,8 @@
 //! facility that needs it (the CLI, the MCP server, ...). No lazy
 //! module-level init.
 //!
-//! The default driver is the one a source or an agent model with no
-//! scheme goes to. A process names it once at startup with
+//! The default driver is the one the empty source and an agent model
+//! with no scheme go to. A process names it once at startup with
 //! [`set_default_driver`], from the user's config; a process that
 //! names none gets [`DEFAULT_DRIVER`]. The models the user's config
 //! sets for a driver's sizes are named the same way, with
@@ -112,9 +112,8 @@ impl DriverRegistry {
         })
     }
 
-    /// Register `driver` and mark it as the default: the driver a
-    /// scheme-less source is handed to. Panics if a default is already
-    /// set.
+    /// Register `driver` and mark it as the default: the driver the
+    /// empty source is handed to. Panics if a default is already set.
     pub fn add_default(mut self, driver: Arc<dyn Driver>) -> Self {
         assert!(self.default.is_none(), "default driver already set");
         self.default = Some(driver.clone());
@@ -154,13 +153,47 @@ impl DriverRegistry {
         &self.drivers
     }
 
-    /// The driver that handles `source`: the one registered for its
-    /// scheme when it has a registered scheme, else the default.
-    pub fn driver_for(&self, source: &str) -> Option<Arc<dyn Driver>> {
-        match split_scheme(source) {
-            Some((scheme, _)) if self.by_scheme.contains_key(scheme) => self.for_scheme(scheme),
-            _ => self.default(),
+    /// The driver that handles `source` and the source to hand that
+    /// driver. A source is `<scheme>:<path>` under a registered scheme.
+    /// A registered scheme alone, with no colon, is that driver's
+    /// default location and is returned as `<scheme>:`. The empty
+    /// source is the default driver's default location. A source that
+    /// names no driver is an error and so is one whose scheme no
+    /// driver serves: a path alone does not say which driver reads it.
+    pub fn resolve_source(&self, source: &str) -> Result<(Arc<dyn Driver>, String), DriverError> {
+        if source.is_empty() {
+            let driver = self
+                .default()
+                .ok_or_else(|| DriverError::Other("no default session driver registered".into()))?;
+            return Ok((driver, String::new()));
         }
+        if let Some(driver) = self.for_scheme(source) {
+            return Ok((driver, format!("{source}:")));
+        }
+        match split_scheme(source) {
+            Some((scheme, _)) => match self.for_scheme(scheme) {
+                Some(driver) => Ok((driver, source.to_string())),
+                None => Err(DriverError::Other(format!(
+                    "no driver serves scheme {scheme:?}; schemes: {}",
+                    self.schemes().join(", ")
+                ))),
+            },
+            None => Err(DriverError::Other(format!(
+                "source names no driver; write it as SCHEME:PATH, where SCHEME is one of {}",
+                self.schemes().join(", ")
+            ))),
+        }
+    }
+
+    /// Every registered scheme, in registration order
+    fn schemes(&self) -> Vec<&'static str> {
+        let mut schemes = Vec::new();
+        for scheme in self.drivers.iter().flat_map(|d| d.schemes()) {
+            if !schemes.contains(scheme) {
+                schemes.push(*scheme);
+            }
+        }
+        schemes
     }
 
     /// The driver that runs an agent whose model is `model`, and the
@@ -203,22 +236,22 @@ impl DriverRegistry {
         failed.map_or(Ok(None), Err)
     }
 
-    /// Route the source `options` names to its driver and open it. The
-    /// empty source is the default driver's default location.
+    /// Route the source `options` names to its driver and open it, as
+    /// [`Self::resolve_source`] reads it.
     pub fn open_source(&self, options: &SourceOptions) -> Result<Box<dyn Source>, DriverError> {
-        let driver = self
-            .driver_for(options.url())
-            .ok_or_else(|| DriverError::Other("no default session driver registered".into()))?;
-        driver.open_source(options)
+        let (driver, source) = self.resolve_source(options.url())?;
+        driver.open_source(&options.with_url(&source))
     }
 
     /// Route `session_url` to its driver by scheme and split it into
-    /// its source URL and session id. A scheme-less URL goes to the
-    /// default driver.
+    /// its source URL and session id. A URL with no registered scheme
+    /// goes to the default driver.
     pub fn split_session_url(&self, session_url: &str) -> Result<(String, String), DriverError> {
-        let driver = self
-            .driver_for(session_url)
-            .ok_or_else(|| DriverError::Other("no default session driver registered".into()))?;
+        let driver = match split_scheme(session_url) {
+            Some((scheme, _)) if self.by_scheme.contains_key(scheme) => self.for_scheme(scheme),
+            _ => self.default(),
+        }
+        .ok_or_else(|| DriverError::Other("no default session driver registered".into()))?;
         driver.split_session_url(session_url)
     }
 }
@@ -249,11 +282,16 @@ mod tests {
         fn schemes(&self) -> &'static [&'static str] {
             self.1
         }
-        fn open_source(&self, _options: &SourceOptions) -> Result<Box<dyn Source>, DriverError> {
-            Err(DriverError::Other("not used".into()))
+        /// Fails with the source it was handed.
+        fn open_source(&self, options: &SourceOptions) -> Result<Box<dyn Source>, DriverError> {
+            Err(DriverError::Other(format!("opened {}", options.url())))
         }
-        fn split_session_url(&self, _session_url: &str) -> Result<(String, String), DriverError> {
-            Err(DriverError::Other("not used".into()))
+        /// Fails with its own name and the URL it was handed.
+        fn split_session_url(&self, session_url: &str) -> Result<(String, String), DriverError> {
+            Err(DriverError::Other(format!(
+                "{} split {session_url}",
+                self.0
+            )))
         }
         fn write_native(
             &self,
@@ -351,7 +389,8 @@ mod tests {
             .fold(DriverRegistry::new(), DriverRegistry::add);
         let names: Vec<&str> = registry.drivers().iter().map(|d| d.name()).collect();
         assert_eq!(names, ["claude", "codex", "pi"]);
-        assert_eq!(registry.driver_for("pi:/a/agent").unwrap().name(), "pi");
+        let (driver, source) = registry.resolve_source("pi:/a/agent").unwrap();
+        assert_eq!((driver.name(), source.as_str()), ("pi", "pi:/a/agent"));
         let (source, id) = registry.split_session_url("pi:/a/agent/s1").unwrap();
         assert_eq!((source.as_str(), id.as_str()), ("pi:/a/agent", "s1"));
         let pi = registry.for_name("pi").unwrap();
@@ -378,8 +417,8 @@ mod tests {
         let registry = DriverRegistry::new()
             .add_default(Arc::new(Fake("one", &["a", "shared"])))
             .add(Arc::new(Fake("two", &["b", "shared"])));
-        assert_eq!(registry.driver_for("b:x").unwrap().name(), "two");
-        assert_eq!(registry.driver_for("shared:x").unwrap().name(), "one");
+        assert_eq!(registry.resolve_source("b:x").unwrap().0.name(), "two");
+        assert_eq!(registry.resolve_source("shared:x").unwrap().0.name(), "one");
     }
 
     #[test]
@@ -482,13 +521,69 @@ mod tests {
         );
     }
 
+    fn resolved(registry: &DriverRegistry, source: &str) -> Result<(&'static str, String), String> {
+        registry
+            .resolve_source(source)
+            .map(|(driver, source)| (driver.name(), source))
+            .map_err(|e| e.to_string())
+    }
+
     #[test]
-    fn scheme_less_and_unknown_scheme_go_to_default() {
+    fn a_scheme_alone_is_the_driver_default_location() {
         let registry = DriverRegistry::new()
             .add_default(Arc::new(Fake("one", &["a"])))
             .add(Arc::new(Fake("two", &["b"])));
-        assert_eq!(registry.driver_for("").unwrap().name(), "one");
-        assert_eq!(registry.driver_for("/tmp/x").unwrap().name(), "one");
-        assert_eq!(registry.driver_for("zzz:x").unwrap().name(), "one");
+        assert_eq!(resolved(&registry, "b"), Ok(("two", "b:".to_string())));
+        assert_eq!(resolved(&registry, "b:"), Ok(("two", "b:".to_string())));
+        assert_eq!(resolved(&registry, "b:/x"), Ok(("two", "b:/x".to_string())));
+    }
+
+    #[test]
+    fn the_empty_source_is_the_default_driver_default_location() {
+        let registry = DriverRegistry::new()
+            .add_default(Arc::new(Fake("one", &["a"])))
+            .add(Arc::new(Fake("two", &["b"])));
+        assert_eq!(resolved(&registry, ""), Ok(("one", String::new())));
+        let none = DriverRegistry::new().add(Arc::new(Fake("two", &["b"])));
+        assert!(resolved(&none, "").is_err());
+    }
+
+    #[test]
+    fn a_source_that_names_no_driver_is_an_error() {
+        let registry = DriverRegistry::new()
+            .add_default(Arc::new(Fake("one", &["a"])))
+            .add(Arc::new(Fake("two", &["b"])));
+        for source in ["/tmp/x", "./b", "b/x", "~/x:y", "other"] {
+            let err = resolved(&registry, source).unwrap_err();
+            assert!(err.contains("names no driver"), "{source}: {err}");
+            assert!(err.contains("one of a, b"), "{source}: {err}");
+        }
+        let err = resolved(&registry, "zzz:x").unwrap_err();
+        assert_eq!(err, "no driver serves scheme \"zzz\"; schemes: a, b");
+    }
+
+    /// The driver is handed the source with its scheme, so it never
+    /// reads a bare scheme as a path.
+    #[test]
+    fn open_source_hands_the_driver_the_resolved_source() {
+        let registry = DriverRegistry::new().add_default(Arc::new(Fake("one", &["a"])));
+        let err = |source: &str| match registry.open_source(&SourceOptions::new(source)) {
+            Ok(_) => panic!("{source}: opened"),
+            Err(e) => e.to_string(),
+        };
+        assert_eq!(err("a"), "opened a:");
+        assert_eq!(err("a:/x"), "opened a:/x");
+        assert!(err("/x").contains("names no driver"));
+    }
+
+    #[test]
+    fn a_session_url_with_no_registered_scheme_goes_to_default() {
+        let registry = DriverRegistry::new()
+            .add_default(Arc::new(Fake("one", &["a"])))
+            .add(Arc::new(Fake("two", &["b"])));
+        let split = |url: &str| registry.split_session_url(url).unwrap_err().to_string();
+        assert_eq!(split("s1"), "one split s1");
+        assert_eq!(split("zzz:s1"), "one split zzz:s1");
+        assert_eq!(split("b:/x/s1"), "two split b:/x/s1");
     }
 }

@@ -47,6 +47,9 @@ never written.
 | `pi:<path>`     | The Pi sessions under `<path>/sessions`, or `<path>` |
 | `pi:`           | The Pi sessions in the default location              |
 
+A scheme alone names the same source as the scheme with a colon: `claude` is
+`claude:`. A path with no scheme is an error.
+
 A session directory such as `claude:` holds native sessions, whether or not they
 are in the store. It has the `session`, `entry`, `message`, `tool_use`, and
 `tool_use_file` tables with the same columns the store's tables have, and the

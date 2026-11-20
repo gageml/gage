@@ -32,8 +32,9 @@ ask.
 
 ## Default driver
 
-The default driver is where a source or a model with no driver named goes. It is
-the `drivers.default` setting; see
+The default driver is the driver whose sessions a command reads when it names
+no session source, and where a model with no driver named goes. It is the
+`drivers.default` setting; see
 [`gage config`](/docs/commands/config#settings).
 
 `gage init` leaves a default the config file already names as it is, so running

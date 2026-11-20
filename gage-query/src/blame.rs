@@ -1652,7 +1652,7 @@ filename f.rs
             Store::open_with_cache_root(&store_path, &tmp.path().join("cache")).unwrap(),
         ));
         let registry = DriverRegistry::builtin();
-        let driver = registry.driver_for(&spec).unwrap();
+        let driver = registry.resolve_source(&spec).unwrap().0;
         let source = driver
             .open_source(SourceOptions::new(&spec).cache_root(claude_root.path().join("cache")))
             .unwrap();
@@ -2223,7 +2223,7 @@ filename f.rs
             Store::open_with_cache_root(&store_path, &tmp.path().join("cache")).unwrap(),
         ));
         let registry = DriverRegistry::builtin();
-        let driver = registry.driver_for(&spec).unwrap();
+        let driver = registry.resolve_source(&spec).unwrap().0;
         let source = driver
             .open_source(SourceOptions::new(&spec).cache_root(claude_root.path().join("cache")))
             .unwrap();

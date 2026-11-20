@@ -55,7 +55,7 @@ async fn external_scope_serves_session_directories_in_the_session_tables() {
 
     let spec = format!("claude:{}", claude_root.path().display());
     let registry = DriverRegistry::builtin();
-    let driver = registry.driver_for(&spec).unwrap();
+    let driver = registry.resolve_source(&spec).unwrap().0;
     let source = driver
         .open_source(SourceOptions::new(&spec).cache_root(claude_root.path().join("cache")))
         .unwrap();

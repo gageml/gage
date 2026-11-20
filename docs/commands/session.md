@@ -34,8 +34,11 @@ nothing is written. `list`, `view`, and `find` accept the option. `add`,
 `list --dataset` or `list --share`, the dataset or share is one the remote
 holds.
 
-A source is `SCHEME:PATH`. A value with no scheme uses the default driver,
-which the `drivers.default` setting names; see
+A source is `SCHEME:PATH`. A scheme alone, with or without the colon, is the
+default directory of that scheme: `claude` and `claude:` name the same source.
+A path with no scheme is an error, because the path does not say which driver
+reads it. When `--native` is omitted, the source is the default directory of
+the default driver, which the `drivers.default` setting names; see
 [`gage config`](/docs/commands/config#settings).
 The `claude` scheme reads Claude Code sessions under `PATH/projects`, or the
 Claude Code home directory when `PATH` is omitted. The `codex` scheme reads

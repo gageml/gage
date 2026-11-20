@@ -6,6 +6,21 @@ conventions in _[Keep a Changelog]_. Release versions use [semantic versioning].
 [Keep a Changelog]: https://keepachangelog.com/en/1.1.0/
 [semantic versioning]: https://semver.org/spec/v2.0.0.html
 
+## [unreleased]
+
+### Enhancements
+
+- A session source can be a scheme alone, which is the default directory of that
+  scheme: `--native claude` is `--native claude:`
+
+### Other changes
+
+- A session source must name its driver. A path with no scheme and a scheme that
+  no driver serves are errors, where both went to the default driver before. A
+  `backup.native` entry that is a path alone must be edited to add its scheme.
+  The `drivers.default` setting names the driver whose default directory a
+  command reads when it names no session source
+
 ## [0.4.0]
 
 ### Enhancements

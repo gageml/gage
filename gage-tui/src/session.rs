@@ -736,9 +736,9 @@ impl NativeBackend {
 
     pub async fn open(self) -> Result<Backend, Box<dyn Error>> {
         let registry = DriverRegistry::builtin();
-        let driver = registry
-            .driver_for(&self.spec)
-            .ok_or_else(|| format!("no session driver for source {:?}", self.spec))?;
+        let (driver, spec) = registry
+            .resolve_source(&self.spec)
+            .map_err(|e| format!("{}: {e}", self.spec))?;
         let mut ctx = ContextBuilder::new(None);
         if self.show_agents {
             ctx = ctx.show_agents();
@@ -747,7 +747,7 @@ impl NativeBackend {
             ctx = ctx.cache_root(root);
         }
         Ok(Backend {
-            ctx: ctx.build_source(&self.spec)?,
+            ctx: ctx.build_source(&spec)?,
             kind: Kind::Native { driver },
             registry: Arc::new(registry),
         })
@@ -939,7 +939,7 @@ pub(crate) mod tests {
         let cache_root = store_root.path().join("cache");
         let spec = format!("claude:{}", claude_root.path().display());
         let registry = DriverRegistry::builtin();
-        let driver = registry.driver_for(&spec).unwrap();
+        let driver = registry.resolve_source(&spec).unwrap().0;
         let source = driver
             .open_source(SourceOptions::new(&spec).cache_root(&cache_root))
             .unwrap();
@@ -975,7 +975,7 @@ pub(crate) mod tests {
         let store = Store::open_with_cache_root(&path, &cache_root).unwrap();
         let spec = format!("codex:{}", codex_home.path().display());
         let registry = DriverRegistry::builtin();
-        let driver = registry.driver_for(&spec).unwrap();
+        let driver = registry.resolve_source(&spec).unwrap().0;
         let source = driver
             .open_source(SourceOptions::new(&spec).cache_root(&cache_root))
             .unwrap();

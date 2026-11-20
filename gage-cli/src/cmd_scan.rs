@@ -2443,7 +2443,7 @@ mod tests {
         .unwrap();
         let spec = format!("claude:{}", claude_root.display());
         let drivers = source::driver_registry();
-        let driver = drivers.driver_for(&spec).unwrap();
+        let driver = drivers.resolve_source(&spec).unwrap().0;
         let native_source = driver
             .open_source(SourceOptions::new(&spec).cache_root(claude_root.join("cache")))
             .unwrap();

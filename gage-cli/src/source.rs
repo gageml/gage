@@ -13,8 +13,8 @@ use gage_store::{Store, StoreError};
 use crate::error::CliError;
 
 /// Long help shared by every `--native` option
-pub const SOURCE_HELP: &str = "Session directory as SCHEME:PATH. A value with no scheme uses \
-the default driver. Schemes are defined by drivers:
+pub const SOURCE_HELP: &str = "Session directory as SCHEME:PATH, or SCHEME alone for the default \
+directory of that scheme. A path with no scheme is an error. Schemes are defined by drivers:
 
   claude  Claude Code sessions under \
 PATH/projects; without PATH, the
@@ -62,17 +62,22 @@ pub fn driver_models(config: &DriversConfig) -> HashMap<String, ModelSizes> {
 }
 
 /// Resolve a `--native` value to the driver that handles it and the
-/// value to hand that driver. `None` is the empty source, which every
-/// driver reads as its default location.
+/// value to hand that driver. `None` is the empty source, which is
+/// the default driver's default location. A driver name alone is that
+/// driver's default location. A value that names no driver is the
+/// error `--native <value>: <reason>`.
 pub fn resolve_source(
     registry: &DriverRegistry,
     source: Option<&str>,
 ) -> Result<(Arc<dyn Driver>, String), String> {
     let source = source.unwrap_or("");
-    let driver = registry
-        .driver_for(source)
-        .ok_or_else(|| "no default session driver registered".to_string())?;
-    Ok((driver, source.to_string()))
+    registry.resolve_source(source).map_err(|e| {
+        if source.is_empty() {
+            e.to_string()
+        } else {
+            format!("--native {source}: {e}")
+        }
+    })
 }
 
 /// A source as a dialog names it: the value given, or the driver's
@@ -141,4 +146,37 @@ pub fn run_skill_session(command: &str, session: &SkillSession<'_>) -> Result<()
         )));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn resolved(source: Option<&str>) -> Result<(&'static str, String), String> {
+        resolve_source(&driver_registry(), source).map(|(driver, spec)| (driver.name(), spec))
+    }
+
+    #[test]
+    fn a_driver_name_alone_is_its_default_location() {
+        assert_eq!(resolved(Some("codex")), Ok(("codex", "codex:".to_string())));
+        assert_eq!(resolved(Some("pi:")), Ok(("pi", "pi:".to_string())));
+        assert_eq!(
+            resolved(Some("claude:/tmp/x")),
+            Ok(("claude", "claude:/tmp/x".to_string()))
+        );
+        assert_eq!(resolved(None).unwrap().1, "");
+    }
+
+    #[test]
+    fn a_value_that_names_no_driver_is_an_error_naming_the_value() {
+        assert_eq!(
+            resolved(Some("/tmp/x")).unwrap_err(),
+            "--native /tmp/x: source names no driver; write it as SCHEME:PATH, \
+             where SCHEME is one of claude, codex, pi"
+        );
+        assert_eq!(
+            resolved(Some("zzz:/x")).unwrap_err(),
+            "--native zzz:/x: no driver serves scheme \"zzz\"; schemes: claude, codex, pi"
+        );
+    }
 }

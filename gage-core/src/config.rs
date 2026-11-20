@@ -174,8 +174,8 @@ pub const DEFAULT_DRIVER: &str = "claude";
 /// Session driver settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DriversConfig {
-    /// The driver a source or an agent model with no scheme goes to,
-    /// by name
+    /// The driver the empty source and an agent model with no scheme
+    /// go to, by name
     #[serde(default = "default_driver")]
     pub default: String,
 

@@ -103,6 +103,14 @@ impl SourceOptions {
         &self.url
     }
 
+    /// These options over the source `url` names
+    pub fn with_url(&self, url: &str) -> Self {
+        Self {
+            url: url.to_string(),
+            ..self.clone()
+        }
+    }
+
     pub fn shows_agents(&self) -> bool {
         self.show_agents
     }

@@ -26,10 +26,11 @@ pub struct InitArgs {
 
     /// Default driver
     ///
-    /// A source or a model with no driver named goes to this driver.
-    /// Without this option a default already in config is kept. With
-    /// none in config, a single driver set up becomes default, and
-    /// with more than one, prompt asks which.
+    /// A command that names no session source reads this driver, and a
+    /// model with no driver named goes to it. Without this option a
+    /// default already in config is kept. With none in config, a single
+    /// driver set up becomes default, and with more than one, prompt
+    /// asks which.
     #[arg(long, value_name = "DRIVER")]
     pub default: Option<String>,
 

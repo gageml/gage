@@ -65,8 +65,8 @@ async fn report(args: StatusArgs) -> Result<String, CliError> {
 /// One driver's block: its name, then its harness, login, and Gage
 /// plugin each on a labeled line, with every problem collected
 /// for the closing list. A harness that is not installed is shown as
-/// such and is a problem only for the default driver, the one a
-/// source or a model with no scheme goes to.
+/// such and is a problem only for the default driver, the one the
+/// empty source and a model with no scheme go to.
 fn write_driver(
     out: &mut String,
     problems: &mut Vec<String>,

@@ -928,7 +928,7 @@ mod tests {
         fs::write(project_dir.join(format!("{id}.jsonl")), content).unwrap();
         let spec = format!("claude:{}", claude_root.display());
         let registry = DriverRegistry::builtin();
-        let driver = registry.driver_for(&spec).unwrap();
+        let driver = registry.resolve_source(&spec).unwrap().0;
         let source = driver
             .open_source(SourceOptions::new(&spec).cache_root(claude_root.join("cache")))
             .unwrap();

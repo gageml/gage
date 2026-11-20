@@ -77,6 +77,9 @@ codex:          the Codex sessions in the default location
 pi:<path>       the Pi sessions under <path>/sessions, or under <path>
 pi:             the Pi sessions in the default location
 
+A scheme alone, as in claude, is the scheme with a colon. A path with no scheme
+is an error.
+
 gage_store names another Gage store by its path, as the GAGE_STORE environment
 variable does for a gage command. Every store table is present, holding that
 store's sessions, notes, issues, scans, and datasets. A store of another version

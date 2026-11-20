@@ -1480,7 +1480,7 @@ mod tests {
         .unwrap();
         let spec = format!("claude:{}", claude_root.path().display());
         let registry = DriverRegistry::builtin();
-        let driver = registry.driver_for(&spec).unwrap();
+        let driver = registry.resolve_source(&spec).unwrap().0;
         let source = driver
             .open_source(SourceOptions::new(&spec).cache_root(claude_root.path().join("cache")))
             .unwrap();
@@ -1534,7 +1534,7 @@ mod tests {
         .unwrap();
         let spec = format!("claude:{}", claude_root.path().display());
         let registry = DriverRegistry::builtin();
-        let driver = registry.driver_for(&spec).unwrap();
+        let driver = registry.resolve_source(&spec).unwrap().0;
         let source = driver
             .open_source(SourceOptions::new(&spec).cache_root(claude_root.path().join("cache")))
             .unwrap();
@@ -1607,7 +1607,7 @@ mod tests {
         .unwrap();
         let spec = format!("claude:{}", claude_root.path().display());
         let registry = DriverRegistry::builtin();
-        let driver = registry.driver_for(&spec).unwrap();
+        let driver = registry.resolve_source(&spec).unwrap().0;
         let source = driver
             .open_source(SourceOptions::new(&spec).cache_root(claude_root.path().join("cache")))
             .unwrap();
@@ -1750,7 +1750,7 @@ mod tests {
         .unwrap();
         let spec = format!("claude:{}", claude_root.path().display());
         let registry = DriverRegistry::builtin();
-        let driver = registry.driver_for(&spec).unwrap();
+        let driver = registry.resolve_source(&spec).unwrap().0;
         let source = driver
             .open_source(SourceOptions::new(&spec).cache_root(claude_root.path().join("cache")))
             .unwrap();
@@ -1921,7 +1921,7 @@ mod tests {
         .unwrap();
         let spec = format!("claude:{}", claude_root.path().display());
         let registry = DriverRegistry::builtin();
-        let driver = registry.driver_for(&spec).unwrap();
+        let driver = registry.resolve_source(&spec).unwrap().0;
         let source = driver
             .open_source(SourceOptions::new(&spec).cache_root(claude_root.path().join("cache")))
             .unwrap();
@@ -2441,7 +2441,7 @@ mod tests {
         );
         let spec = format!("claude:{}", claude_root.path().display());
         let registry = DriverRegistry::builtin();
-        let driver = registry.driver_for(&spec).unwrap();
+        let driver = registry.resolve_source(&spec).unwrap().0;
         let source = driver
             .open_source(SourceOptions::new(&spec).cache_root(claude_root.path().join("cache")))
             .unwrap();
@@ -2511,7 +2511,7 @@ mod tests {
         seed_text_session(claude_root.path(), b, &["a quokka and a wombat"]);
         let spec = format!("claude:{}", claude_root.path().display());
         let registry = DriverRegistry::builtin();
-        let driver = registry.driver_for(&spec).unwrap();
+        let driver = registry.resolve_source(&spec).unwrap().0;
         let source = driver
             .open_source(SourceOptions::new(&spec).cache_root(claude_root.path().join("cache")))
             .unwrap();
@@ -2579,7 +2579,7 @@ mod tests {
         seed_text_session(claude_root.path(), weak, &["a quokka among other words"]);
         let spec = format!("claude:{}", claude_root.path().display());
         let registry = DriverRegistry::builtin();
-        let driver = registry.driver_for(&spec).unwrap();
+        let driver = registry.resolve_source(&spec).unwrap().0;
         let source = driver
             .open_source(SourceOptions::new(&spec).cache_root(claude_root.path().join("cache")))
             .unwrap();
