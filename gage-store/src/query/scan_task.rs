@@ -45,6 +45,9 @@ pub(crate) fn scan_task_schema() -> SchemaRef {
         // How the task entered the plan: `explicit` or `group:<name>`;
         // null without a plan
         Field::new("selected", DataType::Utf8, true),
+        // The resolved params the task's scanner ran with, a JSON
+        // object; null for a scan whose plan does not record them
+        Field::new("params", DataType::Utf8, true),
         // System
         // Null for an active scan
         system(Field::new("scan_commit", DataType::Utf8, true)),
@@ -95,6 +98,7 @@ pub(crate) struct ScanTaskRow {
     pub stopped_ms: Option<i64>,
     pub worked_ms: Option<i64>,
     pub selected: Option<String>,
+    pub params: Option<String>,
     pub scan_commit: Option<String>,
 }
 
@@ -129,9 +133,9 @@ pub(crate) fn task_rows_of(
         .enumerate()
         .map(|(i, t)| {
             let label = format!("{}:{}", t.scanner, t.task);
-            let (num, selected) = match planned.get(&label) {
-                Some((num, selected)) => (*num, selected.clone()),
-                None => (planned.len() as i64 + i as i64 + 1, None),
+            let (num, selected, params) = match planned.get(&label) {
+                Some(entry) => (entry.num, entry.selected.clone(), entry.params.clone()),
+                None => (planned.len() as i64 + i as i64 + 1, None, None),
             };
             ScanTaskRow {
                 scan_id: scan_id.to_string(),
@@ -143,6 +147,7 @@ pub(crate) fn task_rows_of(
                 stopped_ms: t.attrs.stopped,
                 worked_ms: t.attrs.worked_ms.map(|w| w as i64),
                 selected,
+                params,
                 scan_commit: scan_commit.map(String::from),
             }
         })
@@ -151,10 +156,9 @@ pub(crate) fn task_rows_of(
     rows
 }
 
-/// Task label to its plan position, from 1, and its `selected`
-/// value. Empty without a plan; a plan entry that is not an object
-/// with a `task` string is left out.
-fn plan_index(plan: Option<&Value>) -> HashMap<String, (i64, Option<String>)> {
+/// Task label to its plan entry. Empty without a plan; a plan entry
+/// that is not an object with a `task` string is left out.
+fn plan_index(plan: Option<&Value>) -> HashMap<String, PlanEntry> {
     let mut index = HashMap::new();
     let Some(tasks) = plan.and_then(|p| p.get("tasks")).and_then(Value::as_array) else {
         return index;
@@ -165,10 +169,28 @@ fn plan_index(plan: Option<&Value>) -> HashMap<String, (i64, Option<String>)> {
                 .get("selected")
                 .and_then(Value::as_str)
                 .map(String::from);
-            index.insert(label.to_string(), (i as i64 + 1, selected));
+            let params = entry.get("params").map(Value::to_string);
+            index.insert(
+                label.to_string(),
+                PlanEntry {
+                    num: i as i64 + 1,
+                    selected,
+                    params,
+                },
+            );
         }
     }
     index
+}
+
+/// What `plan.json` records for one task.
+struct PlanEntry {
+    /// Position in the plan, from 1
+    num: i64,
+    selected: Option<String>,
+    /// The `params` value as JSON text; `None` for a plan written
+    /// before params were recorded
+    params: Option<String>,
 }
 
 /// The `scan_task_agent` rows of one scan. `read_result` returns the
@@ -229,6 +251,7 @@ pub(crate) fn scan_task_rows(rows: &[ScanTaskRow]) -> Result<RecordBatch> {
     let mut stoppeds = TimestampMillisecondBuilder::with_capacity(len);
     let mut workeds = Int64Builder::with_capacity(len);
     let mut selecteds = StringBuilder::new();
+    let mut params = StringBuilder::new();
     let mut commits = StringBuilder::new();
     for row in rows {
         scan_ids.append_value(&row.scan_id);
@@ -240,6 +263,7 @@ pub(crate) fn scan_task_rows(rows: &[ScanTaskRow]) -> Result<RecordBatch> {
         stoppeds.append_option(row.stopped_ms);
         workeds.append_option(row.worked_ms);
         selecteds.append_option(row.selected.as_deref());
+        params.append_option(row.params.as_deref());
         commits.append_option(row.scan_commit.as_deref());
     }
     Ok(RecordBatch::try_new(
@@ -254,6 +278,7 @@ pub(crate) fn scan_task_rows(rows: &[ScanTaskRow]) -> Result<RecordBatch> {
             Arc::new(stoppeds.finish().with_timezone("UTC")),
             Arc::new(workeds.finish()),
             Arc::new(selecteds.finish()),
+            Arc::new(params.finish()),
             Arc::new(commits.finish()),
         ],
     )?)

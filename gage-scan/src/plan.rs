@@ -26,6 +26,7 @@ use std::fmt;
 use gage_core::glob::glob_match;
 use gage_registry::scanner::{TaskDef, TaskKind};
 use serde::Serialize;
+use serde_json::{Map, Value};
 
 /// One scanner's contribution to the plan: its planned tasks and how
 /// it was selected.
@@ -33,6 +34,8 @@ pub struct PlannedScanner<'a> {
     pub name: &'a str,
     pub tasks: &'a BTreeMap<String, TaskDef>,
     pub selection: Selection,
+    /// The scanner's resolved params; `None` when it declares none
+    pub params: Option<&'a Value>,
 }
 
 /// How a scanner entered the scan.
@@ -82,6 +85,11 @@ pub struct PlanTask {
     /// holds; the `note_doc` table of the scan's scope reads them
     /// from here.
     pub note_writes: BTreeMap<String, String>,
+    /// The resolved params of the task's scanner: the declared
+    /// defaults with the config and command-line values applied, as
+    /// `params()` returns them. An empty object for a scanner that
+    /// declares none.
+    pub params: Value,
 }
 
 impl PlanTask {
@@ -198,6 +206,10 @@ pub fn plan(scanners: &[PlannedScanner<'_>]) -> Result<Plan, PlanError> {
             after,
             unmatched_note_wants,
             note_writes: def.notes.writes.clone(),
+            params: scanner
+                .params
+                .cloned()
+                .unwrap_or_else(|| Value::Object(Map::new())),
         });
     }
 
@@ -276,13 +288,14 @@ fn find_cycle(downstream: &[Vec<usize>], deps: &[u32]) -> Option<Vec<usize>> {
 }
 
 impl Plan {
-    /// The `plan.json` content: per task, how it entered the plan and
-    /// what it was ordered after, in dispatch tie-break order.
+    /// The `plan.json` content: per task, how it entered the plan,
+    /// what it was ordered after, and the params its scanner ran
+    /// with, in dispatch tie-break order.
     #[expect(
         clippy::indexing_slicing,
         reason = "task indices are plan-internal and bounded by construction"
     )]
-    pub fn to_json(&self) -> serde_json::Value {
+    pub fn to_json(&self) -> Value {
         let tasks: Vec<TaskJson> = self
             .tasks
             .iter()
@@ -299,6 +312,7 @@ impl Plan {
                     .collect(),
                 unmatched_note_wants: t.unmatched_note_wants.clone(),
                 note_writes: t.note_writes.clone(),
+                params: t.params.clone(),
             })
             .collect();
         serde_json::to_value(PlanJson { tasks }).expect("plan fields are plain data")
@@ -317,6 +331,7 @@ struct TaskJson {
     after: Vec<EdgeJson>,
     unmatched_note_wants: Vec<String>,
     note_writes: BTreeMap<String, String>,
+    params: Value,
 }
 
 #[derive(Serialize)]
@@ -386,11 +401,13 @@ mod tests {
                 name: "b",
                 tasks: &b,
                 selection: Selection::Explicit,
+                params: None,
             },
             PlannedScanner {
                 name: "a",
                 tasks: &a,
                 selection: Selection::Explicit,
+                params: None,
             },
         ])
         .unwrap();
@@ -415,6 +432,7 @@ mod tests {
             name: "a",
             tasks: &a,
             selection: Selection::Explicit,
+            params: None,
         }])
         .unwrap();
         assert_eq!(plan.deps, [0]);
@@ -428,6 +446,7 @@ mod tests {
             name: "a",
             tasks: &a,
             selection: Selection::Explicit,
+            params: None,
         }]);
         // The want is matched by its own write, so it is not unmatched,
         // and the self edge is dropped
@@ -447,16 +466,19 @@ mod tests {
                 name: "a",
                 tasks: &a,
                 selection: Selection::Explicit,
+                params: None,
             },
             PlannedScanner {
                 name: "b",
                 tasks: &b,
                 selection: Selection::Explicit,
+                params: None,
             },
             PlannedScanner {
                 name: "c",
                 tasks: &c,
                 selection: Selection::Explicit,
+                params: None,
             },
         ])
         .err()
@@ -479,16 +501,19 @@ mod tests {
             ),
         ]);
         let c = tasks(&[("report", &["finding.*"], &[])]);
+        let c_params = serde_json::json!({ "mode": "query" });
         let plan = plan(&[
             PlannedScanner {
                 name: "a",
                 tasks: &a,
                 selection: Selection::Group("default".into()),
+                params: None,
             },
             PlannedScanner {
                 name: "c",
                 tasks: &c,
                 selection: Selection::Explicit,
+                params: Some(&c_params),
             },
         ])
         .unwrap();
@@ -503,14 +528,16 @@ mod tests {
                             { "task": "a:summarize", "pattern": "project-summary.*" }
                         ],
                         "unmatched_note_wants": ["missing"],
-                        "note_writes": { "finding.code": "" }
+                        "note_writes": { "finding.code": "" },
+                        "params": {}
                     },
                     {
                         "task": "a:summarize",
                         "selected": "group:default",
                         "after": [],
                         "unmatched_note_wants": [],
-                        "note_writes": { "project-summary.rules": "" }
+                        "note_writes": { "project-summary.rules": "" },
+                        "params": {}
                     },
                     {
                         "task": "c:report",
@@ -519,7 +546,8 @@ mod tests {
                             { "task": "a:review", "pattern": "finding.*" }
                         ],
                         "unmatched_note_wants": [],
-                        "note_writes": {}
+                        "note_writes": {},
+                        "params": { "mode": "query" }
                     }
                 ]
             })

@@ -54,6 +54,10 @@ conventions in _[Keep a Changelog]_. Release versions use [semantic versioning].
 - A scanner tool handler that fails with a `gage::Error`, as `?` on a runtime
   function such as `write_note` does, gives the agent the error's message. The
   agent received "internal server error" before and could not correct its call
+- A scan records the params its scanners ran with: the declared defaults with
+  the configured and `#{...}` values applied. The `params` column of the
+  `scan_task` table holds them as a JSON object. A scan made before this has
+  null there
 
 ### Other changes
 

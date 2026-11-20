@@ -445,6 +445,7 @@ pub async fn scan(
             name: &s.name,
             tasks: &s.tasks,
             selection: s.selection.clone(),
+            params: s.params.as_ref(),
         })
         .collect();
     let plan = plan::plan(&planned).map_err(ScanError::Plan)?;
@@ -2493,6 +2494,31 @@ mod tests {
         .await;
         outcome.unwrap();
         assert_eq!(outputs(&events), [&Output::Println("query 0".into())]);
+    }
+
+    #[tokio::test]
+    async fn scan_records_the_resolved_params_of_each_task() {
+        let (_dir, compiled) = compile_source_with_params(PARAMS, Some(r#"#{ mode: "query" }"#));
+        let (tmp, store) = open_store();
+        let (outcome, _events) = run_all(
+            &store,
+            &tmp.path().join("scans"),
+            &[compiled.unwrap()],
+            &CancellationToken::new(),
+        )
+        .await;
+        let outcome = outcome.unwrap();
+        let plan: json::Value = json::from_slice(
+            &ScanStore::from(&store)
+                .plan_file(&outcome.commit_sha)
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            plan["tasks"][0]["params"],
+            json::json!({ "mode": "query", "budget": 0 })
+        );
     }
 
     #[tokio::test]
@@ -6260,7 +6286,8 @@ mod tests {
                 "selected": "explicit",
                 "after": [{ "task": "deps:write", "pattern": "x" }],
                 "unmatched_note_wants": ["nobody"],
-                "note_writes": { "y": "the y note" }
+                "note_writes": { "y": "the y note" },
+                "params": {}
             })
         );
         assert_eq!(

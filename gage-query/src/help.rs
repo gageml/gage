@@ -282,8 +282,13 @@ WHERE sc.scan_id = '<SCAN_ID>' AND NOT sc.carried;
 scan_issue (scan_id, issue_id) links a scan to the issues it wrote.
 
 scan_task (scan_id, num, scanner, task, status, started, stopped, worked_ms,
-selected) is one row per task of a scan; num is the task's position in the plan;
-status is pending, started, completed, failed, or canceled. scan_task_agent
+selected, params) is one row per task of a scan; num is the task's position in
+the plan; status is pending, started, completed, failed, or canceled. params is
+the resolved params the task's scanner ran with, a JSON object: the declared
+defaults with the configured and command-line values applied. It is {} for a
+scanner that declares none and null for a scan made before params were recorded.
+Read one value: SELECT DISTINCT scanner, json_extract(params, '$.x') FROM
+scan_task WHERE scan_id = '<SCAN_ID>'; scan_task_agent
 (scan_id, scanner, task, session_id, native_id, exit_code, is_error, stop_reason,
 turns, duration_ms, cost_usd, result) is one row per agent a task ran; session_id
 is the agent's stored session, native_id its native UUID, result the harness's

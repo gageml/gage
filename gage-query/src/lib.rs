@@ -2064,7 +2064,7 @@ mod tests {
         write(
             "plan.json",
             r#"{"tasks":[
-                {"task":"hello:greet","selected":"explicit","after":[],"unmatched_note_wants":[]},
+                {"task":"hello:greet","selected":"explicit","after":[],"unmatched_note_wants":[],"params":{"x":41}},
                 {"task":"hello:fail","selected":"group:default","after":[],"unmatched_note_wants":[]},
                 {"task":"hello:after","selected":"group:eval","after":[],"unmatched_note_wants":[]}
             ]}"#,
@@ -2122,6 +2122,24 @@ mod tests {
         assert_eq!(
             strings(&ctx, "SELECT selected FROM scan_task ORDER BY num").await,
             ["explicit", "group:default", "group:eval"]
+        );
+        // The plan records params for `greet` alone, as a plan written
+        // before params were recorded has none
+        assert_eq!(
+            strings(
+                &ctx,
+                "SELECT json_extract(params, '$.x') FROM scan_task WHERE params IS NOT NULL"
+            )
+            .await,
+            ["41"]
+        );
+        assert_eq!(
+            strings(
+                &ctx,
+                "SELECT task FROM scan_task WHERE params IS NULL ORDER BY num"
+            )
+            .await,
+            ["fail", "after"]
         );
         assert_eq!(
             strings(
