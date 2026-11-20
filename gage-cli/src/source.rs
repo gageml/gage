@@ -6,15 +6,18 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use gage_core::config::{Config, DriversConfig, default_cache_root, display_user_config_path};
-use gage_registry::driver::{DriverRegistry, set_default_driver, set_driver_models};
+use gage_registry::driver::{
+    DriverRegistry, set_default_driver, set_driver_models, set_native_names,
+};
 use gage_session::{Driver, ModelSizes, SkillSession, Source, SourceOptions};
 use gage_store::{Store, StoreError};
 
 use crate::error::CliError;
 
 /// Long help shared by every `--native` option
-pub const SOURCE_HELP: &str = "Session directory as SCHEME:PATH, or SCHEME alone for the default \
-directory of that scheme. A path with no scheme is an error. Schemes are defined by drivers:
+pub const SOURCE_HELP: &str = "Session directory as SCHEME:PATH, SCHEME alone for the default \
+directory of that scheme, or a name set under native in the config file. A name is looked up \
+before a scheme. A path with no scheme is an error. Schemes are defined by drivers:
 
   claude  Claude Code sessions under \
 PATH/projects; without PATH, the
@@ -30,17 +33,21 @@ pub fn driver_registry() -> DriverRegistry {
     DriverRegistry::builtin()
 }
 
-/// Configure the process's drivers from the `drivers` settings of the
-/// user config: the default driver and the models each driver
-/// resolves its sizes to. A config that cannot be read, or that names
-/// a default driver this build does not have, is the error.
+/// Configure the process's drivers from the `drivers` and `native`
+/// settings of the user config: the default driver, the models each
+/// driver resolves its sizes to, and the names of native sources. A
+/// config that cannot be read, that names a default driver this build
+/// does not have, or that gives a name to something that is not a
+/// source, is the error.
 pub fn configure_drivers() -> Result<(), CliError> {
     let path = display_user_config_path();
     let config = Config::load_user().with_context(|| format!("reading {path}"))?;
     set_driver_models(driver_models(&config.drivers))
         .with_context(|| format!("{path}: drivers"))?;
     set_default_driver(&config.drivers.default)
-        .with_context(|| format!("{path}: drivers.default"))
+        .with_context(|| format!("{path}: drivers.default"))?;
+    set_native_names(config.native.into_iter().collect())
+        .with_context(|| path.clone())
         .map_err(CliError::from)
 }
 
@@ -63,8 +70,9 @@ pub fn driver_models(config: &DriversConfig) -> HashMap<String, ModelSizes> {
 
 /// Resolve a `--native` value to the driver that handles it and the
 /// value to hand that driver. `None` is the empty source, which is
-/// the default driver's default location. A driver name alone is that
-/// driver's default location. A value that names no driver is the
+/// the default driver's default location. A name the config gives a
+/// source is that source. A driver name alone is that driver's
+/// default location. A value that names no driver is the
 /// error `--native <value>: <reason>`.
 pub fn resolve_source(
     registry: &DriverRegistry,
@@ -172,7 +180,8 @@ mod tests {
         assert_eq!(
             resolved(Some("/tmp/x")).unwrap_err(),
             "--native /tmp/x: source names no driver; write it as SCHEME:PATH, \
-             where SCHEME is one of claude, codex, pi"
+             where SCHEME is one of claude, codex, pi, or as a name set under native in \
+             the config"
         );
         assert_eq!(
             resolved(Some("zzz:/x")).unwrap_err(),

@@ -28,7 +28,7 @@ gage index [OPTIONS]
 | `--list`                | List every index under the cache directory   |
 | `--remove <CORPUS>`     | Remove the indexes of a corpus               |
 
-A source is `SCHEME:PATH`, as described in
+A source is `SCHEME:PATH` or a configured name, as described in
 [`gage session`](/docs/commands/session). The default is the Claude Code home
 directory.
 

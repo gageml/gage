@@ -31,6 +31,10 @@ conventions in _[Keep a Changelog]_. Release versions use [semantic versioning].
 
 - A session source can be a scheme alone, which is the default directory of that
   scheme: `--native claude` is `--native claude:`
+- The `native` settings give names to session sources. With
+  `work = "pi:~/work/agent"` under `[native]`, `--native work` reads that
+  source. A name is accepted wherever a session source is, and is looked up
+  before a scheme
 
 **Issues**
 

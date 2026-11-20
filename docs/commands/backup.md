@@ -25,7 +25,7 @@ exactly one backup remote exists.
 | `--prune`               | Delete objects and tags that are only on the remote                |
 | `-y, --yes`             | Skip confirmation prompt                                           |
 
-A source is `SCHEME:PATH`, as described in
+A source is `SCHEME:PATH` or a configured name, as described in
 [`gage session`](/docs/commands/session). The sources read by default are the
 `backup.native` setting; see [`gage config`](/docs/commands/config#settings).
 

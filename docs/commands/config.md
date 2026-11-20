@@ -72,9 +72,10 @@ is created with default values before the editor opens.
 | `scanners.disable`               | `[]`           | Scanners that never run by default. Takes precedence over `enable`. Entries may contain `*` wildcards.                                                                                  |
 | `issues.related_threshold`       | `0.2`          | Similarity score at or above which `gage issue show` lists an issue as related.                                                                                                         |
 | `storage.max_session_size`       | `"256MB"`      | Largest total content a single session may write to the store. Accepts a byte count or a `KB`, `MB`, or `GB` suffix. `--max-size` overrides it for one command.                         |
-| `backup.native`                  | `[]`           | Session sources whose sessions `gage backup` adds to the store before each backup. Each entry is `SCHEME:PATH` or a scheme alone. `gage backup --native` replaces the list for one run. |
+| `backup.native`                  | `[]`           | Session sources whose sessions `gage backup` adds to the store before each backup. Each entry is `SCHEME:PATH`, a scheme alone, or a name set under `native`. `gage backup --native` replaces the list for one run. |
 | `drivers.default`                | `"claude"`     | Driver whose default directory a command reads when it names no session source, and driver that a scanner agent model with no scheme goes to. `gage init` writes it when the config file does not set it, and `gage init --default` replaces it. |
 | `drivers.<driver>.models.<size>` | driver default | Model that a driver uses for a model size. `<size>` is `small`, `medium`, or `large`. Scanner agents and `gage resolve` and `gage publish` sessions that name a size run on this model. |
+| `native.<name>`                  | not set        | Session source that `<name>` stands for wherever a session source is given. See [Native source names](#native-source-names).                                                           |
 
 A driver's model sizes are set in a `models` table under the driver's name:
 
@@ -111,3 +112,28 @@ large = "anthropic/claude-opus-5-5"
 
 `gage status` and the check a scan makes before it starts ask Pi whether it is
 signed in to the provider of the `medium` model.
+
+### Native source names
+
+The `native` table gives names to session sources. A name is accepted wherever
+a session source is: the `--native` option of every command, the `backup.native`
+setting, and the `native` parameter of the `query` tool.
+
+```toml
+[native]
+work = "pi:~/work/agent"
+```
+
+```cli
+gage session list --native work
+```
+
+A source is `SCHEME:PATH` or a scheme alone. A name cannot stand for another
+name. A name must not be empty and must not contain a colon.
+
+A name is looked up before a scheme. A name that is also a scheme, such as
+`claude`, replaces the scheme written alone. The scheme with its colon,
+`claude:`, still names the default directory of the scheme.
+
+A command fails when the table holds a name or a source that breaks these rules.
+`gage config` runs with such a table, so `gage config edit` can correct it.

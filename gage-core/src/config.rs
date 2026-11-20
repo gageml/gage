@@ -166,6 +166,13 @@ pub struct Config {
 
     #[serde(default)]
     pub drivers: DriversConfig,
+
+    /// Names for native sources, one `name = "source"` entry each
+    /// under `[native]`. A name is accepted wherever a source is and
+    /// is read as its source, which is `SCHEME:PATH` or a scheme
+    /// alone. A name is looked up before a scheme.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub native: BTreeMap<String, String>,
 }
 
 /// The driver a build treats as default when the config names none
@@ -494,6 +501,17 @@ mod tests {
         assert_eq!(Config::default().drivers.default, "claude");
         let config: Config = toml::from_str("[drivers]\ndefault = \"codex\"\n").unwrap();
         assert_eq!(config.drivers.default, "codex");
+    }
+
+    #[test]
+    fn native_names_are_read_from_their_table_and_left_out_when_none_are_set() {
+        assert!(Config::default().native.is_empty());
+        let unset = toml::to_string_pretty(&Config::default()).unwrap();
+        assert!(!unset.contains("[native]"), "{unset}");
+        let config: Config = toml::from_str("[native]\nwork = \"pi:~/x\"\n").unwrap();
+        assert_eq!(config.native["work"], "pi:~/x");
+        let set = toml::to_string_pretty(&config).unwrap();
+        assert!(set.contains("[native]\nwork = \"pi:~/x\"\n"), "{set}");
     }
 
     #[test]

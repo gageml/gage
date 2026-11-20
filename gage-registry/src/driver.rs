@@ -9,7 +9,8 @@
 //! [`set_default_driver`], from the user's config; a process that
 //! names none gets [`DEFAULT_DRIVER`]. The models the user's config
 //! sets for a driver's sizes are named the same way, with
-//! [`set_driver_models`].
+//! [`set_driver_models`], and so are the names it gives native
+//! sources, with [`set_native_names`].
 
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
@@ -65,6 +66,29 @@ pub fn set_driver_models(models: HashMap<String, ModelSizes>) -> Result<(), Driv
     Ok(())
 }
 
+/// The names the process gave native sources, each with the source
+/// it stands for, once set
+static NATIVE_NAMES: OnceLock<HashMap<String, String>> = OnceLock::new();
+
+/// Set the names every registry [`DriverRegistry::builtin`] builds in
+/// this process resolves to a native source, each with the source it
+/// stands for, as [`DriverRegistry::name_sources`] reads them. A name
+/// or a source that method refuses is an error. The names are fixed
+/// once set; setting different ones afterwards is an error.
+pub fn set_native_names(names: HashMap<String, String>) -> Result<(), DriverError> {
+    let registry = bundled()
+        .into_iter()
+        .fold(DriverRegistry::new(), DriverRegistry::add)
+        .name_sources(names)?;
+    let set = NATIVE_NAMES.get_or_init(|| registry.names.clone());
+    if *set != registry.names {
+        return Err(DriverError::Other(
+            "native source names are already set".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// The drivers bundled with this build, in registration order, each
 /// resolving the model sizes the process set for it
 fn bundled() -> Vec<Arc<dyn Driver>> {
@@ -87,6 +111,8 @@ pub struct DriverRegistry {
     by_scheme: HashMap<&'static str, Arc<dyn Driver>>,
     /// Every added driver, in registration order
     drivers: Vec<Arc<dyn Driver>>,
+    /// Each native source name maps to the source it stands for
+    names: HashMap<String, String>,
 }
 
 impl DriverRegistry {
@@ -95,21 +121,26 @@ impl DriverRegistry {
             default: None,
             by_scheme: HashMap::new(),
             drivers: Vec::new(),
+            names: HashMap::new(),
         }
     }
 
     /// The drivers bundled with this build. The default is the one
     /// the process named with [`set_default_driver`], else
-    /// [`DEFAULT_DRIVER`].
+    /// [`DEFAULT_DRIVER`]. The native source names are the ones the
+    /// process set with [`set_native_names`], else none.
     pub fn builtin() -> Self {
         let default = DEFAULT_NAME.get().map_or(DEFAULT_DRIVER, String::as_str);
-        bundled().into_iter().fold(Self::new(), |registry, driver| {
+        let mut registry = bundled().into_iter().fold(Self::new(), |registry, driver| {
             if driver.name() == default {
                 registry.add_default(driver)
             } else {
                 registry.add(driver)
             }
-        })
+        });
+        // The names were checked against the bundled schemes when set.
+        registry.names = NATIVE_NAMES.get().cloned().unwrap_or_default();
+        registry
     }
 
     /// Register `driver` and mark it as the default: the driver the
@@ -133,6 +164,41 @@ impl DriverRegistry {
         self
     }
 
+    /// Give native sources the names in `names`, each mapped to the
+    /// source it stands for, in place of any names set before. A name
+    /// is not empty and has no colon. A source is a scheme, alone or
+    /// with a path, that an added driver serves, so a name never
+    /// stands for another name. A name or source that breaks these
+    /// rules is an error that names the setting, as in
+    /// `native.<name>: <reason>`. Drivers are added before their
+    /// sources are named.
+    pub fn name_sources(mut self, names: HashMap<String, String>) -> Result<Self, DriverError> {
+        for (name, source) in &names {
+            if name.is_empty() {
+                return Err(DriverError::Other(
+                    "native: a name must not be empty".to_string(),
+                ));
+            }
+            if name.contains(':') {
+                return Err(DriverError::Other(format!(
+                    "native.{name:?}: a name must not contain a colon"
+                )));
+            }
+            let refused = |reason: String| DriverError::Other(format!("native.{name}: {reason}"));
+            if self.for_scheme(source).is_none() && split_scheme(source).is_none() {
+                return Err(refused(format!(
+                    "{source:?} is not a source; write it as SCHEME:PATH or SCHEME, \
+                     where SCHEME is one of {}",
+                    self.schemes().join(", ")
+                )));
+            }
+            self.resolve_scheme(source)
+                .map_err(|e| refused(e.to_string()))?;
+        }
+        self.names = names;
+        Ok(self)
+    }
+
     pub fn for_scheme(&self, scheme: &str) -> Option<Arc<dyn Driver>> {
         self.by_scheme.get(scheme).cloned()
     }
@@ -154,12 +220,15 @@ impl DriverRegistry {
     }
 
     /// The driver that handles `source` and the source to hand that
-    /// driver. A source is `<scheme>:<path>` under a registered scheme.
-    /// A registered scheme alone, with no colon, is that driver's
-    /// default location and is returned as `<scheme>:`. The empty
-    /// source is the default driver's default location. A source that
-    /// names no driver is an error and so is one whose scheme no
-    /// driver serves: a path alone does not say which driver reads it.
+    /// driver. A source is a name set with [`Self::name_sources`],
+    /// which is read as the source it stands for, or `<scheme>:<path>`
+    /// under a registered scheme. A name is looked up before a scheme,
+    /// so a name that is also a scheme is the name. A registered
+    /// scheme alone, with no colon, is that driver's default location
+    /// and is returned as `<scheme>:`. The empty source is the default
+    /// driver's default location. A source that names no driver is an
+    /// error and so is one whose scheme no driver serves: a path alone
+    /// does not say which driver reads it.
     pub fn resolve_source(&self, source: &str) -> Result<(Arc<dyn Driver>, String), DriverError> {
         if source.is_empty() {
             let driver = self
@@ -167,6 +236,15 @@ impl DriverRegistry {
                 .ok_or_else(|| DriverError::Other("no default session driver registered".into()))?;
             return Ok((driver, String::new()));
         }
+        match self.names.get(source) {
+            Some(named) => self.resolve_scheme(named),
+            None => self.resolve_scheme(source),
+        }
+    }
+
+    /// [`Self::resolve_source`] for a source that is not empty and is
+    /// read by its scheme alone, never as a name.
+    fn resolve_scheme(&self, source: &str) -> Result<(Arc<dyn Driver>, String), DriverError> {
         if let Some(driver) = self.for_scheme(source) {
             return Ok((driver, format!("{source}:")));
         }
@@ -179,7 +257,8 @@ impl DriverRegistry {
                 ))),
             },
             None => Err(DriverError::Other(format!(
-                "source names no driver; write it as SCHEME:PATH, where SCHEME is one of {}",
+                "source names no driver; write it as SCHEME:PATH, where SCHEME is one of {}, \
+                 or as a name set under native in the config",
                 self.schemes().join(", ")
             ))),
         }
@@ -564,6 +643,90 @@ mod tests {
         }
         let err = resolved(&registry, "zzz:x").unwrap_err();
         assert_eq!(err, "no driver serves scheme \"zzz\"; schemes: a, b");
+    }
+
+    fn named(names: &[(&str, &str)]) -> Result<DriverRegistry, String> {
+        let names = names
+            .iter()
+            .map(|(name, source)| (name.to_string(), source.to_string()))
+            .collect();
+        DriverRegistry::new()
+            .add_default(Arc::new(Fake("one", &["a"])))
+            .add(Arc::new(Fake("two", &["b"])))
+            .name_sources(names)
+            .map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn a_name_is_the_source_it_stands_for() {
+        let registry = named(&[("work", "b:~/x"), ("home", "b")]).unwrap();
+        assert_eq!(
+            resolved(&registry, "work"),
+            Ok(("two", "b:~/x".to_string()))
+        );
+        assert_eq!(resolved(&registry, "home"), Ok(("two", "b:".to_string())));
+        assert_eq!(resolved(&registry, "a:/y"), Ok(("one", "a:/y".to_string())));
+        let err = resolved(&registry, "other").unwrap_err();
+        assert!(err.contains("names no driver"), "{err}");
+        assert!(err.contains("a name set under native"), "{err}");
+    }
+
+    /// A name is looked up before a scheme. The scheme with its colon
+    /// is never a name, so it still reaches the default location.
+    #[test]
+    fn a_name_that_is_a_scheme_is_read_as_the_name() {
+        let registry = named(&[("a", "b:/elsewhere")]).unwrap();
+        assert_eq!(
+            resolved(&registry, "a"),
+            Ok(("two", "b:/elsewhere".to_string()))
+        );
+        assert_eq!(resolved(&registry, "a:"), Ok(("one", "a:".to_string())));
+    }
+
+    /// A value is read by its scheme alone, so a value that is the
+    /// name of another entry is not that entry's source.
+    #[test]
+    fn a_name_does_not_stand_for_another_name() {
+        let err = named(&[("work", "b:/x"), ("alias", "work")]).err().unwrap();
+        assert_eq!(
+            err,
+            "native.alias: \"work\" is not a source; write it as SCHEME:PATH or SCHEME, \
+             where SCHEME is one of a, b"
+        );
+        let registry = named(&[("a", "b:/x"), ("other", "a")]).unwrap();
+        assert_eq!(resolved(&registry, "other"), Ok(("one", "a:".to_string())));
+    }
+
+    #[test]
+    fn a_name_or_source_that_breaks_the_rules_is_an_error_naming_the_setting() {
+        let err = |names: &[(&str, &str)]| named(names).err().unwrap();
+        assert_eq!(err(&[("", "b:/x")]), "native: a name must not be empty");
+        assert_eq!(
+            err(&[("b:x", "b:/x")]),
+            "native.\"b:x\": a name must not contain a colon"
+        );
+        assert_eq!(
+            err(&[("work", "zzz:/x")]),
+            "native.work: no driver serves scheme \"zzz\"; schemes: a, b"
+        );
+        assert!(err(&[("work", "")]).starts_with("native.work: \"\" is not a source"));
+        assert!(err(&[("work", "/tmp/x")]).starts_with("native.work: \"/tmp/x\" is not a source"));
+    }
+
+    /// The bundled drivers check the names a process sets, and a
+    /// refused set leaves the process with no names.
+    #[test]
+    fn a_process_sets_the_names_of_every_builtin_registry() {
+        let refused = HashMap::from([("work".to_string(), "zzz:/x".to_string())]);
+        assert!(set_native_names(refused).is_err());
+        let names = HashMap::from([("work".to_string(), "pi:~/x".to_string())]);
+        set_native_names(names.clone()).unwrap();
+        set_native_names(names).unwrap();
+        assert!(set_native_names(HashMap::new()).is_err());
+        assert_eq!(
+            resolved(&DriverRegistry::builtin(), "work"),
+            Ok(("pi", "pi:~/x".to_string()))
+        );
     }
 
     /// The driver is handed the source with its scheme, so it never
