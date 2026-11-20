@@ -24,6 +24,10 @@ test:
 validate *args:
     cargo run -p gage-validate -- run {{args}}
 
+# Regenerate the Pi reference sessions with the installed Pi (run by hand)
+pi-fixtures *args:
+    node gage-pi/fixtures/generate.mjs {{args}}
+
 # Install Gage
 install:
     cargo install --path gage-cli

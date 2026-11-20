@@ -1,0 +1,53 @@
+{
+  "run": {
+    "file": "--tmp-gage-pi-fixtures-project--/2026-11-20T12-00-00-500Z_01a1f8d3-eafa-761f-b8f0-d10eaf4e7c6d.jsonl",
+    "sessionId": "01a1f8d3-eafa-761f-b8f0-d10eaf4e7c6d",
+    "entries": 23,
+    "userMessages": 3,
+    "assistantMessages": 6,
+    "toolCalls": 3,
+    "toolResults": 3,
+    "tokens": {
+      "input": 662,
+      "output": 101,
+      "cacheRead": 5304,
+      "cacheWrite": 1687,
+      "total": 7754
+    },
+    "cost": 0.019030750000000003
+  },
+  "branches": {
+    "file": "--tmp-gage-pi-fixtures-project--/2026-11-20T12-00-29-750Z_01a1f8d4-5d3c-761f-b8f0-d115219de458.jsonl",
+    "sessionId": "01a1f8d4-5d3c-761f-b8f0-d115219de458",
+    "entries": 18,
+    "userMessages": 3,
+    "assistantMessages": 4,
+    "toolCalls": 1,
+    "toolResults": 1,
+    "tokens": {
+      "input": 287,
+      "output": 49,
+      "cacheRead": 2432,
+      "cacheWrite": 912,
+      "total": 3680
+    },
+    "cost": 0.009576000000000001
+  },
+  "fork": {
+    "file": "--tmp-gage-pi-fixtures-other-project--/2026-11-20T12-00-47-250Z_01a1f8d4-a198-761f-b8f0-d11826396ebe.jsonl",
+    "sessionId": "01a1f8d4-a198-761f-b8f0-d11826396ebe",
+    "entries": 27,
+    "userMessages": 4,
+    "assistantMessages": 7,
+    "toolCalls": 3,
+    "toolResults": 3,
+    "tokens": {
+      "input": 662,
+      "output": 109,
+      "cacheRead": 5304,
+      "cacheWrite": 2711,
+      "total": 8786
+    },
+    "cost": 0.02563075
+  }
+}
