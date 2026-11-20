@@ -8,13 +8,13 @@ use gage_validate::Error;
 use gage_validate::check::check_source;
 use gage_validate::fetch::fetch;
 use gage_validate::harness::harness;
-use gage_validate::manifest::{self, SourceSpec};
-use gage_validate::report::{self, Checked, SourceReport};
+use gage_validate::manifest::{self, Origin, SourceSpec, repository_root};
+use gage_validate::report::{self, Checked, ReadFrom, SourceReport};
 
 #[derive(Parser, Debug)]
 #[command(
     name = "gage-validate",
-    about = "Validate session drivers against upstream sessions"
+    about = "Validate session drivers against reference sessions"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -23,10 +23,10 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Download upstream sessions and check each driver against them
+    /// Download upstream sessions and check each driver against its sources
     Run(RunArgs),
 
-    /// List upstream sources
+    /// List sources
     Sources(SourceArgs),
 }
 
@@ -92,27 +92,40 @@ fn run(args: RunArgs) -> Result<bool, Error> {
 fn check(spec: &SourceSpec, cache_dir: &std::path::Path) -> Result<Checked, Error> {
     let harness = harness(&spec.harness)
         .ok_or_else(|| Error::Other(format!("no harness named {:?}", spec.harness)))?;
-    let checkout = fetch(&spec.git, cache_dir)?;
-    let files = spec.files(&checkout.dir)?;
+    let (dir, read_from) = match spec.origin() {
+        Origin::Git(url) => {
+            let checkout = fetch(url, cache_dir)?;
+            let read_from = ReadFrom::Upstream {
+                revision: checkout.revision,
+                cached: checkout.cached,
+            };
+            (checkout.dir, read_from)
+        }
+        Origin::Repository(path) => (repository_root().join(path), ReadFrom::Repository),
+    };
+    let files = spec.files(&dir)?;
     if files.is_empty() {
         return Err(Error::Other(
             "no file of the source matches its include globs".into(),
         ));
     }
     let work = tempfile::tempdir()?;
-    let sessions = check_source(&spec.name, harness, &checkout.dir, &files, work.path())?;
+    let sessions = check_source(&spec.name, harness, &dir, &files, work.path())?;
     Ok(Checked {
-        revision: checkout.revision,
-        cached: checkout.cached,
+        read_from,
         sessions,
     })
 }
 
 fn sources(args: SourceArgs) -> Result<bool, Error> {
     for spec in selected(&args)? {
+        let origin = match spec.origin() {
+            Origin::Git(url) => url.to_string(),
+            Origin::Repository(path) => path.display().to_string(),
+        };
         println!(
-            "{}\t{}\t{}\t{}",
-            spec.name, spec.harness, spec.license, spec.git
+            "{}\t{}\t{}\t{origin}",
+            spec.name, spec.harness, spec.license
         );
     }
     Ok(true)

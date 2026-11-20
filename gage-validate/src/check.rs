@@ -381,6 +381,26 @@ mod tests {
         assert!(result.content_format.is_some());
     }
 
+    #[test]
+    fn a_pi_session_passes_every_check() {
+        let session = concat!(
+            r#"{"type":"session","version":3,"id":"s","timestamp":"2025-01-01T00:00:00.000Z","cwd":"/w/proj"}"#,
+            "\n",
+            r#"{"type":"message","id":"a0000001","parentId":null,"timestamp":"2025-01-01T00:00:01.000Z","message":{"role":"user","content":"hello there","timestamp":1}}"#,
+            "\n",
+            r#"{"type":"message","id":"a0000002","parentId":"a0000001","timestamp":"2025-01-01T00:00:02.000Z","message":{"role":"assistant","content":[{"type":"text","text":"hi"}],"model":"m","usage":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"cost":{"total":0.000005}},"stopReason":"stop","timestamp":2}}"#,
+            "\n",
+        );
+        let result = check("pi", "any-name.jsonl", session);
+        assert_eq!(result.failure, None);
+        assert_eq!(result.harness_version.as_deref(), Some("format-v3"));
+        assert_eq!(result.content_format.as_deref(), Some("pi-jsonl 1"));
+
+        let headless: String = session.lines().skip(1).map(|l| format!("{l}\n")).collect();
+        let failure = check("pi", "headless.jsonl", &headless).failure.unwrap();
+        assert_eq!(failure.check, Check::Discover, "{}", failure.message);
+    }
+
     /// Lines both readers take agree whatever the form of their
     /// numbers, strings, spacing, and keys; so do a blank line, a torn
     /// line, and a line that is not UTF-8, which neither reads.

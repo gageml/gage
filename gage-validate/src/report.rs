@@ -16,11 +16,18 @@ pub struct SourceReport {
 /// A source whose sessions were checked.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Checked {
-    /// The upstream revision the sessions were read at
-    pub revision: String,
-    /// The revision was already in the cache
-    pub cached: bool,
+    pub read_from: ReadFrom,
     pub sessions: Vec<SessionResult>,
+}
+
+/// Where a source's sessions were read from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReadFrom {
+    /// An upstream repository at `revision`, which was already in the
+    /// cache when `cached`
+    Upstream { revision: String, cached: bool },
+    /// A directory of this repository, as it stands
+    Repository,
 }
 
 /// Whether every source was checked and every session passed
@@ -54,12 +61,13 @@ fn render_source(out: &mut String, report: &SourceReport) {
             return;
         }
     };
-    let origin = if checked.cached {
-        "cached"
-    } else {
-        "downloaded"
-    };
-    writeln!(out, "{name} ({harness}) at {}, {origin}", checked.revision).unwrap();
+    match &checked.read_from {
+        ReadFrom::Upstream { revision, cached } => {
+            let origin = if *cached { "cached" } else { "downloaded" };
+            writeln!(out, "{name} ({harness}) at {revision}, {origin}").unwrap();
+        }
+        ReadFrom::Repository => writeln!(out, "{name} ({harness}) in this repository").unwrap(),
+    }
     let failures: Vec<&SessionResult> = checked
         .sessions
         .iter()
@@ -158,8 +166,10 @@ mod tests {
                 name: "a".into(),
                 harness: "claude".into(),
                 outcome: Ok(Checked {
-                    revision: "abc".into(),
-                    cached: true,
+                    read_from: ReadFrom::Upstream {
+                        revision: "abc".into(),
+                        cached: true,
+                    },
                     sessions: vec![
                         session("x.jsonl", None),
                         session(
@@ -177,6 +187,14 @@ mod tests {
                 harness: "claude".into(),
                 outcome: Err("git fetch: no route".into()),
             },
+            SourceReport {
+                name: "c".into(),
+                harness: "pi".into(),
+                outcome: Ok(Checked {
+                    read_from: ReadFrom::Repository,
+                    sessions: vec![session("z.jsonl", None)],
+                }),
+            },
         ];
         assert!(!passed(&reports));
         assert_eq!(
@@ -190,7 +208,13 @@ mod tests {
              b (claude)\n\
              \x20 not checked: git fetch: no route\n\
              \n\
-             claude: 2 sessions, 1 failed, 1 sources not checked\n"
+             c (pi) in this repository\n\
+             \x20 sessions: 1, passed: 1, failed: 0\n\
+             \x20 content formats: f 1 (1)\n\
+             \x20 harness versions: none (1)\n\
+             \n\
+             claude: 2 sessions, 1 failed, 1 sources not checked\n\
+             pi: 1 sessions, 0 failed, 0 sources not checked\n"
         );
     }
 
@@ -200,8 +224,10 @@ mod tests {
             name: "a".into(),
             harness: "claude".into(),
             outcome: Ok(Checked {
-                revision: "abc".into(),
-                cached: false,
+                read_from: ReadFrom::Upstream {
+                    revision: "abc".into(),
+                    cached: false,
+                },
                 sessions: vec![session("x.jsonl", None)],
             }),
         };

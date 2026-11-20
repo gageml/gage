@@ -1,7 +1,10 @@
-# The upstream sources of native session files a validation run
-# downloads. Nothing here is redistributed: each run fetches the
-# source's latest revision and reads the files in place. `license` is
-# the source's own statement, kept for the record.
+# The sources of native session files a validation run checks.
+#
+# A source with `git` is upstream. Nothing of it is redistributed: each
+# run fetches the source's latest revision and reads the files in
+# place. A source with `path` is a directory of this repository, read
+# as it stands: sessions a harness wrote for us. `license` is the
+# source's own statement, kept for the record.
 
 [[source]]
 name = "claude-code-log"
@@ -71,3 +74,59 @@ harness = "codex"
 git = "https://github.com/entireio/cli"
 license = "MIT"
 include = ["transcript/testdata/codex_full.jsonl"]
+
+# Sessions the installed Pi wrote through `just pi-fixtures`: the
+# current format, with the entries no upstream source holds.
+[[source]]
+name = "gage-pi-fixtures"
+harness = "pi"
+path = "gage-pi/fixtures"
+license = "Apache-2.0"
+include = ["pi-*/sessions/*/*.jsonl", "pi-*/migrated/*.jsonl"]
+
+# Pi's own test fixtures: two real sessions in format version 1.
+[[source]]
+name = "pi"
+harness = "pi"
+git = "https://github.com/earendil-works/pi"
+license = "MIT"
+include = ["packages/coding-agent/test/fixtures/*.jsonl"]
+
+[[source]]
+name = "specstory-pi"
+harness = "pi"
+git = "https://github.com/specstoryai/getspecstory"
+license = "Apache-2.0"
+include = [
+    "specstory-cli/pkg/providers/piagent/testdata/*.jsonl",
+    "specstory-cli/pkg/providers/piagent/examples/native.jsonl",
+]
+
+# The pi-omp files beside these are another harness's and are left out.
+[[source]]
+name = "ctx-pi"
+harness = "pi"
+git = "https://github.com/ctxrs/ctx"
+license = "Apache-2.0"
+include = [
+    "tests/fixtures/provider-history/pi-session.jsonl",
+    "tests/fixtures/provider-history/pi-malformed-mixed.jsonl",
+]
+
+# pi_expected.jsonl beside these is Entire's own output and is left out.
+[[source]]
+name = "entire-pi"
+harness = "pi"
+git = "https://github.com/entireio/cli"
+license = "MIT"
+include = [
+    "transcript/testdata/pi_full.jsonl",
+    "transcript/testdata/pi_stream_*.jsonl",
+]
+
+[[source]]
+name = "git-ai-pi"
+harness = "pi"
+git = "https://github.com/git-ai-project/git-ai"
+license = "Apache-2.0"
+include = ["tests/fixtures/pi-session-*.jsonl"]

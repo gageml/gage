@@ -27,6 +27,7 @@ pub fn harness(name: &str) -> Option<&'static dyn Harness> {
     match name {
         "claude" => Some(&Claude),
         "codex" => Some(&Codex),
+        "pi" => Some(&Pi),
         _ => None,
     }
 }
@@ -97,6 +98,34 @@ impl Harness for Codex {
     }
 }
 
+struct Pi;
+
+impl Harness for Pi {
+    fn driver(&self) -> &'static str {
+        "pi"
+    }
+
+    fn stage(&self, root: &Path, id: &str, file: &Path) -> io::Result<PathBuf> {
+        copy_into(
+            file,
+            &root.join("sessions/--validate--"),
+            &format!("2026-01-01T00-00-00-000Z_{id}.jsonl"),
+        )
+    }
+
+    /// Pi records no release in a session file. The header names the
+    /// version of the session format, which is reported in its place;
+    /// a header from before the format was versioned names none and is
+    /// version 1.
+    fn version(&self, entry: &Value) -> Option<String> {
+        if entry.get("type")?.as_str()? != "session" {
+            return None;
+        }
+        let version = entry.get("version").and_then(Value::as_u64).unwrap_or(1);
+        Some(format!("format-v{version}"))
+    }
+}
+
 fn copy_into(file: &Path, dir: &Path, name: &str) -> io::Result<PathBuf> {
     fs::create_dir_all(dir)?;
     let staged = dir.join(name);
@@ -125,5 +154,15 @@ mod tests {
         let codex = b"{\"type\":\"session_meta\",\"payload\":{\"cli_version\":\"0.118.0\"}}\n";
         assert_eq!(harness_version(&Codex, codex).as_deref(), Some("0.118.0"));
         assert_eq!(harness_version(&Codex, claude), None);
+    }
+
+    #[test]
+    fn a_pi_session_reports_its_format_version() {
+        let current =
+            b"\n{\"type\":\"session\",\"version\":3,\"id\":\"s\"}\n{\"type\":\"message\"}\n";
+        assert_eq!(harness_version(&Pi, current).as_deref(), Some("format-v3"));
+        let first = b"{\"type\":\"session\",\"id\":\"s\"}\n";
+        assert_eq!(harness_version(&Pi, first).as_deref(), Some("format-v1"));
+        assert_eq!(harness_version(&Pi, b"{\"type\":\"message\"}\n"), None);
     }
 }
