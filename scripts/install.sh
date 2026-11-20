@@ -146,6 +146,7 @@ main() {
     mkdir -p "$install_dir"
     install -m 0755 "${tmp}/${BIN}" "${install_dir}/${BIN}"
     check_path "$install_dir"
+    info "Run '${BIN} init' to set up Gage for your coding agents"
 }
 
 main "$@"
