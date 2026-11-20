@@ -41,5 +41,11 @@ jobs:
       - name: Format
         run: cargo fmt --check
 
+      - name: Git identity
+        # Tests create commits with git, which needs an identity
+        run: |
+          git config --global user.name "gage-ci"
+          git config --global user.email "gage-ci@gage.localhost"
+
       - name: Test
         run: cargo test --locked
