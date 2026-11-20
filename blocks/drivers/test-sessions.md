@@ -1,3 +1,7 @@
+---
+status: active
+---
+
 # Driver test sessions
 
 Do not store test sessions in source code. These must be downloaded by

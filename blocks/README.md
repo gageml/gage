@@ -16,7 +16,7 @@ Blocks must be updated to align with current understanding.
 Blocks are organized in a hierarchy. Each directory contains a type of block as
 described by the README.md
 
-Blocks may define a `status` value of one of:
+Blocks may define an optional `status` value of one of:
 
 - `draft`
 - `proposed`
@@ -24,6 +24,8 @@ Blocks may define a `status` value of one of:
 - `abandoned`
 - `superseded`
 - `active`
+
+If a `status` value is not defined, it is assumed to be `draft`.
 
 If a block is superseded, it's new block must be named using a `superseded-by`
 attribute.
