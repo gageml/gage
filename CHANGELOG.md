@@ -10,11 +10,34 @@ conventions in _[Keep a Changelog]_. Release versions use [semantic versioning].
 
 ### Enhancements
 
+**Pi**
+
+- The `pi:` session source reads Pi coding agent sessions: `gage session list`,
+  `gage session view`, `gage session add`, and `gage query` work on them as they
+  do on Claude Code sessions. Gage reads and stores Pi sessions; it is not set
+  up in Pi and does not run agents on it
+
+**Sessions**
+
 - A session source can be a scheme alone, which is the default directory of that
   scheme: `--native claude` is `--native claude:`
 
+**Remotes**
+
+- The `query` tool's `gage_store` parameter reads the store at a path in place
+  of the main store, as `GAGE_STORE` does for a command. With `stored_remote`,
+  the remote is one of that store
+
+**Scans**
+
+- `gage scan --ignore-missing-harness` starts a scan when the default driver's
+  harness is not installed or not logged in. A scan whose tasks start no agents
+  then runs without a harness
+
 ### Other changes
 
+- The `backup.sources` setting is renamed `backup.native`. A config file that
+  sets `backup.sources` must be edited, because the old name is not read
 - A session source must name its driver. A path with no scheme and a scheme that
   no driver serves are errors, where both went to the default driver before. A
   `backup.native` entry that is a path alone must be edited to add its scheme.
@@ -58,13 +81,6 @@ conventions in _[Keep a Changelog]_. Release versions use [semantic versioning].
   for the default driver. A plugin of another version than the build's is a
   problem that `gage init` fixes
 
-**Pi**
-
-- The `pi:` session source reads Pi coding agent sessions:
-  `gage session list`, `gage session view`, `gage session add`, and
-  `gage query` work on them as they do on Claude Code sessions. Gage reads and
-  stores Pi sessions; it is not set up in Pi and does not run agents on it
-
 **Remotes**
 
 - `gage fetch` fetches from a remote without changing the store's objects.
@@ -73,9 +89,6 @@ conventions in _[Keep a Changelog]_. Release versions use [semantic versioning].
   yet merged. `gage session list`, `view`, and `find`, `gage query`,
   `gage blame`, `gage index`, and `gage scan` accept it, as does the `query`
   tool through its `stored_remote` parameter
-- The `query` tool's `gage_store` parameter reads the store at a path in place
-  of the main store, as `GAGE_STORE` does for a command. With `stored_remote`,
-  the remote is one of that store
 - `gage scan --stored-remote` scans fetched sessions and writes its dataset,
   notes, and issues to the store. These objects are withheld until the sessions
   are merged: `gage push` refuses them and `gage backup` leaves them out
@@ -88,9 +101,6 @@ conventions in _[Keep a Changelog]_. Release versions use [semantic versioning].
   to each session in one agent call
 - `gage scan list` and the scan view report a cost of "unknown" in place of
   `$0.00+` when no agent reported a cost
-- `gage scan --ignore-missing-harness` starts a scan when the default driver's
-  harness is not installed or not logged in. A scan whose tasks start no agents
-  then runs without a harness
 
 ### Fixes
 
@@ -106,8 +116,6 @@ conventions in _[Keep a Changelog]_. Release versions use [semantic versioning].
 - `--native <SOURCE>` replaces `-s, --source` on every command that takes a
   session source. The `query` tool's `source` parameter is renamed `native` to
   match
-- The `backup.sources` setting is renamed `backup.native`. A config file that
-  sets `backup.sources` must be edited, because the old name is not read
 - `gage query` no longer reads another store through a `gage:<path>` source.
   `--stored-remote` reads a remote's fetched objects instead
 - `gage remote rename` is faster
