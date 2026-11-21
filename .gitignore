@@ -1,7 +1,7 @@
 # Local
 .claude/*
 !.claude/skills
-.gage
+.gage/*
 .jj
 .local.*
 CLAUDE.local.md
@@ -11,3 +11,6 @@ target
 
 # Datafusion
 .history
+
+# Include scanners
+!.gage/scanners
