@@ -1,0 +1,10 @@
+pub const SCANNER = #{
+    name: "gage-hello",
+    description: "Print a greeting and the number of sessions in the scan",
+    tasks: #{ main: #{} },
+};
+
+pub async fn main() {
+    let sessions = gage::scan().sessions().await;
+    println!("Hello from gage-hello: {} sessions in this scan", sessions.len());
+}
