@@ -361,7 +361,7 @@ pub async fn scan_sessions() {
             call_agent(prompt)
                 .name("checks")
                 .tool(finding_tool(check_names))
-                .tool(Query::with_session(s))
+                .tool(Query::new().session(s))
                 .model("medium"),
             #{ session_id: s.id, checks: check_names },
         );

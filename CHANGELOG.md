@@ -8,6 +8,12 @@ conventions in _[Keep a Changelog]_. Release versions use [semantic versioning].
 
 ## [unreleased]
 
+### Breaking changes
+
+- A scanner narrows the query tool with methods: `Query::new().session(s)` for
+  one session and `Query::new().session(s).lines(start, end)` for a line range
+  of it. `Query::with_session` and `Query::with_session_range` are removed
+
 ### Other changes
 
 - The confirmation prompt of `gage fetch` and `gage pull` selects "No" when it

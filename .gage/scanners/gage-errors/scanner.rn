@@ -82,7 +82,7 @@ pub async fn scan_sessions() {
             call_agent(t.render(#{ session_id, start, end }))
                 .name("gage-errors-scan")
                 .tool(summary_tool())
-                .tool(Query::with_session_range(s, (start, end)))
+                .tool(Query::new().session(s).lines(start, end))
                 .model("small"),
             #{ session_id },
         );
