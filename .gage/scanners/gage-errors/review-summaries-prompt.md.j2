@@ -1,0 +1,114 @@
+Review summaries of Gage errors and report issues
+
+Gage is a coding-agent session analysis tool. Each note below summarizes the
+errors one session met while using Gage tools and the `gage` command. The
+notes describe what happened and do not judge the cause. Your task is to find
+the Gage problems behind them and report each as an issue for the Gage
+developers.
+
+Notes:
+
+| Id | Target |
+| -- | ------ |
+{% for s in summaries -%}
+| {{ s.id }} | {{ s.target or "" }} |
+{% endfor -%}
+
+Read the notes with `mcp__gage__query`:
+
+```sql
+SELECT id, target, text FROM note
+WHERE id IN ({{ summaries | map(attribute='id') | sql_in_list }})
+```
+
+## Further analysis
+
+Use `mcp__gage__query` to check a summary against its session before you rely
+on it. A note's target names the session and the lines. The `tool_use` table
+holds each call (`session_id`, `line`, `name`, `input_raw`, `output`,
+`is_error`) and the `message` table holds the conversation. Query them to
+confirm an error, to read what led to it, and to count how often it occurs
+across sessions.
+
+A session may have been running when it was stored. A call whose `output` is
+null had not returned, and a session that stops at such a call did not
+necessarily end there. Do not treat a call with null output, or the end of a
+session, as evidence of a hang or a failure.
+
+## Existing issues
+
+Read the issues this scanner has already written before you report any:
+
+```sql
+SELECT id, status, status_reason, modified, title FROM issue
+WHERE name = 'gage-errors'
+```
+
+Read an issue in full with `SELECT * FROM issue_report('<id>')` when its title
+may describe a problem you found.
+
+Do not report a problem that an existing issue describes:
+
+- A pending or open issue already reports it
+- An issue closed as `wontfix` or `duplicate` was decided, and the decision
+  stands
+- An issue closed as `completed` was fixed. Report the problem again only when
+  an error occurred after the issue's `modified` time
+
+## Issue criteria
+
+An issue is one problem in Gage that a developer can act on. Report an issue
+when the evidence shows one of these:
+
+- A defect: a tool or command that fails, panics, or returns a wrong result on
+  valid input
+- A misleading interface: a tool description, help text, error message, or
+  schema that led a session to a wrong call. Repeated wrong guesses at the same
+  table, column, parameter, or option across sessions are evidence of this
+- A missing capability that sessions tried to use and worked around
+
+Do not report:
+
+- A caller mistake that occurred once and that the error message corrected on
+  the next call
+- An error caused by the session's environment and not by Gage
+- An error in a development build that the same session then fixed
+
+Report one issue per problem. Combine the notes that show the same problem
+into one issue, and prefer a problem seen in several sessions over one seen
+once. A defect seen once is still an issue.
+
+## Reporting issues
+
+Report each issue with `mcp__gage__issue_write`.
+
+- Give a short `title` that names the tool or command and the problem
+- Give `evidence` as the IDs of the notes that support the issue
+- Use this skeleton for `description`:
+
+```markdown
+## Summary
+
+Two or three sentences stating the problem.
+
+## Implication
+
+What the problem costs a session or a user.
+
+## Evidence
+
+The errors from the cited notes, with session lines and quoted error text, and
+why they support the claim.
+
+## Suggested direction
+
+Where in Gage the fix likely belongs, when the evidence shows it. Omit this
+section when it does not.
+```
+
+The sessions are historical. Refer to the models in them in the third person
+and do not address them.
+
+## Finishing
+
+Reply with whether you wrote issues. Do not restate them.

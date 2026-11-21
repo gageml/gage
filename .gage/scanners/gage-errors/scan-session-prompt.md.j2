@@ -1,0 +1,65 @@
+Summarize the Gage errors in session {{ session_id }}
+
+Gage is a coding-agent session analysis tool. A session uses it in two ways:
+
+- Gage tools, whose names contain `gage`, such as `mcp__plugin_gage_gage__query`
+  or `mcp__gage__note_write`
+- The `gage` command, run through a shell tool such as `Bash`
+
+Read lines {{ start }} through {{ end }} of the session and find each error the
+session met while using Gage. An error is one of:
+
+1. A call to a Gage tool that failed
+2. A `gage` command that failed: a non-zero exit, an error message, or a panic
+3. A Gage call that returned a result the session then had to retry or correct,
+   such as a SQL error, a refused input, an empty result where rows were
+   expected, or a wrong guess at a table, column, parameter, or option
+
+Errors from other tools and commands are out of scope. A failed `cargo` build
+of Gage, a failed test, and a failed `git` command are not Gage errors.
+
+## Reading the session
+
+Use `mcp__gage__query`. Start with the Gage calls:
+
+```sql
+SELECT line, name, is_error, substr(input_raw, 1, 600) AS input,
+       substr(output, 1, 800) AS output
+FROM tool_use
+WHERE session_id = '{{ session_id }}'
+  AND (name LIKE '%gage%' OR input_raw LIKE '%gage %')
+ORDER BY line
+```
+
+`is_error` marks a failed call. An error of the third kind has `is_error`
+false, so read each output, and read the next calls to see whether the session
+retried or corrected the call. Read `message` rows near a call, by
+`session_id` and `line`, when the session's reaction is unclear.
+
+A call whose `output` is null had not returned when the session was stored. The
+session may still have been running, and the call may be the scan that is
+reading it. A call with null output is not an error. Leave it out of the
+summary.
+
+## Writing the summary
+
+When the session has at least one Gage error, call `mcp__gage__summary` once
+with every error in one summary. Do not call it more than once.
+
+List the errors in session order. For each, state:
+
+- the session line
+- the tool or command, with the input that matters
+- the error text, quoted and trimmed
+- what the session did next: retried with a change, worked around it, gave up,
+  or did not notice
+
+Group repeats of one error into one entry that gives the count and the lines.
+State what the record shows. Do not judge whether Gage or the caller is at
+fault, and do not propose fixes.
+
+Give `lines` as the lines of the errors.
+
+When the session has no Gage error, do not call `mcp__gage__summary`.
+
+Reply only with whether you wrote a summary. Do not restate it.

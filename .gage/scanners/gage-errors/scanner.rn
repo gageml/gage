@@ -1,0 +1,186 @@
+use gage::{
+    AgentRunner,
+    Input,
+    Mark,
+    Progress,
+    Target,
+    Template,
+    Tool,
+    call_agent,
+    carry_forward_notes,
+    scan,
+    tools::{IssueWrite, Query},
+    watermark,
+    write_note,
+};
+
+pub const SCANNER = #{
+    name: "gage-errors",
+    description: "Errors in the use of Gage tools and commands",
+    tasks: #{
+        scan_sessions: #{
+            notes: #{
+                writes: #{
+                    "gage-errors[summary]": include_str!(
+                        "summary-note-doc.md"
+                    ),
+                },
+            },
+        },
+        review_summaries: #{
+            notes: #{ wants: ["gage-errors[summary]"] },
+            issues: #{
+                writes: #{
+                    "gage-errors": "Gage defect inferred from errors in sessions",
+                },
+            },
+        },
+    },
+};
+
+// Bump the last element to rescan sessions already scanned
+const SCAN_KEY = ("gage-errors", "scan", 1);
+
+// Bump the last element to review summaries already reviewed
+const REVIEW_KEY = ("gage-errors", "review", 1);
+
+// A call to a tool not named for Gage is a Gage call when its input
+// holds one of these: the `gage` command at the start of a shell
+// command or after a shell separator
+const COMMAND_SIGNALS = [
+    "\":\"gage ",
+    "\": \"gage ",
+    "&& gage ",
+    "; gage ",
+    "| gage ",
+    "\\ngage ",
+    "$(gage ",
+];
+
+pub async fn scan_sessions() {
+    let t = Template::new(include_str!("scan-session-prompt.md.j2"))?;
+
+    carry_forward_notes(SCAN_KEY).await?;
+
+    let sessions = scan().sessions().unseen(SCAN_KEY).await?;
+    let progress = Progress::new(sessions.len());
+    let agents = AgentRunner::new();
+    let selected = 0;
+
+    for (s, (start, end)) in sessions {
+        // A session with no Gage call has nothing to summarize, so it
+        // is marked without an agent; the check costs one read
+        if !has_gage_call(s, start, end).await? {
+            watermark(Mark::session(s), SCAN_KEY).await?;
+            progress.tick();
+            continue;
+        }
+
+        selected += 1;
+        let session_id = s.id;
+        agents.add(
+            call_agent(t.render(#{ session_id, start, end }))
+                .name("gage-errors-scan")
+                .tool(summary_tool())
+                .tool(Query::with_session_range(s, (start, end)))
+                .model("small"),
+            #{ session_id },
+        );
+    }
+    log::info!("selected {selected} sessions");
+
+    let results = agents.start();
+    while let Some(next) = results.next().await {
+        match next {
+            Ok((result, #{ session_id })) => {
+                log::info!(
+                    "agent result: {:?}",
+                    #{
+                        session: session_id,
+                        result: result.text,
+                        metadata: result.metadata(),
+                    },
+                );
+                watermark(Mark::session(session_id), SCAN_KEY).await?;
+            }
+            Err(err) => {
+                log::error!("agent error: {err:?}");
+            }
+        }
+        progress.tick();
+    }
+}
+
+// True when the session called a Gage tool or ran a `gage` command on
+// lines `start` through `end`.
+async fn has_gage_call(s, start, end) {
+    for t in s.tool_uses().lines(start, end).await {
+        if t.name.contains("gage") {
+            return Ok(true);
+        }
+        let input = t.input_raw;
+        if COMMAND_SIGNALS.iter().any(|signal| input.contains(signal)) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn summary_tool() {
+    Tool::new("summary", write_summary)
+        .input(Input::string("summary").required())
+        .input(Input::string("session_id").required())
+        .input(
+            Input::string("lines")
+                .description(
+                    "Session line numbers of the errors: a line (`112`), \
+                     a range (`61-72`), or a comma-separated list (`28,31`)",
+                ),
+        )
+}
+
+pub async fn write_summary(inputs) {
+    let lines = inputs.get("lines").unwrap_or("");
+    let note = write_note("gage-errors[summary]", inputs.summary)
+        .target(Target::session_lines(inputs.session_id, lines))
+        .metadata(#{ lines })
+        .carry_forward(SCAN_KEY)
+        .await?;
+    Ok(format!("Wrote summary note {}", note.id))
+}
+
+pub async fn review_summaries() {
+    let summaries = scan()
+        .notes()
+        .name("gage-errors[summary]")
+        .unseen(REVIEW_KEY)
+        .await?;
+    if summaries.is_empty() {
+        log::info!("no unreviewed summaries for this scan");
+        return;
+    }
+
+    let t = Template::new(include_str!("review-summaries-prompt.md.j2"))?;
+    let prompt = t.render(#{ summaries });
+
+    let agent = call_agent(prompt)
+        .name("gage-errors-review")
+        .tools([
+            Query::new(),
+            IssueWrite::new().name("gage-errors").pending(),
+        ])
+        .model("large")
+        .await?;
+    let result = agent.wait().await?;
+    log::info!(
+        "issues: {:?}",
+        #{
+            result: result.text,
+            metadata: result.metadata(),
+        },
+    );
+
+    for s in summaries {
+        watermark(Mark::note(s), REVIEW_KEY).await?;
+    }
+}
