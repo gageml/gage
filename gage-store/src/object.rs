@@ -359,9 +359,9 @@ impl Store {
         let now = now_ms();
         let modified_sha = write_blob(path, format!("{now}\n").as_bytes())?;
         let parent_sha = write_blob(path, format!("{}\n", current.commit_sha).as_bytes())?;
-        let (type_entry, version) = self.stamped_type(current)?;
+        let version = current.header.version.clone();
         let mut entries = content.entries;
-        entries.insert("type".to_string(), type_entry);
+        entries.insert("type".to_string(), current.marker("type")?);
         entries.insert("id".to_string(), current.marker("id")?);
         entries.insert("created".to_string(), current.marker("created")?);
         entries.insert("modified".to_string(), blob_entry(&modified_sha));
@@ -422,9 +422,9 @@ impl Store {
         let now = now_ms();
         let modified_sha = write_blob(path, format!("{now}\n").as_bytes())?;
         let parent_sha = write_blob(path, format!("{}\n", onto.commit_sha).as_bytes())?;
-        let (type_entry, version) = self.stamped_type(onto)?;
+        let version = onto.header.version.clone();
         let mut entries = content.entries;
-        entries.insert("type".to_string(), type_entry);
+        entries.insert("type".to_string(), onto.marker("type")?);
         entries.insert("id".to_string(), onto.marker("id")?);
         entries.insert("created".to_string(), onto.marker("created")?);
         entries.insert("modified".to_string(), blob_entry(&modified_sha));
@@ -472,22 +472,6 @@ impl Store {
         self.record_write(object, &links, expected_tip, None)?;
         // The merged commit may bring ancestors the index has not seen
         self.in_index_transaction(|| self.index_from(&object.commit_sha))
-    }
-
-    /// The `type` entry an edit writes: the type at the version this
-    /// build writes, so the blob names the shape of the content beside
-    /// it. Tombstones and resurrections copy the entry instead, which
-    /// is what the `update` hook's identity check compares. A type this
-    /// build does not know keeps the entry it has.
-    fn stamped_type(&self, current: &Object) -> Result<(TreeEntryRef, String), StoreError> {
-        let object_type = &current.header.object_type;
-        match object_version(object_type) {
-            Some(version) => {
-                let sha = write_blob(self.path(), format!("{object_type} {version}\n").as_bytes())?;
-                Ok((blob_entry(&sha), version.to_string()))
-            }
-            None => Ok((current.marker("type")?, current.header.version.clone())),
-        }
     }
 
     /// Delete the object `id_or_prefix` names, whatever its type, by
@@ -2161,11 +2145,11 @@ mod tests {
         assert_eq!(header.version, "2");
     }
 
-    /// An edit writes the `type` blob at this build's version, so the
-    /// blob names the content beside it; a tombstone copies the
-    /// stamped entry.
+    /// An edit keeps the `type` blob of the commit it edits, so an
+    /// object stays at the version it was written at; a tombstone
+    /// copies the same entry.
     #[test]
-    fn an_edit_stamps_the_version_this_build_writes() {
+    fn an_edit_keeps_the_type_version() {
         let tmp = tempfile::tempdir().unwrap();
         let (store, _fsck) = open_store(tmp.path());
         let id = note(&store, "n", None);
@@ -2184,11 +2168,11 @@ mod tests {
             )
             .unwrap();
         let (_, edited) = store.resolve_id(&id).unwrap();
-        assert_eq!(cat(&store, &format!("{edited}:type")), "gage::note 1\n");
-        assert_eq!(store.read_header(&edited).unwrap().version, "1");
+        assert_eq!(cat(&store, &format!("{edited}:type")), "gage::note 0\n");
+        assert_eq!(store.read_header(&edited).unwrap().version, "0");
 
         store.delete_object(&id).unwrap();
         let (_, tomb) = store.resolve_id(&id).unwrap();
-        assert_eq!(cat(&store, &format!("{tomb}:type")), "gage::note 1\n");
+        assert_eq!(cat(&store, &format!("{tomb}:type")), "gage::note 0\n");
     }
 }

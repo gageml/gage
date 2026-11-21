@@ -915,11 +915,11 @@ refs/heads/main\n";
         assert_eq!(compute_ref_prefixes(""), Vec::<(String, u64)>::new());
     }
 
-    /// An edit that stamps a new `type` blob is a fast-forward, and the
-    /// tombstone and resurrection that follow copy the stamped entry,
-    /// so the hook's identity check compares like with like.
+    /// An edit, a tombstone, and a resurrection each copy the `type`
+    /// blob of the commit they follow, so the hook's identity check
+    /// compares like with like on an object of an earlier version.
     #[test]
-    fn update_hook_accepts_delete_and_resurrection_after_a_version_stamp() {
+    fn update_hook_accepts_delete_and_resurrection_of_an_earlier_version() {
         let tmp = tempfile::tempdir().unwrap();
         let source_path = tmp.path().join("source.git");
         let target_path = tmp.path().join("target.git");
@@ -950,7 +950,7 @@ refs/heads/main\n";
             )
             .unwrap();
         let second = tip(&a);
-        assert_ne!(type_blob(&first), type_blob(&second));
+        assert_eq!(type_blob(&first), type_blob(&second));
 
         let a_ref = object_ref(&a);
         let push = |sha: &str| push(&source_path, &target_path, sha, &a_ref);

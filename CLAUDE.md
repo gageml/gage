@@ -14,6 +14,11 @@
 
 ## Design rules
 
+- Before changing an area, read the blocks under `blocks/` that cover it. An
+  active block is the authority on its topic. If a rule in this file or the code
+  disagrees with an active block, report the disagreement. Do not write or edit
+  a block unless the user asks.
+
 - If there are design inconsistencies in the codebase, report them. Stop for
   resolution only when the inconsistency affects the design of the current task.
   Otherwise follow the dominant pattern and continue.
@@ -178,51 +183,46 @@ These rules apply to ALL Rust code in this workspace. They are non-negotiable.
 
 ## Store schema rules
 
-These rules keep a store readable by every Gage build that touches it. A store
-is shared: `gage pull` brings in objects other builds wrote, so an older build
-reading a newer object is a normal condition, not an upgrade-window edge case.
+The principles that keep a store readable by every Gage build are blocks under
+`blocks/store/`. These rules say how to apply them in
+Rust.
 
 Confirm with the user before a `type` version bump, a generation bump, an
 `INDEX_SCHEMA_VERSION` bump, a `HOOK_VERSION` bump, or any departure from a rule
-below. Cite the rule and explain the reason. Apply the other rules without
-asking, and name each rule applied in the summary of the change.
+below or from one of those blocks. Cite the rule or block and explain the
+reason. Apply the other rules without asking, and name each rule applied in the
+summary of the change.
 
-- **An attribute added to an existing type is optional and defaulted forever.**
-  The field carries `#[serde(default, skip_serializing_if = ..)]` and every
-  reader handles its absence. A required attribute, a rename, a removal, or a
-  change of meaning is a `type` version bump, never an in-place change.
+- **An attribute added to an existing type carries
+  `#[serde(default, skip_serializing_if = ..)]`.** Every reader handles its
+  absence.
 
-- **An enum stored in `attrs.json` tolerates unknown values.** It carries an
-  `#[serde(other)] Unknown` variant. A reader degrades the one field; a writer
-  rejects `Unknown` as input. One newer value never fails a listing.
+- **An enum stored in `attrs.json` carries an `#[serde(other)] Unknown`
+  variant.** A reader degrades the one field; a writer rejects `Unknown` as
+  input. One newer value never fails a listing.
 
-- **A `type` version bump ships a reader for every prior version.** Decode is
-  dispatched on `header.version` for versions at or below the type's
-  `OBJECT_VERSION`. `require_type` refuses a version above it with
+- **Decode is dispatched on `header.version`** for versions at or below the
+  type's `OBJECT_VERSION`. `require_type` refuses a version above it with
   `StoreError::ObjectVersion`, and `Store::select` leaves such objects out of
   listings with a warning.
 
-- **An edit stamps the writer's `OBJECT_VERSION` into the `type` blob.** The
-  blob names the shape of the content beside it. Tombstones and resurrections
-  copy the entry from the commit they supersede; the `update` hook's identity
-  check depends on that.
+- **An edit, a tombstone, and a resurrection copy the `type` entry from the
+  commit they follow.** The `update` hook's identity check compares the entry.
 
 - **A change to any `INDEXED_ATTRS` bumps `INDEX_SCHEMA_VERSION` and updates
   `INDEXED_ATTRS_SNAPSHOT`.** Attribute rows are extracted at write time, so a
   list change reaches existing objects only through a rebuild. The test
   `indexed_attrs_match_the_snapshot_beside_the_index_version` enforces it.
 
-- **A driver refuses a `content_format` it does not write.** `read_stored`
-  returns an error naming the stored format and the upgrade.
+- **`read_stored` returns an error for a `content_format` the driver does not
+  write.** The error names the stored format and the upgrade.
 
 - **A hook change bumps `HOOK_VERSION`.** `Store::open` rewrites the hooks of a
   store whose recorded version is behind.
 
-- **A generation bump is the last resort.** It is for a change to the ref
-  layout, the marker set, the link convention, or the tombstone rule only. It
-  ships with a step in `MIGRATIONS`, a rewrite of every remote's fetch refspec
-  (pinned to the generation by `RemoteStore::add`), and a hook update on every
-  Gage store used as a remote.
+- **A generation bump ships with a step in `MIGRATIONS`**, a rewrite of every
+  remote's fetch refspec (pinned to the generation by `RemoteStore::add`), and a
+  hook update on every Gage store used as a remote.
 
 - **Every type has a `layout_snapshot` test, and the generation has a fixture.**
   The snapshot pins the exact tree and `attrs.json` text a type writes;

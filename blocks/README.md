@@ -1,24 +1,45 @@
 # Blocks
 
-A block is a short human owned and reviewed (AI assist is fine) claim of fact.
+A block is a core principle or decision that guides future decisions. A person
+or a model reads a block to decide how to design or change something.
 
-Blocks serve as long running anchors for human understanding and model state.
+Blocks serve as long running anchors for human understanding and model context.
 
-Blocks are different from rules. Rules are instructions to do or not do
-something. Blocks are principles, guidelines, or statements of fact that reflect
-careful deliberation by humans in all cases.
+The purpose of blocks is to mitigate noise in context. Blocks must therefore be
+carefully curated by human experts to say precisely and accurately things that
+should shape future decisions and changes.
 
-It's important that blocks are human owned and carefully reviewed. Blocks must
-not be authored by models without careful, reasoned review by humans.
+## What a block is not
 
-Blocks serve as a guard against noise amplification in model context.
+A block is not a rule. A rule is an instruction to do or not do a specific
+thing. Rules belong in `CLAUDE.md`.
 
-Blocks are high signal and stable.
+A block does not describe how the code implements a decision. It does not name
+functions, files, or data layouts unless the decision is about them.
 
-Blocks must be updated to align with current understanding.
+## Blocks and source code
+
+A block records what was decided. Source code records what Gage does. When the
+two disagree, one of them is wrong, and a human decides which one changes.
+
+## What a block must be
+
+- Human owned. A model may assist, but a block must not be authored by a model
+  without careful, reasoned review by a human.
+
+- Deliberated. A block reflects careful deliberation by humans in all cases.
+
+- Short. A block states one principle.
+
+- Stable. A block holds when the code is rewritten. A block is updated when the
+  understanding behind it changes.
+
+## Organization
 
 Blocks are organized in a hierarchy. Each directory contains a type of block as
 described by the README.md
+
+## Status
 
 Blocks may define an optional `status` value of one of:
 
@@ -31,5 +52,5 @@ Blocks may define an optional `status` value of one of:
 
 If a `status` value is not defined, it is assumed to be `draft`.
 
-If a block is superseded, it's new block must be named using a `superseded-by`
+If a block is superseded, its replacement must be named using a `superseded-by`
 attribute.
