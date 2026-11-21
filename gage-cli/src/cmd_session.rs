@@ -55,6 +55,11 @@ use crate::style::{self, IdKind, styled_id, styled_target};
 #[derive(Subcommand)]
 pub enum SessionCommand {
     /// List available sessions
+    ///
+    /// Sessions are listed most recent first. A stored session is as
+    /// recent as its last entry, and a native session is as recent as
+    /// the last modification of its file. Sessions in a dataset are
+    /// listed in member order.
     List(SessionListArgs),
 
     /// Add sessions to store
@@ -402,9 +407,9 @@ async fn list_native(source: Option<String>, args: SessionListArgs) -> Result<()
 
 /// List the sessions in the Gage store. The `session` table is bound
 /// to the store, so filters and limits are the same SQL as the native
-/// listing. Rows are in the store's `modified` order, newest first;
-/// `--since` filters on when a session was last active; the `Created`
-/// column shows when the session was first added.
+/// listing. Rows are ordered by when a session was last active, most
+/// recent first; `--since` filters on the same time and the `Active`
+/// column shows it.
 /// List the sessions of the store, or with `remote` the sessions
 /// fetched from that remote.
 async fn list_stored(remote: Option<&str>, args: SessionListArgs) -> Result<(), CliError> {
@@ -545,25 +550,26 @@ enum Listing {
     /// Msgs, Modified
     Native,
     /// The store: Id, Project, Title, Type, Model, Size, Msgs,
-    /// Created
+    /// Active
     Stored,
     /// A dataset's members, the stored columns in member order
     Dataset,
 }
 
 impl Listing {
-    /// The `ORDER BY` clause: newest first for a source and the store,
-    /// member order for a dataset
-    fn order_clause(self) -> &'static str {
+    /// The `ORDER BY` clause: most recent first for a source and the
+    /// store, each by its `time`, and member order for a dataset
+    fn order_clause(self) -> String {
         match self {
-            Listing::Native | Listing::Stored => "modified DESC",
-            Listing::Dataset => "m.session_num ASC",
+            Listing::Native | Listing::Stored => format!("{} DESC", self.time()),
+            Listing::Dataset => "m.session_num ASC".to_string(),
         }
     }
 
-    /// The time `--since` bounds: the session file's modification
-    /// time for a source, and the last activity of a stored session
-    fn since_time(self) -> &'static str {
+    /// The time a listing shows and `--since` bounds: the session
+    /// file's modification time for a source, and the last activity of
+    /// a stored session
+    fn time(self) -> &'static str {
         match self {
             Listing::Native => "modified",
             Listing::Stored | Listing::Dataset => STORED_LAST_ACTIVE,
@@ -575,13 +581,10 @@ impl Listing {
 /// count under the same filter. The count is needed for the summary
 /// line; DataFusion's `LIMIT` truncates the shown rows and does not
 /// report a total. Both bindings select the same column list, but for
-/// the time shown: `modified`, the session file's modification time,
-/// for a native listing, which has no `created`, and `created` for the
-/// store. Rows order on `modified` in both, and `--since` filters on
-/// the listing's `since_time`. The
-/// list names columns only: a
-/// function in the projection makes DataFusion repartition the scan,
-/// which keeps the limit from reaching the walk.
+/// the time: the listing's `time`, which is shown, ordered on in a
+/// source and the store, and bounded by `--since`. The native list
+/// names columns only: a function in the projection makes DataFusion
+/// repartition the scan, which keeps the limit from reaching the walk.
 async fn query_sessions(
     ctx: &SessionContext,
     args: &SessionListArgs,
@@ -594,15 +597,12 @@ async fn query_sessions(
         Some(n) => format!(" LIMIT {n}"),
         None => String::new(),
     };
-    let time_col = match listing {
-        Listing::Native => "modified AS time",
-        Listing::Stored | Listing::Dataset => "created AS time",
-    };
+    let time = listing.time();
     let order_clause = listing.order_clause();
     let sql = format!(
         "SELECT id, id_display, id_prefix, project, \
          title, session_type, model, size, message_count, \
-         {time_col}, driver \
+         {time} AS time, driver \
          FROM {from}{where_clause} \
          ORDER BY {order_clause}{limit_clause}",
     );
@@ -622,7 +622,7 @@ async fn query_sessions(
 fn build_where_clause(args: &SessionListArgs, listing: Listing, predicates: &[String]) -> String {
     let mut clauses: Vec<String> = predicates.to_vec();
     if let Some(d) = args.since {
-        clauses.push(since_predicate(listing.since_time(), since_cutoff_ms(d)));
+        clauses.push(since_predicate(listing.time(), since_cutoff_ms(d)));
     }
     if args.empty {
         clauses.push("is_empty IS TRUE".to_string());
@@ -663,7 +663,8 @@ struct Row {
     model: String,
     size: Option<i64>,
     message_count: Option<i64>,
-    /// `modified` for a native listing, `created` for the store
+    /// The file's modification time for a native listing, the last
+    /// activity for the store
     time_ms: Option<i64>,
     /// The name of the driver that wrote a stored row, or that reads
     /// a native one
@@ -768,7 +769,7 @@ fn render_table(rows: &[Row], drivers: &[Arc<dyn Driver>], listing: Listing, ful
             "Modified",
         ],
         Listing::Stored | Listing::Dataset => vec![
-            "Id", "Project", "Title", "Type", "Model", "Size", "Msgs", "Created",
+            "Id", "Project", "Title", "Type", "Model", "Size", "Msgs", "Active",
         ],
     }
     .into_iter()
@@ -2248,14 +2249,18 @@ mod tests {
     /// Write a one-message Claude session `id` under `project` in
     /// `claude_root` and add it to `store`.
     fn add_stored(store: &Store, claude_root: &Path, project: &str, id: &str) {
+        add_stored_at(store, claude_root, project, id, "2025-01-01T00:00:00Z");
+    }
+
+    /// As `add_stored`, with the message sent at `timestamp`.
+    fn add_stored_at(store: &Store, claude_root: &Path, project: &str, id: &str, timestamp: &str) {
         let project_dir = claude_root.join("projects").join(project);
         fs::create_dir_all(&project_dir).unwrap();
         fs::write(
             project_dir.join(format!("{id}.jsonl")),
-            concat!(
-                r#"{"type":"user","uuid":"u1","timestamp":"2025-01-01T00:00:00Z","message":{"role":"user","content":"hello"}}"#,
-                "\n",
-            ),
+            format!(
+                r#"{{"type":"user","uuid":"u1","timestamp":"{timestamp}","message":{{"role":"user","content":"hello"}}}}"#
+            ) + "\n",
         )
         .unwrap();
         let spec = format!("claude:{}", claude_root.display());
@@ -2308,6 +2313,55 @@ mod tests {
         assert!(predicates(None).await.unwrap().is_empty());
         let err = predicates(Some("nope")).await.unwrap_err().to_string();
         assert!(err.contains("no sessions for project 'nope'"), "{err}");
+    }
+
+    /// A stored listing orders sessions by their last activity, most
+    /// recent first, and shows that time. The session stored last has
+    /// the oldest last entry and comes last, where the order of the
+    /// store's writes would put it first.
+    #[tokio::test]
+    async fn stored_listing_orders_by_and_shows_last_activity() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("store.git");
+        gage_store::init(&path).unwrap();
+        let store = Store::open_with_cache_root(&path, &tmp.path().join("cache")).unwrap();
+        let claude_root = tmp.path().join("claude");
+        let sessions = [
+            (
+                "22222222-2222-3333-4444-555555555555",
+                "2025-02-01T00:00:00Z",
+            ),
+            (
+                "33333333-2222-3333-4444-555555555555",
+                "2025-03-01T00:00:00Z",
+            ),
+            (
+                "11111111-2222-3333-4444-555555555555",
+                "2025-01-01T00:00:00Z",
+            ),
+        ];
+        for (id, timestamp) in sessions {
+            add_stored_at(&store, &claude_root, "-w-proj", id, timestamp);
+        }
+        let ctx = ContextBuilder::new(Some(Arc::new(Mutex::new(store))))
+            .build()
+            .await;
+
+        let (rows, total) = query_sessions(&ctx, &list_args(&[]), Listing::Stored, "session", &[])
+            .await
+            .unwrap();
+
+        assert_eq!(total, 3);
+        let times: Vec<Option<i64>> = rows.iter().map(|r| r.time_ms).collect();
+        // 2025-03-01, 2025-02-01, and 2025-01-01 at 00:00 UTC
+        assert_eq!(
+            times,
+            [
+                Some(1_740_787_200_000),
+                Some(1_738_368_000_000),
+                Some(1_735_689_600_000)
+            ]
+        );
     }
 
     /// One placed native session names its stored id and its outcome;

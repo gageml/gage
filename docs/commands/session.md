@@ -70,9 +70,12 @@ gage session list [OPTIONS]
 | `-n, --limit <LIMIT>`     | Limit the number of items shown (default: 20)            |
 | `--full-id`               | Show the full session ID                                 |
 
-`--since` goes by the time of a stored session's last entry, or by the store's
-last write of it when no entry has a time, and by the last modification of a
-native session's file.
+Sessions are listed most recent first. A stored session is as recent as its
+last entry, or as the store's last write of it when no entry has a time. A
+native session is as recent as the last modification of its file. `--since`
+goes by the same time. The `Active` column of a stored listing and the
+`Modified` column of a native listing show it. Sessions in a dataset are listed
+in member order.
 
 ## session add
 
@@ -217,6 +220,9 @@ field term such as `type:assistant` narrow a search.
 `--user`, `--assistant`, and `--tool` search only messages of those kinds.
 `--user` with `--assistant` searches both.
 
-`--since` goes by the time of a stored session's last entry, or by the store's
-last write of it when no entry has a time, and by the last modification of a
-native session's file.
+Sessions are listed most recent first. A stored session is as recent as its
+last entry, or as the store's last write of it when no entry has a time. A
+native session is as recent as the last modification of its file. `--since`
+goes by the same time. The `Active` column of a stored listing and the
+`Modified` column of a native listing show it. Sessions in a dataset are listed
+in member order.

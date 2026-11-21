@@ -16,6 +16,11 @@ conventions in _[Keep a Changelog]_. Release versions use [semantic versioning].
 
 ### Other changes
 
+- `gage session list --stored` lists sessions by the time of their last entry,
+  most recent first, and shows that time in an `Active` column. It ordered them
+  by the store's last write and showed when each was added, in a `Created`
+  column, before. `--share` is listed the same way. `--dataset` keeps member
+  order and shows the `Active` column
 - `gage scan delete` keeps a note or an issue that another scan run or an issue
   still uses, and reports the number it kept. It deleted every note and issue
   the scan run wrote before, including an issue that an earlier scan run also
