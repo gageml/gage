@@ -6,8 +6,8 @@ description:
 ---
 
 The `gage backup` command backs up the store. It adds every session from each
-configured source to the store, then sends every object, tag, and key to a
-remote added with `gage remote add --backup`. Restoring is
+configured native source to the store, then sends every object, tag, and key to
+a remote added with `gage remote add --backup`. Restoring is
 [`gage pull`](/docs/commands/pull).
 
 ```cli
@@ -34,6 +34,13 @@ not continue, as every object is after a store is deleted and rebuilt from its
 sources. Without `--force`, diverged objects are listed, left alone, and
 reported as an error once the rest is sent.
 
+An object the remote holds a newer edit of is not diverged. It happens when
+another store backs up to the same remote after a session there has grown. The
+backup counts such objects as newer on the remote and never sends or replaces
+them, with `--force` or without. The store must hold the newer edit to
+recognize it, as it does after a `gage fetch` from the store that wrote it.
+Otherwise the object is reported as diverged.
+
 An object that links a session fetched from a remote and not merged is
 withheld, as is a tag that names it. A backup leaves withheld objects and tags
 out and reports their count. See
@@ -41,5 +48,6 @@ out and reports their count. See
 
 `--prune` deletes the objects and tags that the remote holds and the store does
 not. An object deleted in the store is kept as a deletion record and is backed
-up, not pruned. Without `--prune`, such objects and tags are listed and left
-alone.
+up, not pruned. Without `--prune`, such objects and tags are left alone and
+are not reported. A remote that several stores back up to holds objects that
+each store lacks.

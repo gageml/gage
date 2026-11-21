@@ -15,6 +15,14 @@ conventions in _[Keep a Changelog]_. Release versions use [semantic versioning].
 - `gage init` shows one line for each coding agent it sets up or removes, such
   as "Installing support for Claude Code", where it showed a line for each step
 - `gage init` no longer shows a line for a store that already exists
+- `gage backup` no longer reports the objects and tags that are only on the
+  remote, and no longer suggests `--prune` for them. A remote that several
+  stores back up to holds objects that each store lacks. `--prune` still lists
+  what it deletes
+- `gage backup` no longer reports an object as diverged when the remote holds a
+  newer edit of it that the store also holds. It counts the object as newer on
+  the remote, exits without an error, and does not replace it under `--force`,
+  where `--force` replaced the newer edit with the older one before
 
 ## [0.5.0]
 

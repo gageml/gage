@@ -126,8 +126,13 @@ pub struct RemoteDiff {
     pub new: Vec<String>,
     /// On the remote at a commit in the local commit's history.
     pub update: Vec<String>,
-    /// On the remote at a commit that is not in the local commit's
-    /// history.
+    /// On the remote at a commit whose history holds the local
+    /// commit: the remote is ahead, as it is after another store sent a
+    /// later edit of the object. A push of the local commit would
+    /// replace the later edit with the earlier one.
+    pub behind: Vec<String>,
+    /// On the remote at a commit that neither continues the local
+    /// commit nor is continued by it, or that the store does not hold.
     pub diverged: Vec<String>,
     /// On the remote under the object or tag prefix and not in the
     /// store.
@@ -641,9 +646,11 @@ impl RemoteStore<'_> {
     /// The store's object and tag refs against what `repository`
     /// advertises, each ref classified by what a push of it would do.
     /// A remote commit the store holds in the local commit's
-    /// first-parent chain is an update; any other remote commit,
-    /// including one the store does not have, is a divergence, which
-    /// covers a remote that is ahead of the store.
+    /// first-parent chain is an update. A remote commit the store
+    /// holds whose first-parent chain has the local commit is behind.
+    /// Any other remote commit is a divergence. That includes one the
+    /// store does not have, so a remote that is ahead by a commit the
+    /// store never fetched is a divergence.
     pub fn diff_remote(&self, repository: &Repository) -> Result<RemoteDiff, StoreError> {
         let (local, withheld) = self.sendable_refs()?;
         let advertised = self.ls_remote(repository)?;
@@ -658,6 +665,8 @@ impl RemoteStore<'_> {
                 Some(remote_sha) => {
                     if self.descends(sha, remote_sha)? {
                         diff.update.push(name.clone());
+                    } else if self.descends(remote_sha, sha)? {
+                        diff.behind.push(name.clone());
                     } else {
                         diff.diverged.push(name.clone());
                     }
@@ -673,10 +682,11 @@ impl RemoteStore<'_> {
         Ok(diff)
     }
 
-    /// True when `ancestor` is in the store and in the first-parent
-    /// chain of `commit`.
+    /// True when the store holds both commits and `ancestor` is in the
+    /// first-parent chain of `commit`.
     fn descends(&self, commit: &str, ancestor: &str) -> Result<bool, StoreError> {
-        if self.store.object_info(ancestor)?.is_none() {
+        if self.store.object_info(ancestor)?.is_none() || self.store.object_info(commit)?.is_none()
+        {
             return Ok(false);
         }
         Ok(self
@@ -1470,6 +1480,27 @@ mod tests {
         let digest = remotes.approval_digest(&set.names()).unwrap();
         assert!(remotes.push(&repository, &set, &digest).unwrap().success());
 
+        // The remote takes a later edit and the store goes back to the
+        // commit before it, still holding the later one
+        let (behind, earlier) = note_ref(&source, "behind");
+        NoteStore::from(&source)
+            .edit(
+                behind.strip_prefix(OBJECT_REFS).unwrap(),
+                NoteEdit {
+                    name: None,
+                    value: Some(NoteValue::Text("later".into())),
+                    target: None,
+                },
+            )
+            .unwrap();
+        let set = PushSet {
+            send: vec![behind.clone()],
+            ..PushSet::default()
+        };
+        let digest = remotes.approval_digest(&set.names()).unwrap();
+        assert!(remotes.push(&repository, &set, &digest).unwrap().success());
+        run(git_in(source.path(), ["update-ref", &behind, &earlier])).unwrap();
+
         let (new, _) = note_ref(&source, "new");
         NoteStore::from(&source)
             .edit(
@@ -1494,6 +1525,7 @@ mod tests {
             RemoteDiff {
                 new: vec![new],
                 update: vec![update],
+                behind: vec![behind],
                 diverged: vec![diverged],
                 remote_only: vec![remote_only],
                 same: 1,

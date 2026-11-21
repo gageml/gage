@@ -10,13 +10,21 @@
 //! statement, and the push carries the approval digest of the whole
 //! set as `gage push` does.
 //!
-//! The store is the authority over its backup. A ref the remote holds
-//! at a commit outside the store's history is diverged, as every ref
-//! is after a store is deleted and rebuilt from its sources; `--force`
-//! replaces the remote's commit. A ref the remote holds and the store
-//! does not is remote-only; `--prune` deletes it. Without the flags
-//! both are listed and left alone, and diverged refs are an error
-//! because the backup is incomplete.
+//! Several stores may back up to one remote, so the remote can hold
+//! what this store lacks. A ref the remote holds at a commit that
+//! continues the store's commit is behind: another store sent a later
+//! edit. It is counted and never sent, with `--force` or without,
+//! because sending it would replace the later edit with the earlier
+//! one. A ref the remote holds and the store does not is remote-only.
+//! It is left alone and not mentioned; `--prune` deletes it.
+//!
+//! A ref the remote holds at a commit that neither continues the
+//! store's commit nor is continued by it is diverged, as every ref is
+//! after a store is deleted and rebuilt from its sources. A remote
+//! commit the store does not hold is diverged too, because the store
+//! cannot tell which case it is. Diverged refs are listed, left alone,
+//! and reported as an error because the backup is incomplete;
+//! `--force` replaces the remote's commit.
 
 use anyhow::Context;
 use clap::Args;
@@ -68,7 +76,8 @@ Replaces the configured backup.native list for this run.\n\n{SOURCE_HELP}")
     /// store's copy does not continue, as every object is after a
     /// store is deleted and rebuilt from its sources. Without this
     /// flag diverged objects are listed, left alone, and reported as
-    /// an error once the rest is sent
+    /// an error once the rest is sent. An object the remote holds a
+    /// newer edit of is not diverged and is never replaced
     #[arg(long)]
     force: bool,
 
@@ -77,7 +86,7 @@ Replaces the configured backup.native list for this run.\n\n{SOURCE_HELP}")
     /// Delete objects and tags only on remote: those the remote holds
     /// and the store does not. An object deleted in store is kept as a deletion record and is
     /// backed up, not pruned. Without this flag such objects and tags
-    /// are listed and left alone
+    /// are left alone
     #[arg(long)]
     prune: bool,
 
@@ -158,14 +167,9 @@ pub async fn main(args: BackupArgs) -> Result<(), CliError> {
                 .map_err(|e| DialogError::Other(e.into()))?;
             dialog::step_list(label, capped(lines))?;
         }
-        if !diff.remote_only.is_empty() {
-            let label = if args.prune {
-                "Deleting refs only on remote"
-            } else {
-                "Refs only on remote (kept)"
-            };
+        if args.prune && !diff.remote_only.is_empty() {
             let lines = diff.remote_only.iter().map(|name| remote_ref_line(name));
-            dialog::step_list(label, capped(lines.collect()))?;
+            dialog::step_list("Deleting refs only on remote", capped(lines.collect()))?;
         }
         let destructive = !set.force.is_empty() || !set.delete.is_empty();
         if destructive {
@@ -178,7 +182,7 @@ pub async fn main(args: BackupArgs) -> Result<(), CliError> {
         }
         let message = if !set.is_empty() {
             format!("Backing up {} to {remote}", count(set.len(), "ref"))
-        } else if diff.diverged.is_empty() && diff.remote_only.is_empty() {
+        } else if diff.diverged.is_empty() && diff.behind.is_empty() {
             format!("Everything up to date on {remote}")
         } else {
             format!("Nothing to send to {remote}")
@@ -214,12 +218,6 @@ pub async fn main(args: BackupArgs) -> Result<(), CliError> {
             );
         }
     }
-    if !args.prune && !diff.remote_only.is_empty() {
-        println!(
-            "{} on {remote} not in store (delete with 'gage backup --prune {remote}')",
-            count(diff.remote_only.len(), "ref")
-        );
-    }
     if !args.force && !diff.diverged.is_empty() {
         return Err(CliError::message(format!(
             "gage backup: {} on {remote} diverge from store and were not sent (replace with 'gage backup --force {remote}')",
@@ -251,7 +249,8 @@ fn push_set(diff: &RemoteDiff, force: bool, prune: bool) -> PushSet {
 }
 
 /// The preview: how many objects and tags are sent, how many the
-/// remote already has, and what is left alone or withheld.
+/// remote already has, and what is behind, diverged, or withheld.
+/// Refs only on the remote are not counted.
 fn summary_lines(diff: &RemoteDiff, set: &PushSet) -> Vec<String> {
     let sent = set.send.iter().chain(&set.force);
     let (objects, tags) = sent.fold((0, 0), |(objects, tags), name| {
@@ -266,14 +265,11 @@ fn summary_lines(diff: &RemoteDiff, set: &PushSet) -> Vec<String> {
         count(tags, "tag"),
         format!("{} already on the remote", diff.same),
     ];
+    if !diff.behind.is_empty() {
+        lines.push(format!("{} newer on the remote", diff.behind.len()));
+    }
     if set.force.is_empty() && !diff.diverged.is_empty() {
         lines.push(format!("{} diverged", count(diff.diverged.len(), "ref")));
-    }
-    if set.delete.is_empty() && !diff.remote_only.is_empty() {
-        lines.push(format!(
-            "{} only on the remote",
-            count(diff.remote_only.len(), "ref")
-        ));
     }
     if diff.withheld > 0 {
         lines.push(format!(
@@ -364,6 +360,7 @@ mod tests {
         RemoteDiff {
             new: vec![format!("{OBJECT_REFS}new")],
             update: vec![format!("{TAG_REFS}v1")],
+            behind: vec![format!("{OBJECT_REFS}behind")],
             diverged: vec![format!("{OBJECT_REFS}div")],
             remote_only: vec![format!("{OBJECT_REFS}only"), format!("{TAG_REFS}old")],
             same: 4,
@@ -387,8 +384,8 @@ mod tests {
                 "1 object",
                 "1 tag",
                 "4 already on the remote",
+                "1 newer on the remote",
                 "1 ref diverged",
-                "2 refs only on the remote",
             ]
         );
 
@@ -405,9 +402,18 @@ mod tests {
         assert_eq!(all.force, diff.diverged);
         assert_eq!(all.delete, diff.remote_only);
         assert_eq!(all.len(), 5);
+        assert!(
+            !all.names().contains(&diff.behind[0]),
+            "a ref the remote is ahead on is never sent"
+        );
         assert_eq!(
             summary_lines(&diff, &all),
-            vec!["2 objects", "1 tag", "4 already on the remote"]
+            vec![
+                "2 objects",
+                "1 tag",
+                "4 already on the remote",
+                "1 newer on the remote",
+            ]
         );
     }
 
