@@ -33,7 +33,7 @@ use crate::dataset::{ATTACHMENTS_LINK, OBJECT_TYPE as DATASET_TYPE, SESSIONS_LIN
 use crate::git::{git_in, run};
 use crate::issue::{IssueStore, OBJECT_TYPE as ISSUE_TYPE};
 use crate::key::plan_key_ref;
-use crate::object::{Object, ObjectTree};
+use crate::object::{Object, ObjectTree, keep_unrecognized};
 use crate::refs::{OBJECT_REFS, TAG_REFS};
 use crate::remote::FetchSource;
 use crate::session::{OBJECT_TYPE as SESSION_TYPE, is_published};
@@ -310,6 +310,7 @@ impl Store {
             )?;
             return match merged {
                 Ok(tree) => {
+                    let tree = keep_unrecognized(local, &keep_unrecognized(remote, &tree));
                     self.edit_onto(remote, &tree, &message("merge"), &local.commit_sha)?;
                     Ok(match choose {
                         Some(side) => Outcome::Resolved(side),
@@ -330,6 +331,7 @@ impl Store {
         if let Some(links) = member_links {
             return match self.merge_members(local, remote, base, links)? {
                 Ok(tree) => {
+                    let tree = keep_unrecognized(local, &keep_unrecognized(remote, &tree));
                     self.edit_onto(remote, &tree, &message("merge"), &local.commit_sha)?;
                     Ok(Outcome::Merged)
                 }
@@ -984,6 +986,41 @@ mod tests {
             .map(|sha| b.read_header(sha).unwrap().id)
             .collect();
         assert_eq!(members, [n2, n3]);
+    }
+
+    /// A membership merge builds its tree from the members, and keeps
+    /// a file a newer build added on either side.
+    #[test]
+    fn a_membership_merge_keeps_files_the_type_does_not_recognize() {
+        let (_dir, a, b) = pair();
+        let n1 = note(&a, "n1");
+        let n2 = note(&a, "n2");
+        let ds = DatasetStore::from(&a).create().unwrap();
+        link(&a, &ds, &[&n1]);
+        pull(&b, "a", None);
+        let link_with = |store: &Store, ids: &[&str], file: &str| {
+            let current = store.read_object(&tip(store, &ds)).unwrap();
+            let mut tree = ObjectTree {
+                attrs: current.tree.attrs.clone(),
+                ..ObjectTree::default()
+            };
+            tree.links.insert(
+                SESSIONS_LINK.to_string(),
+                ids.iter().map(|id| tip(store, id)).collect(),
+            );
+            tree.blobs.insert(file.to_string(), b"future\n".to_vec());
+            store.edit(&current, &tree, "container edit").unwrap();
+        };
+        link_with(&a, &[&n1, &n2], "from-a.bin");
+        link_with(&b, &[&n1], "from-b.bin");
+
+        let report = pull(&b, "a", None);
+
+        assert_eq!(outcome(&report, &ds), &Outcome::Merged);
+        let merged = b.read_object(&tip(&b, &ds)).unwrap();
+        assert_eq!(merged.tree.links[SESSIONS_LINK].len(), 2);
+        let files: Vec<&str> = merged.tree.blobs.keys().map(String::as_str).collect();
+        assert_eq!(files, ["from-a.bin", "from-b.bin"]);
     }
 
     /// Rewrite a dataset's or share's `sessions.link` to the tips of

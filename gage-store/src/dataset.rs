@@ -17,11 +17,12 @@ use std::str::FromStr;
 use gage_core::uuid::new_uuid;
 use gage_session::{ContentSource, Driver, NativeSession};
 use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 
 use crate::attachment::{AttachmentRecord, AttachmentStore};
 use crate::content::GitContentSource;
 use crate::index::{ObjectQuery, Order, SelectedTip};
-use crate::object::{EditOutcome, Object, ObjectTree, require_type};
+use crate::object::{EditOutcome, Object, ObjectTree, recognized_as, require_type};
 use crate::session::{SessionAddOutcome, SessionOutcome, SessionRecord, SessionStore};
 use crate::share::ShareStore;
 use crate::{Store, StoreError};
@@ -32,6 +33,9 @@ pub(crate) const OBJECT_VERSION: &str = "1";
 pub(crate) const INDEXED_ATTRS: &[&str] = &[];
 pub(crate) const SESSIONS_LINK: &str = "sessions.link";
 pub(crate) const ATTACHMENTS_LINK: &str = "attachments.link";
+/// The files this type writes beside `attrs.json`. An edit keeps a
+/// file under any other name.
+pub(crate) const CONTENT_FILES: &[&str] = &[SESSIONS_LINK, ATTACHMENTS_LINK];
 
 /// Dataset operations over an opened store.
 pub struct DatasetStore<'a> {
@@ -1011,6 +1015,11 @@ fn record(object: &Object) -> Result<DatasetRecord, StoreError> {
         session_count: members(object).len(),
         attachment_count: linked_attachments(object).len(),
     })
+}
+
+/// `value` reduced to the members `DatasetAttrs` names.
+pub(crate) fn recognized_attrs(value: &JsonValue) -> Option<JsonValue> {
+    recognized_as::<DatasetAttrs>(value)
 }
 
 fn origin(object: &Object) -> Result<Option<DatasetOrigin>, StoreError> {

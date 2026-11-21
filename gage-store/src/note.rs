@@ -16,8 +16,8 @@ use serde_json::Value as JsonValue;
 
 use crate::index::{ObjectQuery, Order, SelectedTip};
 use crate::object::{
-    EditOutcome, Object, ObjectTree, object_ref, require_target_commit, require_type,
-    resolve_target,
+    EditOutcome, Object, ObjectTree, object_ref, recognized_as, require_target_commit,
+    require_type, resolve_target,
 };
 use crate::{Store, StoreError};
 
@@ -29,6 +29,9 @@ const TEXT_VALUE_FILE: &str = "value.txt";
 const JSON_VALUE_FILE: &str = "value.json";
 const TARGET_LINK: &str = "target.link";
 const ATTRS_FILE: &str = "attrs.json";
+/// The files this type writes beside `attrs.json`. An edit keeps a
+/// file under any other name.
+pub(crate) const CONTENT_FILES: &[&str] = &[TEXT_VALUE_FILE, JSON_VALUE_FILE, TARGET_LINK];
 
 /// Note operations over an opened store.
 pub struct NoteStore<'a> {
@@ -408,6 +411,11 @@ impl<'a> NoteQuery<'a> {
             })
         }))
     }
+}
+
+/// `value` reduced to the members `NoteAttrs` names.
+pub(crate) fn recognized_attrs(value: &JsonValue) -> Option<JsonValue> {
+    recognized_as::<NoteAttrs>(value)
 }
 
 fn build_tree(

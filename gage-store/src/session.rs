@@ -29,7 +29,7 @@ use serde_json::{Value, json};
 use crate::content::GitContentSource;
 use crate::dataset::{DatasetMembers, DatasetStore};
 use crate::index::{ObjectQuery, Order, SelectedTip};
-use crate::object::{EditOutcome, Object, ObjectTree, object_ref, require_type};
+use crate::object::{EditOutcome, Object, ObjectTree, object_ref, recognized_as, require_type};
 use crate::scan::import_opaque_tree;
 use crate::share::{ShareMembers, ShareStore};
 use crate::writer::{TreeInput, blob_sha, is_dot_git, mktree, tree_sha, write_hashed_blob};
@@ -47,6 +47,9 @@ const ATTRS_FILE: &str = "attrs.json";
 pub(crate) const CHANGES_FILE: &str = "changes.json";
 /// The session object's tree under a session directory
 pub const OBJECT_DIR: &str = "session";
+/// The files this type writes beside `attrs.json`. An edit keeps a
+/// file under any other name.
+pub(crate) const CONTENT_FILES: &[&str] = &[FILES_TREE, CHANGES_FILE];
 
 /// Session operations over an opened store.
 pub struct SessionStore<'a> {
@@ -704,6 +707,11 @@ fn decode(object: Object) -> Result<SessionRecord, StoreError> {
     })
 }
 
+/// `value` reduced to the members `SessionAttrsRecord` names.
+pub(crate) fn recognized_attrs(value: &Value) -> Option<Value> {
+    recognized_as::<SessionAttrsRecord>(value)
+}
+
 fn decode_attrs(object: &Object) -> Result<SessionAttrsRecord, StoreError> {
     let commit_sha = object.commit_sha.as_str();
     let attrs_value =
@@ -1306,7 +1314,7 @@ fn files_tree(
 pub(crate) mod tests {
     use super::*;
     use crate::git::{git_in, run};
-    use crate::test_support::{object_counts, open_store};
+    use crate::test_support::{object_counts, open_store, plant_blob, reopen};
     use crate::{DatasetStore, ShareAttrs};
     use gage_core::uuid::new_uuid;
     use gage_session::SessionAttrs;
@@ -1705,6 +1713,39 @@ pub(crate) mod tests {
             cat(&store, &format!("{}:first-parent", grown.commit_sha)),
             format!("{}\n", first.commit_sha)
         );
+    }
+
+    /// A member a newer build added to `attrs.json` is kept when this
+    /// build adds the session again and writes its attrs anew.
+    #[test]
+    fn add_keeps_an_attrs_member_a_newer_build_added() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let first = SessionStore::from(&store)
+            .add(&FakeDriver, &mut fake("s1", &[("session.jsonl", "{}\n")]))
+            .unwrap();
+        let mut attrs: Value =
+            serde_json::from_str(&cat(&store, &format!("{}:attrs.json", first.commit_sha)))
+                .unwrap();
+        attrs["recorded_by"] = json!("someone@somewhere");
+        plant_blob(&store, &first.id, "attrs.json", &attrs.to_string());
+        let store = reopen(store);
+        let sessions = SessionStore::from(&store);
+
+        let grown = sessions
+            .add(
+                &FakeDriver,
+                &mut fake("s1", &[("session.jsonl", "{}\n{}\n")]),
+            )
+            .unwrap();
+
+        assert_eq!(grown.outcome, SessionOutcome::Updated);
+        let attrs: Value =
+            serde_json::from_str(&cat(&store, &format!("{}:attrs.json", grown.commit_sha)))
+                .unwrap();
+        assert_eq!(attrs["recorded_by"], "someone@somewhere");
+        assert_eq!(attrs["size"], 6);
+        assert_eq!(sessions.get(&grown.id).unwrap().attrs.size, 6);
     }
 
     /// `write_native` fails, so an add that reaches it errors out

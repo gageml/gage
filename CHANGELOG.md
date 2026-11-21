@@ -23,6 +23,13 @@ conventions in _[Keep a Changelog]_. Release versions use [semantic versioning].
   newer edit of it that the store also holds. It counts the object as newer on
   the remote, exits without an error, and does not replace it under `--force`,
   where `--force` replaced the newer edit with the older one before
+- A change to an object keeps what a newer release of Gage added to it: files
+  and attributes that this release does not recognize were removed by an edit
+  or a merge before
+- A change to an object keeps the object's type version, where it was raised to
+  the version of the release that made the change before
+- An issue with a file under `changes` that this release does not recognize is
+  read, where it was an error before
 
 ## [0.5.0]
 

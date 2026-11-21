@@ -70,6 +70,13 @@ pub(crate) fn fsck_guard(path: &Path) -> FsckGuard {
 /// way a newer build's object, or a damaged one, arrives. The index
 /// sees the move at the next open; see [`reopen`].
 pub(crate) fn plant_blob(store: &Store, id: &str, name: &str, content: &str) -> String {
+    let blob = write_blob(store.path(), content.as_bytes()).unwrap();
+    plant_entry(store, id, name, "100644", &blob)
+}
+
+/// [`plant_blob`] for an entry of any mode: `sha` names a blob or, with
+/// mode `040000`, a tree.
+pub(crate) fn plant_entry(store: &Store, id: &str, name: &str, mode: &str, sha: &str) -> String {
     let tip = store.rev_parse(&object_ref(id)).unwrap().unwrap();
     let mut entries: Vec<(String, String, String)> = store
         .list_tree(&tip)
@@ -78,8 +85,7 @@ pub(crate) fn plant_blob(store: &Store, id: &str, name: &str, content: &str) -> 
         .filter(|e| e.name != name)
         .map(|e| (e.mode, e.sha, e.name))
         .collect();
-    let blob = write_blob(store.path(), content.as_bytes()).unwrap();
-    entries.push(("100644".to_string(), blob, name.to_string()));
+    entries.push((mode.to_string(), sha.to_string(), name.to_string()));
     let inputs: Vec<TreeInput<'_>> = entries
         .iter()
         .map(|(mode, sha, name)| TreeInput { mode, sha, name })

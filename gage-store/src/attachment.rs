@@ -41,6 +41,7 @@ use std::path::{Path, PathBuf};
 
 use gage_core::uuid::{new_uuid, short_uuid};
 use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 use twox_hash::XxHash3_64;
 use wax::walk::{Entry, FileIterator, GlobEntry, LinkBehavior, WalkError};
 use wax::{Glob, Program};
@@ -49,7 +50,7 @@ use crate::dataset::{DatasetAttachments, DatasetStore};
 use crate::git::EntryKind;
 use crate::index::{ObjectQuery, Order, SelectedTip};
 use crate::key::{resolve_key, validate_key};
-use crate::object::{EditOutcome, Object, ObjectTree, require_type, resolve_target};
+use crate::object::{EditOutcome, Object, ObjectTree, recognized_as, require_type, resolve_target};
 use crate::session::build_files_tree;
 use crate::url;
 use crate::writer::write_blob;
@@ -61,6 +62,9 @@ pub(crate) const OBJECT_VERSION: &str = "1";
 pub(crate) const INDEXED_ATTRS: &[&str] = &["name", "key"];
 const FILES_TREE: &str = "files.d";
 const TARGETS_LINK: &str = "targets.link";
+/// The files this type writes beside `attrs.json`. An edit keeps a
+/// file under any other name.
+pub(crate) const CONTENT_FILES: &[&str] = &[FILES_TREE, TARGETS_LINK];
 /// The most an attachment may hold
 pub const MAX_SIZE: u64 = 10 * 1024 * 1024;
 pub const MAX_FILES: usize = 1000;
@@ -659,6 +663,11 @@ impl<'a> AttachmentQuery<'a> {
     pub fn tips(self) -> Result<Vec<SelectedTip>, StoreError> {
         self.store.select(&self.query)
     }
+}
+
+/// `value` reduced to the members `AttachmentAttrs` names.
+pub(crate) fn recognized_attrs(value: &JsonValue) -> Option<JsonValue> {
+    recognized_as::<AttachmentAttrs>(value)
 }
 
 fn decode(object: Object) -> Result<AttachmentRecord, StoreError> {

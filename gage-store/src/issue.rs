@@ -27,13 +27,16 @@ use std::str::FromStr;
 
 use gage_core::uuid::{new_ulid, new_uuid, ulid_timestamp_ms};
 use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 
 use crate::git::{EntryKind, TreeEntry};
 use crate::index::{ObjectQuery, Order, SelectedTip};
 use crate::key::{resolve_key, validate_key};
 use crate::merge::Side;
 use crate::note::OBJECT_TYPE as NOTE_TYPE;
-use crate::object::{EditOutcome, FIRST_PARENT_FILE, Object, ObjectTree, object_ref, require_type};
+use crate::object::{
+    EditOutcome, FIRST_PARENT_FILE, Object, ObjectTree, object_ref, recognized_as, require_type,
+};
 use crate::writer::{TreeInput, mktree, write_blob};
 use crate::{Store, StoreError};
 
@@ -50,6 +53,9 @@ const MESSAGE_FILE: &str = "message.txt";
 /// resolves them to commits and writes `evidence.link`; the ids may
 /// name notes the same scan wrote, which have no commit until apply.
 const EVIDENCE_FILE: &str = "evidence";
+/// The files this type writes beside `attrs.json`. An edit keeps a
+/// file under any other name.
+pub(crate) const CONTENT_FILES: &[&str] = &[DESCRIPTION_FILE, EVIDENCE_LINK, CHANGES_DIR];
 
 /// Issue operations over an opened store.
 pub struct IssueStore<'a> {
@@ -916,11 +922,10 @@ impl IssueStore<'_> {
     fn read_changes(&self, id: &str, sha: &str) -> Result<Vec<IssueChange>, StoreError> {
         let mut out = Vec::new();
         for entry in self.store.read_tree(sha)? {
+            // A change is a directory; a file here is one a newer build
+            // added.
             if entry.kind != EntryKind::Tree {
-                return Err(StoreError::Parse(format!(
-                    "issue {id} {CHANGES_DIR}/{}: expected a directory",
-                    entry.name
-                )));
+                continue;
             }
             let mut attrs: Option<Vec<u8>> = None;
             let mut message: Option<Vec<u8>> = None;
@@ -929,12 +934,8 @@ impl IssueStore<'_> {
                 match file.name.as_str() {
                     ATTRS_FILE => attrs = Some(bytes),
                     MESSAGE_FILE => message = Some(bytes),
-                    _ => {
-                        return Err(StoreError::Parse(format!(
-                            "issue {id} {CHANGES_DIR}/{}/{}: unexpected file",
-                            entry.name, file.name
-                        )));
-                    }
+                    // A file a newer build added
+                    _ => {}
                 }
             }
             let attrs = attrs.ok_or_else(|| {
@@ -1360,6 +1361,11 @@ fn status_label(status: &(IssueStatus, Option<StatusReason>)) -> String {
     }
 }
 
+/// `value` reduced to the members `IssueAttrs` names.
+pub(crate) fn recognized_attrs(value: &JsonValue) -> Option<JsonValue> {
+    recognized_as::<IssueAttrs>(value)
+}
+
 fn decode_attrs(object: &Object) -> Result<IssueAttrs, StoreError> {
     require_type(object, OBJECT_TYPE)?;
     let id = &object.header.id;
@@ -1381,7 +1387,7 @@ mod tests {
     use super::*;
     use crate::git::{git_in, run};
     use crate::object::object_ref;
-    use crate::test_support::{open_store, plant_blob, reopen};
+    use crate::test_support::{open_store, plant_blob, plant_entry, reopen};
     use crate::{NoteInput, NoteStore, NoteValue};
     use std::slice;
 
@@ -1986,6 +1992,71 @@ mod tests {
         ));
         let names: Vec<String> = issues.iter().unwrap().map(|r| r.unwrap().name).collect();
         assert_eq!(names, vec!["user-issue", "user-issue"]);
+    }
+
+    /// Files a newer build added under `changes/`, beside the change
+    /// directories and inside one, are passed over by a read and kept
+    /// by an edit.
+    #[test]
+    fn files_a_newer_build_added_under_changes_are_ignored_and_kept() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let id = issue(&store, IssueStatus::Open, &[]);
+        let tip = rev_parse(&store, &id);
+        let future = write_blob(store.path(), b"future\n").unwrap();
+        let with_future = |tree: &str| {
+            let mut entries = store.read_tree(tree).unwrap();
+            entries.retain(|e| e.name != "future.txt");
+            let mut inputs: Vec<TreeInput<'_>> = entries
+                .iter()
+                .map(|e| TreeInput {
+                    mode: &e.mode,
+                    sha: &e.sha,
+                    name: &e.name,
+                })
+                .collect();
+            inputs.push(TreeInput {
+                mode: "100644",
+                sha: &future,
+                name: "future.txt",
+            });
+            mktree(store.path(), &inputs).unwrap()
+        };
+        let changes = store.read_tree(&format!("{tip}:{CHANGES_DIR}")).unwrap();
+        let ulid = changes[0].name.clone();
+        let change = with_future(&changes[0].sha);
+        let changes_sha = mktree(
+            store.path(),
+            &[TreeInput {
+                mode: "040000",
+                sha: &change,
+                name: &ulid,
+            }],
+        )
+        .unwrap();
+        plant_entry(
+            &store,
+            &id,
+            CHANGES_DIR,
+            "040000",
+            &with_future(&changes_sha),
+        );
+        let store = reopen(store);
+        let issues = IssueStore::from(&store);
+
+        assert_eq!(issues.get(&id).unwrap().changes.len(), 1);
+        issues
+            .set_status(&id, IssueStatus::Closed, None, "user:test", None)
+            .unwrap();
+
+        assert_eq!(issues.get(&id).unwrap().changes.len(), 2);
+        let tip = rev_parse(&store, &id);
+        for path in [
+            format!("{CHANGES_DIR}/future.txt"),
+            format!("{CHANGES_DIR}/{ulid}/future.txt"),
+        ] {
+            assert_eq!(cat_file(&store, &format!("{tip}:{path}")), "future\n");
+        }
     }
 
     /// Enum values a newer build wrote read as `Unknown`, so the issue

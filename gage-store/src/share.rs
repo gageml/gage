@@ -21,10 +21,11 @@ use std::str::FromStr;
 use gage_core::uuid::new_uuid;
 use semver::{Version, VersionReq};
 use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 
 use crate::dataset::DatasetStore;
 use crate::index::{ObjectQuery, Order, SelectedTip};
-use crate::object::{EditOutcome, Object, ObjectTree, require_type};
+use crate::object::{EditOutcome, Object, ObjectTree, recognized_as, require_type};
 use crate::session::{PublishAttrs, PublishFilter, SessionOutcome, SessionRecord, SessionStore};
 use crate::{Store, StoreError};
 
@@ -33,6 +34,9 @@ pub(crate) const OBJECT_VERSION: &str = "1";
 /// Shares declare no indexed attributes.
 pub(crate) const INDEXED_ATTRS: &[&str] = &[];
 pub(crate) const SESSIONS_LINK: &str = "sessions.link";
+/// The files this type writes beside `attrs.json`. An edit keeps a
+/// file under any other name.
+pub(crate) const CONTENT_FILES: &[&str] = &[SESSIONS_LINK];
 
 /// Share operations over an opened store.
 pub struct ShareStore<'a> {
@@ -748,6 +752,11 @@ fn record(object: &Object) -> Result<ShareRecord, StoreError> {
     })
 }
 
+/// `value` reduced to the members `ShareAttrs` names.
+pub(crate) fn recognized_attrs(value: &JsonValue) -> Option<JsonValue> {
+    recognized_as::<ShareAttrs>(value)
+}
+
 fn attrs(object: &Object) -> Result<ShareAttrs, StoreError> {
     let Some(value) = &object.tree.attrs else {
         return Ok(ShareAttrs::default());
@@ -759,7 +768,7 @@ fn attrs(object: &Object) -> Result<ShareAttrs, StoreError> {
 /// `attrs` as the tree's `attrs.json` value: `None` when every field
 /// is at its default, so such a share has no `attrs.json`. Each filter
 /// entry is validated and written in its canonical text form.
-fn attrs_value(attrs: &ShareAttrs) -> Result<Option<serde_json::Value>, StoreError> {
+fn attrs_value(attrs: &ShareAttrs) -> Result<Option<JsonValue>, StoreError> {
     let canonical = ShareAttrs {
         description: attrs.description.clone(),
         filters: attrs

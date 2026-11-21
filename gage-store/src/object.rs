@@ -28,7 +28,9 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
 use gage_core::datetime::now_ms;
-use serde_json::Value as JsonValue;
+use serde::Serialize;
+use serde::de::DeserializeOwned;
+use serde_json::{Map, Value as JsonValue};
 
 use crate::git::{EntryKind, git_in, run};
 use crate::index::IdMatch;
@@ -335,7 +337,9 @@ impl Store {
         Ok(commit_sha)
     }
 
-    /// Write a new version of `current` with `tree` as its content.
+    /// Write a new version of `current` with `tree` as its content,
+    /// and with the content of `current` that its type does not
+    /// recognize; see [`keep_unrecognized`].
     /// The child commit carries `first-parent` (the current SHA, first
     /// commit parent), reuses `type`, `id`, and `created`, bumps
     /// `modified`, and lists every link SHA as a parent. Returns
@@ -350,6 +354,7 @@ impl Store {
         if current.header.is_tombstone() {
             return Err(StoreError::ObjectDeleted(current.header.id.clone()));
         }
+        let tree = &keep_unrecognized(current, tree);
         let path = self.path();
         let content = write_content(path, tree)?;
         if content.shas == content_shas(&current.entries) {
@@ -1072,6 +1077,124 @@ fn parse_version(version: &str, id: &str) -> Result<u32, StoreError> {
     version
         .parse()
         .map_err(|e| StoreError::Parse(format!("object {id}: type version {version:?}: {e}")))
+}
+
+/// `tree` with the content of `from` that the type of `from` does not
+/// recognize: each file under a name the type does not write, and each
+/// `attrs.json` member its record does not name. A newer build added
+/// that content, and a build that edits the object keeps it. Content
+/// `tree` holds under the same name is left as it is. Content the type
+/// does recognize is not kept, so an edit that leaves a file or a
+/// member out removes it. A type this build does not know keeps
+/// nothing.
+pub(crate) fn keep_unrecognized(from: &Object, tree: &ObjectTree) -> ObjectTree {
+    let mut kept = tree.clone();
+    let Some(content) = recognized_content(&from.header.object_type) else {
+        return kept;
+    };
+    let written = |name: &String| {
+        content.files.contains(&name.as_str())
+            || tree.blobs.contains_key(name)
+            || tree.links.contains_key(name)
+            || tree.subtrees.contains_key(name)
+    };
+    for (name, bytes) in &from.tree.blobs {
+        if !written(name) {
+            kept.blobs.insert(name.clone(), bytes.clone());
+        }
+    }
+    for (name, shas) in &from.tree.links {
+        if !written(name) {
+            kept.links.insert(name.clone(), shas.clone());
+        }
+    }
+    for (name, sha) in &from.tree.subtrees {
+        if !written(name) {
+            kept.subtrees.insert(name.clone(), sha.clone());
+        }
+    }
+
+    let Some(JsonValue::Object(current)) = &from.tree.attrs else {
+        return kept;
+    };
+    let mut members = match &tree.attrs {
+        Some(JsonValue::Object(members)) => members.clone(),
+        Some(_) => return kept,
+        None => Map::new(),
+    };
+    let Some(JsonValue::Object(recognized)) = (content.attrs)(&JsonValue::Object(current.clone()))
+    else {
+        return kept;
+    };
+    keep_members(&mut members, current, &recognized);
+    if tree.attrs.is_some() || !members.is_empty() {
+        kept.attrs = Some(JsonValue::Object(members));
+    }
+    kept
+}
+
+/// Add to `kept` each member of `current` that `recognized` lacks and
+/// `kept` does not hold. A member all three hold as an object is
+/// compared member by member the same way. A recognized object that
+/// `kept` lacks was removed by the edit, so nothing of it is kept. An
+/// array is one value: a member inside an array element is not
+/// compared.
+fn keep_members(
+    kept: &mut Map<String, JsonValue>,
+    current: &Map<String, JsonValue>,
+    recognized: &Map<String, JsonValue>,
+) {
+    for (name, value) in current {
+        match recognized.get(name) {
+            None => {
+                if !kept.contains_key(name) {
+                    kept.insert(name.clone(), value.clone());
+                }
+            }
+            Some(JsonValue::Object(recognized)) => {
+                if let (JsonValue::Object(current), Some(JsonValue::Object(kept))) =
+                    (value, kept.get_mut(name))
+                {
+                    keep_members(kept, current, recognized);
+                }
+            }
+            Some(_) => {}
+        }
+    }
+}
+
+/// What a type recognizes of an object's content.
+struct RecognizedContent {
+    /// The names of the files the type writes beside `attrs.json`
+    files: &'static [&'static str],
+    /// An `attrs.json` value reduced to the members the type's record
+    /// names; see [`recognized_as`]
+    attrs: fn(&JsonValue) -> Option<JsonValue>,
+}
+
+/// What `object_type` recognizes, or `None` for a type whose objects
+/// this build does not edit.
+fn recognized_content(object_type: &str) -> Option<RecognizedContent> {
+    let (files, attrs): (_, fn(&JsonValue) -> Option<JsonValue>) = match object_type {
+        note::OBJECT_TYPE => (note::CONTENT_FILES, note::recognized_attrs),
+        issue::OBJECT_TYPE => (issue::CONTENT_FILES, issue::recognized_attrs),
+        dataset::OBJECT_TYPE => (dataset::CONTENT_FILES, dataset::recognized_attrs),
+        session::OBJECT_TYPE => (session::CONTENT_FILES, session::recognized_attrs),
+        attachment::OBJECT_TYPE => (attachment::CONTENT_FILES, attachment::recognized_attrs),
+        share::OBJECT_TYPE => (share::CONTENT_FILES, share::recognized_attrs),
+        _ => return None,
+    };
+    Some(RecognizedContent { files, attrs })
+}
+
+/// `value` decoded as the record `T` and encoded again, which leaves
+/// the members `T` names. `None` when `value` is not a `T`: the type's
+/// own decoder reports that when it reads the object.
+pub(crate) fn recognized_as<T: DeserializeOwned + Serialize>(
+    value: &JsonValue,
+) -> Option<JsonValue> {
+    let record: T = serde_json::from_value(value.clone()).ok()?;
+    serde_json::to_value(record).ok()
 }
 
 impl Object {
@@ -2143,6 +2266,73 @@ mod tests {
         assert!(err.to_string().contains("upgrade gage"), "{err}");
         let (header, _) = store.delete_object(&id).unwrap();
         assert_eq!(header.version, "2");
+    }
+
+    /// A newer build's additions survive an edit by this build: a file
+    /// under a name the type does not write, and an `attrs.json`
+    /// member its record does not name.
+    #[test]
+    fn an_edit_keeps_content_the_type_does_not_recognize() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let id = note(&store, "n", None);
+        let (_, first) = store.resolve_id(&id).unwrap();
+        let mut attrs: JsonValue =
+            serde_json::from_str(&cat(&store, &format!("{first}:attrs.json"))).unwrap();
+        attrs["future"] = json!({ "a": 1 });
+        plant_blob(&store, &id, "attrs.json", &attrs.to_string());
+        let store = reopen(store);
+        plant_blob(&store, &id, "future.bin", "kept\n");
+        let store = reopen(store);
+        let notes = NoteStore::from(&store);
+
+        notes
+            .edit(
+                &id,
+                NoteEdit {
+                    name: Some("renamed"),
+                    value: Some(NoteValue::Text("v2".into())),
+                    ..NoteEdit::default()
+                },
+            )
+            .unwrap();
+
+        let (_, edited) = store.resolve_id(&id).unwrap();
+        assert_ne!(edited, first);
+        assert_eq!(cat(&store, &format!("{edited}:future.bin")), "kept\n");
+        assert_eq!(cat(&store, &format!("{edited}:value.txt")), "v2");
+        let attrs: JsonValue =
+            serde_json::from_str(&cat(&store, &format!("{edited}:attrs.json"))).unwrap();
+        assert_eq!(attrs["future"], json!({ "a": 1 }));
+        assert_eq!(attrs["name"], "renamed");
+        assert_eq!(notes.get(&id).unwrap().name, "renamed");
+    }
+
+    /// Only what the type does not recognize is kept. A member the
+    /// edit wrote is not overwritten, and a recognized object the edit
+    /// left out is not brought back by the unrecognized members it held.
+    #[test]
+    fn keep_members_keeps_unrecognized_members_alone() {
+        let object = |value: JsonValue| value.as_object().unwrap().clone();
+        let current = object(json!({
+            "future": 1,
+            "known": { "x": 1, "y": 2 },
+            "removed": { "z": 1, "w": 2 },
+            "set": "old",
+        }));
+        let recognized = object(json!({
+            "known": { "x": 1 },
+            "removed": { "z": 1 },
+            "set": "old",
+        }));
+        let mut kept = object(json!({ "known": { "x": 5 }, "set": "new" }));
+
+        keep_members(&mut kept, &current, &recognized);
+
+        assert_eq!(
+            JsonValue::Object(kept),
+            json!({ "future": 1, "known": { "x": 5, "y": 2 }, "set": "new" })
+        );
     }
 
     /// An edit keeps the `type` blob of the commit it edits, so an
