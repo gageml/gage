@@ -1,0 +1,22 @@
+Describe the commit process in session {{ session_id }}
+
+In this session the user and a coding agent committed work to version control,
+pushed it, or tried to. Describe how that process went.
+
+The user wants to streamline how they direct an agent to commit and push. They
+do not yet know what matters, so this task is open ended. Report what the
+record shows about the process: what the user asked for, what the agent did,
+how long it took, and what slowed it, failed, or needed correction. Report
+what went smoothly as well.
+
+The evidence must be in the record itself. Do not infer or assume conditions
+beyond what the record shows.
+
+Read the session by querying with `mcp__gage__query`, filtering by
+`session_id = '{{ session_id }}'`. The `message` table holds the conversation
+and the `tool_use` table holds the tool calls and their results.
+
+Write each observation with the `mcp__gage__observation` tool, with the session
+lines it refers to. Write all observations in a single request.
+
+In your reply, state only how many observations you wrote.

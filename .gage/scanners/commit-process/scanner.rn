@@ -1,0 +1,146 @@
+use gage::{
+    AgentRunner,
+    DateTime,
+    Duration,
+    Input,
+    Mark,
+    Progress,
+    Target,
+    Template,
+    Tool,
+    call_agent,
+    carry_forward_notes,
+    params,
+    scan,
+    watermark,
+    tools::Query,
+    write_note,
+};
+
+pub const SCANNER = #{
+    name: "commit-process",
+    description: "Observe how sessions handle commits and pushes",
+    params: #{
+        // Observe sessions that made a version control write within
+        // this many days
+        days: #{ value: 7 },
+    },
+    tasks: #{
+        observe_sessions: #{
+            notes: #{
+                writes: #{
+                    "commit-process[observation]": include_str!(
+                        "observation-note-doc.md"
+                    ),
+                },
+            },
+        },
+    },
+};
+
+// Bump the last element to rescan sessions already observed
+const OBSERVE_KEY = ("commit-process", "observe", 1);
+
+// A Bash call whose input holds one of these is a version control write
+const SIGNALS = [
+    "jj commit",
+    "jj describe",
+    "jj squash",
+    "jj bookmark",
+    "jj git push",
+    "git commit",
+    "git push",
+];
+
+pub async fn observe_sessions() {
+    let t = Template::new(include_str!("observe-prompt.md.j2"))?;
+    let cutoff = DateTime::now() - Duration::days(params().days);
+
+    carry_forward_notes(OBSERVE_KEY).await?;
+
+    let sessions = scan().sessions().unseen(OBSERVE_KEY).await?;
+    let progress = Progress::new(sessions.len());
+    let agents = AgentRunner::new();
+    let selected = 0;
+
+    for (s, (start, end)) in sessions {
+        // A skipped session is left unmarked so that a wider window
+        // scans it later; the check costs one read
+        if !has_commit_signal(s, cutoff).await? {
+            progress.tick();
+            continue;
+        }
+
+        selected += 1;
+        let session_id = s.id;
+        agents.add(
+            call_agent(t.render(#{ session_id }))
+                .name("commit-process-observe")
+                .tool(observation_tool())
+                .tool(Query::new().session(s).lines(start, end))
+                .model("medium"),
+            #{ session_id },
+        );
+    }
+    log::info!("selected {selected} sessions");
+
+    let results = agents.start();
+    while let Some(next) = results.next().await {
+        match next {
+            Ok((result, #{ session_id })) => {
+                log::info!(
+                    "agent result: {:?}",
+                    #{
+                        session: session_id,
+                        result: result.text,
+                        metadata: result.metadata(),
+                    },
+                );
+                watermark(Mark::session(session_id), OBSERVE_KEY).await?;
+            }
+            Err(err) => {
+                log::error!("agent error: {err:?}");
+            }
+        }
+        progress.tick();
+    }
+}
+
+// True when the session made a version control write at or after
+// `cutoff`. A call with no timestamp counts as inside the window.
+async fn has_commit_signal(s, cutoff) {
+    for t in s.tool_uses().name("Bash").await? {
+        if t.timestamp.map(|ts| ts < cutoff).unwrap_or(false) {
+            continue;
+        }
+        let input = t.input_raw;
+        if SIGNALS.iter().any(|signal| input.contains(signal)) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn observation_tool() {
+    Tool::new("observation", write_observation)
+        .input(Input::string("description").required())
+        .input(Input::string("session_id").required())
+        .input(
+            Input::string("lines")
+                .description(
+                    "Session line numbers the observation refers to: \
+                     a line (`112`), a range (`61-72`), or a \
+                     comma-separated list (`28,31`)",
+                ),
+        )
+}
+
+pub async fn write_observation(inputs) {
+    let lines = inputs.get("lines").unwrap_or("");
+    let note = write_note("commit-process[observation]", inputs.description)
+        .target(Target::session_lines(inputs.session_id, lines))
+        .metadata(#{ lines })
+        .carry_forward(OBSERVE_KEY)
+        .await?;
+    Ok(format!("Wrote observation note {}", note.id))
+}
