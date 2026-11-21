@@ -27,7 +27,7 @@ description = "Run sql over the objects fetched from this remote instead of the 
 
 [parameters.publish]
 type = "boolean"
-description = "Run sql over pending publish sessions instead: sessions staged by gage publish and not yet applied. session, entry, message, tool_use, tool_use_file, and session_change hold them and nothing else; no other table is present. Goes with sql."
+description = "Run sql over pending publish sessions instead: sessions staged by gage publish and not yet applied. session, entry, message, tool_use, tool_use_file, and session_publish_change hold them and nothing else; no other table is present. Goes with sql."
 
 [annotations]
 read_only_hint = true
@@ -63,7 +63,7 @@ limitations: DataFusion dialect limits to plan around
 scopes: what a scan-scoped context restricts
 
 The named tables are session, entry, message, tool_use, tool_use_file,
-session_change, note, note_doc, issue, issue_event, issue_evidence, scan and its
+session_publish_change, note, note_doc, issue, issue_event, issue_evidence, scan and its
 link and log tables, dataset, attachment, and content_schema. session is keyed
 by `id`; every other table names its session `session_id`, and rows within a
 session are ordered by `line`.

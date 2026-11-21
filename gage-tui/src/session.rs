@@ -207,7 +207,7 @@ impl Backend {
         let turns = self.load_turns(session_id, &entries).await?;
         let tool_uses = self.load_tool_uses(session_id).await?;
         // A native session is never a publish, and its context has no
-        // `session_change` relation. A pending publish has redactions, and
+        // `session_publish_change` relation. A pending publish has redactions, and
         // its context has no `note` relation. Only a stored session is
         // an object an attachment targets.
         let (notes, attachments, redactions) = match self.kind {
@@ -348,7 +348,7 @@ impl Backend {
     async fn load_redactions(&self, session_id: &str) -> Result<Vec<Redaction>, Box<dyn Error>> {
         let sql = format!(
             "SELECT type, line, line_end, ref, span_start, span_end, reason, author \
-             FROM session_change WHERE session_id = '{}' ORDER BY line, ref, span_start",
+             FROM session_publish_change WHERE session_id = '{}' ORDER BY line, ref, span_start",
             sql_str(session_id)
         );
         let batches = self.ctx.sql(&sql).await?.collect().await?;

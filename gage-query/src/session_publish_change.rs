@@ -1,4 +1,4 @@
-//! The `session_change` table shape: one row per record of a stored
+//! The `session_publish_change` table shape: one row per record of a stored
 //! session's `changes.json`, the changes its publish made to the
 //! original. A session that is not a publish has no rows.
 
@@ -24,12 +24,15 @@ static SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
     ]))
 });
 
-pub fn session_change_schema() -> SchemaRef {
+pub fn session_publish_change_schema() -> SchemaRef {
     SCHEMA.clone()
 }
 
-/// The `session_change` rows of one session, in record order.
-pub fn session_change_batch(session_id: &str, records: &[ChangeRecord]) -> Result<RecordBatch> {
+/// The `session_publish_change` rows of one session, in record order.
+pub fn session_publish_change_batch(
+    session_id: &str,
+    records: &[ChangeRecord],
+) -> Result<RecordBatch> {
     let mut session_ids = StringBuilder::new();
     let mut kinds = StringBuilder::new();
     let mut lines = Int64Builder::new();
@@ -51,7 +54,7 @@ pub fn session_change_batch(session_id: &str, records: &[ChangeRecord]) -> Resul
         authors.append_value(&r.author);
     }
     Ok(RecordBatch::try_new(
-        session_change_schema(),
+        session_publish_change_schema(),
         vec![
             Arc::new(session_ids.finish()),
             Arc::new(kinds.finish()),

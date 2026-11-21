@@ -962,7 +962,7 @@ mod tests {
             names(
                 "SELECT table_name FROM information_schema.tables \
                  WHERE table_name IN ('session', 'entry', 'message', 'tool_use', \
-                                      'tool_use_file', 'session_change')"
+                                      'tool_use_file', 'session_publish_change')"
             )
             .await,
             6

@@ -1,5 +1,5 @@
 //! The `entry`, `message`, `tool_use`, `tool_use_file`, and
-//! `session_change` tables over stored sessions.
+//! `session_publish_change` tables over stored sessions.
 //!
 //! One provider type serves the five tables; [`RowKind`] selects the
 //! shape. A scan resolves the session set through the
@@ -36,7 +36,7 @@ use gage_session::filter::{self, RowFilter};
 
 use crate::rows::{RowCache, entry_rows, entry_schema, message_rows, message_schema};
 use crate::scope::{SessionSet, StoredSessionRef};
-use crate::session_change::session_change_schema;
+use crate::session_publish_change::session_publish_change_schema;
 use gage_session::{tool_use_file_schema, tool_use_schema};
 
 const SESSION_ID_COL: &str = "session_id";
@@ -47,7 +47,7 @@ pub enum RowKind {
     Message,
     ToolUse,
     ToolUseFile,
-    SessionChange,
+    SessionPublishChange,
 }
 
 impl RowKind {
@@ -57,7 +57,7 @@ impl RowKind {
             RowKind::Message => message_schema(),
             RowKind::ToolUse => tool_use_schema(),
             RowKind::ToolUseFile => tool_use_file_schema(),
-            RowKind::SessionChange => session_change_schema(),
+            RowKind::SessionPublishChange => session_publish_change_schema(),
         }
     }
 
@@ -73,7 +73,10 @@ impl RowKind {
             RowKind::Message => message_rows(scope.rows(session, cache)?.as_ref()),
             RowKind::ToolUse => Ok(scope.tool_uses(session, cache)?.as_ref().clone()),
             RowKind::ToolUseFile => Ok(scope.tool_use_files(session, cache)?.as_ref().clone()),
-            RowKind::SessionChange => Ok(scope.session_changes(session, cache)?.as_ref().clone()),
+            RowKind::SessionPublishChange => Ok(scope
+                .session_publish_changes(session, cache)?
+                .as_ref()
+                .clone()),
         }
     }
 
@@ -82,7 +85,7 @@ impl RowKind {
     fn line_col(self) -> Option<usize> {
         match self {
             RowKind::Entry | RowKind::Message => Some(1),
-            RowKind::SessionChange => Some(2),
+            RowKind::SessionPublishChange => Some(2),
             RowKind::ToolUse => Some(3),
             RowKind::ToolUseFile => None,
         }

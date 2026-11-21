@@ -211,7 +211,7 @@ pub enum PublishCommand {
     ///
     /// Query pending publish sessions with SQL, as gage query does.
     /// Tables session, entry, message, tool_use, tool_use_file, and
-    /// session_change hold staged sessions and nothing else; no other
+    /// session_publish_change hold staged sessions and nothing else; no other
     /// table is present.
     Query(QueryRunArgs),
 
