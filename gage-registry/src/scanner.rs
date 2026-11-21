@@ -891,6 +891,19 @@ fn parse_scanner(source: &str, embed_key: &str, path: &Path) -> Result<ScannerDe
     let mut problems: Vec<Problem> = Vec::new();
 
     for (item, _) in &file.items {
+        if let ast::Item::Fn(item_fn) = item {
+            let name_span = item_fn.name.span();
+            let is_init = &source[name_span.start.0 as usize..name_span.end.0 as usize] == "init";
+            if let Some(async_token) = item_fn.async_token.as_ref().filter(|_| is_init) {
+                // A scan calls `init` without awaiting it
+                problems.push(Problem {
+                    start: async_token.span().start.0 as usize,
+                    end: name_span.end.0 as usize,
+                    message: "init is not async; declare it `pub fn init()`".to_string(),
+                });
+            }
+            continue;
+        }
         let ast::Item::Const(item_const) = item else {
             continue;
         };

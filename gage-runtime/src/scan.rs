@@ -20,13 +20,14 @@ use std::sync::{Arc, Mutex};
 
 use crate::datetime::{self, DateTime};
 use crate::error::Error;
+use crate::init::{QueryViewDef, create_views};
 use crate::value::json_to_value;
 use datafusion::arrow::array::{Array, Int64Array, StringArray, TimestampMillisecondArray};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::error::DataFusionError;
 use datafusion::prelude::SessionContext;
 use gage_core::config::default_cache_root;
-use gage_mcp::{HostError, McpHost};
+use gage_mcp::{HostError, McpHost, QueryViewDoc};
 use gage_query::{ContextBuilder, ScanScope};
 use gage_registry::driver::DriverRegistry;
 use gage_session::{Driver, DriverError, Source, SourceOptions};
@@ -95,6 +96,11 @@ pub struct ScanContext {
     /// its doc, set by the orchestrator per task. The `NoteWrite`
     /// tool's allowed names when a scanner gives it none.
     pub note_writes: BTreeMap<String, String>,
+    /// The query views the scan's scanners defined in `init`, in the
+    /// order the scan creates them. Every query context of the scan
+    /// serves them, so every agent of the scan reads the same views.
+    /// Set by the orchestrator before the first task.
+    pub views: Arc<Vec<QueryViewDef>>,
     query_store: Arc<Mutex<Store>>,
     /// The scan-scoped query context, built on the first read
     scan_query: Arc<OnceCell<SessionContext>>,
@@ -140,6 +146,7 @@ impl ScanContext {
             paths,
             invalidate: false,
             note_writes: BTreeMap::new(),
+            views: Arc::new(Vec::new()),
             query_store: Arc::new(Mutex::new(Store::open_with_cache_root(store_path, &root)?)),
             scan_query: Arc::new(OnceCell::new()),
             store_query: Arc::new(OnceCell::new()),
@@ -192,16 +199,56 @@ impl ScanContext {
     /// read and the agent's query tool run here.
     pub(crate) async fn scan_context(&self) -> Result<&SessionContext, VmError> {
         self.scan_query
-            .get_or_try_init(|| async {
-                let ctx = self
-                    .context_builder()
-                    .scope(ScanScope::scan_dir(self.paths.root()))
-                    .build()
-                    .await;
-                tracing::info!("scan query context built");
-                Ok(ctx)
-            })
+            .get_or_try_init(|| self.build_scan_query())
             .await
+            .map_err(VmError::panic)
+    }
+
+    /// Build the scan-scoped query context and create the scan's
+    /// views on it. The error names the view that could not be
+    /// created.
+    async fn build_scan_query(&self) -> Result<SessionContext, String> {
+        let ctx = self
+            .context_builder()
+            .scope(ScanScope::scan_dir(self.paths.root()))
+            .build()
+            .await;
+        create_views(&ctx, &self.views).await?;
+        tracing::info!("scan query context built");
+        Ok(ctx)
+    }
+
+    /// Create the scan's views on its query context, building the
+    /// context if no read has built it. The error names the scanner
+    /// and the view that could not be created, or says by how much the
+    /// views' descriptions exceed what the query tool's description
+    /// holds. A scan with no views builds nothing.
+    pub async fn prepare_views(&self) -> Result<(), String> {
+        if self.views.is_empty() {
+            return Ok(());
+        }
+        let over = gage_mcp::tools::query::description_overflow(&self.view_docs());
+        if over > 0 {
+            return Err(format!(
+                "the query views' names and descriptions are {over} bytes more than the \
+                 query tool's description holds"
+            ));
+        }
+        self.scan_query
+            .get_or_try_init(|| self.build_scan_query())
+            .await
+            .map(|_| ())
+    }
+
+    /// The scan's views as the query tool's description lists them.
+    pub(crate) fn view_docs(&self) -> Vec<QueryViewDoc> {
+        self.views
+            .iter()
+            .map(|v| QueryViewDoc {
+                name: v.name.clone(),
+                description: v.description.clone(),
+            })
+            .collect()
     }
 
     /// The store-scoped query context, for the reads that consult
@@ -219,7 +266,7 @@ impl ScanContext {
     /// The context the Gage query tool runs over for `scope`: the
     /// scan's own context, or a scan-scoped context narrowed to one
     /// member, with `entry`, `message`, and `tool_use` narrowed to the
-    /// line range when one is given.
+    /// line range when one is given. Either serves the scan's views.
     pub(crate) async fn query_tool_context(
         &self,
         scope: &QueryScope,
@@ -243,6 +290,11 @@ impl ScanContext {
                         .await
                         .map_err(|e| Error::agent(format!("query tool: {e}")))?;
                 }
+                // Created after the narrowing so each view reads the
+                // narrowed tables
+                create_views(&ctx, &self.views)
+                    .await
+                    .map_err(|e| Error::agent(format!("query tool: {e}")))?;
                 Ok(ctx)
             }
         }
@@ -333,9 +385,14 @@ fn scan() -> Result<Scan, VmError> {
 fn params() -> Result<Value, VmError> {
     let params = match SCAN_CTX.try_with(|ctx| ctx.params.clone()) {
         Ok(params) => params,
-        Err(_outside_scan) => crate::publish::current_params().ok_or_else(|| {
-            VmError::panic("params() is available only inside a scan task or a filter task")
-        })?,
+        Err(_outside_scan) => crate::init::current_params()
+            .or_else(crate::publish::current_params)
+            .ok_or_else(|| {
+                VmError::panic(
+                    "params() is available only inside a scan task, a scanner's init function, \
+                     or a filter task",
+                )
+            })?,
     };
     Ok(match &params {
         Some(params) => json_to_value(params),

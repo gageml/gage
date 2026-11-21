@@ -38,14 +38,12 @@ use rmcp::model::{CallToolResult, JsonObject};
 use serde_json::json;
 
 use crate::server::GageServer;
-use crate::service::{QueryConfig, SourceConfig};
+use crate::service::{QueryConfig, QueryViewDoc, SourceConfig};
 use crate::tool::{
-    MAX_DESCRIPTION_BYTES, ToolDef, build_tool_meta, description_byte_len, domain_error, success,
+    MAX_DESCRIPTION_BYTES, build_tool_meta, description_byte_len, domain_error, success,
 };
 
 pub const NAME: &str = "query";
-
-pub const TOOL: ToolDef = route;
 
 const MD: &str = include_str!("../../config/tools/query.md");
 const _: () = assert!(
@@ -67,11 +65,44 @@ const PAGES_KEY: &str = "gage.pages";
 const FILE_EXT: &str = "arrow";
 const TMP_EXT: &str = "tmp";
 
-fn route() -> ToolRoute<GageServer> {
-    ToolRoute::new_dyn(
-        build_tool_meta(MD),
-        |ctx: ToolCallContext<'_, GageServer>| Box::pin(handle(ctx)),
-    )
+/// The route for one configuration. The description ends with the
+/// views the configuration's context serves, which are per
+/// configuration and so cannot sit in the `.md`.
+pub fn route(config: &QueryConfig) -> ToolRoute<GageServer> {
+    let mut meta = build_tool_meta(MD);
+    let base = meta.description.take().unwrap_or_default();
+    meta.description = Some(describe(&base, &config.views).into());
+    ToolRoute::new_dyn(meta, |ctx: ToolCallContext<'_, GageServer>| {
+        Box::pin(handle(ctx))
+    })
+}
+
+/// `base` followed by a section that lists `views`; `base` alone when
+/// there are none.
+fn describe(base: &str, views: &[QueryViewDoc]) -> String {
+    if views.is_empty() {
+        return base.to_string();
+    }
+    let mut text = format!(
+        "{base}\n\nViews defined for this scan. Each is a query over the tables above that \
+         selects the rows a task needs. Read from a view before the tables it is built on:\n"
+    );
+    for view in views {
+        match &view.description {
+            Some(doc) => text.push_str(&format!("- `{}`: {doc}\n", view.name)),
+            None => text.push_str(&format!("- `{}`\n", view.name)),
+        }
+    }
+    text
+}
+
+/// By how many bytes the description that lists `views` exceeds the
+/// cap on a tool description; 0 when it fits.
+pub fn description_overflow(views: &[QueryViewDoc]) -> usize {
+    let base = build_tool_meta(MD).description.unwrap_or_default();
+    describe(&base, views)
+        .len()
+        .saturating_sub(MAX_DESCRIPTION_BYTES)
 }
 
 fn handle(
@@ -874,6 +905,39 @@ mod tests {
         assert_eq!(properties["gage_store"]["type"], "string");
     }
 
+    /// A configuration with views lists them after the base
+    /// description; one without views has the base description alone.
+    #[test]
+    fn the_description_lists_the_views() {
+        let base = build_tool_meta(MD).description.unwrap().to_string();
+        assert_eq!(describe(&base, &[]), base);
+        let views = [
+            QueryViewDoc {
+                name: "tool_call".into(),
+                description: Some("Calls to the Bash tool".into()),
+            },
+            QueryViewDoc {
+                name: "bare".into(),
+                description: None,
+            },
+        ];
+        let description = describe(&base, &views);
+        assert!(description.starts_with(&base), "{description}");
+        assert!(
+            description.ends_with(
+                "Read from a view before the tables it is built on:\n\
+                 - `tool_call`: Calls to the Bash tool\n- `bare`\n"
+            ),
+            "{description}"
+        );
+        assert_eq!(description_overflow(&views), 0);
+        let long = [QueryViewDoc {
+            name: "v".into(),
+            description: Some("x".repeat(MAX_DESCRIPTION_BYTES)),
+        }];
+        assert!(description_overflow(&long) > 0);
+    }
+
     /// The help menu embedded in the description stays in sync with the
     /// help table: the same topics, in order, with the same short lines.
     #[test]
@@ -933,6 +997,7 @@ mod tests {
                 sessions: Arc::new(|| Ok(Vec::new())),
             }),
             source: None,
+            views: Vec::new(),
         };
 
         let same = context_for(&config, &QueryRequest::Sql("SELECT 1"))
@@ -972,6 +1037,7 @@ mod tests {
             context: configured,
             publish: None,
             source: None,
+            views: Vec::new(),
         };
         let refused = context_for(&without, &QueryRequest::PublishSql("SELECT 1"))
             .await
@@ -1105,6 +1171,7 @@ mod tests {
                 store: ours.clone(),
                 cache_root: cache_root.clone(),
             }),
+            views: Vec::new(),
         };
         let request = QueryRequest::StoredRemoteSql {
             remote: "acme",
@@ -1130,6 +1197,7 @@ mod tests {
                 store: dir.path().join("main.git"),
                 cache_root: cache_root.clone(),
             }),
+            views: Vec::new(),
         };
         for (remote, expected, absent) in [
             (None, "from the main store", "from the remote"),
@@ -1189,6 +1257,7 @@ mod tests {
             context: configured,
             publish: None,
             source: None,
+            views: Vec::new(),
         };
         for request in [
             QueryRequest::StoredRemoteSql {
@@ -1236,6 +1305,7 @@ mod tests {
                 store: dir.path().join("store.git"),
                 cache_root: dir.path().join("cache"),
             }),
+            views: Vec::new(),
         };
         let native = format!("claude:{}", dir.path().join("claude").display());
         let request = QueryRequest::NativeSql {

@@ -38,8 +38,8 @@ use gage_registry::driver::DriverRegistry;
 use gage_registry::scanner::{Scanner, TaskDef, TaskKind};
 use gage_runtime::source::{SourceError, SourceFile, source_files};
 use gage_runtime::{
-    AgentPoolDelta, CURRENT_RUNTIME_SCHEME, Fail, Level, OUTPUT_SINK, Output, OutputSink, SCAN_CTX,
-    ScanContext, ScanDatasetRef, TaskOutput, is_ignore,
+    AgentPoolDelta, CURRENT_RUNTIME_SCHEME, Fail, INIT_CTX, InitContext, Level, OUTPUT_SINK,
+    Output, OutputSink, QueryViewDef, SCAN_CTX, ScanContext, ScanDatasetRef, TaskOutput, is_ignore,
 };
 use gage_session::DriverError;
 use gage_store::{
@@ -137,6 +137,12 @@ pub enum Error {
         task: String,
         function: String,
     },
+    /// A declared task runs `init`, the function a scan calls once
+    /// before its tasks
+    InitTask {
+        scanner: String,
+        task: String,
+    },
 
     /// The scanner's source files cannot be enumerated or stored
     Source {
@@ -167,6 +173,13 @@ impl fmt::Display for Error {
                     "scanner {scanner} declares task {task} but defines no function {function}"
                 )
             }
+            Error::InitTask { scanner, task } => {
+                write!(
+                    f,
+                    "scanner {scanner} declares task {task} to run {INIT_FUNCTION}, which a scan \
+                     calls once before its tasks; give the task another function"
+                )
+            }
 
             Error::Source { name, source } => write!(f, "scanner {name}: {source}"),
         }
@@ -190,6 +203,8 @@ pub struct CompiledScanner {
     params: Option<json::Value>,
     /// The files the scanner is built from, recorded with the scan
     source_files: Vec<SourceFile>,
+    /// Whether the scanner defines `init`
+    has_init: bool,
     rt: RuneArc<RuntimeContext>,
     unit: RuneArc<Unit>,
     sources: Arc<Sources>,
@@ -203,6 +218,23 @@ impl CompiledScanner {
     /// The directory holding the scanner's source file.
     pub fn dir(&self) -> &Path {
         &self.dir
+    }
+
+    /// Run the scanner's `init` under its params and return the query
+    /// views it defined, in call order. A scanner without `init`
+    /// defines none. `init` runs on the calling thread and is not
+    /// awaited; the scanner's declaration refuses an `async fn init`.
+    fn init(&self) -> Result<Vec<QueryViewDef>, String> {
+        if !self.has_init {
+            return Ok(Vec::new());
+        }
+        let ctx = InitContext::new(&self.name, self.params.clone());
+        let mut vm = Vm::new(self.rt.clone(), self.unit.clone());
+        let value = INIT_CTX
+            .sync_scope(ctx.clone(), || vm.call([INIT_FUNCTION], ()))
+            .map_err(|e| vm_error(&e, &self.sources))?;
+        init_result(value)?;
+        Ok(ctx.take_views())
     }
 
     /// The compiled artifacts a worker needs to run one of the
@@ -293,7 +325,14 @@ pub fn compile(scanner: &Scanner<'_>) -> Result<CompiledScanner, Error> {
                 function: task.call.clone(),
             });
         }
+        if task.call == INIT_FUNCTION {
+            return Err(Error::InitTask {
+                scanner: def.name.clone(),
+                task: task.name.clone(),
+            });
+        }
     }
+    let has_init = vm.lookup_function([INIT_FUNCTION]).is_ok();
 
     Ok(CompiledScanner {
         name: def.name.clone(),
@@ -302,10 +341,53 @@ pub fn compile(scanner: &Scanner<'_>) -> Result<CompiledScanner, Error> {
         selection: Selection::Explicit,
         params: scanner.params.clone(),
         source_files: files,
+        has_init,
         rt,
         unit,
         sources: Arc::new(sources),
     })
+}
+
+/// The function a scan calls once for each scanner that defines it,
+/// before any task of the scan
+const INIT_FUNCTION: &str = "init";
+
+/// Interpret the return value of `init`: an `Err` fails the scan, and
+/// any other value is success.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "takes the VM call's return value; the runtime holds the only live handle"
+)]
+fn init_result(value: Value) -> Result<(), String> {
+    match rune::from_value::<Result<Value, Value>>(value) {
+        Ok(Err(err)) => Err(format!(
+            "{INIT_FUNCTION} returned Err: {}",
+            render_task_error(err)
+        )),
+        Ok(Ok(_)) | Err(_) => Ok(()),
+    }
+}
+
+/// Run every scanner's `init` and return the scan's query views in
+/// scanner order. A view name two scanners define is refused, since
+/// every agent of the scan reads the same views.
+fn init_scanners(scanners: &[CompiledScanner]) -> Result<Vec<QueryViewDef>, ScanError> {
+    let mut views: Vec<QueryViewDef> = Vec::new();
+    for scanner in scanners {
+        let defined = scanner
+            .init()
+            .map_err(|e| ScanError::Init(format!("scanner {}: {e}", scanner.name)))?;
+        for view in defined {
+            if let Some(first) = views.iter().find(|v| v.name == view.name) {
+                return Err(ScanError::Init(format!(
+                    "scanners {} and {} both define the query view `{}`",
+                    first.scanner, view.scanner, view.name
+                )));
+            }
+            views.push(view);
+        }
+    }
+    Ok(views)
 }
 
 /// A failure of the scan lifecycle itself, as opposed to a task
@@ -325,6 +407,9 @@ pub enum ScanError {
     /// The default driver cannot serve the scan; the message is the
     /// driver's
     NotReady(DriverError),
+    /// A scanner's `init` failed, or what the scanners configured in
+    /// `init` cannot be set up. No task has run.
+    Init(String),
 }
 
 /// One `attachments.needs` pattern of a planned task that no
@@ -353,6 +438,7 @@ impl fmt::Display for ScanError {
                 write!(f, "the dataset has no attachment for: {}", needs.join(", "))
             }
             ScanError::NotReady(e) => write!(f, "{e}"),
+            ScanError::Init(message) => write!(f, "initializing the scan: {message}"),
         }
     }
 }
@@ -460,6 +546,7 @@ pub async fn scan(
         None => None,
     };
     let attachment_warnings = check_attachments(store, config, scanners, &plan)?;
+    let views = init_scanners(scanners)?;
     // The default driver runs every agent whose model names no other,
     // so it is asked before anything is written. A driver a model
     // names is asked when its first agent starts, and so is the
@@ -494,14 +581,6 @@ pub async fn scan(
     let scan_dir = ScanDir::create(config.scans_dir, &id, config.dataset, &scanner_plans)?;
     scan_dir.write_plan(&plan.to_json())?;
     let mut on_event = on_event;
-    on_event(Event::Started {
-        id: id.clone(),
-        tasks: plan
-            .tasks
-            .iter()
-            .map(|t| (t.scanner.clone(), t.task.clone()))
-            .collect(),
-    });
     let mut scan_ctx = ScanContext::new(
         id.clone(),
         dataset,
@@ -510,6 +589,21 @@ pub async fn scan(
         scan_dir.layout(),
         Arc::clone(&config.drivers),
     )?;
+    scan_ctx.views = Arc::new(views);
+    // The views are created before any task so that none starts on a
+    // scan whose views cannot be created
+    if let Err(message) = scan_ctx.prepare_views().await {
+        scan_dir.remove()?;
+        return Err(ScanError::Init(message));
+    }
+    on_event(Event::Started {
+        id: id.clone(),
+        tasks: plan
+            .tasks
+            .iter()
+            .map(|t| (t.scanner.clone(), t.task.clone()))
+            .collect(),
+    });
     if let Some(driver) = &default_driver {
         scan_ctx.agent_ready_checked(&**driver).await;
     }
@@ -3228,6 +3322,198 @@ mod tests {
                 .any(|l| l.contains(" DEBUG gage_runtime::note: write_note")
                     && l.ends_with(" task=notes:main")),
             "{records}"
+        );
+    }
+
+    /// A scanner's `init` runs before its tasks with the scanner's
+    /// params, and the scan creates the views it defines.
+    #[tokio::test]
+    async fn init_runs_before_the_tasks_and_defines_views() {
+        let (_dir, compiled) = compile_source_with_params(
+            r#"
+            use gage::{context, params};
+
+            pub const SCANNER = #{
+                name: "viewer",
+                description: "Defines a view",
+                tasks: #{ main: #{} },
+                params: #{ tool: #{ value: "Bash" } },
+            };
+
+            pub fn init() {
+                let tool = params().tool;
+                context()
+                    .query_view("tool_call", `SELECT line FROM tool_use WHERE name = '${tool}'`)
+                    .description("Calls to one tool");
+            }
+
+            pub async fn main() {
+                println!("ran");
+            }
+            "#,
+            Some("#{ tool: \"Read\" }"),
+        );
+        let compiled = compiled.unwrap();
+        assert_eq!(
+            compiled.init().unwrap(),
+            [QueryViewDef {
+                scanner: "viewer".into(),
+                name: "tool_call".into(),
+                sql: "SELECT line FROM tool_use WHERE name = 'Read'".into(),
+                description: Some("Calls to one tool".into()),
+            }]
+        );
+        let (tmp, store) = open_store();
+        let (outcome, events) = run_all(
+            &store,
+            &tmp.path().join("scans"),
+            &[compiled],
+            &CancellationToken::new(),
+        )
+        .await;
+        assert_eq!(outcome.unwrap().attrs.tasks.completed, 1, "{events:?}");
+        assert_eq!(outputs(&events), [&Output::Println("ran".into())]);
+    }
+
+    /// A scan whose `init` fails, or whose views cannot be created,
+    /// ends before any task starts and leaves no scan directory.
+    #[tokio::test]
+    async fn a_failed_init_stops_the_scan_before_any_task() {
+        const TASK: &str = r#"
+            pub const SCANNER = #{
+                name: "viewer",
+                description: "Defines a view",
+                tasks: #{ main: #{} },
+            };
+
+            pub async fn main() {
+                println!("ran");
+            }
+        "#;
+        for (init, message) in [
+            (
+                r#"pub fn init() { gage::context().query_view("v", "SELECT nope FROM tool_use"); }"#,
+                "initializing the scan: scanner viewer: view `v`:",
+            ),
+            (
+                r#"pub fn init() { gage::context().query_view("tool_use", "SELECT 1"); }"#,
+                "scanner viewer: view `tool_use`: a table or view already has that name",
+            ),
+            (
+                r#"pub fn init() { gage::context().query_view("v", "DROP TABLE tool_use"); }"#,
+                "scanner viewer: view `v`: the SQL is not a SELECT",
+            ),
+            (
+                r#"pub fn init() { gage::context().query_view("Bad Name", "SELECT 1"); }"#,
+                "`Bad Name` is not a view name",
+            ),
+            (
+                r#"pub fn init() { Err("no") }"#,
+                "scanner viewer: init returned Err:",
+            ),
+            (
+                r#"pub fn init() { gage::scan(); }"#,
+                "initializing the scan: scanner viewer:",
+            ),
+        ] {
+            let (_dir, compiled) = compile_source(&format!("{TASK}\n{init}"));
+            let (tmp, store) = open_store();
+            let root = tmp.path().join("scans");
+            let (outcome, events) = run_all(
+                &store,
+                &root,
+                &[compiled.unwrap()],
+                &CancellationToken::new(),
+            )
+            .await;
+            let Err(err) = outcome else {
+                panic!("{init}: the scan ran");
+            };
+            let err = err.to_string();
+            assert!(err.contains(message), "{init}: {err}");
+            assert!(outputs(&events).is_empty(), "{init}: {events:?}");
+            let left: Vec<_> = match std::fs::read_dir(&root) {
+                Ok(entries) => entries.map(|e| e.unwrap().path()).collect(),
+                Err(_) => Vec::new(),
+            };
+            assert!(left.is_empty(), "{init}: {left:?}");
+        }
+    }
+
+    /// Every agent of a scan reads the same views, so two scanners
+    /// that define one name are refused before the scan directory.
+    #[tokio::test]
+    async fn a_view_name_two_scanners_define_is_refused() {
+        let scanner = |name: &str| {
+            format!(
+                r#"
+                pub const SCANNER = #{{
+                    name: "{name}",
+                    description: "Defines a view",
+                    tasks: #{{ main: #{{}} }},
+                }};
+                pub fn init() {{ gage::context().query_view("shared", "SELECT 1"); }}
+                pub async fn main() {{}}
+                "#
+            )
+        };
+        let (_a, first) = compile_source(&scanner("one"));
+        let (_b, second) = compile_source(&scanner("two"));
+        let (tmp, store) = open_store();
+        let root = tmp.path().join("scans");
+        let (outcome, _) = run_all(
+            &store,
+            &root,
+            &[first.unwrap(), second.unwrap()],
+            &CancellationToken::new(),
+        )
+        .await;
+        assert_eq!(
+            outcome.unwrap_err().to_string(),
+            "initializing the scan: scanners one and two both define the query view `shared`"
+        );
+        assert!(!root.exists());
+    }
+
+    /// A task cannot run `init`: the scan calls it before the tasks.
+    #[test]
+    fn a_task_that_runs_init_is_refused() {
+        let (_dir, compiled) = compile_source(
+            r#"
+            pub const SCANNER = #{
+                name: "viewer",
+                description: "Runs init as a task",
+                tasks: #{ init: #{} },
+            };
+            pub fn init() {}
+            "#,
+        );
+        let err = compiled.err().unwrap().to_string();
+        assert!(
+            err.starts_with("scanner viewer declares task init to run init"),
+            "{err}"
+        );
+    }
+
+    /// A scan calls `init` without awaiting it, so an async `init` is
+    /// a declaration problem.
+    #[test]
+    fn an_async_init_is_refused() {
+        let (_dir, compiled) = compile_source(
+            r#"
+            pub const SCANNER = #{
+                name: "viewer",
+                description: "Declares init async",
+                tasks: #{ main: #{} },
+            };
+            pub async fn init() {}
+            pub async fn main() {}
+            "#,
+        );
+        let err = compiled.err().unwrap().to_string();
+        assert!(
+            err.contains("init is not async; declare it `pub fn init()`"),
+            "{err}"
         );
     }
 

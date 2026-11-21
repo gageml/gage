@@ -1,0 +1,32 @@
+use gage::{call_agent, context, params, tools::Query};
+
+pub const SCANNER = #{
+    name: "gage-query-view",
+    description: "query view use",
+    tasks: #{ main: #{} },
+    params: #{ tool: #{ value: "Bash" } },
+};
+
+// Runs once, before any task. It defines the views that the query
+// tool serves to every agent of the scan
+pub fn init() {
+    let tool = params().tool;
+    context()
+        .query_view(
+            "tool_call",
+            `SELECT session_id, line, is_error, output FROM tool_use WHERE name = '${tool}'`,
+        )
+        .description(`Calls to the ${tool} tool`);
+    context()
+        .query_view("failed_tool_call", "SELECT * FROM tool_call WHERE is_error")
+        .description(`Calls to the ${tool} tool that failed`);
+}
+
+pub async fn main() {
+    let a = call_agent("How many calls failed? Reply with the SQL you ran and the count.")
+        .model("small")
+        .tool(Query::new())
+        .await?;
+    let result = a.wait().await?;
+    println!("{}", result.text);
+}

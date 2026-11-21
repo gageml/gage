@@ -1,0 +1,27 @@
+use gage::{call_agent, context, tools::Query};
+
+pub const SCANNER = #{
+    name: "scanner-query-view",
+    description: "Use custom query view",
+    tasks: #{ main: #{} },
+};
+
+pub fn init() {
+    context()
+        .query_view(
+            "short_msg",
+            "SELECT session_id, line, text FROM message
+             WHERE type = 'user' AND subtype = 'text'
+             AND character_length(text) < 50",
+        )
+        .description("Short user messages");
+}
+
+pub async fn main() {
+    let a = call_agent("What are the latest three short messages?")
+        .model("small")
+        .tool(Query::new())
+        .await?;
+    let result = a.wait().await?;
+    println!("{}", result.text);
+}

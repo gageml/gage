@@ -573,6 +573,7 @@ async fn run_mcp() -> anyhow::Result<()> {
                     store: store_path(),
                     cache_root: default_cache_root(),
                 }),
+                views: Vec::new(),
             }),
             GageTool::IssueWrite(IssueWriteConfig::with_store(
                 writer.clone(),

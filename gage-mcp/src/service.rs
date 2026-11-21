@@ -134,6 +134,17 @@ pub struct QueryConfig {
     pub context: Arc<SessionContext>,
     pub publish: Option<PublishConfig>,
     pub source: Option<SourceConfig>,
+    /// The views `context` serves beside its tables, which the tool's
+    /// description lists
+    pub views: Vec<QueryViewDoc>,
+}
+
+/// One view the query tool's description lists: its name and what it
+/// holds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueryViewDoc {
+    pub name: String,
+    pub description: Option<String>,
 }
 
 /// What a `native` or `stored_remote` call needs to read something
@@ -318,7 +329,7 @@ fn build_server(spec: &ToolSpec) -> GageServer {
         match tool {
             GageTool::Query(c) => {
                 config.query = Some(c.clone());
-                router = router.with_route((tools::query::TOOL)());
+                router = router.with_route(tools::query::route(c));
             }
             GageTool::IssueWrite(c) => {
                 config.issue_write = Some(c.clone());
@@ -451,6 +462,7 @@ mod tests {
                 context: Arc::new(SessionContext::new()),
                 publish: None,
                 source: None,
+                views: Vec::new(),
             })],
             custom: vec![CustomToolDef {
                 name: "secret".into(),

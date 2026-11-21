@@ -18,6 +18,15 @@ conventions in _[Keep a Changelog]_. Release versions use [semantic versioning].
 - A scanner gives a line range with `range(start, end)`, where it was
   `lines(start, end)`: on `messages()`, `tool_uses()`, and `compress()`
 
+### Enhancements
+
+- A scanner defines query views for its scan in an `init` function:
+  `context().query_view(name, sql).description(text)`. A view is a named
+  `SELECT` over the scan's tables. The query tool serves the views to every
+  agent of the scan and lists them in its description. Gage calls `init` once
+  for each scanner, with the scanner's params, before any task starts. A view
+  that cannot be created stops the scan before any task
+
 ### Other changes
 
 - `gage session list --stored` lists sessions by the time of their last entry,

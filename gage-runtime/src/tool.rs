@@ -749,6 +749,7 @@ pub(crate) async fn consume(
                     context: Arc::new(context),
                     publish: None,
                     source: None,
+                    views: ctx.view_docs(),
                 }));
             }
             ToolKind::Gage(GageConfig::IssueWrite(config)) => {
@@ -1909,6 +1910,89 @@ mod tests {
         assert_eq!(spec.custom.len(), 1);
         assert_eq!(spec.gage.len(), 1);
         assert_eq!(spec.gage[0].name(), "query");
+    }
+
+    /// The query tool of a scan with views lists them and serves
+    /// them: the dataset scope from the scan's own context, the
+    /// session scope from the context built for the agent.
+    #[tokio::test]
+    async fn the_query_tool_lists_and_serves_the_scans_views() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut ctx = scan_ctx(&tmp);
+        ctx.views = Arc::new(vec![crate::init::QueryViewDef {
+            scanner: "demo".into(),
+            name: "failed_call".into(),
+            sql: "SELECT line, name FROM tool_use WHERE is_error".into(),
+            description: Some("Tool calls that failed".into()),
+        }]);
+        ctx.prepare_views().await.unwrap();
+        let (spec, _) = consume(
+            &tools(
+                r#"
+                use gage::tools::Query;
+                pub fn main() { [Query::new()] }
+                "#,
+            ),
+            &ctx,
+            None,
+            &no_tool_uses(),
+        )
+        .await
+        .unwrap();
+        let GageTool::Query(config) = &spec.gage[0] else {
+            panic!("expected a query tool");
+        };
+        assert_eq!(
+            config.views,
+            [gage_mcp::QueryViewDoc {
+                name: "failed_call".into(),
+                description: Some("Tool calls that failed".into()),
+            }]
+        );
+        let batches = config
+            .context
+            .sql("SELECT definition FROM information_schema.views WHERE table_name = 'failed_call'")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        let definition = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<datafusion::arrow::array::StringArray>()
+            .unwrap()
+            .value(0)
+            .to_string();
+        assert_eq!(definition, "SELECT line, name FROM tool_use WHERE is_error");
+        let rows = config
+            .context
+            .sql("SELECT * FROM failed_call")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        assert_eq!(rows.iter().map(|b| b.num_rows()).sum::<usize>(), 0);
+    }
+
+    /// A view that cannot be created is the scan's error before any
+    /// tool is built.
+    #[tokio::test]
+    async fn prepare_views_reports_a_view_that_cannot_be_created() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut ctx = scan_ctx(&tmp);
+        ctx.views = Arc::new(vec![crate::init::QueryViewDef {
+            scanner: "demo".into(),
+            name: "message".into(),
+            sql: "SELECT 1".into(),
+            description: None,
+        }]);
+        let err = ctx.prepare_views().await.unwrap_err();
+        assert!(
+            err.contains("scanner demo: view `message`: a table or view already has that name"),
+            "{err}"
+        );
     }
 
     #[tokio::test]

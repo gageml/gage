@@ -18,7 +18,7 @@ pub use rmcp::model::ToolAnnotations;
 pub use service::{
     CurrentSessionFn, CustomToolCallback, CustomToolDef, CustomToolOutcome, GageTool,
     IssueAssignConfig, IssueWriteCallback, IssueWriteConfig, IssueWriteInput, IssuesFreeConfig,
-    NoteWriteCallback, NoteWriteConfig, NoteWriteInput, PublishConfig, QueryConfig, SessionLiveFn,
-    SourceConfig, StoreWriterConfig, ToolSpec, ToolsConfig, build_mcp_service, serve_io,
-    serve_stdio,
+    NoteWriteCallback, NoteWriteConfig, NoteWriteInput, PublishConfig, QueryConfig, QueryViewDoc,
+    SessionLiveFn, SourceConfig, StoreWriterConfig, ToolSpec, ToolsConfig, build_mcp_service,
+    serve_io, serve_stdio,
 };
