@@ -202,6 +202,18 @@ pub trait ObjectIndex: Send {
     /// order.
     fn refs_reaching(&self, ids: &[String]) -> Result<Vec<String>, StoreError>;
 
+    /// The subset of the objects `ids` that the tip of a live object
+    /// of one of `linker_types` links, in id order. A link to any
+    /// commit of an object counts. The links of an earlier commit of
+    /// the linking object do not, and neither do the links of the
+    /// object `except`.
+    fn linked_by_tips(
+        &self,
+        ids: &[String],
+        linker_types: &[&str],
+        except: &str,
+    ) -> Result<Vec<String>, StoreError>;
+
     /// Start a transaction. Every `put` and `set_tip` until `commit`
     /// or `rollback` is applied as one unit.
     fn begin(&self) -> Result<(), StoreError>;
@@ -362,6 +374,18 @@ impl Store {
             }
             Ok(())
         })
+    }
+
+    /// The subset of the objects `ids` that the tip of a live object
+    /// of one of `linker_types`, other than the object `except`,
+    /// links at any commit, in id order.
+    pub(crate) fn linked_by_tips(
+        &self,
+        ids: &[String],
+        linker_types: &[&str],
+        except: &str,
+    ) -> Result<Vec<String>, StoreError> {
+        self.index.linked_by_tips(ids, linker_types, except)
     }
 
     /// Tips selected by `query`, in query order, less any tip whose
@@ -571,6 +595,14 @@ mod tests {
         fn refs_reaching(&self, ids: &[String]) -> Result<Vec<String>, StoreError> {
             self.inner().refs_reaching(ids)
         }
+        fn linked_by_tips(
+            &self,
+            ids: &[String],
+            linker_types: &[&str],
+            except: &str,
+        ) -> Result<Vec<String>, StoreError> {
+            self.inner().linked_by_tips(ids, linker_types, except)
+        }
         fn begin(&self) -> Result<(), StoreError> {
             self.inner().begin()
         }
@@ -640,6 +672,14 @@ mod tests {
         }
         fn refs_reaching(&self, ids: &[String]) -> Result<Vec<String>, StoreError> {
             self.inner().refs_reaching(ids)
+        }
+        fn linked_by_tips(
+            &self,
+            ids: &[String],
+            linker_types: &[&str],
+            except: &str,
+        ) -> Result<Vec<String>, StoreError> {
+            self.inner().linked_by_tips(ids, linker_types, except)
         }
         fn begin(&self) -> Result<(), StoreError> {
             self.inner().begin()

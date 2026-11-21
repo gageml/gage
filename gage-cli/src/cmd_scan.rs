@@ -1559,18 +1559,19 @@ fn delete(args: ScanDeleteArgs) -> Result<(), CliError> {
     dialog::run("Delete scan runs", || {
         dialog::step_list("Scan runs", ids.iter().map(|id| short_uuid(id).to_string()))?;
 
-        cli::log::remark("Associated notes and issues are deleted")?;
+        cli::log::remark("Notes and issues that no other scan run or issue uses are deleted")?;
         dialog::confirm_irreversible(args.yes)?;
 
         let mut deleted = 0;
-        let mut notes = 0;
-        let mut issues = 0;
+        let mut counts = CascadeCounts::default();
         for id in &ids {
             match scans.delete_cascade(id) {
                 Ok(d) => {
                     deleted += 1;
-                    notes += d.notes.len();
-                    issues += d.issues.len();
+                    counts.notes += d.notes.len();
+                    counts.issues += d.issues.len();
+                    counts.notes_kept += d.notes_kept.len();
+                    counts.issues_kept += d.issues_kept.len();
                 }
                 Err(e) => cli::log::warning(format!("{}: {e}", short_uuid(id)))?,
             }
@@ -1578,14 +1579,34 @@ fn delete(args: ScanDeleteArgs) -> Result<(), CliError> {
         if deleted < total {
             return Err(dialog::partial("Deleted", deleted, total, "scan run"));
         }
-        Ok(format!(
-            "Deleted {}, {}, {}",
-            count(deleted, "scan run"),
-            count(notes, "note"),
-            count(issues, "issue")
-        )
-        .into())
+        Ok(delete_outro(deleted, &counts).into())
     })
+}
+
+/// The notes and issues a delete of scan runs tombstoned and kept.
+#[derive(Default)]
+struct CascadeCounts {
+    notes: usize,
+    issues: usize,
+    notes_kept: usize,
+    issues_kept: usize,
+}
+
+fn delete_outro(deleted: usize, counts: &CascadeCounts) -> String {
+    let mut outro = format!(
+        "Deleted {}, {}, {}",
+        count(deleted, "scan run"),
+        count(counts.notes, "note"),
+        count(counts.issues, "issue")
+    );
+    if counts.notes_kept + counts.issues_kept > 0 {
+        outro.push_str(&format!(
+            "; kept {}, {} used by other scan runs or issues",
+            count(counts.notes_kept, "note"),
+            count(counts.issues_kept, "issue")
+        ));
+    }
+    outro
 }
 
 async fn run_scan(args: ScanRunArgs) -> Result<(), CliError> {
@@ -2618,5 +2639,28 @@ mod tests {
         ];
         expected.sort();
         assert_eq!(costs, expected);
+    }
+
+    #[test]
+    fn delete_outro_reports_what_was_kept_only_when_something_was() {
+        let none_kept = CascadeCounts {
+            notes: 2,
+            issues: 1,
+            ..CascadeCounts::default()
+        };
+        assert_eq!(
+            delete_outro(1, &none_kept),
+            "Deleted 1 scan run, 2 notes, 1 issue"
+        );
+        let some_kept = CascadeCounts {
+            notes: 2,
+            issues: 0,
+            notes_kept: 1,
+            issues_kept: 3,
+        };
+        assert_eq!(
+            delete_outro(2, &some_kept),
+            "Deleted 2 scan runs, 2 notes, 0 issues; kept 1 note, 3 issues used by other scan runs or issues"
+        );
     }
 }

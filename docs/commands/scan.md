@@ -136,6 +136,12 @@ If you omit the ID, Gage lets you pick from a list.
 Delete scan runs. Each scan run is deleted along with the notes and issues it
 wrote. Notes carried forward from earlier scan runs are kept.
 
+A note or an issue that the scan run wrote is kept when another scan run or an
+issue still uses it. This applies to an issue that another scan run also wrote,
+to a note that a later scan run carried forward, and to a note that an issue
+cites. A kept note or issue is not changed. The command reports the number of
+notes and issues it deleted and the number it kept.
+
 ```cli
 gage scan delete [OPTIONS] <IDS>...
 ```

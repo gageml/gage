@@ -16,6 +16,10 @@ conventions in _[Keep a Changelog]_. Release versions use [semantic versioning].
 
 ### Other changes
 
+- `gage scan delete` keeps a note or an issue that another scan run or an issue
+  still uses, and reports the number it kept. It deleted every note and issue
+  the scan run wrote before, including an issue that an earlier scan run also
+  wrote and a note that a later scan run carried forward
 - The confirmation prompt of `gage fetch` and `gage pull` selects "No" when it
   opens, where it selected "Yes" before
 - `gage init` shows one line for each coding agent it sets up or removes, such

@@ -454,6 +454,45 @@ impl ObjectIndex for SqliteIndex {
         }
         Ok(found)
     }
+
+    fn linked_by_tips(
+        &self,
+        ids: &[String],
+        linker_types: &[&str],
+        except: &str,
+    ) -> Result<Vec<String>, StoreError> {
+        if ids.is_empty() || linker_types.is_empty() {
+            return Ok(Vec::new());
+        }
+        // A link names one commit of its target, so the target is
+        // matched through every commit the index holds of it. The join
+        // to ref keeps the links of a current tip only.
+        let sql = format!(
+            "SELECT DISTINCT t.id FROM object t \
+             JOIN link l ON l.target_sha = t.sha \
+             JOIN ref r ON r.tip_sha = l.commit_sha \
+             JOIN object o ON o.sha = r.tip_sha \
+             WHERE t.id IN ({}) AND o.type IN ({}) \
+             AND o.deleted IS NULL AND o.id != ? \
+             ORDER BY t.id",
+            vec!["?"; ids.len()].join(", "),
+            vec!["?"; linker_types.len()].join(", "),
+        );
+        let args = ids
+            .iter()
+            .map(String::as_str)
+            .chain(linker_types.iter().copied())
+            .chain([except]);
+        let mut stmt = self.conn.prepare(&sql).map_err(sql_err)?;
+        let rows = stmt
+            .query_map(params_from_iter(args), |row| row.get::<_, String>(0))
+            .map_err(sql_err)?;
+        let mut linked = Vec::new();
+        for row in rows {
+            linked.push(row.map_err(sql_err)?);
+        }
+        Ok(linked)
+    }
 }
 
 fn sql_err(e: rusqlite::Error) -> StoreError {

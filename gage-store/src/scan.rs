@@ -278,14 +278,18 @@ pub struct ScanRecord {
     pub modified_ms: i64,
 }
 
-/// The ids [`ScanStore::delete_cascade`] tombstoned.
+/// What [`ScanStore::delete_cascade`] tombstoned and what it kept.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScanDeleted {
     pub scan: String,
-    /// The notes the scan wrote that were live at the delete
+    /// The notes the scan wrote that were tombstoned
     pub notes: Vec<String>,
-    /// The issues the scan wrote that were live at the delete
+    /// The issues the scan wrote that were tombstoned
     pub issues: Vec<String>,
+    /// The notes the scan wrote that another scan or an issue links
+    pub notes_kept: Vec<String>,
+    /// The issues the scan wrote that another scan links
+    pub issues_kept: Vec<String>,
 }
 
 /// A read-only view of a scan's files. Paths are `/`-separated and
@@ -479,44 +483,76 @@ impl ScanStore<'_> {
     }
 
     /// Delete a scan and the notes and issues it wrote, named by
-    /// `notes.link` and `issues.link`. Carried notes stay, since the
-    /// scan did not write them. A note or issue deleted since the scan
-    /// wrote it is skipped. The notes and issues go first, so a
-    /// failure among them leaves the scan in place. Returns the ids
-    /// tombstoned.
+    /// `notes.link` and `issues.link`, less the ones something else
+    /// uses. A note or issue is kept, unchanged, when the current
+    /// commit of another live scan or of a live issue links any commit
+    /// of it: a keyed issue that two scans wrote, or a note that a
+    /// later scan carried. A note's target does not keep the target.
+    /// Carried notes stay, since the scan did not write them. A note
+    /// or issue deleted since the scan wrote it is skipped.
+    ///
+    /// The issues go first, so an issue this delete tombstones does
+    /// not keep the notes it cites. The scan goes last, so a failure
+    /// among the notes and issues leaves the scan in place.
     pub fn delete_cascade(&self, id_or_prefix: &str) -> Result<ScanDeleted, StoreError> {
         let object = self.store.resolve_typed(id_or_prefix, OBJECT_TYPE)?;
         let content = ScanContent::from_files(&CommitFiles {
             store: self.store,
             commit: &object.commit_sha,
         })?;
-        let mut deleted = ScanDeleted {
-            scan: object.header.id.clone(),
-            notes: Vec::new(),
-            issues: Vec::new(),
-        };
-        let notes = NoteStore::from(self.store);
-        for sha in &content.notes {
-            let id = self.store.read_header(sha)?.id;
-            match notes.delete(&id) {
-                Ok(id) => deleted.notes.push(id),
+        let scan = object.header.id.clone();
+
+        let issues = IssueStore::from(self.store);
+        let (issue_ids, issues_kept) = self.unlinked(&content.issues, &scan)?;
+        let mut issues_deleted = Vec::new();
+        for id in issue_ids {
+            match issues.delete(&id) {
+                Ok(id) => issues_deleted.push(id),
                 // Already deleted since the scan wrote it
                 Err(StoreError::ObjectDeleted(_)) => {}
                 Err(e) => return Err(e),
             }
         }
-        let issues = IssueStore::from(self.store);
-        for sha in &content.issues {
-            let id = self.store.read_header(sha)?.id;
-            match issues.delete(&id) {
-                Ok(id) => deleted.issues.push(id),
+        let notes = NoteStore::from(self.store);
+        let (note_ids, notes_kept) = self.unlinked(&content.notes, &scan)?;
+        let mut notes_deleted = Vec::new();
+        for id in note_ids {
+            match notes.delete(&id) {
+                Ok(id) => notes_deleted.push(id),
                 // Already deleted since the scan wrote it
                 Err(StoreError::ObjectDeleted(_)) => {}
                 Err(e) => return Err(e),
             }
         }
         self.store.delete(&object, "scan delete")?;
-        Ok(deleted)
+        Ok(ScanDeleted {
+            scan,
+            notes: notes_deleted,
+            issues: issues_deleted,
+            notes_kept,
+            issues_kept,
+        })
+    }
+
+    /// The ids of the objects the commits `shas` belong to, each once
+    /// in link order, split into those nothing else links and those
+    /// that a live scan other than `scan` or a live issue links now.
+    fn unlinked(
+        &self,
+        shas: &[String],
+        scan: &str,
+    ) -> Result<(Vec<String>, Vec<String>), StoreError> {
+        let mut ids: Vec<String> = Vec::new();
+        for sha in shas {
+            let id = self.store.read_header(sha)?.id;
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+        let linked = self
+            .store
+            .linked_by_tips(&ids, &[OBJECT_TYPE, ISSUE_TYPE], scan)?;
+        Ok(ids.into_iter().partition(|id| !linked.contains(id)))
     }
 
     /// The commit at `sha` must be a live object of `object_type`.
@@ -2059,6 +2095,8 @@ mod tests {
                 scan: id.clone(),
                 notes: vec![written[0].clone()],
                 issues: vec![issue.clone()],
+                notes_kept: Vec::new(),
+                issues_kept: Vec::new(),
             }
         );
         assert!(matches!(
@@ -2075,6 +2113,262 @@ mod tests {
         assert!(matches!(
             issues.get(&issue).unwrap_err(),
             StoreError::ObjectDeleted(x) if x == issue
+        ));
+    }
+
+    fn new_note(store: &Store, name: &str) -> String {
+        use crate::{NoteInput, NoteStore, NoteValue};
+        NoteStore::from(store)
+            .create(NoteInput {
+                name,
+                value: NoteValue::Text(name.into()),
+                author: "task:s:t",
+                target: None,
+                metadata: None,
+                work_id: None,
+            })
+            .unwrap()
+    }
+
+    fn new_issue(store: &Store, evidence: &[String], key: Option<&str>) -> String {
+        use crate::{IssueInput, IssueStatus, IssueStore};
+        IssueStore::from(store)
+            .create(IssueInput {
+                name: "n",
+                title: "t",
+                description: None,
+                author: "task:s:t",
+                status: IssueStatus::Pending,
+                evidence,
+                key,
+            })
+            .unwrap()
+    }
+
+    /// Write the live issue `id` again, as a later scan does under the
+    /// issue's key. Returns the new commit.
+    fn rewrite_issue(tmp: &Path, store: &Store, id: &str, evidence: &[String]) -> String {
+        use crate::{IssueInput, IssueStatus, IssueStore};
+        let issues = IssueStore::from(store);
+        let prev = issues.get(id).unwrap();
+        let dir = tmp.join(new_uuid()).join(id);
+        let input = IssueInput {
+            name: "n",
+            title: "t again",
+            description: None,
+            author: "task:s:t",
+            status: IssueStatus::Pending,
+            evidence,
+            key: prev.key.as_deref(),
+        };
+        issues
+            .write_replace_to_dir(&dir, &input, &new_uuid(), &prev)
+            .unwrap();
+        issues.apply_from_dir(&dir).unwrap().1
+    }
+
+    fn tip(store: &Store, id: &str) -> String {
+        store
+            .rev_parse(&crate::object::object_ref(id))
+            .unwrap()
+            .unwrap()
+    }
+
+    /// A stored scan whose `scan/` tree holds the given link files,
+    /// each a name and the commits it lists. Returns the scan id.
+    fn scan_linking(tmp: &Path, store: &Store, links: &[(&str, &[String])]) -> String {
+        let id = new_uuid();
+        let scan_dir = new_scan_dir(tmp, &id);
+        for (name, shas) in links {
+            let content: String = shas.iter().map(|sha| format!("{sha}\n")).collect();
+            write(&scan_dir.join("scan").join(name), &content);
+        }
+        ScanStore::from(store).create_from_dir(&scan_dir).unwrap();
+        id
+    }
+
+    #[test]
+    fn delete_cascade_keeps_an_issue_an_earlier_scan_also_wrote() {
+        use crate::IssueStore;
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let issues = IssueStore::from(&store);
+        let scans = ScanStore::from(&store);
+        // Scan A writes the keyed issue; scan B writes it again, which
+        // is a later commit of the same object
+        let issue = new_issue(&store, &[], Some("k"));
+        let first = tip(&store, &issue);
+        let a = scan_linking(
+            tmp.path(),
+            &store,
+            &[("issues.link", slice::from_ref(&first))],
+        );
+        let second = rewrite_issue(tmp.path(), &store, &issue, &[]);
+        assert_ne!(first, second);
+        let b = scan_linking(
+            tmp.path(),
+            &store,
+            &[("issues.link", slice::from_ref(&second))],
+        );
+
+        let deleted = scans.delete_cascade(&b).unwrap();
+
+        assert_eq!(
+            deleted,
+            ScanDeleted {
+                scan: b,
+                notes: Vec::new(),
+                issues: Vec::new(),
+                notes_kept: Vec::new(),
+                issues_kept: vec![issue.clone()],
+            }
+        );
+        assert_eq!(tip(&store, &issue), second, "the kept issue is unchanged");
+        assert_eq!(scans.get(&a).unwrap().content.issues, vec![first]);
+
+        // Scan A is the last to link the issue, at an earlier commit
+        let deleted = scans.delete_cascade(&a).unwrap();
+
+        assert_eq!(deleted.issues, vec![issue.clone()]);
+        assert_eq!(deleted.issues_kept, Vec::<String>::new());
+        assert!(matches!(
+            issues.get(&issue).unwrap_err(),
+            StoreError::ObjectDeleted(x) if x == issue
+        ));
+    }
+
+    #[test]
+    fn delete_cascade_keeps_a_note_a_later_scan_carried() {
+        use crate::NoteStore;
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let notes = NoteStore::from(&store);
+        let scans = ScanStore::from(&store);
+        // Scan A writes a note on a session's first lines. The session
+        // grows, and scan B carries the note and writes one of its own
+        let early = new_note(&store, "early");
+        let early_sha = tip(&store, &early);
+        let a = scan_linking(
+            tmp.path(),
+            &store,
+            &[("notes.link", slice::from_ref(&early_sha))],
+        );
+        let late = new_note(&store, "late");
+        let late_sha = tip(&store, &late);
+        let b = scan_linking(
+            tmp.path(),
+            &store,
+            &[
+                ("notes.link", slice::from_ref(&late_sha)),
+                ("notes_carried.link", slice::from_ref(&early_sha)),
+            ],
+        );
+
+        let deleted = scans.delete_cascade(&a).unwrap();
+
+        assert_eq!(
+            deleted,
+            ScanDeleted {
+                scan: a,
+                notes: Vec::new(),
+                issues: Vec::new(),
+                notes_kept: vec![early.clone()],
+                issues_kept: Vec::new(),
+            }
+        );
+        assert_eq!(tip(&store, &early), early_sha, "the kept note is unchanged");
+        // Every note the surviving scan lists is live
+        let content = scans.get(&b).unwrap().content;
+        for sha in content.notes.iter().chain(&content.notes_carried) {
+            notes.get(&store.read_header(sha).unwrap().id).unwrap();
+        }
+    }
+
+    #[test]
+    fn delete_cascade_keeps_a_note_another_issue_cites_and_not_one_its_own_issue_cites() {
+        use crate::{IssueStore, NoteStore};
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let notes = NoteStore::from(&store);
+        let issues = IssueStore::from(&store);
+        let own = new_note(&store, "own");
+        let cited = new_note(&store, "cited");
+        let own_issue = new_issue(&store, slice::from_ref(&own), None);
+        let other_issue = new_issue(&store, slice::from_ref(&cited), None);
+        let scan = scan_linking(
+            tmp.path(),
+            &store,
+            &[
+                ("notes.link", &[tip(&store, &own), tip(&store, &cited)]),
+                ("issues.link", &[tip(&store, &own_issue)]),
+            ],
+        );
+
+        let deleted = ScanStore::from(&store).delete_cascade(&scan).unwrap();
+
+        assert_eq!(
+            deleted,
+            ScanDeleted {
+                scan,
+                notes: vec![own.clone()],
+                issues: vec![own_issue.clone()],
+                notes_kept: vec![cited.clone()],
+                issues_kept: Vec::new(),
+            }
+        );
+        assert!(matches!(
+            notes.get(&own).unwrap_err(),
+            StoreError::ObjectDeleted(x) if x == own
+        ));
+        notes.get(&cited).unwrap();
+        issues.get(&other_issue).unwrap();
+    }
+
+    #[test]
+    fn delete_cascade_ignores_a_dead_scan_an_earlier_link_and_a_note_target() {
+        use crate::{NoteInput, NoteStore, NoteValue};
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let notes = NoteStore::from(&store);
+        let issues = IssueStore::from(&store);
+        let scans = ScanStore::from(&store);
+        let note = new_note(&store, "a");
+        let note_sha = tip(&store, &note);
+        // An issue cited the note once and no longer does
+        let issue = new_issue(&store, slice::from_ref(&note), None);
+        rewrite_issue(tmp.path(), &store, &issue, &[]);
+        assert_eq!(issues.get(&issue).unwrap().evidence, Vec::<String>::new());
+        // A note about the note
+        notes
+            .create(NoteInput {
+                name: "about",
+                value: NoteValue::Text("about".into()),
+                author: "task:s:t",
+                target: Some(&format!("note:{note}")),
+                metadata: None,
+                work_id: None,
+            })
+            .unwrap();
+        // A scan that linked the note and is deleted
+        let dead = scan_linking(
+            tmp.path(),
+            &store,
+            &[("notes_carried.link", slice::from_ref(&note_sha))],
+        );
+        scans.delete(&dead).unwrap();
+        let scan = scan_linking(
+            tmp.path(),
+            &store,
+            &[("notes.link", slice::from_ref(&note_sha))],
+        );
+
+        let deleted = scans.delete_cascade(&scan).unwrap();
+
+        assert_eq!(deleted.notes, vec![note.clone()]);
+        assert_eq!(deleted.notes_kept, Vec::<String>::new());
+        assert!(matches!(
+            notes.get(&note).unwrap_err(),
+            StoreError::ObjectDeleted(x) if x == note
         ));
     }
 }
