@@ -95,8 +95,10 @@ pub(crate) fn tools_module() -> Result<Module, ContextError> {
     m.ty::<Query>()?;
     m.function_meta(Query::new)?;
     m.function_meta(Query::session)?;
-    m.function_meta(Query::lines)?;
     m.function_meta(Query::debug)?;
+    m.ty::<SessionQuery>()?;
+    m.function_meta(SessionQuery::range)?;
+    m.function_meta(SessionQuery::debug)?;
     m.ty::<IssueWrite>()?;
     m.function_meta(IssueWrite::new)?;
     m.function_meta(IssueWrite::name)?;
@@ -131,7 +133,7 @@ enum ToolKind {
 /// The configuration value of one Gage tool
 #[derive(Clone, Debug)]
 enum GageConfig {
-    Query(Query),
+    Query(QueryScope),
     IssueWrite(IssueWrite),
     NoteWrite(NoteWrite),
 }
@@ -148,9 +150,20 @@ impl GageConfig {
 }
 
 impl From<Query> for Tool {
-    fn from(query: Query) -> Self {
+    fn from(_: Query) -> Self {
         Tool {
-            kind: ToolKind::Gage(GageConfig::Query(query)),
+            kind: ToolKind::Gage(GageConfig::Query(QueryScope::Dataset)),
+        }
+    }
+}
+
+impl From<SessionQuery> for Tool {
+    fn from(query: SessionQuery) -> Self {
+        Tool {
+            kind: ToolKind::Gage(GageConfig::Query(QueryScope::Session {
+                id: query.id,
+                lines: query.range,
+            })),
         }
     }
 }
@@ -186,7 +199,9 @@ pub(crate) fn tool_from_value(v: &Value) -> Result<Tool, VmError> {
         return Ok(tool.clone());
     }
     if let Ok(query) = v.borrow_ref::<Query>() {
-        query.scope().map_err(VmError::panic)?;
+        return Ok(Tool::from(query.clone()));
+    }
+    if let Ok(query) = v.borrow_ref::<SessionQuery>() {
         return Ok(Tool::from(query.clone()));
     }
     if let Ok(config) = v.borrow_ref::<IssueWrite>() {
@@ -368,18 +383,25 @@ impl Tool {
     }
 }
 
-/// The configuration of the Gage query tool: the scope its SQL runs
-/// over. `Query::new()` is the scan's dataset, `session` narrows it
-/// to one member, and `lines` narrows that member to a line range.
+/// The configuration of the Gage query tool over the scan's dataset.
+/// `session` gives the configuration for one member session.
 #[derive(Any, Clone, Debug)]
 #[rune(item = ::gage::tools)]
-pub struct Query {
+pub struct Query;
+
+/// The configuration of the Gage query tool over one member session,
+/// whole or narrowed to a line range. `Query::new().session(s)`
+/// returns it.
+#[derive(Any, Clone, Debug)]
+#[rune(item = ::gage::tools)]
+pub struct SessionQuery {
     #[rune(skip)]
-    session: Option<String>,
+    id: String,
     #[rune(skip)]
-    lines: Option<(u64, u64)>,
+    range: Option<(u64, u64)>,
 }
 
+/// The scope the query tool's SQL runs over
 #[derive(Clone, Debug)]
 pub(crate) enum QueryScope {
     /// The scan's dataset
@@ -395,55 +417,44 @@ impl Query {
     /// The scan's dataset
     #[rune::function(path = Self::new)]
     fn new() -> Query {
-        Query {
-            session: None,
-            lines: None,
-        }
+        Query
     }
 
-    /// Narrow to one member session, given as a `Session` or an id
-    /// string.
+    /// One member session, given as a `Session` or an id string.
     #[rune::function(instance)]
-    fn session(mut self, session: Value) -> Result<Query, VmError> {
-        self.session = Some(session_id(&session)?);
-        Ok(self)
+    fn session(self, session: Value) -> Result<SessionQuery, VmError> {
+        Ok(SessionQuery {
+            id: session_id(&session)?,
+            range: None,
+        })
     }
 
+    #[rune::function(protocol = DEBUG_FMT)]
+    fn debug(&self, f: &mut Formatter) -> Result<(), VmError> {
+        write!(f, "Query")?;
+        Ok(())
+    }
+}
+
+impl SessionQuery {
     /// Narrow the session to lines `start` through `end`, inclusive.
-    /// A query tool with lines and no session is refused when an
-    /// agent is given the tool.
     #[rune::function(instance)]
-    fn lines(mut self, start: i64, end: i64) -> Result<Query, VmError> {
+    fn range(mut self, start: i64, end: i64) -> Result<SessionQuery, VmError> {
         if start < 1 || end < start {
             return Err(VmError::panic(format!(
-                "Query::lines: lines {start}..{end} is not a range from 1"
+                "range: lines {start}..{end} is not a range from 1"
             )));
         }
-        self.lines = Some((start as u64, end as u64));
+        self.range = Some((start as u64, end as u64));
         Ok(self)
-    }
-
-    /// The scope the configuration names, or the reason it names
-    /// none.
-    pub(crate) fn scope(&self) -> Result<QueryScope, String> {
-        match (&self.session, self.lines) {
-            (None, None) => Ok(QueryScope::Dataset),
-            (Some(id), lines) => Ok(QueryScope::Session {
-                id: id.clone(),
-                lines,
-            }),
-            (None, Some(_)) => Err(
-                "Query: lines needs a session; call session before the tool is used".to_string(),
-            ),
-        }
     }
 
     #[rune::function(protocol = DEBUG_FMT)]
     fn debug(&self, f: &mut Formatter) -> Result<(), VmError> {
         write!(
             f,
-            "Query {{ session: {:?}, lines: {:?} }}",
-            self.session, self.lines
+            "SessionQuery {{ session: {:?}, range: {:?} }}",
+            self.id, self.range
         )?;
         Ok(())
     }
@@ -732,9 +743,8 @@ pub(crate) async fn consume(
         }
         match &tool.kind {
             ToolKind::Scanner(t) => spec.custom.push(custom_def(t, ctx, sink, tool_uses)?),
-            ToolKind::Gage(GageConfig::Query(query)) => {
-                let scope = query.scope().map_err(Error::agent)?;
-                let context = ctx.query_tool_context(&scope).await?;
+            ToolKind::Gage(GageConfig::Query(scope)) => {
+                let context = ctx.query_tool_context(scope).await?;
                 spec.gage.push(GageTool::Query(QueryConfig {
                     context: Arc::new(context),
                     publish: None,
@@ -1828,21 +1838,20 @@ mod tests {
     }
 
     /// `Query::new()` is the dataset, `session` takes a `Session` or
-    /// an id string, and `lines` narrows the session in either call
-    /// order.
+    /// an id string, and `range` narrows the session. `Query` itself
+    /// has no `range`.
     #[test]
-    fn query_scope_is_built_by_session_and_lines() {
+    fn query_scope_is_built_by_session_and_range() {
         let scope = |v: &Value| match &tool_from_value(v).unwrap().kind {
-            ToolKind::Gage(GageConfig::Query(q)) => q.scope().unwrap(),
+            ToolKind::Gage(GageConfig::Query(scope)) => scope.clone(),
             _ => panic!("expected a query tool"),
         };
         let mut vm = vm(r#"
             use gage::tools::Query;
             pub fn dataset() { Query::new() }
             pub fn whole(s) { Query::new().session(s) }
-            pub fn range(s, start, end) { Query::new().session(s).lines(start, end) }
-            pub fn lines_first(s) { Query::new().lines(2, 5).session(s) }
-            pub fn lines_alone() { Query::new().lines(2, 5) }
+            pub fn range(s, start, end) { Query::new().session(s).range(start, end) }
+            pub fn range_alone() { Query::new().range(2, 5) }
         "#);
         let session = Session {
             id: "abc".into(),
@@ -1861,7 +1870,7 @@ mod tests {
             scope(&from_session),
             QueryScope::Session { ref id, lines: Some((1, 9)) } if id == "abc"
         ));
-        let from_id = vm.call(["lines_first"], ("abc",)).unwrap();
+        let from_id = vm.call(["range"], ("abc", 2i64, 5i64)).unwrap();
         assert!(matches!(
             scope(&from_id),
             QueryScope::Session { ref id, lines: Some((2, 5)) } if id == "abc"
@@ -1872,12 +1881,10 @@ mod tests {
             rendered.contains("lines 3..2 is not a range from 1"),
             "{rendered}"
         );
-        let alone = vm.call(["lines_alone"], ()).unwrap();
-        let Err(err) = tool_from_value(&alone) else {
-            panic!("expected lines without a session to be refused");
-        };
-        let rendered = render_vm_error(&err, None);
-        assert!(rendered.contains("lines needs a session"), "{rendered}");
+        assert!(
+            vm.call(["range_alone"], ()).is_err(),
+            "Query has no range method"
+        );
     }
 
     /// A `Query` value consumes to the query tool over the scan's

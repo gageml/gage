@@ -3799,7 +3799,7 @@ mod tests {
                     for m in s.messages().type("assistant").latest_first().await? {
                         println!("latest assistant: {}", m.text);
                     }
-                    for m in s.messages().lines(2, 3).await {
+                    for m in s.messages().range(2, 3).await {
                         println!("lines 2-3: {}", m.text);
                     }
                     for m in s.messages().latest_first().limit(1).await {

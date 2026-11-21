@@ -13,8 +13,10 @@ conventions in _[Keep a Changelog]_. Release versions use [semantic versioning].
 - The `session_change` table is renamed `session_publish_change`. A query that
   names `session_change` fails
 - A scanner narrows the query tool with methods: `Query::new().session(s)` for
-  one session and `Query::new().session(s).lines(start, end)` for a line range
+  one session and `Query::new().session(s).range(start, end)` for a line range
   of it. `Query::with_session` and `Query::with_session_range` are removed
+- A scanner gives a line range with `range(start, end)`, where it was
+  `lines(start, end)`: on `messages()`, `tool_uses()`, and `compress()`
 
 ### Other changes
 

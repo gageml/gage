@@ -41,7 +41,7 @@ pub async fn range() {
         } else {
             20
         };
-        match s.compress("unlimited", RULES).lines(1, end).await {
+        match s.compress("unlimited", RULES).range(1, end).await {
             Ok(text) => {
                 println!("== {} lines 1-{}", s.id, end);
                 println(text);

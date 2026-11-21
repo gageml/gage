@@ -58,7 +58,7 @@ pub async fn scan_sessions() {
             call_agent(prompt)
                 .name("general-finding")
                 .tool(finding_tool())
-                .tool(Query::new().session(s).lines(start, end))
+                .tool(Query::new().session(s).range(start, end))
                 .model("medium"),
             #{ session_id },
         );

@@ -77,7 +77,7 @@ pub async fn observe_sessions() {
             call_agent(t.render(#{ session_id }))
                 .name("commit-process-observe")
                 .tool(observation_tool())
-                .tool(Query::new().session(s).lines(start, end))
+                .tool(Query::new().session(s).range(start, end))
                 .model("medium"),
             #{ session_id },
         );

@@ -43,7 +43,7 @@ pub async fn check_sessions() {
     for (s, (start, end)) in sessions {
         for msg in s
             .messages()
-            .lines(start, end)
+            .range(start, end)
             .type(#{ "assistant": "thinking" })
             .latest_first()
             .await?

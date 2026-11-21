@@ -3,7 +3,7 @@
 //! query context.
 //!
 //! The builder captures the session, the budget, and the rules;
-//! `.lines(start, end)` constrains it to a line range, the pair
+//! `.range(start, end)` constrains it to a line range, the pair
 //! `scan().sessions().unseen(key)` yields. Awaiting it reads the
 //! session's `message` rows and its `tool_use` links and renders
 //! them with the compressor in `view`, which owns the budget and
@@ -25,7 +25,7 @@ pub(crate) fn types_module() -> Result<Module, ContextError> {
     let mut m = Module::new();
     m.ty::<SessionCompress>()?;
     m.function_meta(compress)?;
-    m.function_meta(SessionCompress::lines)?;
+    m.function_meta(SessionCompress::range)?;
     m.associated_function(&Protocol::INTO_FUTURE, |q: SessionCompress| async move {
         do_compress(q).await
     })?;
@@ -65,7 +65,7 @@ fn compress(session: Ref<Session>, budget: Value, rules: Value) -> SessionCompre
 impl SessionCompress {
     /// Restrict to messages on lines `start` through `end`, inclusive.
     #[rune::function(instance)]
-    fn lines(mut self, start: u64, end: u64) -> Self {
+    fn range(mut self, start: u64, end: u64) -> Self {
         self.lines = Some((start, end));
         self
     }
@@ -130,7 +130,7 @@ mod tests {
         let mut vm = vm(r#"
             pub fn check(s) {
                 let rules = #{ "user.text": #{ min: 10 } };
-                let q = s.compress(100, rules).lines(2, 5);
+                let q = s.compress(100, rules).range(2, 5);
                 [q, rules.len()]
             }
             "#);

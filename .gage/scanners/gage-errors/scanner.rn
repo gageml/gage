@@ -82,7 +82,7 @@ pub async fn scan_sessions() {
             call_agent(t.render(#{ session_id, start, end }))
                 .name("gage-errors-scan")
                 .tool(summary_tool())
-                .tool(Query::new().session(s).lines(start, end))
+                .tool(Query::new().session(s).range(start, end))
                 .model("small"),
             #{ session_id },
         );
@@ -114,7 +114,7 @@ pub async fn scan_sessions() {
 // True when the session called a Gage tool or ran a `gage` command on
 // lines `start` through `end`.
 async fn has_gage_call(s, start, end) {
-    for t in s.tool_uses().lines(start, end).await {
+    for t in s.tool_uses().range(start, end).await {
         if t.name.contains("gage") {
             return Ok(true);
         }

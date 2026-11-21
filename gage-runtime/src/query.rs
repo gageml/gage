@@ -36,14 +36,14 @@ pub(crate) fn types_module() -> Result<Module, ContextError> {
     m.ty::<MessageQuery>()?;
     m.function_meta(messages)?;
     m.associated_function("type", MessageQuery::type_)?;
-    m.function_meta(MessageQuery::lines)?;
+    m.function_meta(MessageQuery::range)?;
     m.function_meta(MessageQuery::latest_first)?;
     m.function_meta(MessageQuery::limit)?;
     m.associated_function(&Protocol::INTO_FUTURE, |q: MessageQuery| async move {
         fetch_messages(q).await
     })?;
     m.ty::<FilteredMessageQuery>()?;
-    m.function_meta(FilteredMessageQuery::lines)?;
+    m.function_meta(FilteredMessageQuery::range)?;
     m.function_meta(FilteredMessageQuery::latest_first)?;
     m.function_meta(FilteredMessageQuery::limit)?;
     m.associated_function(
@@ -67,14 +67,14 @@ pub(crate) fn types_module() -> Result<Module, ContextError> {
     m.ty::<ToolUseQuery>()?;
     m.function_meta(tool_uses)?;
     m.function_meta(ToolUseQuery::name)?;
-    m.function_meta(ToolUseQuery::lines)?;
+    m.function_meta(ToolUseQuery::range)?;
     m.function_meta(ToolUseQuery::latest_first)?;
     m.function_meta(ToolUseQuery::limit)?;
     m.associated_function(&Protocol::INTO_FUTURE, |q: ToolUseQuery| async move {
         fetch_tool_uses(q).await
     })?;
     m.ty::<FilteredToolUseQuery>()?;
-    m.function_meta(FilteredToolUseQuery::lines)?;
+    m.function_meta(FilteredToolUseQuery::range)?;
     m.function_meta(FilteredToolUseQuery::latest_first)?;
     m.function_meta(FilteredToolUseQuery::limit)?;
     m.associated_function(
@@ -130,7 +130,7 @@ impl MessageQuery {
 
     /// Restrict to messages on lines `start` through `end`, inclusive.
     #[rune::function(instance)]
-    fn lines(mut self, start: u64, end: u64) -> Self {
+    fn range(mut self, start: u64, end: u64) -> Self {
         self.lines = Some((start, end));
         self
     }
@@ -152,9 +152,9 @@ impl MessageQuery {
 }
 
 impl FilteredMessageQuery {
-    /// As [`MessageQuery::lines`].
+    /// As [`MessageQuery::range`].
     #[rune::function(instance)]
-    fn lines(mut self, start: u64, end: u64) -> Self {
+    fn range(mut self, start: u64, end: u64) -> Self {
         self.query.lines = Some((start, end));
         self
     }
@@ -279,7 +279,7 @@ impl ToolUseQuery {
     /// Restrict to calls made on lines `start` through `end`,
     /// inclusive.
     #[rune::function(instance)]
-    fn lines(mut self, start: u64, end: u64) -> Self {
+    fn range(mut self, start: u64, end: u64) -> Self {
         self.lines = Some((start, end));
         self
     }
@@ -301,9 +301,9 @@ impl ToolUseQuery {
 }
 
 impl FilteredToolUseQuery {
-    /// As [`ToolUseQuery::lines`].
+    /// As [`ToolUseQuery::range`].
     #[rune::function(instance)]
-    fn lines(mut self, start: u64, end: u64) -> Self {
+    fn range(mut self, start: u64, end: u64) -> Self {
         self.query.lines = Some((start, end));
         self
     }

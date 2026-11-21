@@ -117,7 +117,7 @@ heading.
 ## Runtime dependencies
 
 - `Session::compress(budget, rules)` on the rethink runtime, over the scan's
-  query context, with `.lines(start, end)` to constrain the record to the
+  query context, with `.range(start, end)` to constrain the record to the
   session's unseen lines. The legacy compressor takes the range from the session
   value; rethink sessions carry no range.
 - `model_context(model)` for the default budget. The legacy implementation runs
