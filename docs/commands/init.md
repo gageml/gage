@@ -41,8 +41,8 @@ under one set of names, so the Gage skills are named `gage-blame`,
 ## Default driver
 
 The default driver is the driver whose sessions a command reads when it names
-no session source, and where a model with no driver named goes. It is the
-`drivers.default` setting; see
+no session source and no config sets a default session source, and where a
+model with no driver named goes. It is the `drivers.default` setting; see
 [`gage config`](/docs/commands/config#settings).
 
 `gage init` leaves a default the config file already names as it is, so running

@@ -39,9 +39,11 @@ default directory of that scheme: `claude` and `claude:` name the same source.
 A path with no scheme is an error, because the path does not say which driver
 reads it. A source can also be a name that the `native` settings give a source;
 see [`gage config`](/docs/commands/config#native-source-names). When `--native`
-is omitted, the source is the default directory of
-the default driver, which the `drivers.default` setting names; see
-[`gage config`](/docs/commands/config#settings).
+is omitted, the source is the default session source, which the
+`native.default` setting names; see
+[`gage config`](/commands/config#default-session-source). When no config
+sets it, the source is the default directory of the default driver, which the
+`drivers.default` setting names.
 The `claude` scheme reads Claude Code sessions under `PATH/projects`, or the
 Claude Code home directory when `PATH` is omitted. The `codex` scheme reads
 Codex sessions under `PATH/sessions`, or the Codex home directory when `PATH`
