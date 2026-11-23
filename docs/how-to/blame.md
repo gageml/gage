@@ -1,5 +1,5 @@
 ---
-title: See the tool call that edited a line
+title: See context for a code change
 description:
   How to use gage blame to go from a line of code to the session and tool call
   that wrote it

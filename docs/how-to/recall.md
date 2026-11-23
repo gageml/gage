@@ -1,5 +1,5 @@
 ---
-title: Recall code decisions and reasoning
+title: Recall a decision
 description:
   How to ask your coding agent why code is the way it is and get an answer
   from the sessions that wrote it
@@ -7,10 +7,10 @@ description:
 
 Your code records what was decided. It does not record why. The reasons are in
 your sessions: the discussion before each change, the alternatives that were
-turned down, and the reasoning your agent followed. Without that record, you
-and your agent guess at the intent of old code, repeat ideas that already
-failed, and undo choices that were made on purpose. With Gage, your agent reads
-the sessions behind the code and answers from what was said there.
+turned down, and the reasoning your agent followed. Without that record, you and
+your agent guess at the intent of old code, repeat ideas that already failed,
+and undo choices that were made on purpose. With Gage, your agent reads the
+sessions behind the code and answers from what was said there.
 
 ## Before you start
 
@@ -36,8 +36,8 @@ lets your agent read your sessions.
    Why is src/index.rs lines 40-72 written this way?
    ```
 
-   Your agent finds the sessions that wrote the code, reads the discussion
-   that led to it, and answers.
+   Your agent finds the sessions that wrote the code, reads the discussion that
+   led to it, and answers.
 
 3. Check the sources. The answer cites each session it read, in the form
    `session 1a2b3c4d L120-180`. To view those entries from the terminal, run
@@ -48,19 +48,18 @@ lets your agent read your sessions.
    ```
 
    The answer also says where the sessions are silent. A line that no session
-   wrote has no record, and your agent then relies on Git history and
-   comments.
+   wrote has no record, and your agent then relies on Git history and comments.
 
 ## Ask about specific lines
 
-To go straight to the record for a file or a range of lines, invoke the
-`blame` skill yourself. The question is optional.
+To go straight to the record for a file or a range of lines, invoke the `blame`
+skill yourself. The question is optional.
 
-| Agent       | Command                                        |
-| ----------- | ---------------------------------------------- |
-| Claude Code | `/gage:blame FILE[:LINES] [question]`          |
-| Codex       | `$gage:blame FILE[:LINES] [question]`          |
-| Pi          | `/skill:gage-blame FILE[:LINES] [question]`    |
+| Agent       | Command                                     |
+| ----------- | ------------------------------------------- |
+| Claude Code | `/gage:blame FILE[:LINES] [question]`       |
+| Codex       | `$gage:blame FILE[:LINES] [question]`       |
+| Pi          | `/skill:gage-blame FILE[:LINES] [question]` |
 
 ## Keep the record
 

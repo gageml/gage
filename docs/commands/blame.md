@@ -8,7 +8,7 @@ description:
 The `gage blame` command finds the sessions that wrote the lines of a file. For
 each line it reports the session, the tool call that wrote the line, and the
 lines of the session to read. For a walk-through, see
-[_See the tool call that edited a line_](/docs/how-to/blame).
+[_See context for a code change_](/how-to/blame).
 
 ```cli
 gage blame [OPTIONS] <PATH>
