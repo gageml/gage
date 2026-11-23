@@ -46,6 +46,10 @@ install-dev:
     chmod +x ~/.local/bin/gage
     echo "Installed gage wrapper to ~/.local/bin/gage (PROJECT={{ justfile_directory() }})"
 
+# Install release build via cargo
+install-cargo-bin:
+   cargo install --path gage-cli
+
 # Generate distribution
 dist: _require_dist
     dist build
