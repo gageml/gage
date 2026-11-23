@@ -6,7 +6,7 @@ description:
 ---
 
 The `gage scan` command runs scanners on sessions. For background, see
-[Scans](/docs/scans) and [Scanners](/docs/scanners).
+[Scans](/scans) and [Scanners](/scanners).
 
 ```cli
 gage scan [OPTIONS] [SESSION]...
@@ -24,7 +24,7 @@ scanner group, and sessions from the past 30 days capped at 20.
 
 | Option                          | Description                                                         |
 | ------------------------------- | ------------------------------------------------------------------- |
-| `-N, --native <SOURCE>`             | Session source, as described in [`gage session`](/docs/commands/session) |
+| `-N, --native <SOURCE>`             | Session source, as described in [`gage session`](/commands/session) |
 | `-S, --stored`                  | Scan stored sessions                                                |
 | `-R, --stored-remote <NAME>`    | Scan sessions fetched from a remote                                 |
 | `-s, --scanner <SCANNER>`       | Scanner to run, as a name or path (repeatable)                      |
@@ -66,7 +66,7 @@ time.
 
 A scan runs the attach tasks of the selected scanners on a dataset it creates.
 An existing dataset passed with `--dataset` is scanned as it is; use
-[`gage attachment add --scanner`](/docs/commands/attachment#attachment-add)
+[`gage attachment add --scanner`](/commands/attachment#attachment-add)
 to prepare it. `--ignore-missing-attachments` lets a task that needs an
 attachment the dataset lacks run and fail on its own. Without it, the scan does
 not start.
@@ -81,7 +81,7 @@ A scan agent on Pi is not sandboxed. See
 [Known issues](https://github.com/gageml/gage/blob/main/KNOWN_ISSUES.md#pi).
 
 `--stored-remote` names a remote of the store. The command selects among the
-sessions that [`gage fetch`](/docs/commands/fetch) brought from that remote and
+sessions that [`gage fetch`](/commands/fetch) brought from that remote and
 that are not merged into the store. It fetches nothing, and a remote that
 nothing was fetched from is an error that names `gage fetch`. The session
 selection options apply to the fetched sessions. The scan's dataset, notes, and
@@ -91,11 +91,11 @@ sessions. `--stored-remote` excludes `--native`, `--stored`, `--dataset`, and
 `--no-dataset`.
 
 An object that links a fetched session is withheld:
-[`gage push`](/docs/commands/push) refuses it and
-[`gage backup`](/docs/commands/backup) leaves it out, because sending it would
+[`gage push`](/commands/push) refuses it and
+[`gage backup`](/commands/backup) leaves it out, because sending it would
 send the remote's session. The dataset of such a scan is withheld, and so are
 its notes on the sessions, the issues that cite those notes, and the scan
-itself. Merging the sessions with [`gage merge`](/docs/commands/merge) ends the
+itself. Merging the sessions with [`gage merge`](/commands/merge) ends the
 withholding.
 
 ```cli

@@ -50,7 +50,7 @@ never written.
 A scheme alone names the same source as the scheme with a colon: `claude` is
 `claude:`. A path with no scheme is an error. A source can also be a name that
 the `native` settings give a source; see
-[`gage config`](/docs/commands/config#native-source-names).
+[`gage config`](/commands/config#native-source-names).
 
 A session directory such as `claude:` holds native sessions, whether or not they
 are in the store. It has the `session`, `entry`, `message`, `tool_use`, and
@@ -64,10 +64,10 @@ gage query --native claude: "SELECT id, title FROM session ORDER BY modified DES
 ```
 
 `--stored-remote` names a remote of the store, as listed by
-[`gage remote`](/docs/commands/remote). The query reads the objects that
-[`gage fetch`](/docs/commands/fetch) brought from that remote and nothing of the
+[`gage remote`](/commands/remote). The query reads the objects that
+[`gage fetch`](/commands/fetch) brought from that remote and nothing of the
 store's own objects. Fetched objects are kept apart from the store's own until
-[`gage merge`](/docs/commands/merge) merges them. Every table is present and
+[`gage merge`](/commands/merge) merges them. Every table is present and
 holds the remote's sessions, notes, issues, scans, and datasets. The query
 fetches nothing: the rows are the remote as of the last `gage fetch`. Nothing is
 written. A remote that nothing was fetched from is an error that names

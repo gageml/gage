@@ -1,0 +1,126 @@
+[
+  {
+    "slug": "design-discussions",
+    "title": "Design discussions"
+  },
+  {
+    "slug": "change-reasons",
+    "title": "Reasons for a code change"
+  },
+  {
+    "slug": "rejected-alternatives",
+    "title": "Rejected alternatives"
+  },
+  {
+    "slug": "file-provenance",
+    "title": "File provenance"
+  },
+  {
+    "slug": "ignored-instructions",
+    "title": "Ignored instructions"
+  },
+  {
+    "slug": "shortcuts",
+    "title": "Shortcuts the agent took"
+  },
+  {
+    "slug": "unrequested-changes",
+    "title": "Changes you didn't ask for"
+  },
+  {
+    "slug": "false-success",
+    "title": "False claims of success"
+  },
+  {
+    "slug": "guesses",
+    "title": "Guesses presented as facts"
+  },
+  {
+    "slug": "inconsistent-reasoning",
+    "title": "Inconsistent reasoning"
+  },
+  {
+    "slug": "repeated-mistakes",
+    "title": "Repeated mistakes"
+  },
+  {
+    "slug": "stuck-agent",
+    "title": "Places your agent got stuck"
+  },
+  {
+    "slug": "failed-commands",
+    "title": "Commands that failed"
+  },
+  {
+    "slug": "skipped-tests",
+    "title": "Skipped tests"
+  },
+  {
+    "slug": "missed-bugs",
+    "title": "Bugs missed in review"
+  },
+  {
+    "slug": "regressions",
+    "title": "Regressions"
+  },
+  {
+    "slug": "exposed-secrets",
+    "title": "Exposed secrets"
+  },
+  {
+    "slug": "risky-commands",
+    "title": "Risky commands"
+  },
+  {
+    "slug": "deleted-files",
+    "title": "Deleted files"
+  },
+  {
+    "slug": "uncompleted-tasks",
+    "title": "Uncompleted tasks"
+  },
+  {
+    "slug": "missed-questions",
+    "title": "Missed questions"
+  },
+  {
+    "slug": "recent-work",
+    "title": "What you did yesterday"
+  },
+  {
+    "slug": "work-progress",
+    "title": "Work progress"
+  },
+  {
+    "slug": "past-fixes",
+    "title": "How you fixed it last time"
+  },
+  {
+    "slug": "what-worked",
+    "title": "What worked"
+  },
+  {
+    "slug": "what-failed",
+    "title": "What didn't work"
+  },
+  {
+    "slug": "workflow-improvements",
+    "title": "Ways to improve your workflow"
+  },
+  {
+    "slug": "time-spent",
+    "title": "Where time went"
+  },
+  {
+    "slug": "token-spend",
+    "title": "Where tokens went"
+  },
+  {
+    "slug": "model-comparison",
+    "title": "Which model works best for you"
+  },
+  {
+    "slug": "team-usage",
+    "title": "How your team uses AI"
+  }
+]

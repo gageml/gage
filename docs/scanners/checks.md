@@ -69,7 +69,7 @@ checks = ["general"]
 ## What it writes
 
 The scanner writes notes that are in turn used by downstream issue writers. In
-particular, [`findings`](/docs/scanners/findings) reads `*[finding]` notes and
+particular, [`findings`](/scanners/findings) reads `*[finding]` notes and
 reports issues from them.
 
 | Note                     | Description                                 | Target     |
@@ -82,8 +82,8 @@ reports issues from them.
 When known, a finding note also records the session lines the finding refers
 to.
 
-The notes have the same names as those the [`general`](/docs/scanners/general)
-and [`code-review`](/docs/scanners/code-review) scanners write. Run `checks` in
+The notes have the same names as those the [`general`](/scanners/general)
+and [`code-review`](/scanners/code-review) scanners write. Run `checks` in
 a scan of its own, without those scanners, so that each finding is written
 once.
 

@@ -36,14 +36,14 @@ package from that directory. The MCP server is registered with `pi mcp add`,
 with its tools declared to the model as Pi's own tools are. Pi keeps every skill
 under one set of names, so the Gage skills are named `gage-blame`,
 `gage-publish`, and `gage-resolve` in Pi, and a skill is invoked as
-`/skill:gage-blame`. See [Gage in Pi](/docs/sessions#gage-in-pi).
+`/skill:gage-blame`. See [Gage in Pi](/sessions#gage-in-pi).
 
 ## Default driver
 
 The default driver is the driver whose sessions a command reads when it names
 no session source and no config sets a default session source, and where a
 model with no driver named goes. It is the `drivers.default` setting; see
-[`gage config`](/docs/commands/config#settings).
+[`gage config`](/commands/config#settings).
 
 `gage init` leaves a default the config file already names as it is, so running
 it again asks nothing. When the file names none:
@@ -62,4 +62,4 @@ this run sets up.
 agents `--driver` names. The store and the config stay.
 
 To remove the rest of a Gage installation, see
-[_Uninstall Gage_](/docs/uninstall).
+[_Uninstall Gage_](/uninstall).

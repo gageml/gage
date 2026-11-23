@@ -34,7 +34,7 @@ has grown since the last scan is reviewed only over its new lines.
 ## What it writes
 
 The scanner writes notes that are in turn used by downstream issue writers. In
-particular, [`findings`](/docs/scanners/findings) reads `code-review[finding]`
+particular, [`findings`](/scanners/findings) reads `code-review[finding]`
 notes and reports issues from them.
 
 | Note                     | Description                                 | Target     |

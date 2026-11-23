@@ -1,0 +1,31 @@
+{
+  "name": "gage-docs",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "rspress build",
+    "check": "biome check --write",
+    "dev": "rspress dev",
+    "format": "biome format --write",
+    "preview": "rspress preview"
+  },
+  "dependencies": {
+    "@rspress/core": "2.0.20",
+    "lucide-react": "1.17.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.4.14",
+    "@types/mdast": "4.0.4",
+    "@types/node": "22.19.19",
+    "@types/react": "19.2.16",
+    "@types/react-dom": "19.2.3",
+    "gray-matter": "4.0.3",
+    "react": "19.2.7",
+    "react-dom": "19.2.7",
+    "remark-directive": "^4.0.0",
+    "remark-smartypants": "^3.0.3",
+    "unist-util-visit": "5.1.0",
+    "wrangler": "4.98.0"
+  }
+}

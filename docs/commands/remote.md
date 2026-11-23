@@ -7,9 +7,9 @@ description:
 
 The `gage remote` command manages remotes. A remote is a Git repository the
 store pushes to, fetches from, or backs up to. See
-[`gage push`](/docs/commands/push), [`gage fetch`](/docs/commands/fetch),
-[`gage merge`](/docs/commands/merge), [`gage pull`](/docs/commands/pull), and
-[`gage backup`](/docs/commands/backup).
+[`gage push`](/commands/push), [`gage fetch`](/commands/fetch),
+[`gage merge`](/commands/merge), [`gage pull`](/commands/pull), and
+[`gage backup`](/commands/backup).
 
 ```cli
 gage remote <COMMAND>

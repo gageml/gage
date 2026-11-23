@@ -51,7 +51,7 @@ files its tasks read. A scan runs these attach tasks itself on a dataset it
 creates, but not on a dataset given with `gage scan --dataset`.
 
 To add an attachment already in the store to a dataset, use
-[`gage dataset link`](/docs/commands/dataset#dataset-link).
+[`gage dataset link`](/commands/dataset#dataset-link).
 
 ## attachment list
 
@@ -87,7 +87,7 @@ gage attachment delete [OPTIONS] <ATTACHMENTS>...
 
 Each attachment is removed from every dataset that holds it and marked removed
 in the store. To take an attachment out of one dataset and keep it in the
-store, use [`gage dataset unlink`](/docs/commands/dataset#dataset-unlink).
+store, use [`gage dataset unlink`](/commands/dataset#dataset-unlink).
 
 | Option      | Description              |
 | ----------- | ------------------------ |

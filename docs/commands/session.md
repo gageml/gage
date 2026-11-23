@@ -6,7 +6,7 @@ description:
 ---
 
 The `gage session` command manages sessions. For background, see
-[Sessions](/docs/sessions).
+[Sessions](/sessions).
 
 ```cli
 gage session [OPTIONS] <COMMAND>
@@ -26,9 +26,9 @@ before or after the subcommand, and each excludes the other two.
 | `-R, --stored-remote <NAME>` | Operate on sessions fetched from a remote   |
 
 `--stored-remote` names a remote of the store. The sessions are those that
-[`gage fetch`](/docs/commands/fetch) brought from that remote, which are kept
+[`gage fetch`](/commands/fetch) brought from that remote, which are kept
 apart from the store's own sessions until
-[`gage merge`](/docs/commands/merge) merges them. Nothing is fetched and
+[`gage merge`](/commands/merge) merges them. Nothing is fetched and
 nothing is written. `list`, `view`, and `find` accept the option. `add`,
 `delete`, and `move` refuse it, because fetched sessions are read only. With
 `list --dataset` or `list --share`, the dataset or share is one the remote
@@ -38,7 +38,7 @@ A source is `SCHEME:PATH`. A scheme alone, with or without the colon, is the
 default directory of that scheme: `claude` and `claude:` name the same source.
 A path with no scheme is an error, because the path does not say which driver
 reads it. A source can also be a name that the `native` settings give a source;
-see [`gage config`](/docs/commands/config#native-source-names). When `--native`
+see [`gage config`](/commands/config#native-source-names). When `--native`
 is omitted, the source is the default session source, which the
 `native.default` setting names; see
 [`gage config`](/commands/config#default-session-source). When no config
@@ -47,10 +47,10 @@ sets it, the source is the default directory of the default driver, which the
 The `claude` scheme reads Claude Code sessions under `PATH/projects`, or the
 Claude Code home directory when `PATH` is omitted. The `codex` scheme reads
 Codex sessions under `PATH/sessions`, or the Codex home directory when `PATH`
-is omitted. See [Codex sessions](/docs/sessions#codex-sessions). The `pi`
+is omitted. See [Codex sessions](/sessions#codex-sessions). The `pi`
 scheme reads Pi sessions under `PATH/sessions`, or under `PATH` when it has no
 `sessions` directory, or the Pi agent directory when `PATH` is omitted. See
-[Pi sessions](/docs/sessions#pi-sessions).
+[Pi sessions](/sessions#pi-sessions).
 
 ## session list
 
@@ -132,7 +132,7 @@ not affected.
 With `--stored`, each session is unlinked from every dataset and share that
 holds it and marked removed in the store. The native session is not affected.
 To take a session out of one dataset and keep it in the store, use
-[`gage dataset unlink`](/docs/commands/dataset#dataset-unlink).
+[`gage dataset unlink`](/commands/dataset#dataset-unlink).
 
 | Option      | Description                                      |
 | ----------- | ------------------------------------------------ |

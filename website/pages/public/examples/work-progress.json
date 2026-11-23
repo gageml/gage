@@ -1,0 +1,12 @@
+{
+  "question": "How's the Pi support work going?",
+  "steps": [
+    "The agent finds the sessions on Pi support.",
+    "It checks the branches those sessions pushed."
+  ],
+  "answer": [
+    "The Pi driver is not started yet. The work so far is the groundwork for it.",
+    "A validation suite is built and pushed. It ran against 132 real sessions, and 4 failed.",
+    "The failures led to a bug in how long decimal numbers are written back. The fix passes all 1,448 tests. It is waiting on you to say whether to commit it."
+  ]
+}

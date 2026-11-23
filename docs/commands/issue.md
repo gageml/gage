@@ -6,7 +6,7 @@ description:
 ---
 
 The `gage issue` command manages issues. An issue is a finding reported by a
-scanner or added by you. For background, see [Issues](/docs/issues).
+scanner or added by you. For background, see [Issues](/issues).
 
 ```cli
 gage issue <COMMAND>

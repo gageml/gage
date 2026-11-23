@@ -31,7 +31,7 @@ Gage scans a copy of each session held in its store, not the file under
 `~/.claude`. A scan adds the sessions it selects to the store. The copy is
 updated when the session grows, and it stays after Claude Code deletes the
 original. `gage session list --stored` lists stored sessions. See
-[`gage session`](/docs/commands/session).
+[`gage session`](/commands/session).
 
 ## Codex sessions
 
@@ -115,7 +115,7 @@ with these differences:
 
 ### Gage in Pi
 
-[`gage init`](/docs/commands/init) sets Gage up in Pi, and Pi can be the
+[`gage init`](/commands/init) sets Gage up in Pi, and Pi can be the
 default driver. Gage works in Pi as it does in Claude Code, with these
 differences:
 
@@ -126,7 +126,7 @@ differences:
   scan makes before it starts ask about the provider of the `medium` model.
 - The model sizes default to Anthropic models. A Pi user of another provider
   sets the sizes in the config file; see
-  [`gage config`](/docs/commands/config#settings). Pi names a model as
+  [`gage config`](/commands/config#settings). Pi names a model as
   `<provider>/<id>`.
 - A scan agent takes one prompt and no later message, and a limit on its turns
   is not applied.

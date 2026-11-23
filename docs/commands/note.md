@@ -7,7 +7,7 @@ description:
 
 The `gage note` command manages notes. A note is a value a scanner or person
 assigns to a session, session lines, attachment, or other stored object. For
-background, see [Notes](/docs/notes).
+background, see [Notes](/notes).
 
 ```cli
 gage note <COMMAND>
@@ -56,7 +56,7 @@ line selection such as `12`, `12-20`, or `12-20,31`. A line selection applies
 to a session and limits the match to sessions.
 
 Names need not be unique; writing the same name for the same target adds
-another note. See [Authors](/docs/notes#authors).
+another note. See [Authors](/notes#authors).
 
 ## note show
 

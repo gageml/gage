@@ -1,0 +1,5 @@
+name = "gage-docs"
+compatibility_date = "2026-06-07"
+
+[assets]
+directory = "./doc_build"

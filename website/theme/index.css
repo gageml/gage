@@ -1,0 +1,242 @@
+:root {
+  --rp-c-brand: #3b82f6; /* Tailwind blue-500 */
+  --rp-c-brand-dark: #2563eb; /* blue-600 */
+  --rp-c-brand-darker: #1d4ed8; /* blue-700 */
+  --rp-c-brand-light: #60a5fa; /* blue-400 */
+  --rp-c-brand-lighter: #93c5fd; /* blue-300 */
+  --rp-c-brand-tint: rgba(59, 130, 246, 0.15);
+
+  --rp-radius: 0.75rem;
+
+  /* Draw the keyboard focus ring inside the element so it is neither
+     clipped by scroll containers nor painted over by siblings. */
+  :focus-visible {
+    outline: 2px solid var(--rp-c-brand);
+    outline-offset: -2px;
+  }
+
+  .rp-nav__title {
+    font-family: "Outfit", sans-serif;
+  }
+
+  .rp-icon {
+    display: inline-block;
+    height: 1em;
+    width: 1em;
+    vertical-align: -0.15em;
+  }
+
+  .rp-nav__title__link {
+    font-size: 22px;
+  }
+
+  .rp-home-hero__container {
+    gap: 8px;
+  }
+
+  .rp-home-hero__title {
+    font-family: "Outfit", sans-serif;
+  }
+
+  .rp-home-hero__subtitle {
+    font-size: 46px;
+  }
+
+  .rp-home-hero__tagline {
+    font-size: 22px;
+    line-height: 1.4;
+  }
+
+  .rp-home-hero__actions {
+    margin-top: 36px;
+  }
+
+  /* Flat brand button instead of the gradient fill. */
+  .rp-button--brand {
+    background: var(--rp-c-brand);
+  }
+
+  /* No brand-colored marker bar on the active sidebar item; the tint
+     background and bold text already mark it. */
+  .rp-sidebar-item--group-item.rp-sidebar-item--active .rp-sidebar-item__left::before {
+    content: none;
+  }
+
+  /* Disable the cursor-tracking 3D tilt on feature cards (set as
+     inline styles by useCardAnimation, hence !important). Border
+     hover and the shine gradient are unaffected. */
+  .rp-home-feature__item,
+  .rp-home-feature__item-wrapper {
+    /* biome-ignore lint/complexity/noImportantStyles: see comment above */
+    transform: none !important;
+  }
+
+  .rp-callout {
+    padding: 2px 24px;
+  }
+
+  /* Drop the callout heading (Note, Warning, ...) and draw the
+     colored marker beside the first line of the body text instead.
+     The upstream marker is a ::before on the title element, so it
+     is recreated on the content element with the same geometry.
+     `details` callouts keep their summary as the toggle. */
+  div.rp-callout__title {
+    display: none;
+  }
+
+  .rp-callout__content {
+    position: relative;
+  }
+
+  .rp-callout__content p {
+    margin: 1rem 0;
+  }
+
+  /* The marker stays invisible for types without a color rule below
+     (details), which also keep their title element. */
+  .rp-callout__content::before {
+    content: "";
+    position: absolute;
+    left: -24px;
+    /* First paragraph's top margin, then span exactly one line box
+       so the marker tracks the first line at any line-height. */
+    top: calc((1.75rem - 1lh) / 2 - 2px); /* 2px -> fudge factor */
+    width: 4px;
+    height: 1.75rem;
+    border-radius: 0 20px 20px 0;
+  }
+
+  .rp-callout--note .rp-callout__content::before {
+    background-color: var(--rp-container-note-text);
+  }
+
+  .rp-callout--tip .rp-callout__content::before {
+    background-color: var(--rp-container-tip-text);
+  }
+
+  .rp-callout--info .rp-callout__content::before {
+    background-color: var(--rp-container-info-text);
+  }
+
+  .rp-callout--important .rp-callout__content::before {
+    background-color: var(--rp-container-important-text);
+  }
+
+  .rp-callout--warning .rp-callout__content::before {
+    background-color: var(--rp-container-warning-text);
+  }
+
+  .rp-callout--caution .rp-callout__content::before,
+  .rp-callout--danger .rp-callout__content::before {
+    background-color: var(--rp-container-danger-text);
+  }
+
+  .rp-codeblock__content :where(code) {
+    padding: 14px 0;
+  }
+
+  .rp-outline__title {
+    gap: 8px;
+    text-transform: uppercase;
+  }
+
+  .rp-sidebar-item {
+    margin-top: 0;
+  }
+
+  .rp-sidebar-item--pending,
+  .rp-sidebar-item--pending:hover {
+    /* Cleanup color flash on nav click */
+    color: var(--rp-c-link);
+    transition: none;
+  }
+
+  /* Dark mode only: the --rp-c-brand-tint background set above is too
+     light against the dark bg. `&` is :root (html), so this compiles
+     to :root.rp-dark ... and matches only when the rp-dark class is
+     set. Light mode keeps the tint. */
+  &.rp-dark .rp-sidebar-item--active {
+    background-color: #3b82f640;
+  }
+
+  .rp-sidebar-menu__right {
+    gap: 8px;
+    text-transform: uppercase;
+  }
+
+  .rp-home-feature {
+    margin-bottom: 7rem;
+  }
+
+  /* Drop the default theme's floating divider above a doc page's
+     first h2. Heading margins alone separate the intro from the
+     body. Nesting under :root outranks the theme rule's single-class
+     specificity. */
+  .rp-doc :where(h2:first-of-type)::before {
+    content: none;
+  }
+
+  .gage-footer {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    border-top: 1px solid var(--rp-c-divider-light);
+    padding: 2rem 0;
+  }
+
+  .gage-footer__copyright {
+    font-size: 14px;
+    color: var(--rp-c-text-2);
+  }
+}
+
+/* Copy + add blockquote to get p spacing in quotes */
+.rp-doc
+:not(:where(.rp-not-doc, .rp-not-doc *)):where(blockquote p):not(:where(li p)) {
+  margin-top: 1.25rem;
+  margin-bottom: 1.25rem;
+  line-height: 1.6rem;
+}
+
+/* Fix huge line spacing in default style */
+.rp-doc :not(:where(.rp-not-doc, .rp-not-doc *)):where(p):not(:where(li p)) {
+  line-height: 1.6rem;
+}
+
+/* Pull quote: an excerpt lifted from the body, set apart with a large
+   open quote mark and no border, so it reads as distinct from the
+   attributed blockquotes. Emitted by theme/remark-pullquote.ts. */
+.rp-doc .pullquote {
+  position: relative;
+  margin: 2.5rem 0;
+  padding-left: 3.5rem;
+  font-size: 1.35rem;
+  line-height: 1.6;
+  font-style: italic;
+  color: var(--rp-c-text-2);
+}
+
+.rp-doc .pullquote::before {
+  content: "\201C";
+  position: absolute;
+  left: 0;
+  top: -0.6rem;
+  font-size: 5rem;
+  line-height: 1;
+  font-family: Georgia, "Times New Roman", serif;
+  color: var(--rp-c-brand);
+  opacity: 0.6;
+}
+
+.rp-doc .pullquote p {
+  margin: 0;
+}
+
+/* Fix callout title top margin to match bottom */
+
+.rp-callout__title {
+  margin: 0.75rem 0;
+  font-size: 14px;
+  font-weight: 600;
+  position: relative;
+}

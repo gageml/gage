@@ -12,7 +12,7 @@ require running it yourself.
 :::
 
 The `gage mcp` command starts the MCP server over stdio. The server exposes
-Gage tools to MCP clients. See [Tools](/docs/tools) for the tool list.
+Gage tools to MCP clients. See [Tools](/tools) for the tool list.
 
 ```cli
 gage mcp

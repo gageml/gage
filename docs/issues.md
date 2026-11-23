@@ -57,7 +57,7 @@ another issue.
 
 Like notes, every issue records an `author`, and a plain write always inserts.
 The runtime sets `task:<scanner>:<task>` on issues a scanner task writes and
-`user:<username>` on issues a person writes. See [Notes](/docs/notes#authors).
+`user:<username>` on issues a person writes. See [Notes](/notes#authors).
 
 A scanner that wants a single issue to represent a condition across scans
 gives the write a _key_. A later write under the same key replaces the live

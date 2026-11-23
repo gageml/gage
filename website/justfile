@@ -1,0 +1,19 @@
+# Show this help and exit
+help:
+    @just -l
+
+# Run dev server
+dev:
+    pnpm dev
+
+# Full verification gate: Biome lint + format (auto-fix)
+check:
+    pnpm check
+
+# Build the static site
+build:
+    pnpm build
+
+# Serve production build locally
+preview: build
+    pnpm preview

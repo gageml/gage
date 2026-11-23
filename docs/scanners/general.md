@@ -21,7 +21,7 @@ last scan is scanned only over its new lines.
 ## What it writes
 
 The scanner writes notes that are in turn used by downstream issue
-writers. In particular, [`findings`](/docs/scanners/findings) reads
+writers. In particular, [`findings`](/scanners/findings) reads
 `general[finding]` notes and reports issues from them.
 
 | Note               | Description                         | Target  |

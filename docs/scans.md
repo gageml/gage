@@ -18,7 +18,7 @@ A scan reads from a _dataset_, a set of stored sessions and attachments. When
 you select sessions, Gage adds them to its store, creates a dataset holding
 them, and scans it. To scan the same sessions again, or a set you assembled
 yourself, pass the dataset to `gage scan --dataset`. See
-[`gage dataset`](/docs/commands/dataset).
+[`gage dataset`](/commands/dataset).
 
 Gage maintains a record of each scan. To list scans, run:
 

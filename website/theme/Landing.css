@@ -1,0 +1,789 @@
+/* Landing page sections below the hero. See Landing.tsx. */
+
+.gage-landing {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 1152px;
+  margin: 0 auto;
+  padding: 0 24px 6rem;
+}
+
+.gage-landing__section {
+  margin-top: 6.5rem;
+}
+
+.gage-landing__title {
+  margin: 0;
+  font-family: "Outfit", sans-serif;
+  font-size: 2.25rem;
+  font-weight: 600;
+  line-height: 1.2;
+  letter-spacing: -0.01em;
+  text-align: center;
+  color: var(--rp-c-text-1);
+  text-wrap: balance;
+}
+
+.gage-landing__lead {
+  max-width: 44rem;
+  margin: 1.25rem auto 0;
+  font-size: 1.125rem;
+  line-height: 1.65;
+  text-align: center;
+  color: var(--rp-c-text-2);
+  text-wrap: pretty;
+}
+
+.gage-landing__note,
+.gage-landing__caption {
+  margin: 1.5rem auto 0;
+  font-size: 0.875rem;
+  line-height: 1.6;
+  text-align: center;
+  color: var(--rp-c-text-2);
+}
+
+.gage-landing__grid {
+  display: grid;
+  gap: 1rem;
+  margin-top: 2.5rem;
+}
+
+.gage-landing__grid--three {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+/* Cards */
+
+.gage-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  padding: 1.5rem;
+  border: 1px solid var(--rp-c-divider-light);
+  border-radius: var(--rp-radius);
+  background: var(--rp-c-bg-soft);
+  color: inherit;
+  text-decoration: none;
+}
+
+.gage-card--plain {
+  border-color: transparent;
+  background: transparent;
+  padding: 0.5rem 0.5rem 0.5rem 0;
+}
+
+.gage-card__title {
+  margin: 0;
+  font-size: 1.0625rem;
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--rp-c-text-1);
+  text-wrap: pretty;
+}
+
+.gage-card__details {
+  margin: 0.625rem 0 0;
+  font-size: 0.9375rem;
+  line-height: 1.6;
+  color: var(--rp-c-text-2);
+}
+
+.gage-landing__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.5rem;
+  height: 2.5rem;
+  margin-bottom: 1rem;
+  border-radius: 0.625rem;
+  background: var(--rp-c-brand-tint);
+  color: var(--rp-c-brand);
+}
+
+/* Session window. It keeps a dark surface in both color modes, as a
+   terminal would. */
+
+.gage-session {
+  max-width: 52rem;
+  margin: 1.5rem auto 0;
+  overflow: hidden;
+  border: 1px solid #2a2d36;
+  border-radius: 0.875rem;
+  background: #14161c;
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.08),
+    0 24px 48px -16px rgba(0, 0, 0, 0.35);
+  text-align: left;
+}
+
+.gage-session__bar {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.625rem 1rem;
+  border-bottom: 1px solid #2a2d36;
+  background: #1b1e26;
+}
+
+.gage-session__dots {
+  display: inline-flex;
+  flex: none;
+  gap: 0.375rem;
+}
+
+.gage-session__dots i {
+  width: 0.625rem;
+  height: 0.625rem;
+  border-radius: 50%;
+  background: #3a3e4a;
+}
+
+.gage-session__body {
+  min-height: 17rem;
+  padding: 1.5rem 1.75rem 1.75rem;
+  font-family: var(--rp-font-family-mono, ui-monospace, monospace);
+  font-size: 0.875rem;
+  line-height: 1.7;
+  color: #c9cdd6;
+}
+
+.gage-session__body p {
+  margin: 0;
+}
+
+.gage-session__question {
+  display: flex;
+  gap: 0.75rem;
+  padding: 0.75rem 1rem;
+  border: 1px solid #353945;
+  border-radius: 0.5rem;
+  color: #f2f3f5;
+}
+
+.gage-session__prompt {
+  flex: none;
+  color: var(--rp-c-brand);
+}
+
+.gage-session__body .gage-session__step {
+  display: flex;
+  align-items: baseline;
+  gap: 0.75rem;
+  margin-top: 1rem;
+  padding-left: 1rem;
+  color: #8b90a0;
+}
+
+.gage-session__body .gage-session__step + .gage-session__step {
+  margin-top: 0.25rem;
+}
+
+.gage-session__bullet {
+  flex: none;
+  width: 0.4375rem;
+  height: 0.4375rem;
+  border-radius: 50%;
+  background: var(--rp-c-brand);
+  transform: translateY(-0.0625rem);
+}
+
+.gage-session__answer {
+  margin-top: 1.25rem;
+  padding-left: 1rem;
+}
+
+.gage-session__answer p + p {
+  margin-top: 0.75rem;
+}
+
+/* Marquee under the hero tagline. Each track holds its items twice, so
+   moving it by half its width returns it to an identical position. */
+
+.gage-marquee {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 100%;
+  min-width: 0;
+  margin-top: 4rem;
+  margin-bottom: 2rem;
+}
+
+.gage-marquee__viewport {
+  display: flex;
+  flex-direction: column;
+  gap: 0.625rem;
+  width: 100%;
+  max-width: 60rem;
+  margin-top: 2rem;
+  overflow: hidden;
+  mask-image: linear-gradient(
+    to right,
+    transparent,
+    #000 12%,
+    #000 88%,
+    transparent
+  );
+}
+
+.gage-marquee__track {
+  display: flex;
+  width: max-content;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  animation: gage-marquee-scroll 60s linear infinite;
+}
+
+.gage-marquee__track--reverse {
+  animation-direction: reverse;
+}
+
+.gage-marquee__viewport:hover .gage-marquee__track {
+  animation-play-state: paused;
+}
+
+.gage-marquee__track li {
+  flex: none;
+  margin: 0 0.625rem 0 0;
+  padding: 0;
+}
+
+.gage-marquee__item {
+  display: block;
+  padding: 0.5rem 1rem;
+  border: 1px solid var(--rp-c-divider-light);
+  border-radius: 999px;
+  background: var(--rp-c-bg-soft);
+  font-size: 0.9375rem;
+  font-weight: 500;
+  line-height: 1.4;
+  white-space: nowrap;
+  color: var(--rp-c-text-1);
+  text-decoration: none;
+}
+
+@keyframes gage-marquee-scroll {
+  to {
+    transform: translateX(-50%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .gage-marquee__viewport {
+    mask-image: none;
+  }
+
+  .gage-marquee__track {
+    flex-wrap: wrap;
+    justify-content: center;
+    width: auto;
+    row-gap: 0.625rem;
+    animation: none;
+  }
+
+  .gage-marquee__track li[aria-hidden="true"] {
+    display: none;
+  }
+}
+
+/* Example picker above the session window */
+
+.gage-examples__tabs {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.5rem;
+  margin-top: 2rem;
+}
+
+.gage-examples__tab {
+  padding: 0.5rem 1rem;
+  border: 1px solid var(--rp-c-divider-light);
+  border-radius: 999px;
+  background: transparent;
+  font-family: inherit;
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: var(--rp-c-text-2);
+  cursor: pointer;
+}
+
+.gage-examples__tab:hover {
+  border-color: var(--rp-c-brand);
+  color: var(--rp-c-text-1);
+}
+
+.gage-examples__tab--active,
+.gage-examples__tab--active:hover {
+  border-color: var(--rp-c-brand);
+  background: var(--rp-c-brand-tint);
+  color: var(--rp-c-brand);
+}
+
+.gage-examples__more {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+}
+
+/* How it works: the line drawing and its numbered steps. Everything in
+   the drawing is a stroke with no fill, apart from the badges and the
+   paper of the stacked files, which hides the file behind it. */
+
+.gage-how {
+  margin-top: 1.25rem;
+}
+
+.gage-how__drawing {
+  max-width: 54rem;
+  margin: 0 auto;
+  padding: 1rem;
+  overflow-x: auto;
+  border: 1px solid var(--rp-c-divider);
+  border-radius: 1rem;
+}
+
+.gage-how__slide-title {
+  margin: 0.5rem 0 0;
+  font-family: "Outfit", sans-serif;
+  font-size: 1.25rem;
+  font-weight: 600;
+  line-height: 1.3;
+  text-align: center;
+  color: var(--rp-c-text-1);
+}
+
+.gage-how__svg {
+  display: block;
+  width: 100%;
+  min-width: 40rem;
+  height: auto;
+}
+
+.gage-how__shape,
+.gage-how__detail,
+.gage-how__line,
+.gage-how__head {
+  fill: none;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* Lines keep their weight when a part is drawn smaller or larger. */
+.gage-how__shape,
+.gage-how__detail {
+  vector-effect: non-scaling-stroke;
+}
+
+.gage-how__shape {
+  stroke: var(--rp-c-text-1);
+  stroke-width: 2;
+}
+
+/* Gage is the one filled part. Its table and label are drawn light so
+   they read on the fill in both color modes. */
+.gage-how__shape--gage {
+  fill: #4682b4;
+  transition: stroke 0.45s ease;
+}
+
+.gage-how__part[data-accent] .gage-how__shape--gage {
+  stroke: var(--rp-c-brand);
+}
+
+/* The sheets of the sessions stack are filled, which hides the sheet
+   behind each one. The fill is the page color until the stack is
+   accented, when it takes a color of its own. */
+.gage-how__paper {
+  fill: var(--rp-c-bg);
+  transition: fill 0.45s ease;
+}
+
+.gage-how__part[data-accent] .gage-how__paper {
+  fill: #64748b;
+}
+
+.gage-how__part[data-kind="logs"][data-accent] .gage-how__detail {
+  stroke: rgb(255 255 255 / 75%);
+}
+
+.gage-how__detail {
+  stroke: var(--rp-c-text-3);
+  stroke-width: 1.5;
+}
+
+.gage-how__dot {
+  fill: var(--rp-c-text-3);
+}
+
+.gage-how__line,
+.gage-how__head {
+  stroke: var(--rp-c-text-2);
+  stroke-width: 1.5;
+}
+
+.gage-how__label {
+  font-family: "Outfit", sans-serif;
+  font-size: 17px;
+  font-weight: 600;
+  fill: var(--rp-c-text-1);
+}
+
+.gage-how__part[data-kind="gage"] .gage-how__detail {
+  stroke: rgb(255 255 255 / 75%);
+}
+
+.gage-how__part[data-kind="gage"] .gage-how__label {
+  fill: #fff;
+}
+
+.gage-how__note {
+  font-size: 16px;
+  font-weight: 500;
+  fill: var(--rp-c-text-1);
+}
+
+/* The callout is a link in the blue of the Gage part, a shade darker
+   on a light page and a shade lighter on a dark one so the words read
+   on either. */
+.gage-how__callout {
+  --gage-how-callout: #356a99;
+  color: var(--gage-how-callout);
+}
+
+.rp-dark .gage-how__callout {
+  --gage-how-callout: #7db4e6;
+}
+
+.gage-how__step[data-state] .gage-how__note.gage-how__note--callout {
+  font-weight: 400;
+  fill: var(--gage-how-callout);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.gage-how__grid {
+  stroke: var(--rp-c-brand);
+  stroke-width: 0.5;
+  opacity: 0.18;
+}
+
+.gage-how__grid--major {
+  opacity: 0.45;
+}
+
+.gage-how__grid-text {
+  font-size: 9px;
+  fill: var(--rp-c-brand);
+}
+
+/* Building the drawing. Everything is always present, and a frame
+   sets each group's state. Parts stay solid once they have appeared.
+   Lines and captions from earlier frames fade back so the newest step
+   stands out. */
+
+.gage-how__part,
+.gage-how__step {
+  transition: opacity 0.45s ease;
+}
+
+.gage-how__part[data-state="hidden"],
+.gage-how__step[data-state="hidden"] {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.gage-how__step[data-state="old"] {
+  opacity: 0.4;
+}
+
+.gage-how__step[data-steady][data-state="old"] {
+  opacity: 1;
+}
+
+.gage-how__line--new,
+.gage-how__head--new {
+  stroke: var(--rp-c-brand);
+  stroke-width: 2;
+}
+
+.gage-how__step[data-state="new"] .gage-how__note {
+  font-weight: 600;
+}
+
+.gage-how__step .gage-how__note--dim {
+  font-weight: 500;
+  fill: var(--rp-c-text-3);
+}
+
+.gage-how__controls {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 1.25rem;
+  margin-top: 1.5rem;
+}
+
+.gage-how__controls button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.gage-how__dots {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.gage-how__dot-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.gage-how__dot-button {
+  width: 0.625rem;
+  height: 0.625rem;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: var(--rp-c-divider);
+  cursor: pointer;
+}
+
+.gage-how__dot-button--active {
+  background: var(--rp-c-brand);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .gage-how__part,
+  .gage-how__step {
+    transition: none;
+  }
+}
+
+/* Space between a section lead and a row of picker buttons */
+
+.gage-landing__lead + .gage-examples__tabs {
+  margin-top: 2rem;
+}
+
+/* Works with */
+
+.gage-works {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.gage-works__title {
+  margin: 0;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--rp-c-text-2);
+}
+
+.gage-works__list {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 1.5rem 3.5rem;
+  margin: 2rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.gage-works__item {
+  display: flex;
+  align-items: center;
+  gap: 0.875rem;
+  margin: 0;
+  font-family: "Outfit", sans-serif;
+  font-size: 1.5rem;
+  font-weight: 600;
+  color: var(--rp-c-text-1);
+}
+
+.gage-works__logo {
+  flex: none;
+  width: 2.5rem;
+  height: 2.5rem;
+  background: currentColor;
+  mask: center / contain no-repeat;
+}
+
+.gage-works__planned {
+  margin: 2rem 0 0;
+  font-size: 0.9375rem;
+  line-height: 1.6;
+  text-align: center;
+  color: var(--rp-c-text-2);
+}
+
+.gage-works__planned-title {
+  font-weight: 600;
+  color: var(--rp-c-text-1);
+}
+
+/* Install command under the hero buttons */
+
+.gage-install {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  max-width: min(100%, 46rem);
+  margin-top: 1.5rem;
+  padding: 0.375rem 0.375rem 0.375rem 1rem;
+  border: 1px solid var(--rp-c-divider-light);
+  border-radius: 0.625rem;
+  background: var(--rp-c-bg-soft);
+}
+
+.gage-install__command {
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  white-space: nowrap;
+  font-family: var(--rp-font-family-mono, ui-monospace, monospace);
+  font-size: 0.8125rem;
+  line-height: 2;
+  text-align: left;
+  color: var(--rp-c-text-1);
+  scrollbar-width: none;
+}
+
+.gage-install__prompt {
+  margin-right: 0.625rem;
+  color: var(--rp-c-brand);
+  user-select: none;
+}
+
+.gage-install__copy {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  border: 0;
+  border-radius: 0.375rem;
+  background: transparent;
+  color: var(--rp-c-text-2);
+  cursor: pointer;
+}
+
+.gage-install__copy:hover {
+  background: var(--rp-c-divider-light);
+  color: var(--rp-c-text-1);
+}
+
+/* Closing call to action */
+
+.gage-landing__section--cta {
+  padding: 4rem 2rem;
+  border: 1px solid var(--rp-c-divider-light);
+  border-radius: 1.25rem;
+  background: var(--rp-c-bg-soft);
+}
+
+.gage-landing__actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.75rem;
+  margin-top: 2rem;
+}
+
+/* The hero headline is a sentence now, not two words, so it needs a
+   measure and balanced wrapping. */
+
+.rp-home-hero__subtitle {
+  max-width: 24ch;
+  text-wrap: balance;
+}
+
+.rp-home-hero__tagline {
+  max-width: 36rem;
+  text-wrap: pretty;
+}
+
+/* The home page no longer uses the theme's feature grid, which would
+   otherwise leave its bottom margin behind as an empty band. */
+.rp-home-feature:empty {
+  display: none;
+}
+
+@media (width <= 1000px) {
+  .gage-landing__grid--three {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .gage-landing__grid--three.gage-landing__grid--points {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (width <= 700px) {
+  .gage-landing {
+    padding: 0 16px 4rem;
+  }
+
+  .gage-landing__section {
+    margin-top: 4.5rem;
+  }
+
+  .gage-landing__title {
+    font-size: 1.75rem;
+  }
+
+  .gage-marquee__item {
+    font-size: 0.875rem;
+  }
+
+  .gage-landing__lead {
+    font-size: 1rem;
+  }
+
+  .gage-landing__grid--three.gage-landing__grid--points {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .gage-session__body {
+    padding: 1.25rem;
+    font-size: 0.8125rem;
+  }
+
+  .gage-landing__section--cta {
+    padding: 3rem 1.25rem;
+  }
+}
+
+/* The theme sizes its large buttons by a minimum width and gives them
+   no side padding, so a long label runs to the edges. */
+.rp-button--big {
+  padding: 0 1.75rem;
+}
+
+/* GitHub mark on a button that links to the Gage repository. Drawn with a mask so
+   it takes the button's text color in both color modes. */
+.rp-button[href="https://github.com/gageml/gage"] {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.rp-button[href="https://github.com/gageml/gage"]::before {
+  content: "";
+  flex: none;
+  width: 1.125em;
+  height: 1.125em;
+  background: currentColor;
+  mask:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12'/%3E%3C/svg%3E")
+    center / contain no-repeat;
+}

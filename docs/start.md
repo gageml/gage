@@ -51,4 +51,4 @@ Resolve issues:
 gage resolve
 ```
 
-For steps to uninstall, see [_Uninstall Gage_](/docs/uninstall).
+For steps to uninstall, see [_Uninstall Gage_](/uninstall).

@@ -1,0 +1,12 @@
+{
+  "question": "My disk is almost full. What is ~/.cache/gage-dev-target and where did it come from?",
+  "steps": [
+    "The agent searches your logs for the commands that named the directory.",
+    "It checks whether the work that used it was merged."
+  ],
+  "answer": [
+    "It is build output from the Codex driver work. One session created it and sent every build there.",
+    "It is large because that session built a stack of six branches in it and rebuilt each one after rebases. Nothing ever cleaned it up.",
+    "That work is finished and merged, so nothing depends on the directory. Deleting it frees 525 GB."
+  ]
+}

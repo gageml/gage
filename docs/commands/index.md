@@ -29,7 +29,7 @@ gage index [OPTIONS]
 | `--remove <CORPUS>`     | Remove the indexes of a corpus               |
 
 A source is `SCHEME:PATH` or a configured name, as described in
-[`gage session`](/docs/commands/session). The default is the Claude Code home
+[`gage session`](/commands/session). The default is the Claude Code home
 directory.
 
 `--list` shows one row per corpus: the corpus path, the indexes it holds, the
@@ -39,4 +39,4 @@ corpus path as `--list` shows it, such as `store/1a2b3c4d5e6f7a8b`, and removes
 its whole directory, whether or not its source is still present.
 
 The object index of the Gage store is a separate index. See
-[`gage store index`](/docs/commands/store#store-index).
+[`gage store index`](/commands/store#store-index).

@@ -8,7 +8,7 @@ description:
 The `gage dataset` command manages datasets. A dataset is a set of stored
 sessions and attachments that a scan runs over. `gage scan` creates a dataset
 from its session selection unless given one with `--dataset`. For background,
-see [Scans](/docs/scans).
+see [Scans](/scans).
 
 ```cli
 gage dataset <COMMAND>
@@ -30,9 +30,9 @@ linked into the new dataset in a single step.
 
 | Option                    | Description                                                  |
 | ------------------------- | ------------------------------------------------------------ |
-| `-N, --native <SOURCE>`       | Session source, as described in [`gage session`](/docs/commands/session) |
+| `-N, --native <SOURCE>`       | Session source, as described in [`gage session`](/commands/session) |
 | `-p, --project <PROJECT>` | Limit sessions to a project path or name                     |
-| `--touches <DIR>`         | Limit sessions to those that touch a directory, as described in [`gage session add`](/docs/commands/session#session-add) |
+| `--touches <DIR>`         | Limit sessions to those that touch a directory, as described in [`gage session add`](/commands/session#session-add) |
 | `--since <SINCE>`         | Select sessions active within a duration (e.g. `1h`, `30m`, `7d`) |
 | `-a, --all`               | Select every available session                               |
 | `-n, --limit <N>`         | Select the latest N sessions                                 |
@@ -43,9 +43,9 @@ linked into the new dataset in a single step.
 | `-y, --yes`               | Skip confirmation prompt                                     |
 
 To add sessions to an existing dataset, use
-[`gage session add --dataset`](/docs/commands/session#session-add). To add
+[`gage session add --dataset`](/commands/session#session-add). To add
 attachments, use
-[`gage attachment add --dataset`](/docs/commands/attachment#attachment-add). To
+[`gage attachment add --dataset`](/commands/attachment#attachment-add). To
 add sessions and attachments already in the store, use
 [`gage dataset link`](#dataset-link).
 

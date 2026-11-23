@@ -8,7 +8,7 @@ description:
 The `gage backup` command backs up the store. It adds every session from each
 configured native source to the store, then sends every object, tag, and key to
 a remote added with `gage remote add --backup`. Restoring is
-[`gage pull`](/docs/commands/pull).
+[`gage pull`](/commands/pull).
 
 ```cli
 gage backup [OPTIONS] [REPOSITORY]
@@ -26,8 +26,8 @@ exactly one backup remote exists.
 | `-y, --yes`             | Skip confirmation prompt                                           |
 
 A source is `SCHEME:PATH` or a configured name, as described in
-[`gage session`](/docs/commands/session). The sources read by default are the
-`backup.native` setting; see [`gage config`](/docs/commands/config#settings).
+[`gage session`](/commands/session). The sources read by default are the
+`backup.native` setting; see [`gage config`](/commands/config#settings).
 
 A diverged object is one the remote holds with a history the store's copy does
 not continue, as every object is after a store is deleted and rebuilt from its
@@ -44,7 +44,7 @@ Otherwise the object is reported as diverged.
 An object that links a session fetched from a remote and not merged is
 withheld, as is a tag that names it. A backup leaves withheld objects and tags
 out and reports their count. See
-[`gage scan --stored-remote`](/docs/commands/scan).
+[`gage scan --stored-remote`](/commands/scan).
 
 `--prune` deletes the objects and tags that the remote holds and the store does
 not. An object deleted in the store is kept as a deletion record and is backed

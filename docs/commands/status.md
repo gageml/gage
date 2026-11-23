@@ -21,4 +21,4 @@ gage status [OPTIONS]
 | `-v, --verbose`   | Show per-subdirectory storage breakdown under `~/.gage` |
 
 For the state of the store itself, see
-[`gage store status`](/docs/commands/store#store-status).
+[`gage store status`](/commands/store#store-status).

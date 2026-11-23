@@ -33,7 +33,7 @@ nothing.
 The scanner writes issues, not notes. The supporting finding notes are
 attached to each issue as evidence. Issues are written as _pending_; the
 first phase of `gage resolve` reconciles them against existing issues. See
-[Issues](/docs/issues#status).
+[Issues](/issues#status).
 
 | Issue      | Description                         |
 | ---------- | ----------------------------------- |
@@ -44,8 +44,8 @@ first phase of `gage resolve` reconciles them against existing issues. See
 The scanner is in the `default` group. It runs when you run `gage scan`
 without selecting scanners. It only reports when the same scan includes a
 scanner that writes finding notes, such as
-[`code-review`](/docs/scanners/code-review) and
-[`general`](/docs/scanners/general). To run it with them explicitly:
+[`code-review`](/scanners/code-review) and
+[`general`](/scanners/general). To run it with them explicitly:
 
 ```cli
 gage scan -s general -s findings
