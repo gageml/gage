@@ -39,7 +39,7 @@ const SKILLS_DIR: &str = "skills/";
 
 /// The plugin's skills, by the names Gage gives them. An agent has
 /// its own name for each, which [`PluginTarget::skill_name`] gives.
-pub const SKILLS: &[&str] = &["blame", "publish", "resolve"];
+pub const SKILLS: &[&str] = &["blame", "publish", "resolve", "sidecar"];
 
 #[derive(RustEmbed)]
 #[folder = "templates/"]
