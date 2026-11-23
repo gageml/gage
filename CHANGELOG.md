@@ -18,8 +18,20 @@ conventions in _[Keep a Changelog]_. Release versions use [semantic versioning].
 - A scanner gives a line range with `range(start, end)`, where it was
   `lines(start, end)`: on `messages()`, `tool_uses()`, and `compress()`
 
+- A session source in the `native` table of `~/.gage/config.toml` with a
+  relative path is an error. A name `default` in that table is now the default
+  session source
+
 ### Enhancements
 
+- The `native.default` setting names the default session source: the source a
+  command reads when `--native` is omitted. When no config sets it, a command
+  reads the default directory of the default driver, as before
+- A project sets session sources in `.gage/config.toml` under the project
+  directory. A command run in the project directory or below it reads the
+  `native` table of that file, and a name the file sets replaces the same name
+  in `~/.gage/config.toml`. A relative path in the file is under the project
+  directory
 - A scanner defines query views for its scan in an `init` function:
   `context().query_view(name, sql).description(text)`. A view is a named
   `SELECT` over the scan's tables. The query tool serves the views to every

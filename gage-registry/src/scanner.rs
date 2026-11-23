@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use gage_core::config::ScannerConfig;
+use gage_core::config::{ScannerConfig, project_gage_dirs};
 use gage_core::glob::glob_match;
 use gage_core::path::shorten_home_in;
 use rune::SourceId;
@@ -66,22 +66,11 @@ pub fn discover_project_scanner_dirs(start: &Path) -> Vec<PathBuf> {
 /// Each `<dir>/.gage/<leaf>` that exists walking up from `start`,
 /// innermost first. The walk stops at `$HOME`.
 pub(crate) fn discover_project_dirs(start: &Path, leaf: &str) -> Vec<PathBuf> {
-    let home = std::env::var("HOME").ok().map(PathBuf::from);
-    let mut out = Vec::new();
-    let mut cur = Some(start);
-    while let Some(dir) = cur {
-        if let Some(h) = &home
-            && dir == h.as_path()
-        {
-            break;
-        }
-        let candidate = dir.join(".gage").join(leaf);
-        if candidate.is_dir() {
-            out.push(candidate);
-        }
-        cur = dir.parent();
-    }
-    out
+    project_gage_dirs(start)
+        .into_iter()
+        .map(|dir| dir.join(leaf))
+        .filter(|dir| dir.is_dir())
+        .collect()
 }
 
 /// User-level custom scanner root: `<gage_home>/local/scanners`. Unlike

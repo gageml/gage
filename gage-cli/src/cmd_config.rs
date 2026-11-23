@@ -9,7 +9,7 @@ use gage_core::config::{Config, user_config_path};
 use gage_session::ModelSizes;
 
 use crate::error::CliError;
-use crate::source::{driver_models, driver_registry};
+use crate::source::{driver_models, driver_registry, project_native};
 
 #[derive(Subcommand)]
 pub enum ConfigCommand {
@@ -71,8 +71,13 @@ fn get(name: &str) -> Result<(), CliError> {
 
 /// Loads the user config and converts it to a TOML table so that
 /// every setting, set or defaulted, has a dotted name and a value.
+/// The native sources are those in effect in the current directory:
+/// each name a project config sets replaces the user's.
 fn load_effective(verb: &str) -> Result<Table, CliError> {
-    let config = Config::load_user().with_context(|| format!("gage config {verb}"))?;
+    let mut config = Config::load_user().with_context(|| format!("gage config {verb}"))?;
+    for project in project_native().with_context(|| format!("gage config {verb}"))? {
+        config.native.extend(project.sources);
+    }
     let mut table = match Value::try_from(&config).with_context(|| format!("gage config {verb}"))? {
         Value::Table(t) => t,
         _ => unreachable!("Config serializes to a TOML table"),

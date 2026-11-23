@@ -4,8 +4,9 @@
 //! facility that needs it (the CLI, the MCP server, ...). No lazy
 //! module-level init.
 //!
-//! The default driver is the one the empty source and an agent model
-//! with no scheme go to. A process names it once at startup with
+//! The default driver is the one an agent model with no scheme goes
+//! to, and the one the empty source goes to when no native source is
+//! named the default. A process names it once at startup with
 //! [`set_default_driver`], from the user's config; a process that
 //! names none gets [`DEFAULT_DRIVER`]. The models the user's config
 //! sets for a driver's sizes are named the same way, with
@@ -17,7 +18,7 @@ use std::sync::{Arc, OnceLock};
 
 use gage_claude::driver::ClaudeDriver;
 use gage_codex::driver::CodexDriver;
-use gage_core::config::DEFAULT_DRIVER;
+use gage_core::config::{DEFAULT_DRIVER, DEFAULT_NATIVE};
 use gage_pi::driver::PiDriver;
 use gage_session::{
     Driver, DriverError, HostContext, ModelSizes, Source, SourceOptions, split_scheme,
@@ -225,12 +226,17 @@ impl DriverRegistry {
     /// under a registered scheme. A name is looked up before a scheme,
     /// so a name that is also a scheme is the name. A registered
     /// scheme alone, with no colon, is that driver's default location
-    /// and is returned as `<scheme>:`. The empty source is the default
-    /// driver's default location. A source that names no driver is an
+    /// and is returned as `<scheme>:`. The empty source is the source
+    /// named [`DEFAULT_NATIVE`], and the default driver's default
+    /// location when no source has that name. A source that names no
+    /// driver is an
     /// error and so is one whose scheme no driver serves: a path alone
     /// does not say which driver reads it.
     pub fn resolve_source(&self, source: &str) -> Result<(Arc<dyn Driver>, String), DriverError> {
         if source.is_empty() {
+            if let Some(default) = self.names.get(DEFAULT_NATIVE) {
+                return self.resolve_scheme(default);
+            }
             let driver = self
                 .default()
                 .ok_or_else(|| DriverError::Other("no default session driver registered".into()))?;
@@ -629,6 +635,26 @@ mod tests {
         assert_eq!(resolved(&registry, ""), Ok(("one", String::new())));
         let none = DriverRegistry::new().add(Arc::new(Fake("two", &["b"])));
         assert!(resolved(&none, "").is_err());
+    }
+
+    /// The default native source replaces the default driver's
+    /// default location and is a name like any other.
+    #[test]
+    fn the_empty_source_is_the_source_named_default() {
+        let registry = named(&[("default", "b:/proj/sessions")]).unwrap();
+        let default = Ok(("two", "b:/proj/sessions".to_string()));
+        assert_eq!(resolved(&registry, ""), default);
+        assert_eq!(resolved(&registry, "default"), default);
+        assert_eq!(resolved(&registry, "a"), Ok(("one", "a:".to_string())));
+        let scheme = named(&[("default", "b")]).unwrap();
+        assert_eq!(resolved(&scheme, ""), Ok(("two", "b:".to_string())));
+        let err = named(&[("work", "b:/x"), ("default", "work")])
+            .err()
+            .unwrap();
+        assert!(
+            err.starts_with("native.default: \"work\" is not a source"),
+            "{err}"
+        );
     }
 
     #[test]

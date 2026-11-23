@@ -170,9 +170,67 @@ pub struct Config {
     /// Names for native sources, one `name = "source"` entry each
     /// under `[native]`. A name is accepted wherever a source is and
     /// is read as its source, which is `SCHEME:PATH` or a scheme
-    /// alone. A name is looked up before a scheme.
+    /// alone. A name is looked up before a scheme. The name
+    /// [`DEFAULT_NATIVE`] is the source a command reads when it is
+    /// given none.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub native: BTreeMap<String, String>,
+}
+
+/// The key under `[native]` that holds the default native source:
+/// the source a command reads when it is given none. Every other key
+/// in the table is a name a user chose.
+pub const DEFAULT_NATIVE: &str = "default";
+
+/// Contents of a project config file, `<project>/.gage/config.toml`.
+/// A project sets native sources and nothing else, so a file with any
+/// other table does not load.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectConfig {
+    /// The `[native]` table, as [`Config::native`] holds it
+    #[serde(default)]
+    pub native: BTreeMap<String, String>,
+}
+
+impl ProjectConfig {
+    pub fn load_from(path: &Path) -> io::Result<Self> {
+        let text = fs::read_to_string(path)?;
+        toml::from_str(&text).map_err(io::Error::other)
+    }
+}
+
+/// Each `<dir>/.gage` directory that exists walking up from `start`,
+/// innermost first. The walk stops at `$HOME`, so it never reaches
+/// the user's gage home there.
+pub fn project_gage_dirs(start: &Path) -> Vec<PathBuf> {
+    let home = env::var_os("HOME").map(PathBuf::from);
+    let mut out = Vec::new();
+    let mut cur = Some(start);
+    while let Some(dir) = cur {
+        if home.as_deref() == Some(dir) {
+            break;
+        }
+        let candidate = dir.join(".gage");
+        if candidate.is_dir() {
+            out.push(candidate);
+        }
+        cur = dir.parent();
+    }
+    out
+}
+
+/// Each project config file, `<dir>/.gage/config.toml`, that exists
+/// walking up from `start`, innermost first. The gage home is the
+/// user's and is never a project, wherever `GAGE_HOME` puts it.
+pub fn project_config_paths(start: &Path) -> Vec<PathBuf> {
+    let user = gage_home();
+    project_gage_dirs(start)
+        .into_iter()
+        .filter(|dir| *dir != user)
+        .map(|dir| dir.join("config.toml"))
+        .filter(|path| path.is_file())
+        .collect()
 }
 
 /// The driver a build treats as default when the config names none
@@ -181,8 +239,9 @@ pub const DEFAULT_DRIVER: &str = "claude";
 /// Session driver settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DriversConfig {
-    /// The driver the empty source and an agent model with no scheme
-    /// go to, by name
+    /// The driver an agent model with no scheme goes to, by name,
+    /// and the driver whose default location the empty source is
+    /// when the config sets no default native source
     #[serde(default = "default_driver")]
     pub default: String,
 
@@ -493,7 +552,10 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
-    use super::Config;
+    use std::fs;
+    use std::path::PathBuf;
+
+    use super::{Config, DEFAULT_NATIVE, ProjectConfig, project_config_paths};
     use serde_json as json;
 
     #[test]
@@ -512,6 +574,45 @@ mod tests {
         assert_eq!(config.native["work"], "pi:~/x");
         let set = toml::to_string_pretty(&config).unwrap();
         assert!(set.contains("[native]\nwork = \"pi:~/x\"\n"), "{set}");
+    }
+
+    #[test]
+    fn a_project_config_holds_native_sources_and_nothing_else() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(&path, "[native]\ndefault = \"pi:sessions\"\n").unwrap();
+        let config = ProjectConfig::load_from(&path).unwrap();
+        assert_eq!(config.native[DEFAULT_NATIVE], "pi:sessions");
+
+        fs::write(&path, "").unwrap();
+        assert!(ProjectConfig::load_from(&path).unwrap().native.is_empty());
+
+        fs::write(&path, "[drivers]\ndefault = \"pi\"\n").unwrap();
+        let err = ProjectConfig::load_from(&path).unwrap_err().to_string();
+        assert!(err.contains("unknown field `drivers`"), "{err}");
+    }
+
+    #[test]
+    fn project_config_paths_are_found_walking_up_innermost_first() {
+        let root = tempfile::tempdir().unwrap();
+        let outer = root.path().join("outer");
+        let inner = outer.join("mid/inner");
+        fs::create_dir_all(inner.join(".gage")).unwrap();
+        fs::create_dir_all(outer.join("mid/.gage")).unwrap();
+        fs::create_dir_all(outer.join(".gage")).unwrap();
+        fs::write(inner.join(".gage/config.toml"), "").unwrap();
+        fs::write(outer.join(".gage/config.toml"), "").unwrap();
+        let found: Vec<PathBuf> = project_config_paths(&inner)
+            .into_iter()
+            .filter(|path| path.starts_with(root.path()))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                inner.join(".gage/config.toml"),
+                outer.join(".gage/config.toml"),
+            ]
+        );
     }
 
     #[test]
