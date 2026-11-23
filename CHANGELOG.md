@@ -24,6 +24,8 @@ conventions in _[Keep a Changelog]_. Release versions use [semantic versioning].
 
 ### Enhancements
 
+- `gage merge` and `gage pull` take `--type` to merge every object of a type,
+  such as `issue`, with everything those objects link
 - The `native.default` setting names the default session source: the source a
   command reads when `--native` is omitted. When no config sets it, a command
   reads the default directory of the default driver, as before

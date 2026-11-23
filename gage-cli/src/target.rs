@@ -38,6 +38,6 @@ pub(crate) fn resolve_target(store: &Store, input: &str) -> Result<String, Strin
 }
 
 /// `gage::note` displays as `note`
-fn type_name(object_type: &str) -> &str {
+pub fn type_name(object_type: &str) -> &str {
     object_type.strip_prefix("gage::").unwrap_or(object_type)
 }

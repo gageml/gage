@@ -8,8 +8,9 @@ description:
 The `gage pull` command fetches objects from a remote and merges them into the
 store. It does what [`gage fetch`](/commands/fetch) followed by
 [`gage merge`](/commands/merge) does, in one run. It pulls the named
-objects and what they link, or the whole remote with `--all`, and reports what
-could not be merged.
+objects and what they link, the objects of a type and what they link with
+`--type`, or the whole remote with `--all`, and reports what could not be
+merged.
 
 ```cli
 gage pull [OPTIONS] <REPOSITORY> [OBJECTS]...
@@ -25,9 +26,20 @@ records as its fetch default. Pass `--all` to pull the whole remote.
 | Option      | Description                                                        |
 | ----------- | ------------------------------------------------------------------ |
 | `-a, --all` | Pull every object and tag from the remote. The pull previews the counts and asks to continue. |
+| `--type <TYPE>` | Merge every object of a type and what it links (repeatable) |
 | `--ours`    | Keep the local side on conflict                                    |
 | `--theirs`  | Take the remote side on conflict                                   |
 | `-y, --yes` | Skip confirmation prompt                                           |
+
+`--type` takes one of `attachment`, `dataset`, `issue`, `note`, `scan`,
+`session`, or `share`. The type of an object is not known before the object is
+transferred, so the pull fetches the whole remote. It then merges every object
+of that type and everything those objects link, and leaves the rest unmerged.
+`--type` excludes named objects, `--all`, `--ours`, and `--theirs`.
+
+```cli
+gage pull acme --type issue
+```
 
 An object that cannot be merged is reported as a conflict and left as it is,
 and the command exits with status 1. To resolve a conflict from a remote, run

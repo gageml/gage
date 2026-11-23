@@ -141,6 +141,10 @@ pub enum Objects {
     All,
     /// The named objects, as given, and everything they link
     Named(Vec<String>),
+    /// Every object of the bare type names, and everything they link.
+    /// A type is read from an object's commit, so a transfer takes
+    /// the whole repository and the merge selects
+    Typed(Vec<String>),
 }
 
 /// The objects a merge or pull takes: every one under `--all`, the
@@ -156,7 +160,8 @@ pub fn selected_objects(
 ) -> anyhow::Result<Objects> {
     chosen_objects(remotes, repository, objects, all)?.ok_or_else(|| {
         anyhow::anyhow!(
-            "name objects to {verb}, or pass --all to {verb} every object; \
+            "name objects to {verb}, pass --type to {verb} objects of a type, \
+             or pass --all to {verb} every object; \
              gage fetch --list shows what a remote has"
         )
     })
@@ -311,6 +316,14 @@ pub fn plan_transfer(
     let named: Option<Vec<String>> = match objects {
         Objects::All => {
             cli::log::remark(format!("{} on the remote", ref_counts(advertised.keys())))?;
+            None
+        }
+        Objects::Typed(types) => {
+            cli::log::remark(format!(
+                "{} on the remote, all fetched to select type {}",
+                ref_counts(advertised.keys()),
+                types.join(", ")
+            ))?;
             None
         }
         Objects::Named(objects) => {
@@ -499,6 +512,10 @@ fn merge_command(remote: &str, objects: &Objects) -> String {
     match objects {
         Objects::All => format!("gage merge {remote} --all"),
         Objects::Named(objects) => format!("gage merge {remote} {}", objects.join(" ")),
+        Objects::Typed(types) => {
+            let options: Vec<String> = types.iter().map(|t| format!("--type {t}")).collect();
+            format!("gage merge {remote} {}", options.join(" "))
+        }
     }
 }
 
@@ -506,7 +523,9 @@ fn merge_command(remote: &str, objects: &Objects) -> String {
 pub mod tests {
     use std::path::Path;
 
-    use gage_store::{NoteInput, NoteStore, NoteValue, TagStore};
+    use gage_store::{
+        IssueInput, IssueStatus, IssueStore, NoteInput, NoteStore, NoteValue, TagStore,
+    };
 
     use super::*;
 
@@ -542,6 +561,21 @@ pub mod tests {
             .unwrap()
     }
 
+    /// An open issue that cites the notes `evidence`
+    pub fn issue(store: &Store, name: &str, evidence: &[String]) -> String {
+        IssueStore::from(store)
+            .create(IssueInput {
+                name,
+                title: "t",
+                description: None,
+                author: "user:test",
+                status: IssueStatus::Open,
+                evidence,
+                key: None,
+            })
+            .unwrap()
+    }
+
     pub fn object_ref(id: &str) -> String {
         format!("{OBJECT_REFS}{id}")
     }
@@ -552,7 +586,7 @@ pub mod tests {
             .ls_remote(source.repository())
             .unwrap();
         let named = match objects {
-            Objects::All => None,
+            Objects::All | Objects::Typed(_) => None,
             Objects::Named(objects) => {
                 Some(resolve_objects(objects, &advertised, "on the remote").unwrap())
             }
@@ -582,7 +616,7 @@ pub mod tests {
 
         match objects("up", false).unwrap() {
             Objects::Named(named) => assert_eq!(named, ["theirs", "7zzz"]),
-            Objects::All => panic!("the default is named objects"),
+            Objects::All | Objects::Typed(_) => panic!("the default is named objects"),
         }
         assert!(matches!(objects("bare", true).unwrap(), Objects::All));
         for none in ["bare", "/srv/url.git"] {
@@ -665,6 +699,10 @@ pub mod tests {
         assert_eq!(
             merge_command("up", &Objects::Named(vec!["v1".into(), "7zz".into()])),
             "gage merge up v1 7zz"
+        );
+        assert_eq!(
+            merge_command("up", &Objects::Typed(vec!["issue".into(), "note".into()])),
+            "gage merge up --type issue --type note"
         );
         assert_eq!(
             fetched_line("up", &HashSet::new()),

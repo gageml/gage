@@ -2,9 +2,10 @@
 //!
 //! The repository is a configured remote that `gage fetch` has
 //! fetched. With objects named, those objects and everything they
-//! link are merged; with `--all`, every fetched object and tag is.
-//! With neither, the objects are the ones the remote records as its
-//! fetch default. The objects are resolved against the fetched refs,
+//! link are merged; with `--type`, every fetched object of a type
+//! and everything it links are; with `--all`, every fetched object
+//! and tag is. With none of these, the objects are the ones the
+//! remote records as its fetch default. The objects are resolved against the fetched refs,
 //! and the remote is never contacted.
 //!
 //! A divergence the type can merge is merged; one it cannot is
@@ -21,7 +22,8 @@ use clap::Args;
 use cliclack as cli;
 use gage_core::uuid::short_uuid;
 use gage_store::{
-    Conflict, FetchSource, MergeReport, Outcome, RemoteStore, Repository, Side, Store, TAG_REFS,
+    Conflict, FetchSource, MergeReport, OBJECT_REFS, Outcome, RemoteStore, Repository, Side, Store,
+    TAG_REFS,
 };
 
 use crate::author::resolve_author;
@@ -30,6 +32,7 @@ use crate::cmd_fetch::{
 };
 use crate::dialog::{self, DialogError, DialogResult};
 use crate::error::CliError;
+use crate::target::type_name;
 
 #[derive(Args)]
 pub struct MergeArgs {
@@ -56,11 +59,39 @@ pub struct MergeArgs {
     all: bool,
 
     #[command(flatten)]
+    types: TypeArgs,
+
+    #[command(flatten)]
     resolve: ResolveArgs,
 
     /// Skip confirmation prompt
     #[arg(short, long)]
     yes: bool,
+}
+
+/// The objects a merge or pull takes by their type
+#[derive(Args)]
+pub struct TypeArgs {
+    /// Merge objects of type (repeatable)
+    ///
+    /// Merges every object of TYPE and everything it links, in place
+    /// of named objects. One of attachment, dataset, issue, note,
+    /// scan, session, or share. A pull transfers every object from
+    /// remote to read its type, and merges only those selected
+    #[arg(
+        long,
+        conflicts_with_all = ["objects", "all", "ours", "theirs"],
+        hide_possible_values = true,
+        value_parser = ["attachment", "dataset", "issue", "note", "scan", "session", "share"]
+    )]
+    r#type: Vec<String>,
+}
+
+impl TypeArgs {
+    /// The selection the option names, when it is given.
+    pub fn objects(&self) -> Option<Objects> {
+        (!self.r#type.is_empty()).then(|| Objects::Typed(self.r#type.clone()))
+    }
 }
 
 /// How a merge settles a divergence it cannot merge
@@ -92,14 +123,17 @@ pub fn main(args: MergeArgs) -> Result<(), CliError> {
     let repository = remotes.resolve(&args.remote).context("gage merge")?;
     let source = FetchSource::from(repository);
     let tracked = fetched_refs(&store, &source).context("gage merge")?;
-    let objects = selected_objects(
-        &remotes,
-        source.repository(),
-        args.objects,
-        args.all,
-        "merge",
-    )
-    .context("gage merge")?;
+    let objects = match args.types.objects() {
+        Some(typed) => typed,
+        None => selected_objects(
+            &remotes,
+            source.repository(),
+            args.objects,
+            args.all,
+            "merge",
+        )
+        .context("gage merge")?,
+    };
     let remote = source.repository().name().to_string();
 
     let mut only: Option<Option<HashSet<String>>> = None;
@@ -151,6 +185,7 @@ fn merge_dialog(
     only: &mut Option<Option<HashSet<String>>>,
 ) -> Result<DialogResult, DialogError> {
     let remote = source.repository().name();
+    let place = format!("in the fetch of {remote}");
     let selected = match objects {
         Objects::All => {
             cli::log::remark(format!(
@@ -160,14 +195,10 @@ fn merge_dialog(
             None
         }
         Objects::Named(objects) => Some(
-            named_closure(
-                store,
-                source,
-                tracked,
-                objects,
-                &format!("in the fetch of {remote}"),
-            )
-            .map_err(DialogError::Failed)?,
+            named_closure(store, source, tracked, objects, &place).map_err(DialogError::Failed)?,
+        ),
+        Objects::Typed(types) => Some(
+            typed_closure(store, source, tracked, types, &place).map_err(DialogError::Failed)?,
         ),
     };
     if let Some(selected) = &selected {
@@ -192,6 +223,33 @@ fn named_closure(
 ) -> Result<HashSet<String>, String> {
     let named = resolve_objects(objects, tracked, place)?;
     link_closure(store, source, &named, tracked, |_| Ok(())).map_err(|e| e.to_string())
+}
+
+/// The fetched objects of `types`, bare type names, and everything
+/// they link among the fetched refs. A deleted object keeps its type,
+/// so the remote's deletion of one is selected too. An error is the
+/// lines to show.
+pub fn typed_closure(
+    store: &Store,
+    source: &FetchSource,
+    tracked: &BTreeMap<String, String>,
+    types: &[String],
+    place: &str,
+) -> Result<HashSet<String>, String> {
+    let mut roots: Vec<String> = Vec::new();
+    for (ref_name, sha) in tracked {
+        if !ref_name.starts_with(OBJECT_REFS) {
+            continue;
+        }
+        let header = store.read_header(sha).map_err(|e| e.to_string())?;
+        if types.iter().any(|t| t == type_name(&header.object_type)) {
+            roots.push(ref_name.clone());
+        }
+    }
+    if roots.is_empty() {
+        return Err(format!("no object of type {} {place}", types.join(" or ")));
+    }
+    link_closure(store, source, &roots, tracked, |_| Ok(())).map_err(|e| e.to_string())
 }
 
 /// Decide the local refs from the tracking refs of `source`: every
@@ -311,10 +369,10 @@ fn report_lines(run: Run, source: &str, report: &MergeReport) -> Vec<String> {
 mod tests {
     use std::fs;
 
-    use gage_store::{NoteEdit, NoteStore, NoteValue, OBJECT_REFS, TagStore};
+    use gage_store::{NoteEdit, NoteStore, NoteValue, TagStore};
 
     use super::*;
-    use crate::cmd_fetch::tests::{note, object_ref, open_store, pair, plan};
+    use crate::cmd_fetch::tests::{issue, note, object_ref, open_store, pair, plan};
     use crate::cmd_fetch::transfer;
 
     fn edit_note(store: &Store, id: &str, value: &str) {
@@ -426,6 +484,74 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err, "zzzz: not found in the fetch of up");
+    }
+
+    /// A merge by type takes every fetched object of the type with
+    /// the notes it cites, and leaves the rest of the fetch unmerged.
+    #[test]
+    fn a_typed_merge_takes_the_objects_of_the_type_and_what_they_link() {
+        let (_tmp, up_store, down) = pair();
+        let cited = note(&up_store, "cited");
+        let other = note(&up_store, "other");
+        let with_evidence = issue(&up_store, "a", std::slice::from_ref(&cited));
+        let alone = issue(&up_store, "b", &[]);
+        fetch_all(&down);
+        let source = up();
+        let tracked = fetched_refs(&down, &source).unwrap();
+        let types = ["issue".to_string()];
+
+        let only = typed_closure(&down, &source, &tracked, &types, "here").unwrap();
+        let expected: HashSet<String> = [&with_evidence, &alone, &cited]
+            .map(|id| object_ref(id))
+            .into();
+        assert_eq!(only, expected);
+        merge(&down, &source, Some(&only), None).unwrap();
+
+        for id in [&with_evidence, &alone, &cited] {
+            assert!(down.rev_parse(&object_ref(id)).unwrap().is_some());
+        }
+        assert_eq!(down.rev_parse(&object_ref(&other)).unwrap(), None);
+
+        let err = typed_closure(
+            &down,
+            &source,
+            &tracked,
+            &["scan".to_string(), "share".to_string()],
+            "in the fetch of up",
+        )
+        .unwrap_err();
+        assert_eq!(err, "no object of type scan or share in the fetch of up");
+    }
+
+    /// The option takes a bare type name, and neither named objects,
+    /// --all, nor a side for conflicts goes with it. The side is
+    /// refused by a conflict of its own: clap drops what a side
+    /// requires once an option that conflicts with it is given.
+    #[test]
+    fn the_type_option_names_known_types_and_excludes_other_selections() {
+        use clap::Parser;
+
+        #[derive(Parser)]
+        struct Cli {
+            #[command(flatten)]
+            args: MergeArgs,
+        }
+        let parse = |args: &[&str]| Cli::try_parse_from([&["merge", "up"], args].concat());
+
+        let cli = parse(&["--type", "issue", "--type", "note"]).ok().unwrap();
+        match cli.args.types.objects() {
+            Some(Objects::Typed(types)) => assert_eq!(types, ["issue", "note"]),
+            _ => panic!("the option selects by type"),
+        }
+        assert!(parse(&[]).ok().unwrap().args.types.objects().is_none());
+        for refused in [
+            &["--type", "gage::issue"][..],
+            &["--type", "issue", "7zz"],
+            &["--type", "issue", "--all"],
+            &["--type", "issue", "--theirs"],
+        ] {
+            assert!(parse(refused).is_err(), "{refused:?}");
+        }
     }
 
     /// A divergence a note cannot merge is a conflict that names the
