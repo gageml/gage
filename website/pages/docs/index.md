@@ -14,6 +14,7 @@ description: Index of the Gage documentation
 - [Scans](/scans)
 - [Scanners](/scanners)
 - [Issues](/issues)
+- [Resolve](/resolve)
 - [Notes](/notes)
 
 **How to**

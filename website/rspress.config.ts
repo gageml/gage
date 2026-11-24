@@ -108,6 +108,7 @@ const SIDEBAR: SidebarItem[] = [
       { text: "Scans", link: "/scans" },
       { text: "Scanners", link: "/scanners" },
       { text: "Issues", link: "/issues" },
+      { text: "Resolve", link: "/resolve" },
       { text: "Notes", link: "/notes" },
     ],
   },
