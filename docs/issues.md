@@ -1,5 +1,8 @@
 ---
 title: Issues
+description:
+  What an issue is, how to list, view, and close issues, and what issue status
+  and authors mean
 ---
 
 If a scanner finds something worth reporting, it creates an _issue_. An issue

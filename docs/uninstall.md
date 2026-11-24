@@ -1,5 +1,6 @@
 ---
 title: Uninstall Gage
+description: How to remove the Gage plugin, binary, and data by hand
 ---
 
 Gage does not yet have an uninstaller.

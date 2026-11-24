@@ -1,5 +1,6 @@
 ---
 title: Docs
+description: Index of the Gage documentation
 ---
 
 **Introduction**

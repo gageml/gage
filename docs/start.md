@@ -1,5 +1,7 @@
 ---
 title: Quick start
+description:
+  How to install Gage, set it up in your coding agent, and run a first scan
 ---
 
 :::note

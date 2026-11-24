@@ -1,5 +1,8 @@
 ---
 title: Notes
+description:
+  What a note is, what a note can target, and how note names, authors, and
+  carry forward work
 ---
 
 _Notes_ are values that scanners and people assign to sessions, session lines,

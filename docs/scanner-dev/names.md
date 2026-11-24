@@ -1,3 +1,8 @@
+---
+description:
+  Conventions for naming the tasks, notes, and attachments of a scanner
+---
+
 # Scanner naming conventions
 
 ## Task names

@@ -6,6 +6,11 @@ import { pluginSitemap } from "@rspress/plugin-sitemap";
 import remarkDirective from "remark-directive";
 import remarkSmartypants from "remark-smartypants";
 import { cliLang } from "./theme/cli-lang";
+import {
+  llmsTxtBySidebar,
+  plainDirectives,
+  type SidebarItem,
+} from "./theme/llms";
 import { remarkCalloutVariant } from "./theme/remark-callout-variant";
 import { remarkLucide } from "./theme/remark-lucide";
 import { remarkPullquote } from "./theme/remark-pullquote";
@@ -87,12 +92,150 @@ const TOPICS: Topic[] = (
   ),
 }));
 
+const SIDEBAR: SidebarItem[] = [
+  {
+    text: "Introduction",
+    items: [
+      { text: "Quick start", link: "/start" },
+      { text: "Uninstall", link: "/uninstall" },
+    ],
+  },
+  {
+    text: "Concepts",
+    collapsed: true,
+    items: [
+      { text: "Sessions", link: "/sessions" },
+      { text: "Scans", link: "/scans" },
+      { text: "Scanners", link: "/scanners" },
+      { text: "Issues", link: "/issues" },
+      { text: "Notes", link: "/notes" },
+    ],
+  },
+  {
+    text: "How to",
+    collapsed: false,
+    items: [
+      {
+        text: "Session history",
+        items: [
+          {
+            text: "See context for a code change",
+            link: "/how-to/blame",
+          },
+          { text: "Recall a decision", link: "/how-to/recall" },
+        ],
+      },
+      {
+        text: "Measurement",
+        items: [{ text: "Scan a session", link: "/how-to/scan" }],
+      },
+      {
+        text: "Workflow",
+        items: [
+          {
+            text: "Take up work from another session",
+            link: "/how-to/take-up-work",
+          },
+        ],
+      },
+    ],
+  },
+  {
+    text: "Commands",
+    collapsed: true,
+    items: [
+      { text: "init", link: "/commands/init" },
+      { text: "status", link: "/commands/status" },
+      { text: "scan", link: "/commands/scan" },
+      { text: "resolve", link: "/commands/resolve" },
+      { text: "session", link: "/commands/session" },
+      { text: "dataset", link: "/commands/dataset" },
+      { text: "issue", link: "/commands/issue" },
+      { text: "note", link: "/commands/note" },
+      { text: "tag", link: "/commands/tag" },
+      { text: "attachment", link: "/commands/attachment" },
+      { text: "query", link: "/commands/query" },
+      { text: "blame", link: "/commands/blame" },
+      { text: "config", link: "/commands/config" },
+      { text: "native", link: "/commands/native" },
+      { text: "remote", link: "/commands/remote" },
+      { text: "push", link: "/commands/push" },
+      { text: "pull", link: "/commands/pull" },
+      { text: "fetch", link: "/commands/fetch" },
+      { text: "merge", link: "/commands/merge" },
+      { text: "backup", link: "/commands/backup" },
+      { text: "store", link: "/commands/store" },
+      { text: "index", link: "/commands/index" },
+      { text: "mcp", link: "/commands/mcp" },
+    ],
+  },
+  {
+    text: "Scanners",
+    collapsed: true,
+    items: [
+      { text: "checks", link: "/scanners/checks" },
+      { text: "code-review", link: "/scanners/code-review" },
+      {
+        text: "eval-annotation",
+        link: "/scanners/eval-annotation",
+      },
+      { text: "findings", link: "/scanners/findings" },
+      { text: "general", link: "/scanners/general" },
+      {
+        text: "session-retention",
+        link: "/scanners/session-retention",
+      },
+    ],
+  },
+  {
+    text: "Scanner development",
+    collapsed: true,
+    items: [
+      { text: "Naming conventions", link: "/scanner-dev/names" },
+      { text: "Language server", link: "/scanner-dev/lsp" },
+    ],
+  },
+  {
+    text: "Reference",
+    collapsed: true,
+    items: [{ text: "Tools", link: "/tools" }],
+  },
+];
+
+const OUT_DIR = path.join(__dirname, "doc_build");
+
+// Rewrite the Markdown copies and llms-full.txt once the build has
+// written them. Rspress has no hook into its Markdown rendering.
+function gageLlmsMarkdownPlugin(): RspressPlugin {
+  return {
+    name: "gage-llms-markdown",
+    afterBuild(_config, isProd) {
+      if (!isProd) return;
+      const rewrite = (file: string) => {
+        const before = fs.readFileSync(file, "utf8");
+        const after = plainDirectives(before);
+        if (after !== before) fs.writeFileSync(file, after);
+      };
+      const walk = (dir: string) => {
+        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+          const full = path.join(dir, entry.name);
+          if (entry.isDirectory()) walk(full);
+          else if (entry.name.endsWith(".md")) rewrite(full);
+        }
+      };
+      walk(OUT_DIR);
+      rewrite(path.join(OUT_DIR, "llms-full.txt"));
+    },
+  };
+}
+
 export default defineConfig({
   root: path.join(__dirname, "pages"),
-  plugins: [gageDocsPlugin(DOCS), pluginSitemap()],
+  plugins: [gageDocsPlugin(DOCS), pluginSitemap(), gageLlmsMarkdownPlugin()],
+  outDir: OUT_DIR,
   title: "Gage",
   siteOrigin: "https://docs.gage.io",
-  llms: true,
+  llms: { llmsTxt: llmsTxtBySidebar(SIDEBAR) },
   icon: "/favicon.ico",
   builderConfig: {
     source: {
@@ -191,116 +334,6 @@ export default defineConfig({
       { text: "Docs", link: "/docs/", activeMatch: "/docs/" },
       { text: "Scanners", link: "/scanners", activeMatch: "/scanners" },
     ],
-    sidebar: {
-      "/": [
-        {
-          text: "Introduction",
-          items: [
-            { text: "Quick start", link: "/start" },
-            { text: "Uninstall", link: "/uninstall" },
-          ],
-        },
-        {
-          text: "Concepts",
-          collapsed: true,
-          items: [
-            { text: "Sessions", link: "/sessions" },
-            { text: "Scans", link: "/scans" },
-            { text: "Scanners", link: "/scanners" },
-            { text: "Issues", link: "/issues" },
-            { text: "Notes", link: "/notes" },
-          ],
-        },
-        {
-          text: "How to",
-          collapsed: false,
-          items: [
-            {
-              text: "Session history",
-              items: [
-                {
-                  text: "See context for a code change",
-                  link: "/how-to/blame",
-                },
-                { text: "Recall a decision", link: "/how-to/recall" },
-              ],
-            },
-            {
-              text: "Measurement",
-              items: [{ text: "Scan a session", link: "/how-to/scan" }],
-            },
-            {
-              text: "Workflow",
-              items: [
-                {
-                  text: "Take up work from another session",
-                  link: "/how-to/take-up-work",
-                },
-              ],
-            },
-          ],
-        },
-        {
-          text: "Commands",
-          collapsed: true,
-          items: [
-            { text: "init", link: "/commands/init" },
-            { text: "status", link: "/commands/status" },
-            { text: "scan", link: "/commands/scan" },
-            { text: "resolve", link: "/commands/resolve" },
-            { text: "session", link: "/commands/session" },
-            { text: "dataset", link: "/commands/dataset" },
-            { text: "issue", link: "/commands/issue" },
-            { text: "note", link: "/commands/note" },
-            { text: "tag", link: "/commands/tag" },
-            { text: "attachment", link: "/commands/attachment" },
-            { text: "query", link: "/commands/query" },
-            { text: "blame", link: "/commands/blame" },
-            { text: "config", link: "/commands/config" },
-            { text: "native", link: "/commands/native" },
-            { text: "remote", link: "/commands/remote" },
-            { text: "push", link: "/commands/push" },
-            { text: "pull", link: "/commands/pull" },
-            { text: "fetch", link: "/commands/fetch" },
-            { text: "merge", link: "/commands/merge" },
-            { text: "backup", link: "/commands/backup" },
-            { text: "store", link: "/commands/store" },
-            { text: "index", link: "/commands/index" },
-            { text: "mcp", link: "/commands/mcp" },
-          ],
-        },
-        {
-          text: "Scanners",
-          collapsed: true,
-          items: [
-            { text: "checks", link: "/scanners/checks" },
-            { text: "code-review", link: "/scanners/code-review" },
-            {
-              text: "eval-annotation",
-              link: "/scanners/eval-annotation",
-            },
-            { text: "findings", link: "/scanners/findings" },
-            { text: "general", link: "/scanners/general" },
-            {
-              text: "session-retention",
-              link: "/scanners/session-retention",
-            },
-          ],
-        },
-        {
-          text: "Scanner development",
-          collapsed: true,
-          items: [
-            { text: "Naming conventions", link: "/scanner-dev/names" },
-            { text: "Language server", link: "/scanner-dev/lsp" },
-          ],
-        },
-        {
-          text: "Reference",
-          collapsed: true,
-          items: [{ text: "Tools", link: "/tools" }],
-        },
-      ],
-    },
+    sidebar: { "/": SIDEBAR },
   },
 });

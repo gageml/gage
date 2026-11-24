@@ -1,5 +1,8 @@
 ---
 title: Scans
+description:
+  What a scan is, how to start one, and how a scan reads sessions from a
+  dataset
 ---
 
 A _scan_ (or scan _run_) is the process of scanning sessions.

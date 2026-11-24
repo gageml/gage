@@ -1,5 +1,8 @@
 ---
 title: Scanners
+description:
+  What a scanner is, where Gage loads scanners from, and how scanners are
+  grouped
 ---
 
 A scanner is a small program that reports issues it finds in your sessions or

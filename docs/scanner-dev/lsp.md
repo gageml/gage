@@ -1,3 +1,9 @@
+---
+description:
+  How to install the Gage language server and set it up in VS Code for scanner
+  development
+---
+
 # Gage language server
 
 To install the Gage LSP (language support for Gage scanners), install the
