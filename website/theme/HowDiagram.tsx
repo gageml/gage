@@ -1,6 +1,7 @@
 import { Zap } from "lucide-react";
 import { useEffect, useState } from "react";
 import {
+  type Caption,
   type End,
   type PartKind,
   SCENE,
@@ -27,6 +28,7 @@ const SIZES: Record<PartKind, { w: number; h: number }> = {
   model: { w: 132, h: 62 },
   gage: { w: 160, h: 120 },
   logs: { w: 94, h: 104 },
+  issues: { w: 94, h: 104 },
 };
 
 // The size of a part as placed, after its scale.
@@ -105,6 +107,16 @@ function PartShape({ kind }: { kind: PartKind }) {
             d="M0 16h48l22 22v66h-70zM48 16v22h22"
           />
           <path className="gage-how__detail" d="M12 58h46M12 72h46M12 86h30" />
+        </>
+      );
+    case "issues":
+      return (
+        <>
+          <rect className="gage-how__shape" width="94" height="104" rx="8" />
+          <circle className="gage-how__shape" cx="20" cy="28" r="5" />
+          <circle className="gage-how__shape" cx="20" cy="52" r="5" />
+          <circle className="gage-how__shape" cx="20" cy="76" r="5" />
+          <path className="gage-how__detail" d="M36 28h42M36 52h42M36 76h28" />
         </>
       );
   }
@@ -280,6 +292,86 @@ function Callout({ note, href }: { note: SceneNote; href: string }) {
   );
 }
 
+// The height of a line of caption words, in drawing units: the 16px
+// note size times the 1.35 line spacing.
+const CAPTION_LINE = 21.6;
+
+// The size of a command caption's pane. A mono letter at the 15px
+// command size is 9 units wide, which gives the pane its width.
+const CODE_LETTER = 9;
+const CODE_PAD = 9;
+const CODE_HEIGHT = 28;
+
+// A caption that is a command: one line of mono words in a bordered
+// pane. The caption's anchor places the pane, not the words, so an
+// "end" caption has the pane's right edge at x.
+function CodeCaption({
+  caption,
+  mid,
+}: {
+  caption: Caption;
+  mid: [number, number];
+}) {
+  const w = caption.text.length * CODE_LETTER + 2 * CODE_PAD;
+  const x = mid[0] + caption.dx;
+  const y = mid[1] + caption.dy;
+  const left =
+    caption.anchor === "start"
+      ? x
+      : caption.anchor === "end"
+        ? x - w
+        : x - w / 2;
+  return (
+    <>
+      <rect
+        className="gage-how__pane"
+        x={left}
+        y={y - 19}
+        width={w}
+        height={CODE_HEIGHT}
+        rx="6"
+      />
+      <text
+        className="gage-how__note gage-how__note--code"
+        x={left + w / 2}
+        y={y}
+        textAnchor="middle"
+      >
+        {caption.text}
+      </text>
+    </>
+  );
+}
+
+// The words on a line. A caption above its line grows upward, so the
+// last line of words keeps its distance from the line.
+function LinkCaption({
+  caption,
+  mid,
+}: {
+  caption: Caption;
+  mid: [number, number];
+}) {
+  if (caption.code) return <CodeCaption caption={caption} mid={mid} />;
+  const lines = caption.text.split("\n");
+  const x = mid[0] + caption.dx;
+  const rise = caption.dy < 0 ? (lines.length - 1) * CAPTION_LINE : 0;
+  return (
+    <text
+      className="gage-how__note"
+      x={x}
+      y={mid[1] + caption.dy - rise}
+      textAnchor={caption.anchor}
+    >
+      {lines.map((line, index) => (
+        <tspan key={line} x={x} dy={index === 0 ? 0 : CAPTION_LINE}>
+          {line}
+        </tspan>
+      ))}
+    </text>
+  );
+}
+
 export function HowDiagram({
   parts,
   view,
@@ -354,16 +446,7 @@ export function HowDiagram({
               markerStart={link.both ? head : undefined}
               markerEnd={head}
             />
-            {link.caption && (
-              <text
-                className="gage-how__note"
-                x={mid[0] + link.caption.dx}
-                y={mid[1] + link.caption.dy}
-                textAnchor={link.caption.anchor}
-              >
-                {link.caption.text}
-              </text>
-            )}
+            {link.caption && <LinkCaption caption={link.caption} mid={mid} />}
           </g>
         );
       })}

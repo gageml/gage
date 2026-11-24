@@ -446,6 +446,19 @@
   fill: var(--rp-c-text-1);
 }
 
+/* A caption that is a command the reader types. */
+.gage-how__note--code {
+  font-family: var(--rp-font-family-mono, ui-monospace, monospace);
+  font-size: 15px;
+}
+
+/* The pane behind a command caption. */
+.gage-how__pane {
+  fill: var(--rp-c-bg-soft);
+  stroke: var(--rp-c-divider);
+  stroke-width: 1;
+}
+
 /* The callout is a link in the blue of the Gage part, a shade darker
    on a light page and a shade lighter on a dark one so the words read
    on either. */
