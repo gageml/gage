@@ -5,6 +5,8 @@ description:
   session
 ---
 
+<!-- test -->
+
 Resolve is a skill that the Gage plugin installs in your coding agent. It works
 through your issues with you. The agent explains each issue, checks whether it
 still applies, and makes the fixes you approve.
@@ -70,8 +72,8 @@ You decide what happens next. The agent makes no change until you approve it.
   that it worked. It then closes the issue as completed.
 - To dismiss the issue, tell the agent. It closes the issue as wontfix and
   records your reason.
-- To put the issue off, tell the agent. It returns the issue to open so that
-  you can take it up later.
+- To put the issue off, tell the agent. It returns the issue to open so that you
+  can take it up later.
 
 ## Work in several sessions
 

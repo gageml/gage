@@ -24,8 +24,8 @@ landing:
   how:
     title: How it works
     lead:
-      Gage lets you search your local sessions using SQL — without a
-      database!
+      Gage lets you search your local sessions using SQL (without the
+      complexity of a database)
   can:
     title: What you can do with Gage
     points:
