@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@rspress/core": "2.0.20",
+    "@rspress/plugin-sitemap": "2.0.20",
     "lucide-react": "1.17.0"
   },
   "devDependencies": {

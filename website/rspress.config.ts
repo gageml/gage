@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { RspressPlugin } from "@rspress/core";
 import { defineConfig } from "@rspress/core";
+import { pluginSitemap } from "@rspress/plugin-sitemap";
 import remarkDirective from "remark-directive";
 import remarkSmartypants from "remark-smartypants";
 import { cliLang } from "./theme/cli-lang";
@@ -88,8 +89,10 @@ const TOPICS: Topic[] = (
 
 export default defineConfig({
   root: path.join(__dirname, "pages"),
-  plugins: [gageDocsPlugin(DOCS)],
+  plugins: [gageDocsPlugin(DOCS), pluginSitemap()],
   title: "Gage",
+  siteOrigin: "https://docs.gage.io",
+  llms: true,
   icon: "/favicon.ico",
   builderConfig: {
     source: {

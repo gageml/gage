@@ -11,6 +11,9 @@ importers:
       '@rspress/core':
         specifier: 2.0.20
         version: 2.0.20(@rspack/core@2.1.10(@swc/helpers@0.5.23))(micromark-util-types@2.0.2)(micromark@4.0.2(supports-color@10.2.2))(supports-color@10.2.2)
+      '@rspress/plugin-sitemap':
+        specifier: 2.0.20
+        version: 2.0.20(@rspress/core@2.0.20(@rspack/core@2.1.10(@swc/helpers@0.5.23))(micromark-util-types@2.0.2)(micromark@4.0.2(supports-color@10.2.2))(supports-color@10.2.2))
       lucide-react:
         specifier: 1.17.0
         version: 1.17.0(react@19.2.7)
@@ -255,6 +258,12 @@ packages:
     resolution: {integrity: sha512-JR+hsQicVDQIj7122KyIJrkwZCuVEXZm4MDLcXaoBHdtMP3hoK6cp1ZXEb0LdnKwG2MduFlK6i+L7vGLrN8QZA==}
     engines: {node: ^20.19.0 || >=22.12.0}
     hasBin: true
+
+  '@rspress/plugin-sitemap@2.0.20':
+    resolution: {integrity: sha512-B5yOTL+7vwTKjnb64/fAAoU9Bk8//jwAWN9U16O944r9IA56kaTHhxzwp/u215fJwjkhiYo8ujK5W9vwAl6rvw==}
+    engines: {node: ^20.19.0 || >=22.12.0}
+    peerDependencies:
+      '@rspress/core': ^2.0.10
 
   '@rspress/shared@2.0.20':
     resolution: {integrity: sha512-+e55crMZom5BQLgebrT4Pz4Zg0P7JIsYnDz4Ey65CTloFhfan1rARQpgb74b2bf5kKv/sPbPw6pfD8Fu74mCPQ==}
@@ -1298,6 +1307,10 @@ snapshots:
       - micromark
       - micromark-util-types
       - supports-color
+
+  '@rspress/plugin-sitemap@2.0.20(@rspress/core@2.0.20(@rspack/core@2.1.10(@swc/helpers@0.5.23))(micromark-util-types@2.0.2)(micromark@4.0.2(supports-color@10.2.2))(supports-color@10.2.2))':
+    dependencies:
+      '@rspress/core': 2.0.20(@rspack/core@2.1.10(@swc/helpers@0.5.23))(micromark-util-types@2.0.2)(micromark@4.0.2(supports-color@10.2.2))(supports-color@10.2.2)
 
   '@rspress/shared@2.0.20(supports-color@10.2.2)':
     dependencies:
