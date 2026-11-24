@@ -1,6 +1,7 @@
 //! The `scan` table: one row per live scan object. The markers come
 //! from the index; the run attributes and the dataset id come from
-//! the object, read for every row. The schema and row builder are
+//! the object, whose `attrs.json` and `dataset.link` are read for
+//! every row and the rest of whose content is not. The schema and row builder are
 //! shared with the scan scope, whose one row may describe an active
 //! scan: no markers, no commit, and a run that has not stopped, so
 //! those columns are nullable.
@@ -18,7 +19,7 @@ use gage_core::uuid::short_uuid;
 use gage_session::system;
 
 use super::batch::{BatchSource, BatchTable, external, marker, readable, unique_prefix_lens};
-use crate::{Order, SCAN_TYPE, ScanRecord, ScanStore, Store};
+use crate::{Order, SCAN_TYPE, ScanAttrs, ScanRecord, ScanStore, Store};
 
 fn timestamp() -> DataType {
     DataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into()))
@@ -78,11 +79,32 @@ impl ScanRow {
         dataset_id: Option<String>,
         id_prefix: String,
     ) -> Self {
-        let attrs = &record.content.attrs;
+        let mut row = ScanRow::stored(
+            &record.id,
+            &record.commit_sha,
+            &record.content.attrs,
+            dataset_id.zip(record.content.dataset.clone()),
+            id_prefix,
+        );
+        row.modified_ms = Some(record.modified_ms);
+        row.created_ms = Some(record.created_ms);
+        row
+    }
+
+    /// The row of a stored scan from its run attributes, without the
+    /// markers. `dataset` is the dataset's id and the commit the scan
+    /// read.
+    fn stored(
+        id: &str,
+        commit_sha: &str,
+        attrs: &ScanAttrs,
+        dataset: Option<(String, String)>,
+        id_prefix: String,
+    ) -> Self {
         ScanRow {
-            id: record.id.clone(),
-            modified_ms: Some(record.modified_ms),
-            created_ms: Some(record.created_ms),
+            id: id.to_string(),
+            modified_ms: None,
+            created_ms: None,
             runtime: Some(attrs.runtime.clone()),
             started_ms: Some(attrs.started),
             stopped_ms: Some(attrs.stopped),
@@ -90,9 +112,9 @@ impl ScanRow {
             tasks: attrs.tasks.total as i64,
             completed: attrs.tasks.completed as i64,
             failed: attrs.tasks.failed as i64,
-            dataset: dataset_id.zip(record.content.dataset.clone()),
+            dataset,
             id_prefix,
-            commit: Some(record.commit_sha.clone()),
+            commit: Some(commit_sha.to_string()),
         }
     }
 }
@@ -176,16 +198,21 @@ impl BatchSource for Source {
             unique_prefix_lens(store.short_prefix_ids(Some(SCAN_TYPE)).map_err(external)?);
         let mut rows = Vec::with_capacity(tips.len());
         for tip in &tips {
-            let Some(record) = readable(scans.at_commit(&tip.sha))? else {
+            let Some(summary) = readable(scans.summary_at_commit(&tip.sha))? else {
                 continue;
             };
-            let dataset_id = match &record.content.dataset {
-                Some(sha) => Some(store.read_header(sha).map_err(external)?.id),
+            let dataset = match summary.dataset {
+                Some(sha) => Some((store.read_header(&sha).map_err(external)?.id, sha)),
                 None => None,
             };
             let n = prefix_len.get(&tip.id).copied().unwrap_or(tip.id.len());
-            let mut row =
-                ScanRow::from_record(&record, dataset_id, tip.id.chars().take(n).collect());
+            let mut row = ScanRow::stored(
+                &tip.id,
+                &tip.sha,
+                &summary.attrs,
+                dataset,
+                tip.id.chars().take(n).collect(),
+            );
             row.modified_ms = Some(marker(&tip.id, "modified", tip.modified_ms)?);
             row.created_ms = Some(marker(&tip.id, "created", tip.created_ms)?);
             rows.push(row);

@@ -343,7 +343,8 @@ enum Kind {
 }
 
 /// Rows over every live scan, newest first, read from each scan
-/// object.
+/// object's `tasks/` tree and, for the task table, its `plan.json`.
+/// Nothing else of the scan is read.
 #[derive(Debug)]
 struct Source(Kind);
 
@@ -365,24 +366,21 @@ impl BatchSource for Source {
         let mut task_rows = Vec::new();
         let mut agent_rows = Vec::new();
         for tip in &tips {
-            let Some(record) = readable(scans.at_commit(&tip.sha))? else {
+            let Some(tasks) = readable(scans.tasks_at_commit(&tip.sha))? else {
                 continue;
             };
-            let content = &record.content;
             match self.0 {
-                Kind::Task => task_rows.extend(task_rows_of(
-                    &record.id,
-                    Some(&record.commit_sha),
-                    &content.tasks,
-                    content.plan.as_ref(),
-                )),
+                Kind::Task => {
+                    let plan = scans.plan_at_commit(&tip.sha).map_err(external)?;
+                    task_rows.extend(task_rows_of(&tip.id, Some(&tip.sha), &tasks, plan.as_ref()));
+                }
                 Kind::Agent => agent_rows.extend(agent_rows_of(
-                    &record.id,
-                    Some(&record.commit_sha),
-                    &content.tasks,
+                    &tip.id,
+                    Some(&tip.sha),
+                    &tasks,
                     |scanner, task, id| {
                         scans
-                            .agent_file(&record.commit_sha, scanner, task, id, "result")
+                            .agent_file(&tip.sha, scanner, task, id, "result")
                             .map_err(external)
                     },
                 )?),

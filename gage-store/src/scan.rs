@@ -31,7 +31,7 @@ use crate::git::EntryKind;
 use crate::index::{ObjectQuery, Order, SelectedTip};
 use crate::issue::{IssueStore, OBJECT_TYPE as ISSUE_TYPE};
 use crate::note::{NoteStore, OBJECT_TYPE as NOTE_TYPE};
-use crate::object::{ObjectTree, require_type};
+use crate::object::{ObjectTree, require_header_type, require_type};
 use crate::scan_dir::ScanDirLayout;
 use crate::session::{OBJECT_TYPE as SESSION_TYPE, build_files_tree_inner};
 use crate::writer::{TreeInput, mktree, write_blob};
@@ -266,6 +266,14 @@ pub struct ScanContent {
     pub scanners: BTreeMap<String, Vec<String>>,
 }
 
+/// The part of a stored scan that a listing of every scan reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ScanSummary {
+    pub attrs: ScanAttrs,
+    /// The commit SHA of the scanned dataset, from `dataset.link`
+    pub dataset: Option<String>,
+}
+
 /// A scan read from the store: its content plus the object markers.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScanRecord {
@@ -404,6 +412,45 @@ impl ScanStore<'_> {
         let object = self.store.read_object(commit_sha)?;
         require_type(&object, OBJECT_TYPE)?;
         self.record(&object.commit_sha)
+    }
+
+    /// The run attributes and the dataset link of the scan at
+    /// `commit_sha`. Reads those two files only, where
+    /// [`ScanStore::at_commit`] decodes the whole scan; a listing over
+    /// every scan uses this.
+    pub(crate) fn summary_at_commit(&self, commit_sha: &str) -> Result<ScanSummary, StoreError> {
+        let files = self.scan_files(commit_sha)?;
+        Ok(ScanSummary {
+            attrs: read_json(&files, ATTRS_FILE)?,
+            dataset: read_dataset_link(&files)?,
+        })
+    }
+
+    /// The tasks of the scan at `commit_sha`, in `tasks/` tree order,
+    /// read without the rest of the scan.
+    pub(crate) fn tasks_at_commit(&self, commit_sha: &str) -> Result<Vec<ScanTask>, StoreError> {
+        read_tasks(&self.scan_files(commit_sha)?)
+    }
+
+    /// The resolved task plan of the scan at `commit_sha`, read
+    /// without the rest of the scan. `None` for a scan written
+    /// without one.
+    pub(crate) fn plan_at_commit(
+        &self,
+        commit_sha: &str,
+    ) -> Result<Option<serde_json::Value>, StoreError> {
+        read_plan(&self.scan_files(commit_sha)?)
+    }
+
+    /// The files of the scan at `commit_sha`, once its markers name a
+    /// scan this build reads.
+    fn scan_files<'c>(&'c self, commit_sha: &'c str) -> Result<CommitFiles<'c>, StoreError> {
+        let header = self.store.read_header(commit_sha)?;
+        require_header_type(&header, OBJECT_TYPE)?;
+        Ok(CommitFiles {
+            store: self.store,
+            commit: commit_sha,
+        })
     }
 
     /// Every live scan, newest created first, read lazily.
@@ -632,29 +679,12 @@ impl ScanContent {
     /// must list exactly one SHA.
     pub fn from_files(files: &dyn ScanFiles) -> Result<ScanContent, StoreError> {
         let attrs = read_json(files, ATTRS_FILE)?;
-        let dataset = match read_link(files, DATASET_LINK)? {
-            None => None,
-            Some(shas) => match shas.as_slice() {
-                [sha] => Some(sha.clone()),
-                _ => {
-                    return Err(StoreError::Parse(format!(
-                        "scan file {DATASET_LINK}: expected one SHA, found {}",
-                        shas.len()
-                    )));
-                }
-            },
-        };
+        let dataset = read_dataset_link(files)?;
         let notes = read_link(files, NOTES_LINK)?.unwrap_or_default();
         let notes_carried = read_link(files, NOTES_CARRIED_LINK)?.unwrap_or_default();
         let issues = read_link(files, ISSUES_LINK)?.unwrap_or_default();
         let watermarks = read_watermarks(files)?;
-        let plan = match files.read(PLAN_FILE)? {
-            Some(bytes) => Some(
-                serde_json::from_slice(&bytes)
-                    .map_err(|e| StoreError::Parse(format!("scan file {PLAN_FILE}: {e}")))?,
-            ),
-            None => None,
-        };
+        let plan = read_plan(files)?;
         let logs = files.list_files(LOGS_DIR)?;
         let tasks = read_tasks(files)?;
         let mut scanners = BTreeMap::new();
@@ -676,6 +706,29 @@ impl ScanContent {
             tasks,
             scanners,
         })
+    }
+}
+
+/// The commit SHA in `dataset.link`, or `None` without the file. The
+/// file must list exactly one SHA.
+fn read_dataset_link(files: &dyn ScanFiles) -> Result<Option<String>, StoreError> {
+    match read_link(files, DATASET_LINK)? {
+        None => Ok(None),
+        Some(shas) => match shas.as_slice() {
+            [sha] => Ok(Some(sha.clone())),
+            _ => Err(StoreError::Parse(format!(
+                "scan file {DATASET_LINK}: expected one SHA, found {}",
+                shas.len()
+            ))),
+        },
+    }
+}
+
+/// `plan.json` decoded, or `None` without the file.
+fn read_plan(files: &dyn ScanFiles) -> Result<Option<serde_json::Value>, StoreError> {
+    match files.read(PLAN_FILE)? {
+        Some(bytes) => Ok(Some(parse_json(&bytes, PLAN_FILE)?)),
+        None => Ok(None),
     }
 }
 
@@ -1750,6 +1803,62 @@ mod tests {
             record.content,
             ScanContent::from_files(&DirFiles::new(&scan_dir.join("scan"))).unwrap()
         );
+    }
+
+    #[test]
+    fn the_partial_readers_return_the_same_parts_as_the_full_record() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let datasets = DatasetStore::from(&store);
+        let dataset_id = datasets.create().unwrap();
+        let dataset_sha = datasets.get(&dataset_id).unwrap().commit_sha;
+        let id = new_uuid();
+        let scan_dir = new_scan_dir(tmp.path(), &id);
+        write(
+            &scan_dir.join("scan/dataset.link"),
+            &format!("{dataset_sha}\n"),
+        );
+        write(
+            &scan_dir.join("scan/plan.json"),
+            r#"{"tasks":[{"task":"hello:greet","selected":"explicit"}]}"#,
+        );
+        let scans = ScanStore::from(&store);
+        let commit = scans.create_from_dir(&scan_dir).unwrap();
+        let content = scans.get(&id).unwrap().content;
+        assert!(content.dataset.is_some());
+        assert!(content.plan.is_some());
+        assert_eq!(content.tasks.len(), 2);
+
+        assert_eq!(
+            scans.summary_at_commit(&commit).unwrap(),
+            ScanSummary {
+                attrs: content.attrs,
+                dataset: content.dataset,
+            }
+        );
+        assert_eq!(scans.tasks_at_commit(&commit).unwrap(), content.tasks);
+        assert_eq!(scans.plan_at_commit(&commit).unwrap(), content.plan);
+    }
+
+    #[test]
+    fn the_partial_readers_reject_a_commit_that_is_not_a_scan() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let datasets = DatasetStore::from(&store);
+        let dataset_id = datasets.create().unwrap();
+        let dataset_sha = datasets.get(&dataset_id).unwrap().commit_sha;
+        let scans = ScanStore::from(&store);
+
+        let wrong_type = |err: StoreError| {
+            assert!(
+                matches!(&err, StoreError::WrongType { expected, actual, .. }
+                    if expected == OBJECT_TYPE && actual == DATASET_TYPE),
+                "{err}"
+            );
+        };
+        wrong_type(scans.summary_at_commit(&dataset_sha).unwrap_err());
+        wrong_type(scans.tasks_at_commit(&dataset_sha).unwrap_err());
+        wrong_type(scans.plan_at_commit(&dataset_sha).unwrap_err());
     }
 
     #[test]

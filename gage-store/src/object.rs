@@ -1034,18 +1034,24 @@ pub(crate) fn require_target_commit(
 /// the one this build writes for the type. An older version passes;
 /// each type's decoder reads every version up to its own.
 pub(crate) fn require_type(object: &Object, expected: &str) -> Result<(), StoreError> {
-    if object.header.object_type != expected {
+    require_header_type(&object.header, expected)
+}
+
+/// [`require_type`] over an object's markers alone, for a reader that
+/// does not load the object.
+pub(crate) fn require_header_type(header: &ObjectHeader, expected: &str) -> Result<(), StoreError> {
+    if header.object_type != expected {
         return Err(StoreError::WrongType {
-            id: object.header.id.clone(),
+            id: header.id.clone(),
             expected: expected.to_string(),
-            actual: object.header.object_type.clone(),
+            actual: header.object_type.clone(),
         });
     }
     let Some(supported) = object_version(expected) else {
         return Ok(());
     };
-    let id = &object.header.id;
-    let found = parse_version(&object.header.version, id)?;
+    let id = &header.id;
+    let found = parse_version(&header.version, id)?;
     let supported = parse_version(supported, id)?;
     if found > supported {
         return Err(StoreError::ObjectVersion {
