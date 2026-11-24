@@ -71,8 +71,8 @@ mod withheld;
 mod writer;
 
 pub use admin::{
-    GcOutcome, HOOK_VERSION, InitOutcome, STORE_VERSION, StoreStatus, init, init_with_cache_root,
-    store_path,
+    GcOutcome, HOOK_VERSION, InitOutcome, STORE_VERSION, StoreOrigin, StoreStatus, init,
+    init_with_cache_root, set_project_store, store_origin, store_path,
 };
 pub use attachment::{
     AttachmentAddOutcome, AttachmentAttrs, AttachmentFile, AttachmentOutcome, AttachmentQuery,

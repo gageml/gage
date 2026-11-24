@@ -8,8 +8,8 @@ use std::sync::Arc;
 
 use anyhow::{Context, anyhow, bail};
 use gage_core::config::{
-    Config, DriversConfig, ProjectConfig, default_cache_root, display_user_config_path,
-    project_config_paths,
+    Config, DriversConfig, ProjectConfig, ProjectStore, default_cache_root,
+    display_user_config_path, project_config_paths, project_store,
 };
 use gage_core::path::shorten_home;
 use gage_registry::driver::{
@@ -58,6 +58,27 @@ pub fn configure_drivers() -> Result<(), CliError> {
     set_native_names(native.into_iter().collect())
         .context("native")
         .map_err(CliError::from)
+}
+
+/// Name the store of the project the command runs in, when a project
+/// config between the current directory and the home directory sets
+/// one. A project config that does not load, or one whose store is
+/// outside the project, is an error, so that a command never falls
+/// back to the user's store and writes a project's data there.
+pub fn configure_store() -> Result<(), CliError> {
+    let Some(store) = project_store_here()? else {
+        return Ok(());
+    };
+    gage_store::set_project_store(store.path)
+        .map_err(|set| anyhow!("project store is already {}", set.display()))
+        .map_err(CliError::from)
+}
+
+/// The store of the nearest project that names one, walking up from
+/// the current directory.
+pub fn project_store_here() -> anyhow::Result<Option<ProjectStore>> {
+    let cwd = env::current_dir().context("reading the current directory")?;
+    Ok(project_store(&cwd)?)
 }
 
 /// The `[native]` table of one project config

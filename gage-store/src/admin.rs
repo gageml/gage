@@ -8,6 +8,7 @@ use std::env;
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use gage_core::config::{default_cache_root, gage_home};
 
@@ -60,23 +61,67 @@ pub(crate) const PRE_PUSH_HOOK: &str = include_str!("hooks/pre-push");
 /// Relative path of the pre-push hook inside the store.
 pub(crate) const PRE_PUSH_HOOK_PATH: &str = "hooks/pre-push";
 
-/// Path to the default store: `$GAGE_STORE` when set, else
-/// `<gage_home>/store.git`, located as [`locate`] does so a working
-/// tree names its repository. The variable moves the store alone;
-/// the cache, config, and everything else under the home stay where
-/// `GAGE_HOME` puts them.
-pub fn store_path() -> PathBuf {
-    locate(&store_path_from(
-        env::var_os("GAGE_STORE").as_deref(),
-        &gage_home(),
-    ))
+/// The store of the project this process runs in, once named
+static PROJECT_STORE: OnceLock<PathBuf> = OnceLock::new();
+
+/// Name the store of the project this process runs in, which
+/// [`store_path`] returns when `GAGE_STORE` is not set. The path is
+/// fixed once set. Naming a different one afterwards is refused with
+/// the path already set.
+pub fn set_project_store(path: PathBuf) -> Result<(), PathBuf> {
+    let set = PROJECT_STORE.get_or_init(|| path.clone());
+    if *set == path {
+        Ok(())
+    } else {
+        Err(set.clone())
+    }
 }
 
-/// The store path for a `GAGE_STORE` value and a home.
-fn store_path_from(gage_store: Option<&OsStr>, home: &Path) -> PathBuf {
-    match gage_store {
-        Some(path) if !path.is_empty() => PathBuf::from(path),
-        _ => home.join("store.git"),
+/// What selected the store [`store_path`] returns
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StoreOrigin {
+    /// The `GAGE_STORE` variable
+    Variable,
+    /// A project config, through [`set_project_store`]
+    Project,
+    /// The Gage home
+    Home,
+}
+
+/// Path to the default store: `$GAGE_STORE` when set, else the
+/// project's store when [`set_project_store`] named one, else
+/// `<gage_home>/store.git`, located as [`locate`] does so a working
+/// tree names its repository. The variable and the project move the
+/// store alone; the cache, config, and everything else under the
+/// home stay where `GAGE_HOME` puts them.
+pub fn store_path() -> PathBuf {
+    locate(&default_store().0)
+}
+
+/// What selected the store [`store_path`] returns.
+pub fn store_origin() -> StoreOrigin {
+    default_store().1
+}
+
+fn default_store() -> (PathBuf, StoreOrigin) {
+    store_path_from(
+        env::var_os("GAGE_STORE").as_deref(),
+        PROJECT_STORE.get().map(PathBuf::as_path),
+        &gage_home(),
+    )
+}
+
+/// The store path for a `GAGE_STORE` value, a project's store, and a
+/// home, with what selected it.
+fn store_path_from(
+    gage_store: Option<&OsStr>,
+    project: Option<&Path>,
+    home: &Path,
+) -> (PathBuf, StoreOrigin) {
+    match (gage_store, project) {
+        (Some(path), _) if !path.is_empty() => (PathBuf::from(path), StoreOrigin::Variable),
+        (_, Some(path)) => (path.to_path_buf(), StoreOrigin::Project),
+        _ => (home.join("store.git"), StoreOrigin::Home),
     }
 }
 
@@ -473,19 +518,26 @@ mod tests {
     };
 
     #[test]
-    fn store_path_is_gage_store_when_set_else_under_the_home() {
+    fn store_path_is_gage_store_then_the_project_store_then_under_the_home() {
         let home = Path::new("/h/.gage");
+        let project = Path::new("/p/.gage/store.git");
+        let variable = OsStr::new("/v/store.git");
+        let at_home = (PathBuf::from("/h/.gage/store.git"), StoreOrigin::Home);
+        assert_eq!(store_path_from(None, None, home), at_home);
+        assert_eq!(store_path_from(Some(OsStr::new("")), None, home), at_home);
         assert_eq!(
-            store_path_from(None, home),
-            PathBuf::from("/h/.gage/store.git")
+            store_path_from(Some(variable), None, home),
+            (PathBuf::from("/v/store.git"), StoreOrigin::Variable)
+        );
+        let in_project = (project.to_path_buf(), StoreOrigin::Project);
+        assert_eq!(store_path_from(None, Some(project), home), in_project);
+        assert_eq!(
+            store_path_from(Some(OsStr::new("")), Some(project), home),
+            in_project
         );
         assert_eq!(
-            store_path_from(Some(OsStr::new("")), home),
-            PathBuf::from("/h/.gage/store.git")
-        );
-        assert_eq!(
-            store_path_from(Some(OsStr::new("/p/.gage/store.git")), home),
-            PathBuf::from("/p/.gage/store.git")
+            store_path_from(Some(variable), Some(project), home),
+            (PathBuf::from("/v/store.git"), StoreOrigin::Variable)
         );
     }
 

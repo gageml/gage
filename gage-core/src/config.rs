@@ -1,9 +1,10 @@
 use std::collections::BTreeMap;
 use std::env;
+use std::ffi::OsStr;
 use std::fmt;
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
 
 use serde::{Deserialize, Serialize, de};
@@ -184,14 +185,27 @@ pub struct Config {
 pub const DEFAULT_NATIVE: &str = "default";
 
 /// Contents of a project config file, `<project>/.gage/config.toml`.
-/// A project sets native sources and nothing else, so a file with any
-/// other table does not load.
+/// A project sets native sources and its store and nothing else, so a
+/// file with any other table does not load.
 #[derive(Debug, Default, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectConfig {
     /// The `[native]` table, as [`Config::native`] holds it
     #[serde(default)]
     pub native: BTreeMap<String, String>,
+
+    #[serde(default)]
+    pub store: ProjectStoreConfig,
+}
+
+/// The `[store]` table of a project config.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectStoreConfig {
+    /// The project's store, as written: a path relative to the
+    /// project directory that names a place under its `.gage`
+    /// directory. [`project_store`] reads it as a full path.
+    pub path: Option<PathBuf>,
 }
 
 impl ProjectConfig {
@@ -199,6 +213,64 @@ impl ProjectConfig {
         let text = fs::read_to_string(path)?;
         toml::from_str(&text).map_err(io::Error::other)
     }
+}
+
+/// The store a project config names
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectStore {
+    /// The config file that names the store
+    pub config: PathBuf,
+    /// The store, under the `.gage` directory that holds `config`
+    pub path: PathBuf,
+}
+
+/// The store of the nearest project that names one, walking up from
+/// `start`. A project config that does not load is an error, and so
+/// is a `store.path` that names a place outside the project's `.gage`
+/// directory: a project config arrives with a cloned repository, and
+/// it must not point a command at a store elsewhere on the machine.
+/// A config above the one that names the store is not read.
+pub fn project_store(start: &Path) -> io::Result<Option<ProjectStore>> {
+    for config in project_config_paths(start) {
+        let at = |e: &dyn fmt::Display| io::Error::other(format!("{}: {e}", config.display()));
+        let Some(written) = ProjectConfig::load_from(&config)
+            .map_err(|e| at(&e))?
+            .store
+            .path
+        else {
+            continue;
+        };
+        let project_dir = config
+            .parent()
+            .and_then(Path::parent)
+            .expect("a project config should be at <project>/.gage/config.toml");
+        let path = project_store_path(project_dir, &written).map_err(|e| at(&e))?;
+        return Ok(Some(ProjectStore { config, path }));
+    }
+    Ok(None)
+}
+
+/// `written` placed under `project_dir`, when it names a place under
+/// the project's `.gage` directory. The check is on the path as
+/// written, so `..` is refused wherever it appears.
+fn project_store_path(project_dir: &Path, written: &Path) -> Result<PathBuf, String> {
+    let parts: Vec<Component<'_>> = written
+        .components()
+        .filter(|part| *part != Component::CurDir)
+        .collect();
+    let under_gage_dir = parts.len() > 1
+        && parts.first() == Some(&Component::Normal(OsStr::new(".gage")))
+        && parts
+            .iter()
+            .all(|part| matches!(part, Component::Normal(_)));
+    if !under_gage_dir {
+        return Err(format!(
+            "store.path: {} is not a path under the project's .gage directory, such as \
+             .gage/store.git",
+            written.display()
+        ));
+    }
+    Ok(project_dir.join(parts.iter().collect::<PathBuf>()))
 }
 
 /// Set `name` to `source` in the `[native]` table of the config file
@@ -677,8 +749,8 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        Config, DEFAULT_NATIVE, ProjectConfig, project_config_paths, remove_native_source,
-        rename_backup_native, rename_native_source, set_native_source,
+        Config, DEFAULT_NATIVE, ProjectConfig, project_config_paths, project_store,
+        remove_native_source, rename_backup_native, rename_native_source, set_native_source,
     };
     use serde_json as json;
 
@@ -701,7 +773,7 @@ mod tests {
     }
 
     #[test]
-    fn a_project_config_holds_native_sources_and_nothing_else() {
+    fn a_project_config_holds_native_sources_and_a_store_and_nothing_else() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         fs::write(&path, "[native]\ndefault = \"pi:sessions\"\n").unwrap();
@@ -709,7 +781,17 @@ mod tests {
         assert_eq!(config.native[DEFAULT_NATIVE], "pi:sessions");
 
         fs::write(&path, "").unwrap();
-        assert!(ProjectConfig::load_from(&path).unwrap().native.is_empty());
+        let empty = ProjectConfig::load_from(&path).unwrap();
+        assert!(empty.native.is_empty());
+        assert_eq!(empty.store.path, None);
+
+        fs::write(&path, "[store]\npath = \".gage/store.git\"\n").unwrap();
+        let config = ProjectConfig::load_from(&path).unwrap();
+        assert_eq!(config.store.path, Some(PathBuf::from(".gage/store.git")));
+
+        fs::write(&path, "[store]\nurl = \"x\"\n").unwrap();
+        let err = ProjectConfig::load_from(&path).unwrap_err().to_string();
+        assert!(err.contains("unknown field `url`"), "{err}");
 
         fs::write(&path, "[drivers]\ndefault = \"pi\"\n").unwrap();
         let err = ProjectConfig::load_from(&path).unwrap_err().to_string();
@@ -820,6 +902,72 @@ mod tests {
                 outer.join(".gage/config.toml"),
             ]
         );
+    }
+
+    #[test]
+    fn a_project_store_is_the_one_the_nearest_project_names() {
+        let root = tempfile::tempdir().unwrap();
+        let outer = root.path().join("outer");
+        let inner = outer.join("mid/inner");
+        fs::create_dir_all(inner.join(".gage")).unwrap();
+        fs::create_dir_all(outer.join(".gage")).unwrap();
+        let outer_config = outer.join(".gage/config.toml");
+        let inner_config = inner.join(".gage/config.toml");
+
+        assert_eq!(project_store(&inner).unwrap(), None);
+
+        fs::write(
+            &outer_config,
+            "[store]\npath = \"./.gage/trial/store.git\"\n",
+        )
+        .unwrap();
+        fs::write(&inner_config, "[native]\ndefault = \"pi:sessions\"\n").unwrap();
+        let store = project_store(&inner).unwrap().unwrap();
+        assert_eq!(store.config, outer_config);
+        assert_eq!(store.path, outer.join(".gage/trial/store.git"));
+
+        fs::write(&inner_config, "[store]\npath = \".gage/store.git\"\n").unwrap();
+        let store = project_store(&inner).unwrap().unwrap();
+        assert_eq!(store.config, inner_config);
+        assert_eq!(store.path, inner.join(".gage/store.git"));
+        assert_eq!(
+            project_store(&outer.join("mid")).unwrap().unwrap().path,
+            outer.join(".gage/trial/store.git")
+        );
+
+        // The config above the one that names the store is not read
+        fs::write(&outer_config, "not toml").unwrap();
+        assert!(project_store(&inner).is_ok());
+        let err = project_store(&outer).unwrap_err().to_string();
+        assert!(
+            err.starts_with(&outer_config.display().to_string()),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_project_store_outside_the_project_gage_directory_is_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        fs::create_dir_all(project.join(".gage")).unwrap();
+        let config = project.join(".gage/config.toml");
+        for path in [
+            "store.git",
+            ".gage",
+            ".gage/../store.git",
+            ".gage/a/../../store.git",
+            "../.gage/store.git",
+            "/tmp/store.git",
+            "~/.gage/store.git",
+            "",
+        ] {
+            fs::write(&config, format!("[store]\npath = {path:?}\n")).unwrap();
+            let err = project_store(&project).unwrap_err().to_string();
+            assert!(
+                err.contains("store.path") && err.contains(".gage/config.toml"),
+                "{path}: {err}"
+            );
+        }
     }
 
     #[test]

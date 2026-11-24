@@ -8,7 +8,13 @@ conventions in _[Keep a Changelog]_. Release versions use [semantic versioning].
 
 ## [unreleased]
 
-Pending changes.
+### Enhancements
+
+- A project config names a store of the project's own: `path` in a `store`
+  table of `.gage/config.toml`, as a path under the project's `.gage` directory.
+  Commands run in the project use that store. `GAGE_STORE` takes precedence
+  over it
+- `gage status` marks a store that `GAGE_STORE` or a project config selected
 
 ## [0.6.0]
 

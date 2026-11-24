@@ -386,11 +386,12 @@ async fn main() -> ExitCode {
             None
         }
     };
-    // `gage config` and `gage native` run without configured drivers,
-    // so a config that names a default driver this build does not
-    // have, or a source that is not one, can still be edited
+    // `gage config` and `gage native` run without configured drivers
+    // and without the project's store, so a config that names a
+    // default driver this build does not have, a source that is not
+    // one, or a store outside its project can still be edited
     if !matches!(cli.command, Command::Config { .. } | Command::Native { .. })
-        && let Err(e) = source::configure_drivers()
+        && let Err(e) = source::configure_drivers().and_then(|()| source::configure_store())
     {
         return exit_code(Err(e));
     }

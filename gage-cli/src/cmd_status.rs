@@ -20,7 +20,7 @@ use gage_core::config::gage_home;
 use gage_core::path::shorten_home;
 use gage_query::ContextBuilder;
 use gage_session::{AuthInfo, Driver, DriverStatus, Field, HarnessInfo, InstallInfo};
-use gage_store::Store;
+use gage_store::{Store, StoreOrigin};
 
 use crate::cmd_note::count_rows;
 use crate::error::CliError;
@@ -170,7 +170,12 @@ async fn write_counts(out: &mut String, problems: &mut Vec<String>) -> Result<()
     w(out, format!("{}", style("Data").bold()));
 
     let path = gage_store::store_path();
-    w(out, format!("  Store:    {}", shorten_home(&path)));
+    let origin = match gage_store::store_origin() {
+        StoreOrigin::Variable => " (GAGE_STORE)",
+        StoreOrigin::Project => " (project config)",
+        StoreOrigin::Home => "",
+    };
+    w(out, format!("  Store:    {}{origin}", shorten_home(&path)));
     match Store::open(&path) {
         Ok(store) => {
             let ctx = ContextBuilder::new(Some(Arc::new(Mutex::new(store))))

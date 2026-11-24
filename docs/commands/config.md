@@ -7,8 +7,8 @@ description:
 
 The `gage config` command manages Gage configuration. Config lives in one TOML
 file, `~/.gage/config.toml`. When `GAGE_HOME` is set, the file is
-`$GAGE_HOME/config.toml`. A project can set session sources in a file of its
-own; see [Project config](#project-config).
+`$GAGE_HOME/config.toml`. A project can set session sources and a store in a
+file of its own; see [Project config](#project-config).
 
 ```cli
 gage config <COMMAND>
@@ -25,7 +25,8 @@ gage config list
 Every setting is printed as `name = value` with its working value: the value in
 the config file, or the default when the file does not set it. A `native`
 setting that a [project config](#project-config) sets is printed with the
-project's value.
+project's value. A store that a project config names is printed as `store.path`
+with its full path.
 
 ```toml
 backup.native = []
@@ -169,9 +170,9 @@ driver, which the `drivers.default` setting names.
 
 ### Project config
 
-A project sets session sources in `.gage/config.toml` under the project
-directory. A command reads the file when it runs in the project directory or in
-a directory below it.
+A project sets session sources and a store in `.gage/config.toml` under the
+project directory. A command reads the file when it runs in the project
+directory or in a directory below it.
 
 ```toml
 [native]
@@ -181,8 +182,8 @@ default = "claude:sessions"
 With this file in `~/code/app/.gage/config.toml`, `gage session list` run under
 `~/code/app` lists the Claude Code sessions under `~/code/app/sessions/projects`.
 
-A project config holds the `native` table and nothing else. A command fails
-when the file sets any other table.
+A project config holds the `native` table and the `store` table and nothing
+else. A command fails when the file sets any other table.
 
 A name the project config sets replaces the same name in `~/.gage/config.toml`.
 The other names of that file stay in effect. When more than one directory
@@ -196,3 +197,32 @@ read as written.
 
 `gage config edit` edits `~/.gage/config.toml`. A project config is edited as a
 file.
+
+#### Project store
+
+A project names a store of its own with `path` in the `store` table.
+
+```toml
+[store]
+path = ".gage/store.git"
+```
+
+With this file in `~/code/app/.gage/config.toml`, every command run under
+`~/code/app` uses the store at `~/code/app/.gage/store.git` in place of
+`~/.gage/store.git`. The cache, the user config, and everything else under
+`~/.gage` stay in use.
+
+The path is relative to the project directory and names a place under the
+project's `.gage` directory. A command fails when the path is absolute, is under
+`~`, holds `..`, or names a place outside `.gage`. A project config can arrive
+with a cloned repository, and this rule keeps it from naming a store elsewhere
+on the machine.
+
+A project store is created with [`gage store init`](/commands/store) run in the
+project directory. A store is not a file to commit, so the project's
+`.gitignore` should list it.
+
+The store in use is, in order: the path in `GAGE_STORE` when that variable is
+set, the store of the nearest project config that names one, and
+`~/.gage/store.git`. [`gage status`](/commands/status) prints the store in use
+and marks one that `GAGE_STORE` or a project config selected.

@@ -17,6 +17,11 @@ The `gage store` command manages the Gage store. The store is a bare Git
 repository at `~/.gage/store.git` that holds every Gage object. When
 `GAGE_HOME` is set, the store is `$GAGE_HOME/store.git`.
 
+A project can name a store of its own in its
+[project config](/commands/config#project-config). Commands run in the project
+directory use that store. When `GAGE_STORE` is set, the store is the
+repository at that path, whatever a project config names.
+
 ```cli
 gage store <COMMAND>
 ```
@@ -26,7 +31,8 @@ prefix.
 
 ## store init
 
-Create the store. Running it on an existing store is harmless.
+Create the store. Running it on an existing store is harmless. In a project
+whose config names a store, the command creates that store.
 
 ```cli
 gage store init
