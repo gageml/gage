@@ -210,6 +210,26 @@ mod tests {
         );
     }
 
+    /// A side for conflicts goes with named objects, and is refused
+    /// with --all and with --type.
+    #[test]
+    fn a_side_is_refused_without_named_objects() {
+        use clap::Parser;
+
+        #[derive(Parser)]
+        struct Cli {
+            #[command(flatten)]
+            args: PullArgs,
+        }
+        let parse = |args: &[&str]| Cli::try_parse_from([&["pull", "up"], args].concat());
+
+        for side in ["--ours", "--theirs"] {
+            assert!(parse(&["7zz", side]).is_ok(), "{side}");
+            assert!(parse(&["--all", side]).is_err(), "--all {side}");
+            assert!(parse(&["--type", "issue", side]).is_err(), "--type {side}");
+        }
+    }
+
     /// A pull of a URL merges through a transient namespace, and
     /// discarding it leaves no tracking ref of the URL behind.
     #[test]

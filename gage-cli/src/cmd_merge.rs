@@ -80,7 +80,7 @@ pub struct TypeArgs {
     /// remote to read its type, and merges only those selected
     #[arg(
         long,
-        conflicts_with_all = ["objects", "all", "ours", "theirs"],
+        conflicts_with_all = ["objects", "all"],
         hide_possible_values = true,
         value_parser = ["attachment", "dataset", "issue", "note", "scan", "session", "share"]
     )]
@@ -94,15 +94,18 @@ impl TypeArgs {
     }
 }
 
-/// How a merge settles a divergence it cannot merge
+/// How a merge settles a divergence it cannot merge. A side goes
+/// with named objects alone. Clap drops what an option requires once
+/// an option that conflicts with the required one is given, so each
+/// other selection is refused by a conflict of its own.
 #[derive(Args)]
 pub struct ResolveArgs {
     /// Keep local side on conflict
-    #[arg(long, requires = "objects", conflicts_with = "theirs")]
+    #[arg(long, requires = "objects", conflicts_with_all = ["theirs", "all", "type"])]
     ours: bool,
 
     /// Take remote side on conflict
-    #[arg(long, requires = "objects")]
+    #[arg(long, requires = "objects", conflicts_with_all = ["all", "type"])]
     theirs: bool,
 }
 
@@ -524,9 +527,7 @@ mod tests {
     }
 
     /// The option takes a bare type name, and neither named objects,
-    /// --all, nor a side for conflicts goes with it. The side is
-    /// refused by a conflict of its own: clap drops what a side
-    /// requires once an option that conflicts with it is given.
+    /// --all, nor a side for conflicts goes with it.
     #[test]
     fn the_type_option_names_known_types_and_excludes_other_selections() {
         use clap::Parser;
@@ -552,6 +553,27 @@ mod tests {
         ] {
             assert!(parse(refused).is_err(), "{refused:?}");
         }
+    }
+
+    /// A side for conflicts goes with named objects, and is refused
+    /// with --all and with no selection.
+    #[test]
+    fn a_side_is_refused_without_named_objects() {
+        use clap::Parser;
+
+        #[derive(Parser)]
+        struct Cli {
+            #[command(flatten)]
+            args: MergeArgs,
+        }
+        let parse = |args: &[&str]| Cli::try_parse_from([&["merge", "up"], args].concat());
+
+        for side in ["--ours", "--theirs"] {
+            assert!(parse(&["7zz", side]).is_ok(), "{side}");
+            assert!(parse(&["--all", side]).is_err(), "--all {side}");
+            assert!(parse(&[side]).is_err(), "{side} alone");
+        }
+        assert!(parse(&["7zz", "--ours", "--theirs"]).is_err());
     }
 
     /// A divergence a note cannot merge is a conflict that names the
