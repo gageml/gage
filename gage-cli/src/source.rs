@@ -133,12 +133,7 @@ fn layered_native(
     projects: Vec<ProjectNative>,
 ) -> anyhow::Result<BTreeMap<String, String>> {
     for (name, source) in user {
-        if relative_path(source).is_some() {
-            bail!(
-                "{user_path}: native.{name}: {source:?} has a relative path; write an \
-                 absolute path or a path under ~"
-            );
-        }
+        check_user_path(name, source).with_context(|| user_path.to_string())?;
     }
     check_native(user).with_context(|| user_path.to_string())?;
     let mut native = user.clone();
@@ -147,6 +142,37 @@ fn layered_native(
         native.extend(project.sources);
     }
     Ok(native)
+}
+
+/// Check that `source`, which the user config gives `name`, has no
+/// relative path.
+fn check_user_path(name: &str, source: &str) -> anyhow::Result<()> {
+    if relative_path(source).is_some() {
+        bail!(
+            "native.{name}: {source:?} has a relative path; write an absolute path or a path \
+             under ~"
+        );
+    }
+    Ok(())
+}
+
+/// Check one entry of a `[native]` table as a config load checks it.
+/// `project_dir` is the directory of the project whose config holds
+/// the entry, and `None` when the user config holds it. The error is
+/// `native.<name>: <reason>`.
+pub fn check_native_entry(
+    name: &str,
+    source: &str,
+    project_dir: Option<&Path>,
+) -> anyhow::Result<()> {
+    let source = match project_dir {
+        Some(dir) => anchor_source(source, dir).map_err(|e| anyhow!("native.{name}: {e}"))?,
+        None => {
+            check_user_path(name, source)?;
+            source.to_string()
+        }
+    };
+    check_native(&BTreeMap::from([(name.to_string(), source)]))
 }
 
 /// Check the names and sources of one `[native]` table as the

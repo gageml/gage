@@ -40,6 +40,7 @@ title: Docs
 - [query](/commands/query)
 - [blame](/commands/blame)
 - [config](/commands/config)
+- [native](/commands/native)
 - [remote](/commands/remote)
 - [push](/commands/push)
 - [pull](/commands/pull)

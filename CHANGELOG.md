@@ -24,6 +24,11 @@ conventions in _[Keep a Changelog]_. Release versions use [semantic versioning].
 
 ### Enhancements
 
+- `gage native` manages the names of session sources with `add`, `list`, `edit`,
+  `rename`, and `delete`, where a name was set only by editing a config file.
+  `gage native list` shows each name in effect in the current directory, its
+  source, and the config file that sets it, with the built-in schemes.
+  `gage native add --project` writes the project config file
 - `gage merge` and `gage pull` take `--type` to merge every object of a type,
   such as `issue`, with everything those objects link
 - The `native.default` setting names the default session source: the source a

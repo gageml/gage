@@ -54,6 +54,7 @@ mod cmd_index;
 mod cmd_init;
 mod cmd_issue;
 mod cmd_merge;
+mod cmd_native;
 mod cmd_note;
 mod cmd_publish;
 mod cmd_pull;
@@ -243,6 +244,15 @@ enum Command {
         command: cmd_remote::RemoteCommand,
     },
 
+    /// Manage native sources
+    ///
+    /// A native source is a directory of coding agent sessions. A
+    /// name given to one is accepted wherever a session source is.
+    Native {
+        #[command(subcommand)]
+        command: cmd_native::NativeCommand,
+    },
+
     /// Show Gage login, plugin, corpus, and storage status
     Status(cmd_status::StatusArgs),
 
@@ -376,9 +386,10 @@ async fn main() -> ExitCode {
             None
         }
     };
-    // `gage config` runs without a default driver, so a config that
-    // names one this build does not have can still be edited
-    if !matches!(cli.command, Command::Config { .. })
+    // `gage config` and `gage native` run without configured drivers,
+    // so a config that names a default driver this build does not
+    // have, or a source that is not one, can still be edited
+    if !matches!(cli.command, Command::Config { .. } | Command::Native { .. })
         && let Err(e) = source::configure_drivers()
     {
         return exit_code(Err(e));
@@ -407,6 +418,13 @@ async fn main() -> ExitCode {
                 cmd_remote::RemoteCommand::Edit(args) => cmd_remote::edit(args),
                 cmd_remote::RemoteCommand::Rename(args) => cmd_remote::rename(args),
                 cmd_remote::RemoteCommand::Delete(args) => cmd_remote::delete(args),
+            },
+            Command::Native { command } => match command {
+                cmd_native::NativeCommand::Add(args) => cmd_native::add(args),
+                cmd_native::NativeCommand::List => cmd_native::list(),
+                cmd_native::NativeCommand::Edit(args) => cmd_native::edit(args),
+                cmd_native::NativeCommand::Rename(args) => cmd_native::rename(args),
+                cmd_native::NativeCommand::Delete(args) => cmd_native::delete(args),
             },
             Command::Session {
                 native: source,

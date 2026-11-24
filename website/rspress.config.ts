@@ -254,6 +254,7 @@ export default defineConfig({
             { text: "query", link: "/commands/query" },
             { text: "blame", link: "/commands/blame" },
             { text: "config", link: "/commands/config" },
+            { text: "native", link: "/commands/native" },
             { text: "remote", link: "/commands/remote" },
             { text: "push", link: "/commands/push" },
             { text: "pull", link: "/commands/pull" },

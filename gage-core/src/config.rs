@@ -8,6 +8,7 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize, de};
 use serde_json as json;
+use toml_edit::{DocumentMut, Item};
 
 use crate::glob::glob_match;
 
@@ -198,6 +199,130 @@ impl ProjectConfig {
         let text = fs::read_to_string(path)?;
         toml::from_str(&text).map_err(io::Error::other)
     }
+}
+
+/// Set `name` to `source` in the `[native]` table of the config file
+/// at `path`, which is a user config or a project config. The rest of
+/// the file's text stays as written, and a comment on the line of an
+/// entry whose source is replaced stays on it. A file with no
+/// `[native]` table gains one at its end. A missing file is created
+/// with that table alone.
+pub fn set_native_source(path: &Path, name: &str, source: &str) -> io::Result<()> {
+    edit_document(path, |doc| {
+        let table = doc
+            .entry("native")
+            .or_insert_with(toml_edit::table)
+            .as_table_like_mut()
+            .ok_or_else(|| not_a_table(path))?;
+        match table.get_mut(name).and_then(Item::as_value_mut) {
+            Some(slot) => replace_value(slot, source),
+            None => {
+                table.insert(name, toml_edit::value(source));
+            }
+        }
+        Ok(true)
+    })
+    .map(|_changed| ())
+}
+
+/// Remove `name` from the `[native]` table of the config file at
+/// `path`, with the comment lines above it. The rest of the file's
+/// text stays as written. Returns whether the file held the name.
+pub fn remove_native_source(path: &Path, name: &str) -> io::Result<bool> {
+    edit_document(path, |doc| {
+        let Some(native) = doc.get_mut("native") else {
+            return Ok(false);
+        };
+        let table = native
+            .as_table_like_mut()
+            .ok_or_else(|| not_a_table(path))?;
+        Ok(table.remove(name).is_some())
+    })
+}
+
+/// Give the entry `name` in the `[native]` table of the config file
+/// at `path` the name `new_name`. The entry keeps its source and its
+/// comments and becomes the last entry of the table. The rest of the
+/// file's text stays as written. Returns whether the file held the
+/// name.
+pub fn rename_native_source(path: &Path, name: &str, new_name: &str) -> io::Result<bool> {
+    edit_document(path, |doc| {
+        let Some(native) = doc.get_mut("native") else {
+            return Ok(false);
+        };
+        let table = native
+            .as_table_like_mut()
+            .ok_or_else(|| not_a_table(path))?;
+        let Some(decor) = table.key(name).map(|key| key.leaf_decor().clone()) else {
+            return Ok(false);
+        };
+        let item = table.remove(name).expect("a key should have an item");
+        table.insert(new_name, item);
+        let mut key = table
+            .key_mut(new_name)
+            .expect("an inserted item should have a key");
+        *key.leaf_decor_mut() = decor;
+        Ok(true)
+    })
+}
+
+/// Replace each `name` in the `backup.native` list of the config file
+/// at `path` with `new_name`. The rest of the file's text stays as
+/// written. Returns whether the list held the name.
+pub fn rename_backup_native(path: &Path, name: &str, new_name: &str) -> io::Result<bool> {
+    edit_document(path, |doc| {
+        let Some(list) = doc
+            .get_mut("backup")
+            .and_then(|backup| backup.get_mut("native"))
+            .and_then(Item::as_array_mut)
+        else {
+            return Ok(false);
+        };
+        let mut changed = false;
+        for slot in list.iter_mut().filter(|slot| slot.as_str() == Some(name)) {
+            replace_value(slot, new_name);
+            changed = true;
+        }
+        Ok(changed)
+    })
+}
+
+/// Apply `edit` to the TOML document at `path` and write the document
+/// back when `edit` returns true. A missing file is read as an empty
+/// document. Returns what `edit` returned.
+fn edit_document(
+    path: &Path,
+    edit: impl FnOnce(&mut DocumentMut) -> io::Result<bool>,
+) -> io::Result<bool> {
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e),
+    };
+    let mut doc: DocumentMut = text.parse().map_err(io::Error::other)?;
+    if !edit(&mut doc)? {
+        return Ok(false);
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, doc.to_string())?;
+    Ok(true)
+}
+
+/// Put the string `value` in `slot`. A comment on the line is the old
+/// value's decoration and moves to the new one.
+fn replace_value(slot: &mut toml_edit::Value, value: &str) {
+    let decor = slot.decor().clone();
+    *slot = toml_edit::Value::from(value);
+    *slot.decor_mut() = decor;
+}
+
+fn not_a_table(path: &Path) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("{}: native is not a table", path.display()),
+    )
 }
 
 /// Each `<dir>/.gage` directory that exists walking up from `start`,
@@ -512,17 +637,13 @@ impl Config {
             Some(named) if named == driver => Ok(false),
             Some(_) => {
                 let text = fs::read_to_string(path)?;
-                let mut doc: toml_edit::DocumentMut = text.parse().map_err(io::Error::other)?;
+                let mut doc: DocumentMut = text.parse().map_err(io::Error::other)?;
                 let slot = doc
                     .get_mut("drivers")
                     .and_then(|drivers| drivers.get_mut("default"))
-                    .and_then(toml_edit::Item::as_value_mut)
+                    .and_then(Item::as_value_mut)
                     .expect("a named default should be a value");
-                // A comment on the setting's line is the old value's
-                // decoration and moves to the new one
-                let decor = slot.decor().clone();
-                *slot = toml_edit::Value::from(driver);
-                *slot.decor_mut() = decor;
+                replace_value(slot, driver);
                 fs::write(path, doc.to_string())?;
                 Ok(true)
             }
@@ -555,7 +676,10 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
-    use super::{Config, DEFAULT_NATIVE, ProjectConfig, project_config_paths};
+    use super::{
+        Config, DEFAULT_NATIVE, ProjectConfig, project_config_paths, remove_native_source,
+        rename_backup_native, rename_native_source, set_native_source,
+    };
     use serde_json as json;
 
     #[test]
@@ -590,6 +714,89 @@ mod tests {
         fs::write(&path, "[drivers]\ndefault = \"pi\"\n").unwrap();
         let err = ProjectConfig::load_from(&path).unwrap_err().to_string();
         assert!(err.contains("unknown field `drivers`"), "{err}");
+    }
+
+    #[test]
+    fn setting_a_native_source_adds_a_table_or_an_entry_and_keeps_the_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sub/config.toml");
+        set_native_source(&path, "work", "pi:~/w").unwrap();
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "[native]\nwork = \"pi:~/w\"\n"
+        );
+
+        let written = "# kept\n[backup]\nnative = [\"work\"]\n";
+        fs::write(&path, written).unwrap();
+        set_native_source(&path, "work", "pi:~/w").unwrap();
+        set_native_source(&path, "home", "claude").unwrap();
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            format!("{written}\n[native]\nwork = \"pi:~/w\"\nhome = \"claude\"\n")
+        );
+        let config = Config::load_from(&path).unwrap();
+        assert_eq!(config.native["home"], "claude");
+        assert_eq!(config.backup.native, ["work"]);
+    }
+
+    #[test]
+    fn setting_a_native_source_that_is_set_replaces_its_value_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let written = "[native]\n# mine\nwork = \"pi:~/w\" # here\nold = \"codex\"\n";
+        fs::write(&path, written).unwrap();
+        set_native_source(&path, "work", "claude:/x").unwrap();
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            written.replace("pi:~/w", "claude:/x")
+        );
+    }
+
+    #[test]
+    fn removing_a_native_source_takes_its_line_and_says_whether_it_was_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        assert!(!remove_native_source(&path, "work").unwrap());
+        assert!(!path.exists());
+
+        let written =
+            "[native]\nwork = \"pi:~/w\"\nold = \"codex\" # kept\n\n[backup]\nnative = []\n";
+        fs::write(&path, written).unwrap();
+        assert!(!remove_native_source(&path, "none").unwrap());
+        assert_eq!(fs::read_to_string(&path).unwrap(), written);
+        assert!(remove_native_source(&path, "work").unwrap());
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            written.replace("work = \"pi:~/w\"\n", "")
+        );
+    }
+
+    #[test]
+    fn renaming_a_native_source_keeps_its_source_and_comments() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let written = "[native]\n# mine\nwork = \"pi:~/w\" # here\nold = \"codex\"\n";
+        fs::write(&path, written).unwrap();
+        assert!(!rename_native_source(&path, "none", "job").unwrap());
+        assert!(rename_native_source(&path, "work", "job").unwrap());
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "[native]\nold = \"codex\"\n# mine\njob = \"pi:~/w\" # here\n"
+        );
+    }
+
+    #[test]
+    fn renaming_a_backup_native_source_replaces_each_entry_of_that_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let written = "[backup]\nnative = [\"work\", \"pi:\", \"work\"] # all\n";
+        fs::write(&path, written).unwrap();
+        assert!(!rename_backup_native(&path, "none", "job").unwrap());
+        assert!(rename_backup_native(&path, "work", "job").unwrap());
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            written.replace("work", "job")
+        );
     }
 
     #[test]

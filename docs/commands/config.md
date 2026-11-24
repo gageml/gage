@@ -132,6 +132,9 @@ work = "pi:~/work/agent"
 gage session list --native work
 ```
 
+[`gage native`](/commands/native) adds, lists, edits, renames, and deletes
+the names without opening the file.
+
 A source is `SCHEME:PATH` or a scheme alone. A name cannot stand for another
 name. A name must not be empty and must not contain a colon.
 
