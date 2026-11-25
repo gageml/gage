@@ -3,12 +3,18 @@
 <h1 align="center">Gage</h1>
 
 <p align="center">
-  <strong>Scan Claude sessions to find and fix hidden issues.</strong>
+  <strong>Unlock the value of your session logs.</strong>
+  <br />
+  Gage runs locally to search, scan, and score.
 </p>
+
+<h3 align="center">
+  <a href="https://docs.gage.io">docs.gage.io</a>
+</h3>
 
 <p align="center">
   <a href="https://gage.io">Website</a> ·
-  <a href="https://gage.io/docs/">Documentation</a> ·
+  <a href="https://docs.gage.io/start">Quick start</a> ·
   <a href="https://github.com/gageml/gage/issues">Report an issue</a>
 </p>
 
@@ -23,42 +29,61 @@
   <img width="80%" alt="Scan view" src="docs/scan.png" />
 </p>
 
-Coding agents do a lot of work you never see. Buried in your Claude Code
-transcripts are diagnosed-but-unfixed bugs, quietly violated project rules, and
-agent behavior that worked against you. Gage scans those transcripts, turns what
-it finds into actionable issues, and uses Claude Code itself to help you resolve
-them.
+Your coding agent writes a log of every session. Those logs hold the design
+discussions, the decisions, and the reasoning behind your code. They also hold
+bugs that were diagnosed and never fixed, project rules that were quietly
+broken, and tasks that were started and never finished. Gage lets you and your
+agent search those sessions with SQL, scan them for issues, and resolve what
+the scans find.
 
-## Highlights
+## What you can do with Gage
 
-- Finds bugs that were diagnosed in a session and never fixed.
-- Checks the work done in sessions against your project's own rules.
-- Cites evidence for every issue, down to the session entry behind it.
-- Resolves issues in an interactive Claude Code session that you control.
-- Runs locally and stores its data under `~/.gage/`. Nothing leaves your machine
-  unless you push or publish it.
-- Queries sessions, notes, and issues with SQL in the PostgreSQL dialect.
-- Ships scanners as readable source under [scanners](/scanners).
+- **Answer "why is this code this way?"** Gage traces a line of code to the
+  session that wrote it. You see the design discussion, the assumptions, the
+  decision, and the alternatives that were considered.
+- **Resume unfinished tasks.** Ask your agent which tasks were started and not
+  completed. You get a list of loose ends across all your sessions.
+- **Take up one task in a new session.** Sessions wander as new ideas come up.
+  A new session reads the earlier one through Gage and continues the task you
+  name.
+- **Back up sessions.** Session history holds the thinking behind your code.
+  Coding agents delete old sessions. Gage keeps a copy and backs it up to a Git
+  remote that you choose.
+- **Review design rationale, not just code.** A code review needs the reasons
+  for a change. Those reasons are in the session record.
+- **Automate session scans.** Scanners turn a one-time question into a
+  repeatable check. You can write a scanner for any policy, review, or
+  measurement.
+
+## Works with
+
+Gage works with Claude Code, Codex, and Pi.
+
+Support is planned for OpenCode, Cursor, Copilot CLI, Factory Droid, and Gemini
+CLI.
 
 ## Quick start
 
 Requirements:
 
 - Linux (x86_64) or macOS (Apple Silicon)
-- Claude Code with an active login (Pro plans recommended)
+- Claude Code, Codex, or Pi with an active login
 
-Gage uses Claude Code to scan sessions and resolve issues. Token usage is
-handled through Claude Code according to your Anthropic plan.
+Gage uses your coding agent to scan sessions and resolve issues. Token usage is
+handled through that agent according to your plan.
 
 ```shell
 # Install Gage
 curl -fsSL https://gage.io/install.sh | sh
 
-# Install the Claude Code plugin
+# Set up Gage in each coding agent that is installed
 gage init
 
 # Scan your recent sessions
 gage scan
+
+# List the open issues
+gage issue list
 
 # Resolve the issues that the scan found
 gage resolve
@@ -66,11 +91,40 @@ gage resolve
 
 See [Install](#install) for other installation methods.
 
+## Search your sessions
+
+Gage reads your sessions as SQL tables. There is no database to set up.
+
+```shell
+# Start an interactive SQL prompt
+gage query
+
+# Search the text of every message
+gage query "select * from message_text('store layout')"
+```
+
+`gage init` installs a plugin that gives your coding agent the same access. Ask
+a question in plain words and your agent answers from the sessions.
+
+```text
+Why does the session parser skip compressed entries?
+```
+
+`gage blame` goes from a line of code to the session and tool call that wrote
+it.
+
+```shell
+gage blame src/index.rs -l 40-72
+```
+
+See [_Recall a decision_](https://docs.gage.io/how-to/recall) and
+[_See context for a code change_](https://docs.gage.io/how-to/blame).
+
 ## Find issues
 
-Scanners read your Claude Code sessions and surface issues you would otherwise
-never see: bugs left unfixed, agent behavior that worked against you, settings
-that cost you data.
+Scanners read your sessions and surface issues you would otherwise never see.
+These include bugs left unfixed, agent behavior that worked against you, and
+settings that cost you data.
 
 <p align="center">
   <img width="80%" alt="An opened issue" src="docs/issue.png" />
@@ -80,8 +134,8 @@ that cost you data.
 
 ## Fix issues
 
-`gage resolve` opens an interactive Claude Code session that works through open
-issues with you. You decide what gets fixed and what gets skipped.
+`gage resolve` opens an interactive session in your coding agent that works
+through open issues with you. You decide what gets fixed and what gets skipped.
 
 <p align="center">
   <img width="80%" alt="Resolve session" src="docs/resolve-session.png" />
@@ -91,15 +145,21 @@ issues with you. You decide what gets fixed and what gets skipped.
 
 ## Trace everything
 
-Every issue cites its evidence. Walk from an issue to its notes to the exact
-session content behind it --- thinking blocks included --- or query everything
-directly with SQL.
+Every issue cites its evidence. You can walk from an issue to its notes and
+then to the exact session content behind it, thinking blocks included.
 
 <p align="center">
   <img width="80%" alt="Issue target session" src="docs/issue-target.png" />
   <br />
   <em>Trace the issue to the offending entry</em>
 </p>
+
+## Keep sessions local
+
+Gage runs locally and stores its data under `~/.gage/`. Nothing leaves your
+machine unless you run a command that sends it, such as `gage push` or
+`gage backup`. Gage uses a Git-style workflow for backup and for sharing with
+people you trust. See [PRIVACY.md](PRIVACY.md).
 
 ## Scanners
 
@@ -182,9 +242,10 @@ cd gage
 cargo install --path gage-cli
 ```
 
-### Claude Code plugin
+### Coding agent plugin
 
-Gage requires a Claude Code plugin. Install it by running:
+Gage requires a plugin in your coding agent. `gage init` installs it in Claude
+Code, Codex, and Pi, in each one that is installed:
 
 ```shell
 gage init
@@ -192,16 +253,18 @@ gage init
 
 ## Documentation
 
-Full documentation is available at [gage.io/docs](https://gage.io/docs/).
+Full documentation is available at [docs.gage.io](https://docs.gage.io/docs/).
 
-- [Quick start](https://gage.io/docs/start)
-- [Scans](https://gage.io/docs/scans)
-- [Scanners](https://gage.io/docs/scanners)
-- [Issues](https://gage.io/docs/issues)
-- [Notes](https://gage.io/docs/notes)
-- [Resolve](https://gage.io/docs/resolve)
-- [Query](https://gage.io/docs/commands/query)
-- [Uninstall](https://gage.io/docs/uninstall)
+- [Quick start](https://docs.gage.io/start)
+- [Sessions](https://docs.gage.io/sessions)
+- [Scans](https://docs.gage.io/scans)
+- [Scanners](https://docs.gage.io/scanners)
+- [Issues](https://docs.gage.io/issues)
+- [Notes](https://docs.gage.io/notes)
+- [Resolve](https://docs.gage.io/resolve)
+- [Query](https://docs.gage.io/commands/query)
+- [Backup](https://docs.gage.io/commands/backup)
+- [Uninstall](https://docs.gage.io/uninstall)
 
 Problems that are known and not planned to be fixed are listed in
 [KNOWN_ISSUES.md](KNOWN_ISSUES.md).
@@ -225,12 +288,12 @@ No. Gage runs locally and writes all state under `~/.gage/`. Gage sends data to
 another location only when you run a command that does so, such as `gage push`
 or `gage backup`.
 
-Gage provides tools to Claude Code over a local MCP server. Claude is free to
-use these tools within the constraints of user-defined permissions (allow and
-deny). Gage tools do not open network connections or otherwise write outside of
-`~/.gage/`. Claude, however, may. This is the normal risk profile of running an
-agent. To minimize the risk of sensitive data exfiltration, follow the
-safeguards recommended by Anthropic.
+Gage provides tools to your coding agent over a local MCP server. The agent is
+free to use these tools within the constraints of user-defined permissions
+(allow and deny). Gage tools do not open network connections or otherwise write
+outside of `~/.gage/`. The agent, however, may. This is the normal risk profile
+of running an agent. To minimize the risk of sensitive data exfiltration, follow
+the safeguards recommended by the vendor of your agent.
 
 See [PRIVACY.md](PRIVACY.md) for the full privacy statement.
 
