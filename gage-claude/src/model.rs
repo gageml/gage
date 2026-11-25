@@ -1,11 +1,12 @@
 //! Model resolution for values passed to `claude --model`. A size
-//! name (`small`/`medium`/`large`) resolves to a model id. The
-//! family aliases claude documents (`haiku`/`sonnet`/`opus`) track
-//! the latest release of each family, and the 5.x releases refuse
+//! name (`small`/`medium`/`large`) resolves to a model. The family
+//! aliases claude documents (`haiku`/`sonnet`/`opus`) track the latest
+//! release of each family. The `large` size defaults to the `opus`
+//! alias, so it follows the latest Opus. The 5.x releases refuse
 //! routine Gage prompts through the reasoning_extraction safety
-//! classifier, so each size defaults to the latest 4.x release of its
-//! family. Family aliases and concrete model ids pass through
-//! unchanged.
+//! classifier, so `small` and `medium` default to the latest 4.x
+//! release of their family. Family aliases and concrete model ids
+//! pass through unchanged.
 
 use gage_session::{ModelChoice, ModelChoices, ModelSizes};
 
@@ -19,7 +20,7 @@ pub fn default_sizes() -> ModelSizes {
     ModelSizes {
         small: Some("claude-haiku-4-5".to_string()),
         medium: Some("claude-sonnet-4-6".to_string()),
-        large: Some("claude-opus-4-8".to_string()),
+        large: Some("opus".to_string()),
     }
 }
 
@@ -86,7 +87,7 @@ mod tests {
     #[test]
     fn resolves_sizes_to_their_defaults() {
         let sizes = default_sizes();
-        assert_eq!(resolve_model("large", &sizes), "claude-opus-4-8");
+        assert_eq!(resolve_model("large", &sizes), "opus");
         assert_eq!(resolve_model("medium", &sizes), "claude-sonnet-4-6");
         assert_eq!(resolve_model("small", &sizes), "claude-haiku-4-5");
     }
@@ -109,7 +110,7 @@ mod tests {
     fn default_model_when_unset() {
         let sizes = default_sizes();
         assert_eq!(resolved_model(None, &sizes), "claude-sonnet-4-6");
-        assert_eq!(resolved_model(Some("large"), &sizes), "claude-opus-4-8");
+        assert_eq!(resolved_model(Some("large"), &sizes), "opus");
         assert_eq!(
             resolved_model(Some("claude-haiku-4-5"), &sizes),
             "claude-haiku-4-5"

@@ -16,6 +16,12 @@ conventions in _[Keep a Changelog]_. Release versions use [semantic versioning].
   over it
 - `gage status` marks a store that `GAGE_STORE` or a project config selected
 
+### Other changes
+
+- The `large` model size of the Claude driver defaults to `opus`, which is the
+  latest Opus, where it was `claude-opus-4-8`. Set
+  `drivers.claude.models.large` to keep a fixed model
+
 ## [0.6.0]
 
 ### Breaking changes

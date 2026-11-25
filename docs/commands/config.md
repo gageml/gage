@@ -30,7 +30,7 @@ with its full path.
 
 ```toml
 backup.native = []
-drivers.claude.models.large = "claude-opus-4-8"
+drivers.claude.models.large = "opus"
 drivers.claude.models.medium = "claude-sonnet-4-6"
 drivers.claude.models.small = "claude-haiku-4-5"
 drivers.codex.models.large = "gpt-6.1-sol"

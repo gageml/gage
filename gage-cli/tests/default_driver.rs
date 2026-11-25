@@ -87,7 +87,7 @@ fn model_sizes_list_the_driver_default_until_config_sets_one() {
     assert_eq!(
         models,
         [
-            "drivers.claude.models.large = \"claude-opus-4-8\"",
+            "drivers.claude.models.large = \"opus\"",
             "drivers.claude.models.medium = \"claude-sonnet-5-5\"",
             "drivers.claude.models.small = \"claude-haiku-4-5\"",
         ]
