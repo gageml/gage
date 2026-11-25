@@ -2641,6 +2641,56 @@ mod tests {
         assert_eq!(costs, expected);
     }
 
+    /// The scan view reads a stored scan through SQL the compiler
+    /// does not check against the schema. Loading the model runs
+    /// every statement of the stored loader.
+    #[tokio::test]
+    async fn the_view_model_of_a_stored_scan_has_its_tasks_agents_and_cost() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("store.git");
+        gage_store::init(&path).unwrap();
+        let store = Store::open_with_cache_root(&path, &tmp.path().join("cache")).unwrap();
+        let id = new_uuid();
+        store_scan(
+            &store,
+            tmp.path(),
+            &id,
+            &[("AGENT1", Some(0.5)), ("AGENT2", None)],
+        );
+        let host = StoreHost {
+            store: Arc::new(Mutex::new(store)),
+            registry: source::driver_registry(),
+            live: None,
+        };
+
+        let model = host.load_model(&id).await.unwrap();
+        assert_eq!(model.scan_id, short_uuid(&id));
+        assert_eq!(model.log_key.as_deref(), Some(id.as_str()));
+        assert_eq!((model.total, model.progress, model.errors), (1, 1, 0));
+        assert!(model.finished);
+        assert_eq!(model.elapsed, Some(Duration::from_millis(500)));
+        assert!(model.notes.is_empty() && model.issues.is_empty());
+        assert!(model.sessions.is_empty());
+        assert_eq!(model.tasks.len(), 1);
+        let task = &model.tasks[0];
+        assert_eq!(
+            (task.id.scanner.as_str(), task.id.task.as_str()),
+            ("hello", "greet")
+        );
+        assert!(task.state == TaskState::Completed);
+        assert_eq!(task.elapsed, Some(Duration::from_millis(200)));
+        let mut agents: Vec<&str> = task.agents.iter().map(|a| a.session_id.as_str()).collect();
+        agents.sort();
+        assert_eq!(agents, ["AGENT1", "AGENT2"]);
+        assert!(task.cost == model.cost && model.cost.is_some());
+
+        let picks = host.list_rows().await.unwrap();
+        assert_eq!(picks.len(), 1);
+        assert_eq!(picks[0].id, id);
+        assert_eq!((picks[0].tasks, picks[0].sessions), (1, 0));
+        assert_eq!(picks[0].status, "completed");
+    }
+
     #[test]
     fn delete_outro_reports_what_was_kept_only_when_something_was() {
         let none_kept = CascadeCounts {
