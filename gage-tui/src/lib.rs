@@ -1,6 +1,7 @@
 mod app;
 mod attrs;
 mod body;
+mod desktop;
 mod dialog;
 mod doc;
 mod format;

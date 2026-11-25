@@ -42,6 +42,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::attrs::attr_lines;
+use crate::desktop::{self, Desktop, SystemDesktop};
 use crate::dialog;
 use crate::doc::Document;
 use crate::input::spawn_input_thread;
@@ -930,6 +931,9 @@ fn handle_key(state: &mut ViewState, key: KeyEvent, on_cancel: &impl Fn()) -> bo
                 KeyCode::Char('a') if matches!(state.dialog, Dialog::Issue { .. }) => {
                     state.open_actions_prompt();
                 }
+                KeyCode::Char('a') if matches!(state.dialog, Dialog::Note { .. }) => {
+                    state.open_note_actions_prompt();
+                }
                 KeyCode::Char('A') => state.open_tool_use_session(),
                 KeyCode::Char('T') if matches!(state.dialog, Dialog::Issue { .. }) => {
                     state.open_issue_target_session();
@@ -970,6 +974,7 @@ fn handle_key(state: &mut ViewState, key: KeyEvent, on_cancel: &impl Fn()) -> bo
         KeyCode::Enter if state.focus == Focus::Notes => state.open_selected_note(),
         KeyCode::Enter if state.focus == Focus::Issues => state.open_selected_issue(),
         KeyCode::Char('a') if state.focus == Focus::Issues => state.actions_for_selected_issue(),
+        KeyCode::Char('a') if state.focus == Focus::Notes => state.actions_for_selected_note(),
         KeyCode::Enter if state.focus == Focus::Sessions => state.open_selected_session(),
         KeyCode::Enter if state.focus == Focus::Tasks => state.enter_task_row(),
         KeyCode::Right if state.focus == Focus::Tasks => state.expand_task_row(),
@@ -1004,6 +1009,12 @@ fn handle_prompt_key(state: &mut ViewState, key: KeyEvent) {
                 _ => {}
             }
         }
+        Some(Prompt::NoteActions { .. }) => match key.code {
+            KeyCode::Char('c') => state.copy_note(),
+            KeyCode::Char('o') if state.desktop.can_browse() => state.open_note_in_browser(),
+            KeyCode::Char('q') | KeyCode::Esc => state.prompt = None,
+            _ => {}
+        },
         Some(Prompt::Close { .. }) | Some(Prompt::Open { .. }) | Some(Prompt::Comment { .. }) => {
             handle_comment_key(state, key)
         }
@@ -1136,6 +1147,8 @@ struct ViewState {
     /// position for a second phase.
     max_ratio: f64,
     host: Arc<dyn ScanHost>,
+    /// The clipboard and browser the note actions use
+    desktop: Arc<dyn Desktop>,
     /// Where the embedded session view's page loader sends its
     /// events; the event loop receives them
     view_events: UnboundedSender<app::ViewEvent>,
@@ -1195,13 +1208,16 @@ enum Dialog {
     OpenScan(Picker),
 }
 
-/// A confirm/comment prompt drawn over whatever is beneath it — the
-/// issue dialog or the bare view, depending on where it was opened
-/// from. Opening one never disturbs the open dialog or its scroll
-/// state; dismissing removes only the overlay. Each variant holds a
-/// snapshot of its issue so the prompt works with or without the
-/// issue dialog beneath.
+/// A menu or confirm/comment prompt drawn over whatever is beneath it
+/// — a note or issue dialog or the bare view, depending on where it
+/// was opened from. Opening one never disturbs the open dialog or its
+/// scroll state; dismissing removes only the overlay. Each variant
+/// holds a snapshot of its note or issue so the prompt works with or
+/// without the dialog beneath.
 enum Prompt {
+    /// Menu of the actions available for a note, keyed by letter. An
+    /// action runs at once and closes the menu.
+    NoteActions { note: Box<NoteItem> },
     /// Menu of the actions available for an issue, keyed by letter.
     /// Resolve and comment are always offered; the close reasons show
     /// for an open issue and the reopen statuses for a closed one.
@@ -1285,6 +1301,7 @@ impl ViewState {
             session_ui: HashMap::new(),
             max_ratio: 0.0,
             host,
+            desktop: Arc::new(SystemDesktop),
             view_events,
             allow_open: false,
             enhanced_keys: false,
@@ -1310,7 +1327,9 @@ impl ViewState {
         model.finished = true;
         let allow_open = self.allow_open;
         let enhanced_keys = self.enhanced_keys;
+        let desktop = Arc::clone(&self.desktop);
         *self = ViewState::new(model, Arc::clone(&self.host), self.view_events.clone());
+        self.desktop = desktop;
         self.allow_open = allow_open;
         self.enhanced_keys = enhanced_keys;
     }
@@ -1580,6 +1599,51 @@ impl ViewState {
                 issue: Box::new(issue.clone()),
             });
         }
+    }
+
+    /// Open the actions menu over the note dialog's note
+    fn open_note_actions_prompt(&mut self) {
+        if let Dialog::Note { note } = &self.dialog {
+            self.prompt = Some(Prompt::NoteActions {
+                note: Box::new(note.clone()),
+            });
+        }
+    }
+
+    /// Open the actions menu for the notes table's selected note
+    fn actions_for_selected_note(&mut self) {
+        let Some(i) = self.notes.selected_index() else {
+            return;
+        };
+        if let Some(note) = self.model.notes.get(i) {
+            self.prompt = Some(Prompt::NoteActions {
+                note: Box::new(note.clone()),
+            });
+        }
+    }
+
+    /// Copy the note's value, as written, to the clipboard.
+    fn copy_note(&mut self) {
+        if let Some(Prompt::NoteActions { note }) = self.prompt.take()
+            && let Err(e) = self.desktop.copy_text(&note.value_full)
+        {
+            self.notify(format!("Cannot copy note: {e}"));
+        }
+    }
+
+    fn open_note_in_browser(&mut self) {
+        if let Some(Prompt::NoteActions { note }) = self.prompt.take()
+            && let Err(e) = self.desktop.browse_html(&note_html(&note))
+        {
+            self.notify(format!("Cannot open note in browser: {e}"));
+        }
+    }
+
+    /// Show `message` over the open dialog; dismissing it restores
+    /// that dialog.
+    fn notify(&mut self, message: String) {
+        let return_to = Box::new(std::mem::replace(&mut self.dialog, Dialog::None));
+        self.dialog = Dialog::Notice { message, return_to };
     }
 
     /// Take the actions menu's issue to hand to a chosen action's
@@ -2543,6 +2607,7 @@ fn draw_dialogs(frame: &mut Frame, state: &mut ViewState) {
         model,
         cancel_requested,
         enhanced_keys,
+        desktop,
         ..
     } = state;
     match dialog {
@@ -2574,16 +2639,17 @@ fn draw_dialogs(frame: &mut Frame, state: &mut ViewState) {
         Dialog::None => {}
     }
     if let Some(prompt) = prompt {
-        draw_prompt(frame, prompt, *enhanced_keys);
+        draw_prompt(frame, prompt, *enhanced_keys, desktop.can_browse());
     }
 }
 
 /// Draw the open prompt over the frame. The prompt dialogs clear only
 /// their own centered area, so whatever is beneath stays visible.
-fn draw_prompt(frame: &mut Frame, prompt: &mut Prompt, enhanced_keys: bool) {
+fn draw_prompt(frame: &mut Frame, prompt: &mut Prompt, enhanced_keys: bool, can_browse: bool) {
     let newline = hint::newline_keys(enhanced_keys);
     match prompt {
         Prompt::Actions { issue } => draw_actions(frame, issue),
+        Prompt::NoteActions { .. } => draw_note_actions(frame, can_browse),
         Prompt::Close { reason, editor, .. } => {
             let comment_prompt = match reason {
                 StatusReason::Duplicate => "Comment — name the surviving issue ID",
@@ -2691,6 +2757,31 @@ fn draw_actions(frame: &mut Frame, issue: &IssueItem) {
     dialog::draw_lines(frame, lines, "q cancel");
 }
 
+/// The note actions menu. The browser row is dimmed and marked
+/// disabled when a browser started here would not appear in front of
+/// the user.
+fn draw_note_actions(frame: &mut Frame, can_browse: bool) {
+    let copy = Line::from(vec![
+        Span::raw("  "),
+        Span::styled("c", styles::Dialog::key()),
+        Span::raw(" copy to clipboard"),
+    ]);
+    let open = if can_browse {
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled("o", styles::Dialog::key()),
+            Span::raw(" open in browser"),
+        ])
+    } else {
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled("o open in browser (disabled)", styles::Dialog::dim()),
+        ])
+    };
+    let lines = vec![copy.left_aligned(), open.left_aligned()];
+    dialog::draw_lines(frame, lines, "q cancel");
+}
+
 /// Note detail content: caption/value header columns (with an optional
 /// multi-line Metadata attribute) and the value rendered as markdown.
 fn note_lines(note: &NoteItem, width: u16) -> Vec<Line<'static>> {
@@ -2708,6 +2799,22 @@ fn note_lines(note: &NoteItem, width: u16) -> Vec<Line<'static>> {
     lines.push(Line::raw(""));
     lines.extend(markdown::render(&note.value_full));
     lines
+}
+
+/// The note as a standalone HTML page: the detail view's header
+/// attributes and the value rendered from markdown.
+fn note_html(note: &NoteItem) -> String {
+    let metadata_pretty = note.metadata.as_deref().map(pretty_json);
+    let mut attrs: Vec<(&str, &str)> = vec![
+        ("Name", &note.name),
+        ("Target", &note.target),
+        ("Author", &note.author),
+        ("Created", &note.created),
+    ];
+    if let Some(pretty) = &metadata_pretty {
+        attrs.push(("Metadata", pretty));
+    }
+    desktop::html_page(&note.name, &attrs, &note.value_full)
 }
 
 /// Pretty-print a raw JSON string (2-space indent). Falls back to the
@@ -3621,6 +3728,7 @@ fn footer_help(state: &ViewState) -> Line<'static> {
             if session_target(&note.target).is_some() {
                 items.push(("T", "target"));
             }
+            items.push(("a", "action"));
             hint::help_line(&items)
         }
         Dialog::Issue { issue } => {
@@ -3649,7 +3757,7 @@ fn footer_help(state: &ViewState) -> Line<'static> {
         }
         Dialog::Log { .. } => hint::help_line(&[("q", "close"), ("↑/↓", "scroll")]),
         Dialog::OpenScan(_) => Line::default(),
-        Dialog::None if state.focus == Focus::Issues => {
+        Dialog::None if matches!(state.focus, Focus::Issues | Focus::Notes) => {
             if state.model.finished {
                 hint::help_line(&[
                     ("q", "quit"),
@@ -4110,6 +4218,176 @@ mod tests {
         let line = name_line("general", false);
         assert_eq!(line.spans.len(), 1);
         assert_eq!(line.spans[0].style, Style::new());
+    }
+
+    /// A desktop that records what the view asks of it.
+    #[derive(Default)]
+    struct RecordingDesktop {
+        no_browser: bool,
+        fail: bool,
+        copied: Mutex<Vec<String>>,
+        browsed: Mutex<Vec<String>>,
+    }
+
+    impl Desktop for RecordingDesktop {
+        fn copy_text(&self, text: &str) -> io::Result<()> {
+            if self.fail {
+                return Err(io::Error::other("no clipboard"));
+            }
+            self.copied.lock().unwrap().push(text.to_string());
+            Ok(())
+        }
+        fn can_browse(&self) -> bool {
+            !self.no_browser
+        }
+        fn browse_html(&self, page: &str) -> io::Result<()> {
+            if self.fail {
+                return Err(io::Error::other("no opener"));
+            }
+            self.browsed.lock().unwrap().push(page.to_string());
+            Ok(())
+        }
+    }
+
+    fn note_item() -> NoteItem {
+        NoteItem {
+            id: "n1".into(),
+            name: "general[finding]".into(),
+            value: "A finding".into(),
+            value_full: "# A finding\n\nThe **details**.".into(),
+            target: "session:abc".into(),
+            target_cell: "abc".into(),
+            author: "me".into(),
+            created: "today".into(),
+            metadata: Some(r#"{"k":1}"#.into()),
+        }
+    }
+
+    /// A finished view of one note, with the notes table focused and
+    /// `desktop` in place of the system's.
+    fn state_with_note(desktop: Arc<RecordingDesktop>) -> ViewState {
+        let model = ScanModel {
+            notes: vec![note_item()],
+            finished: true,
+            ..ScanModel::default()
+        };
+        let mut state = ViewState::new(model, Arc::new(NullHost), unbounded_channel().0);
+        state.desktop = desktop;
+        state.focus = Focus::Notes;
+        state
+    }
+
+    fn press(state: &mut ViewState, c: char) {
+        handle_key(state, key(c), &|| {});
+    }
+
+    fn screen_text(state: &mut ViewState) -> String {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|frame| draw(frame, state)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let mut out = String::new();
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                out.push_str(buffer[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    #[test]
+    fn note_actions_open_from_the_notes_table_and_the_note_dialog() {
+        let mut state = state_with_note(Arc::default());
+        assert!(screen_text(&mut state).contains("a action"));
+        press(&mut state, 'a');
+        assert!(matches!(state.prompt, Some(Prompt::NoteActions { .. })));
+        assert!(matches!(state.dialog, Dialog::None));
+        let menu = screen_text(&mut state);
+        assert!(menu.contains("c copy to clipboard"), "{menu}");
+        assert!(menu.contains("o open in browser"), "{menu}");
+        assert!(!menu.contains("(disabled)"), "{menu}");
+        press(&mut state, 'q');
+        assert!(state.prompt.is_none());
+
+        state.open_selected_note();
+        assert!(screen_text(&mut state).contains("a action"));
+        press(&mut state, 'a');
+        assert!(matches!(state.prompt, Some(Prompt::NoteActions { .. })));
+        press(&mut state, 'q');
+        assert!(state.prompt.is_none());
+        assert!(matches!(state.dialog, Dialog::Note { .. }));
+    }
+
+    #[test]
+    fn note_copy_puts_the_note_value_on_the_clipboard() {
+        let desktop = Arc::new(RecordingDesktop::default());
+        let mut state = state_with_note(Arc::clone(&desktop));
+        press(&mut state, 'a');
+        press(&mut state, 'c');
+        assert!(state.prompt.is_none());
+        assert!(matches!(state.dialog, Dialog::None));
+        assert_eq!(
+            *desktop.copied.lock().unwrap(),
+            vec![note_item().value_full]
+        );
+    }
+
+    #[test]
+    fn note_open_sends_the_note_page_to_the_browser() {
+        let desktop = Arc::new(RecordingDesktop::default());
+        let mut state = state_with_note(Arc::clone(&desktop));
+        press(&mut state, 'a');
+        press(&mut state, 'o');
+        assert!(state.prompt.is_none());
+        let browsed = desktop.browsed.lock().unwrap();
+        let [page] = browsed.as_slice() else {
+            panic!("expected one page, got {}", browsed.len());
+        };
+        assert!(page.contains("<td>session:abc</td>"), "{page}");
+        assert!(page.contains("<h1>A finding</h1>"), "{page}");
+        assert!(page.contains("<strong>details</strong>"), "{page}");
+    }
+
+    #[test]
+    fn note_open_is_disabled_without_a_local_browser() {
+        let desktop = Arc::new(RecordingDesktop {
+            no_browser: true,
+            ..RecordingDesktop::default()
+        });
+        let mut state = state_with_note(Arc::clone(&desktop));
+        press(&mut state, 'a');
+        let menu = screen_text(&mut state);
+        assert!(menu.contains("o open in browser (disabled)"), "{menu}");
+        press(&mut state, 'o');
+        assert!(matches!(state.prompt, Some(Prompt::NoteActions { .. })));
+        assert!(desktop.browsed.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_failed_note_action_shows_a_notice_over_the_note_dialog() {
+        let desktop = Arc::new(RecordingDesktop {
+            fail: true,
+            ..RecordingDesktop::default()
+        });
+        let mut state = state_with_note(desktop);
+        state.open_selected_note();
+        press(&mut state, 'a');
+        press(&mut state, 'c');
+        assert!(state.prompt.is_none());
+        let notice = screen_text(&mut state);
+        assert!(
+            notice.contains("Cannot copy note: no clipboard"),
+            "{notice}"
+        );
+        handle_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &|| {},
+        );
+        assert!(matches!(state.dialog, Dialog::Note { .. }));
     }
 
     #[test]

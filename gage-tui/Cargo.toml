@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+crossterm = { version = "0.29", features = ["osc52"] }
 datafusion = { workspace = true }
 gage-core = { path = "../gage-core" }
 gage-query = { path = "../gage-query" }
@@ -12,14 +13,12 @@ gage-session = { path = "../gage-session" }
 gage-store = { path = "../gage-store" }
 ratatui = { version = "0.30", features = ["unstable-rendered-line-info"] }
 serde_json = { workspace = true }
-pulldown-cmark = { version = "0.13", default-features = false }
+tempfile = { workspace = true }
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 unicode-linebreak = "0.1"
 unicode-segmentation = "1.13"
 unicode-width = "0.2"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
-
-[dev-dependencies]
-tempfile = { workspace = true }
 
 [lints]
 workspace = true
