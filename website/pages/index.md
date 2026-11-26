@@ -3,7 +3,7 @@ pageType: home
 hero:
   text: Unlock the value of your session logs
   tagline:
-    Gage runs locally to search, scan, and score.
+    Gage runs locally to search and scan.
   learn:
     title: What's in your logs
   install: curl -fsSL https://gage.io/install.sh | sh

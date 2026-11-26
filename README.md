@@ -5,7 +5,7 @@
 <p align="center">
   <strong>Unlock the value of your session logs.</strong>
   <br />
-  Gage runs locally to search, scan, and score.
+  Gage runs locally to search and scan.
 </p>
 
 <h3 align="center">
