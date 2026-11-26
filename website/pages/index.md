@@ -87,7 +87,6 @@ landing:
       models. Gage uses a Git style workflow for backup and to share only
       with those you trust.
     actions:
-      - theme: brand
-        text: Commitment to Privacy
+      - text: Read more in `PRIVACY.md`
         link: https://github.com/gageml/gage/blob/main/PRIVACY.md
 ---

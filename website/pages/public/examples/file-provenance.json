@@ -1,5 +1,5 @@
 {
-  "question": "My disk is almost full. What is ~/.cache/gage-dev-target and where did it come from?",
+  "question": "My disk is full. What is ~/.cache/gage-dev-target?",
   "steps": [
     "The agent searches your logs for the commands that named the directory.",
     "It checks whether the work that used it was merged."

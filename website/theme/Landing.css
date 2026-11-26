@@ -712,6 +712,20 @@
   margin-top: 2rem;
 }
 
+.gage-landing__link {
+  color: var(--rp-c-brand);
+  font-weight: 500;
+}
+
+.gage-landing__link:hover {
+  text-decoration: underline;
+}
+
+.gage-landing__link code {
+  font-family: var(--rp-font-family-mono);
+  font-size: 0.9em;
+}
+
 /* The hero headline is a sentence now, not two words, so it needs a
    measure and balanced wrapping. */
 

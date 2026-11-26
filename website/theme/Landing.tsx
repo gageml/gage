@@ -1,5 +1,4 @@
 import { useFrontmatter } from "@rspress/core/runtime";
-import { Button } from "@rspress/core/theme-original";
 import {
   ArrowLeftRight,
   Brain,
@@ -28,7 +27,7 @@ import "./Landing.css";
 // shape that frontmatter must have.
 
 interface Action {
-  theme?: "brand" | "alt";
+  // Text between backticks is set as code.
   text: string;
   link: string;
 }
@@ -532,14 +531,16 @@ function CallToAction({
       <p className="gage-landing__lead">{content.details}</p>
       <div className="gage-landing__actions">
         {content.actions.map((action) => (
-          <Button
+          <a
             key={action.link}
-            type="a"
+            className="gage-landing__link"
             href={action.link}
-            theme={action.theme}
           >
-            {action.text}
-          </Button>
+            {action.text.split("`").map((part, i) =>
+              // biome-ignore lint/suspicious/noArrayIndexKey: fixed text
+              i % 2 ? <code key={i}>{part}</code> : part,
+            )}
+          </a>
         ))}
       </div>
     </section>
@@ -553,8 +554,8 @@ export default function Landing() {
   return (
     <div className="gage-landing">
       {content.can && <Points content={content.can} />}
-      {content.how && <HowItWorks content={content.how} />}
       {content.examples && <Examples content={content.examples} />}
+      {content.how && <HowItWorks content={content.how} />}
       {content.works && <WorksWith content={content.works} />}
       {content.cta && <CallToAction content={content.cta} />}
     </div>

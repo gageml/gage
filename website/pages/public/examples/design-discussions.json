@@ -1,10 +1,10 @@
 {
-  "question": "The query tool used to read other stores through its source input. Now it only has native. Was there any thinking about that when the change was made?",
+  "question": "The query tool isn't reading other stores. Is that a regression or intentional?",
   "steps": [
     "The agent traces the change through two earlier sessions and their commits."
   ],
   "answer": [
-    "The loss was considered once, in one sentence, at the moment you approved the change.",
+    "It is intentional. The loss was considered once, in one sentence, at the moment you approved the change.",
     "On November 14 you asked for the ability to read another store, and it was built as the source input. On November 16 a redesign left that value with no place to go. The agent first proposed keeping it as a third input.",
     "Your reply did not mention it, so the agent changed its recommendation to removal. It noted that a single call could no longer read a different store, and you approved.",
     "Nobody examined whether the replacement covered every case that the old input did."
