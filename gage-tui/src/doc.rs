@@ -263,6 +263,9 @@ pub struct Entry {
     /// The message subtype the driver derived, from the `message`
     /// table; `None` for an entry that is not a message
     pub message_subtype: Option<String>,
+    /// When the harness recorded the entry, epoch milliseconds, from
+    /// the `entry` table; `None` for an entry with no timestamp
+    pub timestamp_ms: Option<i64>,
     /// The harness's row as the driver's codec decodes it
     pub value: EntryValue,
 }
@@ -445,6 +448,7 @@ mod tests {
                     entry_type: "user".to_string(),
                     message_type: None,
                     message_subtype: None,
+                    timestamp_ms: None,
                     value: json!({}).into(),
                 })
                 .collect(),

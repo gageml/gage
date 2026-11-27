@@ -270,7 +270,7 @@ impl Backend {
         let codec = bodies.codec()?;
         let id = sql_str(session_id);
         let sql = format!(
-            "SELECT e.line, e.uuid, e.type, m.type, m.subtype, e.raw \
+            "SELECT e.line, e.uuid, e.type, m.type, m.subtype, e.raw, e.timestamp \
              FROM entry e LEFT JOIN message m ON m.session_id = '{id}' AND m.line = e.line \
              WHERE e.session_id = '{id}' ORDER BY e.line"
         );
@@ -283,6 +283,7 @@ impl Backend {
             let message_types = column::<StringArray>(batch, 3);
             let subtypes = column::<StringArray>(batch, 4);
             let raws = column::<StringArray>(batch, 5);
+            let timestamps = column::<TimestampMillisecondArray>(batch, 6);
             for i in 0..batch.num_rows() {
                 // A driver that supplies no raw row leaves the entry
                 // with nothing to render; it still holds its line
@@ -299,6 +300,7 @@ impl Backend {
                         .is_valid(i)
                         .then(|| message_types.value(i).to_string()),
                     message_subtype: subtypes.is_valid(i).then(|| subtypes.value(i).to_string()),
+                    timestamp_ms: timestamps.is_valid(i).then(|| timestamps.value(i)),
                     value,
                 });
             }
@@ -1214,6 +1216,9 @@ pub(crate) mod tests {
         let doc = backend.load(&f.session_id).await.unwrap();
         assert_eq!(doc.entries.len(), 2);
         assert_eq!(doc.entries[0].entry_type(), "user");
+        // 2025-01-01T00:00:00Z and one second later
+        assert_eq!(doc.entries[0].timestamp_ms, Some(1_735_689_600_000));
+        assert_eq!(doc.entries[1].timestamp_ms, Some(1_735_689_601_000));
         assert_eq!(blocks(&doc, 0), markdown("hello there"));
         assert_eq!(blocks(&doc, 1), markdown("hi"));
         let origin = doc.session.value["origin"].as_str().unwrap();

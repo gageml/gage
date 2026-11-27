@@ -11,6 +11,7 @@ use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use gage_core::datetime::ms_to_iso8601;
 use gage_session::INVALID_ENTRY_TYPE;
 use gage_store::{ChangeKind, NoteValue};
 use ratatui::DefaultTerminal;
@@ -1856,7 +1857,13 @@ fn body_title(doc: &Document, kind: Option<&RowKind>) -> String {
         Some(RowKind::Session) => "Session".to_string(),
         Some(RowKind::Attachment { .. }) => format!("{} • attachment", doc.session.id),
         Some(RowKind::AttachmentFile { path, .. }) => format!("{} • {path}", doc.session.id),
-        Some(RowKind::Entry { index }) => entry_header(doc, *index),
+        Some(RowKind::Entry { index }) => {
+            let head = entry_header(doc, *index);
+            match entry_time(doc, *index) {
+                Some(time) => format!("{head} • {time}"),
+                None => head,
+            }
+        }
         Some(RowKind::Note {
             entry_index,
             note_id,
@@ -1876,12 +1883,20 @@ fn body_title(doc: &Document, kind: Option<&RowKind>) -> String {
     }
 }
 
+/// The time of entry `index` as `yyyy-mm-dd hh:mm:ss` in UTC; `None`
+/// for an entry with no timestamp.
+fn entry_time(doc: &Document, index: usize) -> Option<String> {
+    let ms = doc.entries.get(index)?.timestamp_ms.filter(|ms| *ms >= 0)?;
+    let iso = ms_to_iso8601(ms);
+    Some(format!("{} {}", &iso[..10], &iso[11..19]))
+}
+
 fn entry_header(doc: &Document, index: usize) -> String {
     let kind = doc
         .entries
         .get(index)
         .map_or("?".to_string(), |e| e.label().to_string());
-    format!("{} {}", index + 1, kind)
+    format!("{} • {}", index + 1, kind)
 }
 
 /// The content of a run of dropped lines: the `line` records that
@@ -2699,6 +2714,28 @@ mod tests {
         assert_eq!(state.selected_entry_index(), Some(1));
     }
 
+    /// The body pane's label shows the selected entry's line, type,
+    /// and time as a UTC date and time, separated by bullets. An entry
+    /// with no timestamp shows its line and type alone.
+    #[test]
+    fn body_label_shows_the_entry_line_type_and_time() {
+        let mut doc = doc_with_entries(2);
+        // 2025-01-01T00:00:01.500Z
+        doc.entries[0].timestamp_ms = Some(1_735_689_601_500);
+        let mut state = AppState::new(doc, &ViewOptions::default(), DocSource::Backend, false);
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+
+        state.list_state.select(Some(1));
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let text = screen(&terminal);
+        assert!(text.contains("┌1 • user • 2025-01-01 00:00:01─"), "{text}");
+
+        state.list_state.select(Some(2));
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let text = screen(&terminal);
+        assert!(text.contains("┌2 • user─"), "{text}");
+    }
+
     /// A document of `count` user entries, one per JSONL line
     fn doc_with_entries(count: u32) -> Document {
         Document {
@@ -2715,6 +2752,7 @@ mod tests {
                     entry_type: "user".into(),
                     message_type: None,
                     message_subtype: Some("text".into()),
+                    timestamp_ms: None,
                     value: serde_json::json!({"type": "user"}).into(),
                 })
                 .collect(),
