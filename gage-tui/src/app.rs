@@ -356,6 +356,10 @@ pub(crate) enum KeyOutcome {
     Ignored,
 }
 
+fn is_recenter_key(key: KeyEvent) -> bool {
+    key.code == KeyCode::Char('l') && key.modifiers.contains(KeyModifiers::CONTROL)
+}
+
 /// Apply one key press to the view. Dialog input takes precedence over
 /// global keys.
 pub(crate) fn handle_key(
@@ -364,6 +368,10 @@ pub(crate) fn handle_key(
     backend: &Backend,
     events: &UnboundedSender<ViewEvent>,
 ) -> io::Result<KeyOutcome> {
+    // Any key other than the recenter key restarts the recenter cycle
+    if !is_recenter_key(key) {
+        state.recenter_next = Recenter::Center;
+    }
     match &mut state.dialog {
         Dialog::AddNote { .. } | Dialog::EditNote { .. } => {
             handle_note_dialog(state, key, backend)?;
@@ -510,10 +518,8 @@ pub(crate) fn handle_key(
             state.collapse_selected();
             KeyOutcome::Consumed
         }
-        KeyCode::Char('l')
-            if key.modifiers.contains(KeyModifiers::CONTROL) && state.focus == Focus::Outline =>
-        {
-            state.center_selected();
+        _ if is_recenter_key(key) && state.focus == Focus::Outline => {
+            state.recenter_selected();
             KeyOutcome::Consumed
         }
         KeyCode::Char('n') => {
@@ -671,6 +677,8 @@ pub(crate) struct AppState {
     /// A centering requested before the first draw, applied once the
     /// outline viewport is known
     center_pending: bool,
+    /// Where the next recenter key press places the selected row
+    recenter_next: Recenter,
     dialog: Dialog,
     view: ViewOptions,
     source: DocSource,
@@ -722,6 +730,7 @@ impl AppState {
             body_viewport: 0,
             outline_viewport: 0,
             center_pending: false,
+            recenter_next: Recenter::Center,
             dialog: Dialog::None,
             view: options.clone(),
             source,
@@ -1110,6 +1119,28 @@ impl AppState {
         };
         let half = (self.outline_viewport / 2) as usize;
         *self.list_state.offset_mut() = sel.saturating_sub(half);
+    }
+
+    /// Scroll the selected row to the next position of the recenter
+    /// cycle: the middle of the outline, then near its top, then near
+    /// its bottom. The top and bottom positions leave
+    /// `recenter_padding` rows between the selected row and the edge.
+    fn recenter_selected(&mut self) {
+        let Some(sel) = self.list_state.selected() else {
+            return;
+        };
+        let viewport = usize::from(self.outline_viewport);
+        let padding = recenter_padding(viewport);
+        let (offset, next) = match self.recenter_next {
+            Recenter::Center => (sel.saturating_sub(viewport / 2), Recenter::Top),
+            Recenter::Top => (sel.saturating_sub(padding), Recenter::Bottom),
+            Recenter::Bottom => (
+                (sel + padding + 1).saturating_sub(viewport),
+                Recenter::Center,
+            ),
+        };
+        *self.list_state.offset_mut() = offset;
+        self.recenter_next = next;
     }
 
     fn outline_page(&self) -> u16 {
@@ -1559,6 +1590,20 @@ fn handle_confirm_delete(state: &mut AppState, code: KeyCode, backend: &Backend)
         state.body_scroll = 0;
     }
     Ok(())
+}
+
+/// A position of the recenter cycle
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Recenter {
+    Center,
+    Top,
+    Bottom,
+}
+
+/// Rows left between the selected row and the outline edge by the top
+/// and bottom recenter positions: a fifth of the viewport, at most 3.
+fn recenter_padding(viewport: usize) -> usize {
+    (viewport / 5).min(3)
 }
 
 fn page_size(viewport: u16) -> u16 {
@@ -3259,6 +3304,69 @@ mod tests {
         assert!(half > 0);
         assert_eq!(state.list_state.offset(), selected - half);
         assert!(!state.center_pending);
+    }
+
+    fn press_recenter(state: &mut AppState, backend: &Backend) {
+        let (events, _view_events) = unbounded_channel();
+        handle_key(
+            state,
+            KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL),
+            backend,
+            &events,
+        )
+        .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn recenter_key_cycles_center_top_bottom() {
+        let backend = test_backend().await;
+        let doc = doc_with_entries(60);
+        let mut state = AppState::new(doc, &ViewOptions::default(), DocSource::Backend, false);
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        state.select_entry(30);
+        let viewport = usize::from(state.outline_viewport);
+        let padding = recenter_padding(viewport);
+        assert!(padding > 0);
+
+        let mut pane_rows = Vec::new();
+        for _ in 0..4 {
+            press_recenter(&mut state, &backend);
+            terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+            pane_rows.push(state.selected_pane_row());
+        }
+        assert_eq!(
+            pane_rows,
+            [viewport / 2, padding, viewport - 1 - padding, viewport / 2]
+        );
+        assert_eq!(state.selected_entry_index(), Some(30));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn another_key_restarts_the_recenter_cycle() {
+        let backend = test_backend().await;
+        let doc = doc_with_entries(60);
+        let mut state = AppState::new(doc, &ViewOptions::default(), DocSource::Backend, false);
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        state.select_entry(30);
+        let viewport = usize::from(state.outline_viewport);
+
+        press_recenter(&mut state, &backend);
+        press(&mut state, &backend, KeyCode::Down);
+        press_recenter(&mut state, &backend);
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        assert_eq!(state.selected_pane_row(), viewport / 2);
+    }
+
+    #[test]
+    fn recenter_padding_shrinks_with_the_viewport() {
+        assert_eq!(recenter_padding(0), 0);
+        assert_eq!(recenter_padding(4), 0);
+        assert_eq!(recenter_padding(5), 1);
+        assert_eq!(recenter_padding(10), 2);
+        assert_eq!(recenter_padding(15), 3);
+        assert_eq!(recenter_padding(60), 3);
     }
 
     /// A document of `count` user entries with the entry at `hidden`
