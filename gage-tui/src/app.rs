@@ -1199,8 +1199,63 @@ impl AppState {
             "Edit comment"
         };
         let (note_id, text) = (note.id.clone(), note.text());
+        // Show the parent while its note is edited
+        self.select_note_parent();
         self.open_note_editor(note_id, text, title);
         true
+    }
+
+    /// Move the selection from a note row to the row the note is
+    /// about: its entry row, or the session row for a session-level
+    /// note.
+    fn select_note_parent(&mut self) {
+        let Some(row) = self
+            .list_state
+            .selected()
+            .and_then(|i| self.outline.row(i))
+        else {
+            return;
+        };
+        let RowKind::Note { entry_index, .. } = &row.kind else {
+            return;
+        };
+        let parent = match *entry_index {
+            Some(entry_index) => self
+                .outline
+                .rows()
+                .iter()
+                .position(|r| matches!(r.kind, RowKind::Entry { index } if index == entry_index)),
+            // Session notes hang off the session row, always row 0
+            None => Some(0),
+        };
+        if let Some(parent) = parent {
+            self.list_state.select(Some(parent));
+            self.body_scroll = 0;
+        }
+    }
+
+    /// Select the row of note `note_id`, if it has one.
+    fn select_note(&mut self, note_id: &str) {
+        let row = self
+            .outline
+            .rows()
+            .iter()
+            .position(|r| matches!(&r.kind, RowKind::Note { note_id: id, .. } if id == note_id));
+        if let Some(row) = row {
+            self.list_state.select(Some(row));
+            self.body_scroll = 0;
+        }
+    }
+
+    /// Close the note editor and return it. The edit editor moved the
+    /// selection to the note's parent when it opened, so closing it
+    /// puts the selection back on the note.
+    fn close_note_editor(&mut self) -> Dialog {
+        let dialog = std::mem::replace(&mut self.dialog, Dialog::None);
+        if let Dialog::EditNote { note_id, .. } = &dialog {
+            self.select_note(note_id);
+        }
+        dialog
     }
 
     fn open_note_editor(&mut self, note_id: String, text: String, title: &'static str) {
@@ -1355,7 +1410,7 @@ fn handle_note_dialog(state: &mut AppState, key: KeyEvent, backend: &Backend) ->
                 _ => true,
             };
             if empty {
-                state.dialog = Dialog::None;
+                state.close_note_editor();
             } else {
                 commit_note(state, backend)?;
             }
@@ -1369,7 +1424,7 @@ fn handle_note_dialog(state: &mut AppState, key: KeyEvent, backend: &Backend) ->
                 _ => false,
             };
             if !dirty {
-                state.dialog = Dialog::None;
+                state.close_note_editor();
             } else {
                 let pending = std::mem::replace(&mut state.dialog, Dialog::None);
                 state.dialog = Dialog::ConfirmCancel {
@@ -1397,7 +1452,7 @@ fn handle_note_dialog(state: &mut AppState, key: KeyEvent, backend: &Backend) ->
 /// closed, so the host surfaces the error and the view stays as it
 /// was.
 fn commit_note(state: &mut AppState, backend: &Backend) -> io::Result<()> {
-    match std::mem::replace(&mut state.dialog, Dialog::None) {
+    match state.close_note_editor() {
         Dialog::AddNote {
             entry_index,
             editor,
@@ -1452,7 +1507,11 @@ fn handle_confirm_cancel(state: &mut AppState, code: KeyCode) {
     };
     match code {
         KeyCode::Char('y') | KeyCode::Char('Y') => {
-            // Discard the editor; dialog stays None.
+            // Discard the editor; dialog stays None. A discarded edit
+            // puts the selection back on its note.
+            if let Dialog::EditNote { note_id, .. } = &*pending {
+                state.select_note(note_id);
+            }
         }
         _ => state.dialog = *pending,
     }
@@ -3263,9 +3322,28 @@ mod tests {
         press(&mut state, &backend, KeyCode::Char('j'));
         press(&mut state, &backend, KeyCode::Char('e'));
         assert!(matches!(state.dialog, Dialog::EditNote { .. }));
+        // The parent entry is selected while its note is edited
+        assert_eq!(state.list_state.selected(), Some(2));
         type_text(&mut state, &backend, " second");
         press(&mut state, &backend, KeyCode::Enter);
         assert_eq!(outline_labels(&state)[3], "note first second");
+        // Saving puts the selection back on the note
+        assert_eq!(state.list_state.selected(), Some(3));
+
+        // A clean cancel and a discarded edit both return to the note
+        press(&mut state, &backend, KeyCode::Char('e'));
+        assert_eq!(state.list_state.selected(), Some(2));
+        press(&mut state, &backend, KeyCode::Esc);
+        assert!(matches!(state.dialog, Dialog::None));
+        assert_eq!(state.list_state.selected(), Some(3));
+        press(&mut state, &backend, KeyCode::Char('e'));
+        type_text(&mut state, &backend, " third");
+        press(&mut state, &backend, KeyCode::Esc);
+        assert!(matches!(state.dialog, Dialog::ConfirmCancel { .. }));
+        assert_eq!(state.list_state.selected(), Some(2));
+        press(&mut state, &backend, KeyCode::Char('y'));
+        assert!(matches!(state.dialog, Dialog::None));
+        assert_eq!(state.list_state.selected(), Some(3));
         let stored = backend.load(&f.session_id).await.unwrap();
         assert_eq!(stored.notes[0].text(), "first second");
 
