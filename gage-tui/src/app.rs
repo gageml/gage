@@ -395,22 +395,6 @@ pub(crate) fn handle_key(
             }
             return Ok(KeyOutcome::Consumed);
         }
-        Dialog::NoteType { entry_index } => {
-            let entry_index = *entry_index;
-            match key.code {
-                KeyCode::Char('c') => {
-                    state.open_add_editor(entry_index, "comment", "Add comment");
-                }
-                KeyCode::Char('o') => {
-                    state.open_add_editor(entry_index, "open", "Add open code");
-                }
-                KeyCode::Char('q') | KeyCode::Char('n') | KeyCode::Esc => {
-                    state.dialog = Dialog::None;
-                }
-                _ => {}
-            }
-            return Ok(KeyOutcome::Consumed);
-        }
         Dialog::Options => {
             match key.code {
                 KeyCode::Char('a') => state.toggle_assistant(),
@@ -611,12 +595,6 @@ impl SavedUi {
 
 enum Dialog {
     None,
-    /// Note-type chooser (`n`), layered before the add editor
-    NoteType {
-        /// Target entry; None for a session-level note (the
-        /// `<Session>` row or one of its notes selected)
-        entry_index: Option<usize>,
-    },
     AddNote {
         /// Target entry; None for a session-level note (the
         /// `<Session>` row or one of its notes selected)
@@ -1191,7 +1169,7 @@ impl AppState {
             return;
         }
         let entry_index = self.selected_entry_index();
-        self.dialog = Dialog::NoteType { entry_index };
+        self.open_add_editor(entry_index, "comment", "Add comment");
     }
 
     fn open_add_editor(
@@ -2208,7 +2186,6 @@ fn draw_dialog(frame: &mut Frame, dialog: &mut Dialog, view: &ViewOptions, enhan
         Dialog::NotesUnavailable(notice) => {
             crate::dialog::draw_wrapped_message(frame, notice, "Enter dismiss")
         }
-        Dialog::NoteType { .. } => draw_note_type(frame),
         Dialog::AddNote { editor, title, .. } => draw_editor(frame, title, editor, enhanced_keys),
         Dialog::EditNote { editor, title, .. } => draw_editor(frame, title, editor, enhanced_keys),
         Dialog::ConfirmCancel { pending } => {
@@ -2278,15 +2255,6 @@ fn option_line(key: char, on: bool, dim_box: bool, label: &str) -> Line<'static>
         checkbox,
         Span::raw(format!(" {label}")),
     ])
-}
-
-/// Note-type chooser: which kind of note `n` will add.
-fn draw_note_type(frame: &mut Frame) {
-    let lines = vec![
-        Line::raw("  c comment (general note)").left_aligned(),
-        Line::raw("  o open code (qualitative analysis)").left_aligned(),
-    ];
-    crate::dialog::draw_lines_titled(frame, Some("Note type"), lines, "q cancel");
 }
 
 fn draw_editor(frame: &mut Frame, title: &str, editor: &mut TextArea, enhanced_keys: bool) {
@@ -3279,7 +3247,6 @@ mod tests {
         press(&mut state, &backend, KeyCode::Char('j'));
         press(&mut state, &backend, KeyCode::Char('j'));
         press(&mut state, &backend, KeyCode::Char('n'));
-        press(&mut state, &backend, KeyCode::Char('c'));
         type_text(&mut state, &backend, "first");
         press(&mut state, &backend, KeyCode::Enter);
         assert!(matches!(state.dialog, Dialog::None));
@@ -3356,7 +3323,6 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
 
         press(&mut state, &backend, KeyCode::Char('n'));
-        press(&mut state, &backend, KeyCode::Char('c'));
         terminal.draw(|frame| draw(frame, &mut state)).unwrap();
         let text = screen(&terminal);
         assert!(text.contains("Add comment"), "{text}");
