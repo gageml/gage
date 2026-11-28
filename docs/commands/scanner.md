@@ -50,8 +50,9 @@ gage scanner list [OPTIONS]
 | ---------------- | ------------------------------------------------- |
 | `-o, --outdated` | Show installed scanners that have a newer version |
 
-The `Source` column says where a scanner is. It is `installed`, `user`, or
-`project`. A scanner that the config disables is marked `(disabled)`.
+The `Source` column says where a scanner is. It is `project`, `user`, or
+`installed`, and the scanners are listed in that order, by name within each. A
+scanner that the config disables is marked `(disabled)`.
 
 `--outdated` shows each installed scanner with its installed version and the
 newer version in the source. A note says when the newer version needs a newer

@@ -179,15 +179,14 @@ fn list(args: ScannerListArgs) -> Result<(), CliError> {
 struct Row {
     name: String,
     version: String,
-    /// Where the scanner is: `installed`, `user`, or `project`
-    source: String,
+    /// Where the scanner is
+    source: DefSource,
     description: String,
     state: RowState,
 }
 
-/// What a listed scanner is to a scan. The order is the order of the
-/// listing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+/// What a listed scanner is to a scan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RowState {
     /// Found, and the config enables it
     Enabled,
@@ -201,7 +200,7 @@ impl Row {
         Row {
             name: def.display_name().to_string(),
             version: def.version.clone(),
-            source: scanner_source(&def.path).to_string(),
+            source: scanner_source(&def.path),
             description: def.description.clone(),
             state: if config.is_scanner_enabled(&def.name) {
                 RowState::Enabled
@@ -211,9 +210,15 @@ impl Row {
         }
     }
 
-    /// Scanners that can be run first, then the rest, each by name.
-    fn order(&self) -> (RowState, &str) {
-        (self.state, &self.name)
+    /// Project scanners first, then user scanners, then installed
+    /// ones, each by name.
+    fn order(&self) -> (u8, &str) {
+        let place = match self.source {
+            DefSource::Project => 0,
+            DefSource::User => 1,
+            DefSource::Installed | DefSource::Builtin => 2,
+        };
+        (place, &self.name)
     }
 
     fn cells(&self) -> Vec<String> {
@@ -224,7 +229,7 @@ impl Row {
         vec![
             name,
             self.version.clone(),
-            style(&self.source).dim().to_string(),
+            style(self.source).dim().to_string(),
             style(&self.description).dim().to_string(),
         ]
     }
@@ -649,16 +654,27 @@ mod tests {
     }
 
     #[test]
-    fn listed_scanners_that_can_run_come_first_and_a_disabled_one_is_marked() {
+    fn scanners_are_listed_by_place_then_name_and_a_disabled_one_is_marked() {
         let tmp = tempfile::tempdir().unwrap();
         write_scanner(tmp.path(), "ns/beta", "version: \"1.0.0\",");
         write_scanner(tmp.path(), "ns/alpha", "version: \"2.0.0\",");
         write_scanner(tmp.path(), "ns/off", "");
+        write_scanner(tmp.path(), "ns/zeta", "");
+        write_scanner(tmp.path(), "ns/user", "");
         let set = ScannerSet::read_installed(tmp.path());
         let mut config = Config::default();
         config.scanners.disable.push("off".to_string());
 
+        // The files are outside every scanner root, so each row is a
+        // project row until its source is set here
         let mut rows: Vec<Row> = set.iter().map(|e| Row::found(&e.def, &config)).collect();
+        for row in &mut rows {
+            row.source = match row.name.as_str() {
+                "ns/zeta" => DefSource::Project,
+                "ns/user" => DefSource::User,
+                _ => DefSource::Installed,
+            };
+        }
         rows.sort_by(|a, b| a.order().cmp(&b.order()));
 
         let cells: Vec<Vec<String>> = rows
@@ -673,9 +689,11 @@ mod tests {
         assert_eq!(
             cells,
             [
-                ["ns/alpha", "2.0.0", "project", "About alpha"],
-                ["ns/beta", "1.0.0", "project", "About beta"],
-                ["ns/off (disabled)", "", "project", "About off"],
+                ["ns/zeta", "", "project", "About zeta"],
+                ["ns/user", "", "user", "About user"],
+                ["ns/alpha", "2.0.0", "installed", "About alpha"],
+                ["ns/beta", "1.0.0", "installed", "About beta"],
+                ["ns/off (disabled)", "", "installed", "About off"],
             ]
         );
     }
