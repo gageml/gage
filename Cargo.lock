@@ -2759,6 +2759,7 @@ name = "gage-session"
 version = "0.6.0"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "datafusion",
  "indexmap",
  "regex",

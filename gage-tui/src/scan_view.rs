@@ -3826,6 +3826,7 @@ mod tests {
     use gage_store::Store;
 
     use super::*;
+    use crate::desktop::RecordingDesktop;
 
     #[test]
     fn scan_cost_sums_reported_costs_and_marks_what_it_leaves_out() {
@@ -4218,35 +4219,6 @@ mod tests {
         let line = name_line("general", false);
         assert_eq!(line.spans.len(), 1);
         assert_eq!(line.spans[0].style, Style::new());
-    }
-
-    /// A desktop that records what the view asks of it.
-    #[derive(Default)]
-    struct RecordingDesktop {
-        no_browser: bool,
-        fail: bool,
-        copied: Mutex<Vec<String>>,
-        browsed: Mutex<Vec<String>>,
-    }
-
-    impl Desktop for RecordingDesktop {
-        fn copy_text(&self, text: &str) -> io::Result<()> {
-            if self.fail {
-                return Err(io::Error::other("no clipboard"));
-            }
-            self.copied.lock().unwrap().push(text.to_string());
-            Ok(())
-        }
-        fn can_browse(&self) -> bool {
-            !self.no_browser
-        }
-        fn browse_html(&self, page: &str) -> io::Result<()> {
-            if self.fail {
-                return Err(io::Error::other("no opener"));
-            }
-            self.browsed.lock().unwrap().push(page.to_string());
-            Ok(())
-        }
     }
 
     fn note_item() -> NoteItem {

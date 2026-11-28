@@ -6,6 +6,7 @@ mod dialog;
 mod doc;
 mod format;
 mod hint;
+mod image;
 mod input;
 mod item_table;
 mod json;

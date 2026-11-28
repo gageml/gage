@@ -5,7 +5,7 @@
 //! rest to the entry's source.
 
 use gage_core::human::format_size;
-use gage_session::{BodyAttr, BodyBlock, EntryBody, EntryValue, INVALID_ENTRY_TYPE};
+use gage_session::{BodyAttr, BodyBlock, EntryBody, EntryImage, EntryValue, INVALID_ENTRY_TYPE};
 
 use crate::entry::{message_subtype, split_ide_tags};
 use crate::index::entry_text;
@@ -497,6 +497,34 @@ fn texts(entry: &EntryValue, pointers: &[&str]) -> Vec<String> {
         .collect()
 }
 
+/// The images the entry holds as base64 text: those among a
+/// message's content blocks, those inside its tool result blocks, and
+/// those of a queued prompt. An image the entry names by URL or file
+/// id has no bytes here and is left out.
+pub fn entry_images(entry: &EntryValue) -> Vec<EntryImage<'_>> {
+    let mut images = Vec::new();
+    for pointer in ["/message/content", "/attachment/prompt"] {
+        collect_images(entry.pointer(pointer), &mut images);
+    }
+    images
+}
+
+fn collect_images<'a>(content: Option<&'a EntryValue>, images: &mut Vec<EntryImage<'a>>) {
+    let blocks = content.and_then(EntryValue::as_array);
+    for block in blocks.into_iter().flatten() {
+        match str_at(block, "/type") {
+            Some("image") => {
+                images.extend(str_at(block, "/source/data").map(|base64| EntryImage {
+                    media_type: str_at(block, "/source/media_type"),
+                    base64,
+                }))
+            }
+            Some("tool_result") => collect_images(block.pointer("/content"), images),
+            _ => {}
+        }
+    }
+}
+
 fn str_at<'a>(value: &'a EntryValue, pointer: &str) -> Option<&'a str> {
     value.pointer(pointer)?.as_str()
 }
@@ -514,6 +542,10 @@ mod tests {
     fn body(text: &str) -> Vec<BodyBlock> {
         let entry = codec().decode(text.as_bytes()).unwrap();
         entry_body(&entry).blocks
+    }
+
+    fn decode(value: serde_json::Value) -> EntryValue {
+        codec().decode(value.to_string().as_bytes()).unwrap()
     }
 
     fn body_of(value: serde_json::Value) -> Vec<BodyBlock> {
@@ -1036,5 +1068,53 @@ mod tests {
     fn an_unknown_type_has_no_body() {
         assert_eq!(body_of(json!({"type": "not-a-type", "content": "x"})), []);
         assert_eq!(body_of(json!({"content": "x"})), []);
+    }
+
+    /// The images come in entry order, with the images of a tool
+    /// result block among them, and an image without base64 text is
+    /// left out.
+    #[test]
+    fn entry_images_are_the_base64_images_of_a_message() {
+        let entry = decode(json!({
+            "type": "user",
+            "message": {"role": "user", "content": [
+                {"type": "text", "text": "look"},
+                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "YQ=="}},
+                {"type": "image", "source": {"type": "url", "url": "https://example.com/a.png"}},
+                {"type": "tool_result", "tool_use_id": "t1", "content": [
+                    {"type": "text", "text": "read"},
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": "YWI="}},
+                ]},
+            ]},
+        }));
+        let images = entry_images(&entry);
+        let found: Vec<_> = images.iter().map(|i| (i.media_type, i.base64)).collect();
+        assert_eq!(
+            found,
+            [(Some("image/png"), "YQ=="), (Some("image/jpeg"), "YWI=")]
+        );
+    }
+
+    #[test]
+    fn entry_images_include_those_of_a_queued_prompt() {
+        let entry = decode(json!({
+            "type": "attachment",
+            "attachment": {"type": "queued_command", "prompt": [
+                {"type": "text", "text": "see"},
+                {"type": "image", "source": {"type": "base64", "data": "AAAA"}},
+            ]},
+        }));
+        let images = entry_images(&entry);
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].media_type, None);
+    }
+
+    #[test]
+    fn an_entry_without_images_has_none() {
+        let entry = decode(json!({
+            "type": "user",
+            "message": {"role": "user", "content": "hello"},
+        }));
+        assert!(entry_images(&entry).is_empty());
     }
 }

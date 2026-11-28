@@ -26,11 +26,11 @@ use gage_plugin::{MARKETPLACE_NAME, MCP_SERVER_NAME, PLUGIN_ID, write_mcp_json, 
 use gage_session::{
     AgentSession, AgentSpec, AuthInfo, ContentSchema, ContentSink, ContentSource, DecodedEntry,
     Derivation, Driver, DriverError, DriverStatus, DriverTables, Entry, EntryBody, EntryCodec,
-    EntryValue, Field, HarnessInfo, HarnessSession, HostContext, InstallInfo, InstallReport,
-    InstallUi, MaintenanceOutcome, MaintenanceStatus, MessageTextFilter, MessageTextHit,
-    ModelChoices, ModelSizes, NativeLookupError, NativeSession, PatchHunk, SessionAttrs,
-    SessionLiveError, SkillSession, Source, SourceOptions, StoredSession, SummaryAttrs, ToolUse,
-    WrittenContent, split_scheme,
+    EntryImage, EntryValue, Field, HarnessInfo, HarnessSession, HostContext, InstallInfo,
+    InstallReport, InstallUi, MaintenanceOutcome, MaintenanceStatus, MessageTextFilter,
+    MessageTextHit, ModelChoices, ModelSizes, NativeLookupError, NativeSession, PatchHunk,
+    SessionAttrs, SessionLiveError, SkillSession, Source, SourceOptions, StoredSession,
+    SummaryAttrs, ToolUse, WrittenContent, split_scheme,
 };
 use serde::Deserialize;
 use serde_json::Map;
@@ -188,6 +188,13 @@ impl Driver for ClaudeDriver {
             return EntryBody::default();
         }
         body::entry_body(entry)
+    }
+
+    fn entry_images<'a>(&self, content_format: &str, entry: &'a EntryValue) -> Vec<EntryImage<'a>> {
+        if content_format != CONTENT_FORMAT {
+            return Vec::new();
+        }
+        body::entry_images(entry)
     }
 
     fn patch_hunks(&self, result_raw: &str) -> Vec<PatchHunk> {

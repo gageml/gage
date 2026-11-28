@@ -4,7 +4,7 @@
 //! entry: it shows what tells a reader what happened and leaves the
 //! rest to the entry's source.
 
-use gage_session::{BodyAttr, BodyBlock, EntryBody, EntryValue, INVALID_ENTRY_TYPE};
+use gage_session::{BodyAttr, BodyBlock, EntryBody, EntryImage, EntryValue, INVALID_ENTRY_TYPE};
 use serde_json::Value;
 
 use crate::derive::{blocks, content_text, str_at};
@@ -51,6 +51,23 @@ pub(crate) fn entry_body(entry: &EntryValue) -> EntryBody {
         None => Vec::new(),
     };
     EntryBody { blocks }
+}
+
+/// The images among the content blocks of a message or a custom
+/// message, in order.
+pub(crate) fn entry_images(entry: &EntryValue) -> Vec<EntryImage<'_>> {
+    ["/message/content", "/content"]
+        .into_iter()
+        .filter_map(|pointer| entry.pointer(pointer)?.as_array())
+        .flatten()
+        .filter(|block| block.get("type").and_then(EntryValue::as_str) == Some("image"))
+        .filter_map(|block| {
+            Some(EntryImage {
+                media_type: block.get("mimeType").and_then(EntryValue::as_str),
+                base64: block.get("data")?.as_str()?,
+            })
+        })
+        .collect()
 }
 
 /// The codec's error, then the line it could not decode.

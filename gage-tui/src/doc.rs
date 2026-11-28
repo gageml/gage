@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use std::sync::Arc;
 
-use gage_session::{Driver, DriverError, EntryBody, EntryCodec, EntryValue};
+use gage_session::{Driver, DriverError, EntryBody, EntryCodec, EntryImage, EntryValue};
 use gage_store::{ChangeKind, NoteValue};
 use serde_json::Value;
 
@@ -294,6 +294,10 @@ impl BodySource {
         self.driver.entry_body(&self.content_format, entry)
     }
 
+    fn entry_images<'a>(&self, entry: &'a EntryValue) -> Vec<EntryImage<'a>> {
+        self.driver.entry_images(&self.content_format, entry)
+    }
+
     /// The Claude Code driver over the format the fixtures are in.
     #[cfg(test)]
     pub(crate) fn claude() -> Self {
@@ -385,6 +389,33 @@ impl Document {
                 (!body.blocks.is_empty()).then_some(Body::Entry(body))
             }
         }
+    }
+
+    /// The images the row of the entry at `index` leads to: the
+    /// entry's own, and for a tool call row those of the entries that
+    /// returned its calls' results, in line order.
+    pub fn entry_images(&self, index: usize) -> Vec<EntryImage<'_>> {
+        let Some(entry) = self.entries.get(index) else {
+            return Vec::new();
+        };
+        let mut images = self.bodies.entry_images(&entry.value);
+        if entry.message_subtype.as_deref() == Some("tool_use") {
+            let mut result_lines: Vec<u32> = self
+                .tool_uses
+                .iter()
+                .filter(|t| t.line == entry.line)
+                .filter_map(|t| t.result_line)
+                .collect();
+            result_lines.sort_unstable();
+            result_lines.dedup();
+            let results = result_lines
+                .into_iter()
+                .filter_map(|line| self.entries.iter().find(|e| e.line == line));
+            for result in results {
+                images.extend(self.bodies.entry_images(&result.value));
+            }
+        }
+        images
     }
 
     fn tool_uses_where(&self, keep: impl Fn(&ToolUse) -> bool) -> Vec<ToolUse> {
@@ -576,5 +607,41 @@ mod tests {
         }];
         assert!(matches!(doc.entry_body(0), Some(Body::ToolCalls(calls)) if calls.len() == 1));
         assert!(matches!(doc.entry_body(1), Some(Body::ToolResults(r)) if r.len() == 1));
+    }
+
+    /// An entry's images are the ones its value holds, and a tool
+    /// call row also has the images its calls' results returned.
+    #[test]
+    fn a_tool_call_row_has_the_images_of_its_results() {
+        let mut doc = derived();
+        doc.entries[0].message_subtype = Some("tool_use".to_string());
+        doc.entries[1].message_subtype = Some("tool_result".to_string());
+        doc.entries[1].value = json!({
+            "type": "user",
+            "message": {"role": "user", "content": [{
+                "type": "tool_result",
+                "tool_use_id": "toolu_1",
+                "content": [{
+                    "type": "image",
+                    "source": {"type": "base64", "media_type": "image/png", "data": "YQ=="},
+                }],
+            }]},
+        })
+        .into();
+        doc.tool_uses = vec![ToolUse {
+            line: 1,
+            result_line: Some(2),
+            name: "Read".to_string(),
+            input: "{}".to_string(),
+            output: None,
+            is_error: None,
+        }];
+        let base64 = |index: usize| -> Vec<&str> {
+            doc.entry_images(index).iter().map(|i| i.base64).collect()
+        };
+        assert_eq!(base64(0), ["YQ=="]);
+        assert_eq!(base64(1), ["YQ=="]);
+        assert!(base64(2).is_empty());
+        assert!(base64(99).is_empty());
     }
 }

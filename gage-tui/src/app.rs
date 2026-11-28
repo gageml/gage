@@ -3,8 +3,10 @@
 //! toggles expansion (Enter on a user comment note edits it instead). In
 //! the body: j/k/g/G/PgUp/PgDn scroll. `n` opens a note dialog over the
 //! selected entry; `e` edits the selected user comment note; `d` deletes
-//! the selected user-authored note. →/← expand and collapse (← moves to
-//! the parent at a terminus). `[`/`]` are deliberately unbound so a host
+//! the selected user-authored note. `i` opens the image of the selected
+//! entry in the desktop's viewer, or lists the images when the entry
+//! has several. →/← expand and collapse (← moves to the parent at a
+//! terminus). `[`/`]` are deliberately unbound so a host
 //! embedding the view can step between sessions with them.
 
 use std::io;
@@ -28,6 +30,7 @@ use serde_json::Value;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use crate::attrs::attr_lines;
+use crate::desktop::{Desktop, SystemDesktop};
 use crate::doc::{Body, Document, Dropped, Note, Redaction, Session};
 use crate::hint;
 use crate::input::spawn_input_thread;
@@ -36,7 +39,7 @@ use crate::outline::{AttachmentFiles, CollapseOutcome, Expansion, Outline, RowKi
 use crate::picker::{self, PickColumn, PickItem, Picker, PickerAction};
 use crate::session::{self, Backend};
 use crate::textarea::TextArea;
-use crate::{body, json, session_attachment, styles, tool};
+use crate::{body, image, json, session_attachment, styles, tool};
 
 pub async fn run(
     terminal: &mut DefaultTerminal,
@@ -420,9 +423,27 @@ pub(crate) fn handle_key(
             }
             return Ok(KeyOutcome::Consumed);
         }
-        Dialog::NotesUnavailable(_) => {
+        Dialog::NotesUnavailable(_) | Dialog::Notice(_) => {
             if matches!(key.code, KeyCode::Enter | KeyCode::Char('q') | KeyCode::Esc) {
                 state.dialog = Dialog::None;
+            }
+            return Ok(KeyOutcome::Consumed);
+        }
+        Dialog::Images {
+            picker,
+            entry_index,
+        } => {
+            match picker.handle_key(key.code) {
+                PickerAction::Close => state.dialog = Dialog::None,
+                PickerAction::Open(id) => {
+                    let entry_index = *entry_index;
+                    // A row id is the image's position, which the
+                    // picker was built with.
+                    if let Ok(position) = id.parse() {
+                        state.open_image(entry_index, position);
+                    }
+                }
+                PickerAction::None | PickerAction::LoadMore => {}
             }
             return Ok(KeyOutcome::Consumed);
         }
@@ -540,6 +561,10 @@ pub(crate) fn handle_key(
             state.dialog = Dialog::OpenSession { picker, loader };
             KeyOutcome::Consumed
         }
+        KeyCode::Char('i') if state.selected_image_entry().is_some() => {
+            state.open_images();
+            KeyOutcome::Consumed
+        }
         KeyCode::Char('e') if state.notes_writable => {
             state.begin_edit_note();
             KeyOutcome::Consumed
@@ -644,6 +669,15 @@ enum Dialog {
     /// Notice that `n` has nothing to write to over a native source
     /// Why a note cannot be added here, shown as a notice
     NotesUnavailable(&'static str),
+    /// The images of the entry at `entry_index` (`i`), when it has
+    /// more than one. Enter opens the selected image and keeps the
+    /// dialog, so that the user can open another.
+    Images {
+        picker: Picker,
+        entry_index: usize,
+    },
+    /// A message the user dismisses
+    Notice(String),
     /// Go-to-entry field (`0`..`9`): the typed digits and the cursor
     /// offset within them
     GotoEntry {
@@ -690,6 +724,7 @@ pub(crate) struct AppState {
     /// Whether the terminal runs the Kitty keyboard protocol; selects
     /// the newline shortcut the editor hint names
     enhanced_keys: bool,
+    desktop: Arc<dyn Desktop>,
 }
 
 impl AppState {
@@ -737,6 +772,7 @@ impl AppState {
             notes_writable,
             notes_notice,
             enhanced_keys: false,
+            desktop: Arc::new(SystemDesktop),
         }
     }
 
@@ -1168,6 +1204,53 @@ impl AppState {
         }
     }
 
+    /// The entry of the selected row, when the row is an entry's and
+    /// leads to at least one image.
+    fn selected_image_entry(&self) -> Option<usize> {
+        let row = self
+            .list_state
+            .selected()
+            .and_then(|i| self.outline.row(i))?;
+        match &row.kind {
+            RowKind::Entry { index } if !self.doc.entry_images(*index).is_empty() => Some(*index),
+            _ => None,
+        }
+    }
+
+    /// Open the selected entry's image, or list its images when it
+    /// has several. Without a local display there is nowhere to show
+    /// an image, and a notice says so.
+    fn open_images(&mut self) {
+        let Some(entry_index) = self.selected_image_entry() else {
+            return;
+        };
+        if !self.desktop.can_browse() {
+            self.dialog = Dialog::Notice(image::NO_DISPLAY.to_string());
+            return;
+        }
+        let images = self.doc.entry_images(entry_index);
+        if images.len() == 1 {
+            self.open_image(entry_index, 0);
+        } else {
+            self.dialog = Dialog::Images {
+                picker: image::picker(&images),
+                entry_index,
+            };
+        }
+    }
+
+    /// Show the image at `position` among the images of the entry at
+    /// `entry_index`. A failure replaces the open dialog with a notice.
+    fn open_image(&mut self, entry_index: usize, position: usize) {
+        let images = self.doc.entry_images(entry_index);
+        let Some(image) = images.get(position) else {
+            return;
+        };
+        if let Err(message) = image::open(self.desktop.as_ref(), image) {
+            self.dialog = Dialog::Notice(message);
+        }
+    }
+
     /// Whether the selected row is one no note targets: a run of
     /// dropped lines, an attachment, or an attachment file.
     fn selected_takes_no_note(&self) -> bool {
@@ -1241,25 +1324,20 @@ impl AppState {
     /// about: its entry row, or the session row for a session-level
     /// note.
     fn select_note_parent(&mut self) {
-        let Some(row) = self
-            .list_state
-            .selected()
-            .and_then(|i| self.outline.row(i))
-        else {
+        let Some(row) = self.list_state.selected().and_then(|i| self.outline.row(i)) else {
             return;
         };
         let RowKind::Note { entry_index, .. } = &row.kind else {
             return;
         };
-        let parent = match *entry_index {
-            Some(entry_index) => self
-                .outline
-                .rows()
-                .iter()
-                .position(|r| matches!(r.kind, RowKind::Entry { index } if index == entry_index)),
-            // Session notes hang off the session row, always row 0
-            None => Some(0),
-        };
+        let parent =
+            match *entry_index {
+                Some(entry_index) => self.outline.rows().iter().position(
+                    |r| matches!(r.kind, RowKind::Entry { index } if index == entry_index),
+                ),
+                // Session notes hang off the session row, always row 0
+                None => Some(0),
+            };
         if let Some(parent) = parent {
             self.list_state.select(Some(parent));
             self.body_scroll = 0;
@@ -1268,11 +1346,10 @@ impl AppState {
 
     /// Select the row of note `note_id`, if it has one.
     fn select_note(&mut self, note_id: &str) {
-        let row = self
-            .outline
-            .rows()
-            .iter()
-            .position(|r| matches!(&r.kind, RowKind::Note { note_id: id, .. } if id == note_id));
+        let row =
+            self.outline.rows().iter().position(
+                |r| matches!(&r.kind, RowKind::Note { note_id: id, .. } if id == note_id),
+            );
         if let Some(row) = row {
             self.list_state.select(Some(row));
             self.body_scroll = 0;
@@ -1672,6 +1749,9 @@ pub(crate) fn footer_hint(state: &AppState) -> Line<'static> {
             hints.push(("e", "edit"));
         }
         hints.push(("d", "delete"));
+    }
+    if state.selected_image_entry().is_some() {
+        hints.push(("i", "image"));
     }
     hints.push(("r", "refresh"));
     hint::help_line(&hints)
@@ -2326,7 +2406,10 @@ fn draw_dialog(frame: &mut Frame, dialog: &mut Dialog, view: &ViewOptions, enhan
             frame,
             &format!("Line {line} is not visible. Show all entries?"),
         ),
-        Dialog::OpenSession { picker, .. } => picker.draw(frame),
+        Dialog::OpenSession { picker, .. } | Dialog::Images { picker, .. } => picker.draw(frame),
+        Dialog::Notice(message) => {
+            crate::dialog::draw_wrapped_message(frame, message, "Enter dismiss")
+        }
         Dialog::GotoEntry { input, cursor } => {
             let hint = hint::dialog_line(&[("g", "go"), ("Esc", "cancel")]);
             crate::dialog::draw_input(frame, "Go to entry", input, *cursor, hint)
@@ -2408,6 +2491,7 @@ mod tests {
     use super::*;
     use gage_session::EntryValue;
 
+    use crate::desktop::RecordingDesktop;
     use crate::doc::{AttachmentFile, BodySource, Entry, SessionAttachment, ToolUse};
     use crate::session::tests::fixture;
 
@@ -4071,5 +4155,109 @@ mod tests {
         let err =
             apply_event(&mut state, ViewEvent::Page(Err(io::Error::other("boom")))).unwrap_err();
         assert_eq!(err.to_string(), "boom");
+    }
+
+    // The eight bytes every PNG file begins with, in base64
+    const PNG: &str = "iVBORw0KGgo=";
+
+    /// A view over three entries with a recording desktop: the first
+    /// entry has `count` images, the others none. The first entry is
+    /// selected.
+    async fn state_with_images(
+        count: usize,
+        desktop: Arc<RecordingDesktop>,
+    ) -> (AppState, Backend) {
+        let image = serde_json::json!({
+            "type": "image",
+            "source": {"type": "base64", "media_type": "image/png", "data": PNG},
+        });
+        let mut doc = doc_with_entries(3);
+        doc.entries[0].value = message_value("user", vec![image; count].into());
+        let backend = test_backend().await;
+        let mut state = AppState::new(doc, &ViewOptions::default(), DocSource::Backend, false);
+        state.desktop = desktop;
+        press(&mut state, &backend, KeyCode::Char('j'));
+        (state, backend)
+    }
+
+    /// `i` on an entry with one image opens it in the desktop's
+    /// viewer with no dialog. The hint names the key only on a row
+    /// that has an image, and the key does nothing on any other row.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn i_opens_the_image_of_the_selected_entry() {
+        let desktop = Arc::new(RecordingDesktop::default());
+        let (mut state, backend) = state_with_images(1, Arc::clone(&desktop)).await;
+        assert!(footer_hint(&state).to_string().contains("i image"));
+        assert!(matches!(
+            press(&mut state, &backend, KeyCode::Char('i')),
+            KeyOutcome::Consumed
+        ));
+        assert!(matches!(state.dialog, Dialog::None));
+        assert_eq!(
+            *desktop.opened.lock().unwrap(),
+            [(b"\x89PNG\r\n\x1a\n".to_vec(), "png".to_string())]
+        );
+
+        press(&mut state, &backend, KeyCode::Char('j'));
+        assert!(!footer_hint(&state).to_string().contains("image"));
+        assert!(matches!(
+            press(&mut state, &backend, KeyCode::Char('i')),
+            KeyOutcome::Ignored
+        ));
+        assert_eq!(desktop.opened.lock().unwrap().len(), 1);
+    }
+
+    /// `i` on an entry with several images lists them. Enter opens
+    /// the selected one and keeps the list, and `q` closes it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn i_lists_the_images_of_an_entry_that_has_several() {
+        let desktop = Arc::new(RecordingDesktop::default());
+        let (mut state, backend) = state_with_images(2, Arc::clone(&desktop)).await;
+        press(&mut state, &backend, KeyCode::Char('i'));
+        assert!(matches!(state.dialog, Dialog::Images { .. }));
+        assert!(desktop.opened.lock().unwrap().is_empty());
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut state)).unwrap();
+        let text = screen(&terminal);
+        assert!(text.contains("Images"), "{text}");
+        assert_eq!(text.matches("image/png").count(), 2, "{text}");
+
+        press(&mut state, &backend, KeyCode::Enter);
+        press(&mut state, &backend, KeyCode::Char('j'));
+        press(&mut state, &backend, KeyCode::Enter);
+        assert!(matches!(state.dialog, Dialog::Images { .. }));
+        assert_eq!(desktop.opened.lock().unwrap().len(), 2);
+
+        press(&mut state, &backend, KeyCode::Char('q'));
+        assert!(matches!(state.dialog, Dialog::None));
+    }
+
+    /// Without a local display the hint still names the key, and the
+    /// key shows a notice in place of opening a viewer.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn i_without_a_local_display_shows_a_notice() {
+        let desktop = Arc::new(RecordingDesktop {
+            no_browser: true,
+            ..RecordingDesktop::default()
+        });
+        let (mut state, backend) = state_with_images(2, Arc::clone(&desktop)).await;
+        assert!(footer_hint(&state).to_string().contains("i image"));
+        press(&mut state, &backend, KeyCode::Char('i'));
+        assert!(matches!(&state.dialog, Dialog::Notice(text) if text == image::NO_DISPLAY));
+        assert!(desktop.opened.lock().unwrap().is_empty());
+        press(&mut state, &backend, KeyCode::Enter);
+        assert!(matches!(state.dialog, Dialog::None));
+    }
+
+    /// A viewer that does not start is reported in a notice.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_viewer_that_does_not_start_is_reported() {
+        let desktop = Arc::new(RecordingDesktop {
+            fail: true,
+            ..RecordingDesktop::default()
+        });
+        let (mut state, backend) = state_with_images(1, desktop).await;
+        press(&mut state, &backend, KeyCode::Char('i'));
+        assert!(matches!(&state.dialog, Dialog::Notice(text) if text.contains("no opener")));
     }
 }

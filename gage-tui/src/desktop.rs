@@ -1,14 +1,16 @@
-//! The user's desktop as a view reaches it: the clipboard and the web
-//! browser.
+//! The user's desktop as a view reaches it: the clipboard, the web
+//! browser, and the program that opens a file of a given type.
 //!
 //! A view calls these through [`Desktop`] so that a test can record
-//! the calls in place of a terminal and a browser.
+//! the calls in place of a terminal, a browser, and a viewer.
 
 use std::env;
 use std::ffi::OsStr;
 use std::io::{self, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
+#[cfg(test)]
+use std::sync::Mutex;
 use std::thread;
 
 use crossterm::clipboard::CopyToClipboard;
@@ -18,11 +20,14 @@ use pulldown_cmark::{Event, Options, Parser, html};
 pub(crate) trait Desktop: Send + Sync {
     /// Put `text` on the clipboard.
     fn copy_text(&self, text: &str) -> io::Result<()>;
-    /// Whether a browser started here would appear in front of the
-    /// user.
+    /// Whether a program started here, a browser or a viewer, would
+    /// appear in front of the user.
     fn can_browse(&self) -> bool;
     /// Show an HTML page in the user's browser.
     fn browse_html(&self, page: &str) -> io::Result<()>;
+    /// Show a file of `bytes` in the program the desktop opens files
+    /// named with `extension` in.
+    fn open_file(&self, bytes: &[u8], extension: &str) -> io::Result<()>;
 }
 
 /// The desktop of the machine the process runs on.
@@ -42,22 +47,32 @@ impl Desktop for SystemDesktop {
     }
 
     fn browse_html(&self, page: &str) -> io::Result<()> {
-        let mut file = tempfile::Builder::new()
-            .prefix("gage-note-")
-            .suffix(".html")
-            .tempfile()?;
-        file.write_all(page.as_bytes())?;
-        // The browser reads the file after this call returns, so the
-        // file outlives the process.
-        let (_, path) = file.keep().map_err(|e| e.error)?;
-        open_in_browser(&path)
+        open_temp_file("gage-note-", "html", page.as_bytes())
     }
+
+    fn open_file(&self, bytes: &[u8], extension: &str) -> io::Result<()> {
+        open_temp_file("gage-file-", extension, bytes)
+    }
+}
+
+/// Write `bytes` to a temporary file named with `extension` and start
+/// the platform's opener on it.
+fn open_temp_file(prefix: &str, extension: &str, bytes: &[u8]) -> io::Result<()> {
+    let mut file = tempfile::Builder::new()
+        .prefix(prefix)
+        .suffix(&format!(".{extension}"))
+        .tempfile()?;
+    file.write_all(bytes)?;
+    // The program reads the file after this call returns, so the file
+    // outlives the process.
+    let (_, path) = file.keep().map_err(|e| e.error)?;
+    open_path(&path)
 }
 
 /// Whether the process has a display on the machine it runs on, given
 /// a probe that says whether an environment variable is set. An SSH
 /// session runs on a machine the user is not in front of, and a Linux
-/// session without X11 or Wayland has no display to open a browser on.
+/// session without X11 or Wayland has no display to open a program on.
 fn display_is_local(is_set: impl Fn(&str) -> bool) -> bool {
     let over_ssh = ["SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"]
         .into_iter()
@@ -71,7 +86,7 @@ fn display_is_local(is_set: impl Fn(&str) -> bool) -> bool {
 
 /// Start the platform's opener on `path`, detached from the terminal
 /// so that its output cannot write over the view.
-fn open_in_browser(path: &Path) -> io::Result<()> {
+fn open_path(path: &Path) -> io::Result<()> {
     let mut command = if cfg!(target_os = "macos") {
         Command::new("open")
     } else if cfg!(windows) {
@@ -91,7 +106,7 @@ fn open_in_browser(path: &Path) -> io::Result<()> {
         .stderr(Stdio::null())
         .spawn()
         .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", display(&opener))))?;
-    // An opener can stay alive for as long as the browser it started,
+    // An opener can stay alive for as long as the program it started,
     // so the wait runs off the event loop. The wait only reaps the
     // process: its result arrives after the caller has returned and
     // there is no dialog left to report it in.
@@ -158,6 +173,50 @@ fn escape(text: &str) -> String {
         }
     }
     out
+}
+
+/// A desktop that records what a view asks of it.
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct RecordingDesktop {
+    pub no_browser: bool,
+    pub fail: bool,
+    pub copied: Mutex<Vec<String>>,
+    pub browsed: Mutex<Vec<String>>,
+    /// The bytes and extension of each file opened
+    pub opened: Mutex<Vec<(Vec<u8>, String)>>,
+}
+
+#[cfg(test)]
+impl Desktop for RecordingDesktop {
+    fn copy_text(&self, text: &str) -> io::Result<()> {
+        if self.fail {
+            return Err(io::Error::other("no clipboard"));
+        }
+        self.copied.lock().unwrap().push(text.to_string());
+        Ok(())
+    }
+
+    fn can_browse(&self) -> bool {
+        !self.no_browser
+    }
+
+    fn browse_html(&self, page: &str) -> io::Result<()> {
+        if self.fail {
+            return Err(io::Error::other("no opener"));
+        }
+        self.browsed.lock().unwrap().push(page.to_string());
+        Ok(())
+    }
+
+    fn open_file(&self, bytes: &[u8], extension: &str) -> io::Result<()> {
+        if self.fail {
+            return Err(io::Error::other("no opener"));
+        }
+        let file = (bytes.to_vec(), extension.to_string());
+        self.opened.lock().unwrap().push(file);
+        Ok(())
+    }
 }
 
 #[cfg(test)]

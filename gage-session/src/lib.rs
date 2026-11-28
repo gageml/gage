@@ -28,6 +28,7 @@ pub mod codec;
 pub mod content_schema;
 pub mod filter;
 pub mod host;
+pub mod image;
 pub mod model_choice;
 pub mod model_size;
 pub mod patch;
@@ -48,6 +49,7 @@ pub use content_schema::{
     ContentField, ContentSchema, content_schema_batch, content_schema_schema,
 };
 pub use host::HostContext;
+pub use image::EntryImage;
 pub use model_choice::{ModelChoice, ModelChoices};
 pub use model_size::{MODEL_SIZES, ModelSizes};
 pub use patch::PatchHunk;
@@ -232,6 +234,17 @@ pub trait Driver: Send + Sync {
     /// entry the driver has nothing to show for.
     fn entry_body(&self, _content_format: &str, _entry: &EntryValue) -> EntryBody {
         EntryBody::default()
+    }
+
+    /// The images `entry` holds, in the order the entry holds them,
+    /// for an entry of `content_format` as the format's codec decodes
+    /// it. The default is none, for a driver that reads no images.
+    fn entry_images<'a>(
+        &self,
+        _content_format: &str,
+        _entry: &'a EntryValue,
+    ) -> Vec<EntryImage<'a>> {
+        Vec::new()
     }
 
     /// The hunks of the patch a tool call's result record carries:

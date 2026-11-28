@@ -38,8 +38,8 @@ use gage_corpus::{
 use gage_plugin::{MCP_SERVER_NAME, write_plugin};
 use gage_session::{
     AgentSession, AgentSpec, ContentSchema, ContentSink, ContentSource, DecodedEntry, Derivation,
-    Driver, DriverError, DriverStatus, DriverTables, Entry, EntryBody, EntryCodec, EntryValue,
-    Field, HarnessSession, HostContext, InstallReport, InstallUi, MaintenanceOutcome,
+    Driver, DriverError, DriverStatus, DriverTables, Entry, EntryBody, EntryCodec, EntryImage,
+    EntryValue, Field, HarnessSession, HostContext, InstallReport, InstallUi, MaintenanceOutcome,
     MaintenanceStatus, MessageTextFilter, MessageTextHit, ModelChoices, ModelSizes,
     NativeLookupError, NativeSession, SessionAttrs, SkillSession, Source, SourceOptions,
     StoredSession, SummaryAttrs, ToolUse, WrittenContent, split_scheme,
@@ -161,6 +161,13 @@ impl Driver for PiDriver {
             return EntryBody::default();
         }
         body::entry_body(entry)
+    }
+
+    fn entry_images<'a>(&self, content_format: &str, entry: &'a EntryValue) -> Vec<EntryImage<'a>> {
+        if content_format != CONTENT_FORMAT {
+            return Vec::new();
+        }
+        body::entry_images(entry)
     }
 
     fn format_project(&self, name: &str, max_chars: usize) -> String {
@@ -1383,6 +1390,18 @@ mod tests {
                 .blocks
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn entry_images_are_the_image_blocks_of_a_message() {
+        let driver = PiDriver::new();
+        let codec = driver.codec(CONTENT_FORMAT).unwrap();
+        let line = r#"{"type":"message","id":"m1","message":{"role":"toolResult","toolName":"read","content":[{"type":"text","text":"read"},{"type":"image","data":"YQ==","mimeType":"image/png"},{"type":"image"}]}}"#;
+        let entry = codec.decode(line.as_bytes()).unwrap();
+        let images = driver.entry_images(CONTENT_FORMAT, &entry);
+        let found: Vec<_> = images.iter().map(|i| (i.media_type, i.base64)).collect();
+        assert_eq!(found, [(Some("image/png"), "YQ==")]);
+        assert!(driver.entry_images("other 1", &entry).is_empty());
     }
 
     #[test]

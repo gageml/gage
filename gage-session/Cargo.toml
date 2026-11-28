@@ -8,6 +8,7 @@ path = "src/lib.rs"
 
 [dependencies]
 async-trait = { workspace = true }
+base64 = "0.22"
 datafusion = { workspace = true }
 indexmap = { version = "2", features = ["serde"] }
 regex = { workspace = true }
