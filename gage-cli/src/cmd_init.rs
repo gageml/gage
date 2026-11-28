@@ -7,6 +7,7 @@ use gage_registry::driver::DriverRegistry;
 use gage_session::{Driver, DriverStatus, Field, InstallUi};
 use gage_store::{Store, StoreError};
 
+use crate::cmd_scanner;
 use crate::dialog::{self, DialogError, DialogResult};
 use crate::error::CliError;
 use crate::source::driver_registry;
@@ -33,6 +34,14 @@ pub struct InitArgs {
     /// asks which.
     #[arg(long, value_name = "DRIVER")]
     pub default: Option<String>,
+
+    /// Leave scanners uninstalled
+    ///
+    /// Without this option, an init that finds no installed scanner
+    /// asks whether to install scanners that Gage publishes, and
+    /// installs them under --yes.
+    #[arg(long, conflicts_with = "remove")]
+    pub no_scanners: bool,
 
     /// Skip prompts
     ///
@@ -80,6 +89,19 @@ fn install_dialog(args: &InitArgs) -> Result<DialogResult, DialogError> {
         }
         DefaultPlan::Ask(names) => Some(prompt_default(&registry, &names)?),
     };
+    let scanners = plan_scanners(
+        cmd_scanner::none_installed(),
+        args.no_scanners,
+        args.yes,
+        || {
+            Ok(cli::confirm("Install scanners?")
+                .initial_value(true)
+                .interact()?)
+        },
+    )?;
+    if scanners {
+        dialog::step_value("Scanners", "Every scanner Gage publishes")?;
+    }
 
     dialog::confirm(args.yes, true)?;
 
@@ -115,7 +137,40 @@ fn install_dialog(args: &InitArgs) -> Result<DialogResult, DialogError> {
         ui.finish();
     }
 
+    if scanners {
+        // The rest of the setup stands without scanners, and the
+        // warning names the command that installs them later
+        let config = Config::load_user()
+            .map_err(|e| DialogError::Other(anyhow::anyhow!("reading config: {e}")))?;
+        match cmd_scanner::install_gage_scanners(&config) {
+            Ok(done) => cli::log::success(done)?,
+            Err(DialogError::Failed(reason)) => cli::log::warning(format!(
+                "Scanners were not installed: {reason}\n\
+                 Install one later with `gage scanner install`"
+            ))?,
+            Err(e) => return Err(e),
+        }
+    }
+
     Ok(DialogResult::from("Initialized Gage"))
+}
+
+/// Decide whether an init installs scanners. It does when none is
+/// installed and `--no-scanners` is not given: under `--yes` without
+/// asking, and otherwise when the user agrees to `ask`.
+fn plan_scanners(
+    none_installed: bool,
+    no_scanners: bool,
+    yes: bool,
+    ask: impl FnOnce() -> Result<bool, DialogError>,
+) -> Result<bool, DialogError> {
+    if !none_installed || no_scanners {
+        return Ok(false);
+    }
+    if yes {
+        return Ok(true);
+    }
+    ask()
 }
 
 /// A driver as `gage init` weighs it
@@ -396,6 +451,27 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn scanners_are_installed_when_none_is_and_the_user_agrees() {
+        let ask = |answer: bool| move || Ok(answer);
+        let unasked = || -> Result<bool, DialogError> { panic!("the user was asked") };
+        let plan =
+            |none_installed, no_scanners, yes, ask: &dyn Fn() -> Result<bool, DialogError>| {
+                plan_scanners(none_installed, no_scanners, yes, ask)
+                    .unwrap_or_else(|_| panic!("the scanner plan failed"))
+            };
+
+        assert!(plan(true, false, false, &ask(true)));
+        assert!(!plan(true, false, false, &ask(false)));
+        // --yes installs without asking
+        assert!(plan(true, false, true, &unasked));
+        // Installed scanners and --no-scanners leave the question out
+        assert!(!plan(false, false, false, &unasked));
+        assert!(!plan(false, false, true, &unasked));
+        assert!(!plan(true, true, false, &unasked));
+        assert!(!plan(true, true, true, &unasked));
+    }
 
     fn candidate(name: &str, harness: &str, installed: bool) -> Candidate {
         Candidate {

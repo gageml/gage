@@ -35,7 +35,7 @@ use gage_core::glob::glob_match;
 use gage_core::stopwatch::Stopwatch;
 use gage_core::uuid::short_uuid;
 use gage_registry::driver::DriverRegistry;
-use gage_registry::scanner::{Scanner, TaskDef, TaskKind};
+use gage_registry::scanner::{ApiMismatch, Scanner, TaskDef, TaskKind, check_api};
 use gage_runtime::source::{SourceError, SourceFile, source_files};
 use gage_runtime::{
     AgentPoolDelta, CURRENT_RUNTIME_SCHEME, Fail, INIT_CTX, InitContext, Level, OUTPUT_SINK,
@@ -131,6 +131,11 @@ pub enum Error {
         name: String,
         diagnostics: String,
     },
+    /// The scanner declares an API level this build does not run
+    Api {
+        name: String,
+        mismatch: ApiMismatch,
+    },
     /// A declared task names a function the scanner does not define
     MissingTask {
         scanner: String,
@@ -159,6 +164,9 @@ impl fmt::Display for Error {
                     f,
                     "scanner {name} has an invalid SCANNER declaration\n{diagnostics}"
                 )
+            }
+            Error::Api { name, mismatch } => {
+                write!(f, "scanner {name} cannot run: {mismatch}")
             }
             Error::Compile { name, diagnostics } => {
                 write!(f, "scanner {name} failed to compile\n{diagnostics}")
@@ -199,6 +207,8 @@ pub struct CompiledScanner {
     /// the scan tasks; the attach phase runs the attach tasks
     tasks: BTreeMap<String, TaskDef>,
     selection: Selection,
+    /// The version the scanner declares; empty when it declares none
+    version: String,
     /// The scanner's resolved params, read by `params()` in its tasks
     params: Option<json::Value>,
     /// The files the scanner is built from, recorded with the scan
@@ -270,6 +280,14 @@ pub fn compile(scanner: &Scanner<'_>) -> Result<CompiledScanner, Error> {
             diagnostics: def.render_problems(),
         });
     }
+    // Checked before the build, so a scanner written for another API
+    // level reports the remedy and not the compile errors it causes
+    if let Some(Err(mismatch)) = def.api.map(check_api) {
+        return Err(Error::Api {
+            name: def.name.clone(),
+            mismatch,
+        });
+    }
     let context = gage_runtime::context().unwrap();
     let rt = RuneArc::try_new(context.runtime().unwrap()).unwrap();
 
@@ -339,6 +357,7 @@ pub fn compile(scanner: &Scanner<'_>) -> Result<CompiledScanner, Error> {
         dir: def.path.parent().map(Path::to_path_buf).unwrap_or_default(),
         tasks: def.tasks.clone(),
         selection: Selection::Explicit,
+        version: def.version.clone(),
         params: scanner.params.clone(),
         source_files: files,
         has_init,
@@ -531,6 +550,7 @@ pub async fn scan(
             name: &s.name,
             tasks: &s.tasks,
             selection: s.selection.clone(),
+            version: &s.version,
             params: s.params.as_ref(),
         })
         .collect();
@@ -4007,6 +4027,38 @@ mod tests {
             "{diagnostics}"
         );
         assert!(diagnostics.contains("run_main"), "{diagnostics}");
+    }
+
+    /// A scanner written for an API level this build does not support
+    /// stops at compile with the remedy, before its source is built:
+    /// the body here would not compile.
+    #[test]
+    fn an_unsupported_api_level_fails_compile_with_the_remedy() {
+        let newer = gage_registry::scanner::API_LEVEL + 1;
+        let source = format!(
+            r#"
+            pub const SCANNER = #{{
+                name: "ahead",
+                description: "Written for a later API",
+                api: {newer},
+                tasks: #{{ main: #{{}} }},
+            }};
+            pub fn main() {{ not_in_this_api() }}
+        "#
+        );
+        let (_dir, compiled) = compile_source(&source);
+        let err = compiled.err().expect("the API level is not supported");
+        assert!(
+            matches!(
+                &err,
+                Error::Api {
+                    name,
+                    mismatch: ApiMismatch::NeedsNewerGage { level },
+                } if name == "ahead" && *level == newer
+            ),
+            "{err}"
+        );
+        assert!(err.to_string().ends_with("upgrade Gage"), "{err}");
     }
 
     /// A dataset holding one `claude` session seeded from `jsonl`,

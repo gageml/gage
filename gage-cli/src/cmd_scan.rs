@@ -20,7 +20,7 @@ use gage_core::stopwatch::Stopwatch;
 use gage_core::uuid::{new_uuid, short_uuid};
 use gage_query::{ContextBuilder, ScanScope};
 use gage_registry::driver::DriverRegistry;
-use gage_registry::scanner::{Scanner, ScannerDef, ScannerRegistry, scanner_source};
+use gage_registry::scanner::{Scanner, ScannerRegistry};
 use gage_runtime::{LOG_TARGET, Output, TaskOutput};
 use gage_scan::recover::{self, Recovered};
 use gage_scan::scan_dir::scans_dir;
@@ -42,9 +42,8 @@ use gage_tui::text::fmt_duration;
 use tabled::{
     Table,
     settings::{
-        Alignment, Color, Style, Width,
+        Alignment, Color, Style,
         object::{Columns, Object, Rows},
-        peaker::Priority,
     },
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
@@ -311,16 +310,12 @@ pub struct ScanRunArgs {
     )]
     no_dataset: bool,
 
-    /// Show available scanners and exit
-    #[arg(long, exclusive = true)]
-    list_scanners: bool,
-
     /// Skip prompts and confirmation
     ///
-    /// Fills unspecified selections with defaults: the `default`
-    /// scanner group when neither --scanner nor --group is
-    /// set, and the past 30 days capped at 20 sessions when no
-    /// session selection or dataset option is set.
+    /// Requires --scanner or --group, since no scanner runs unless it
+    /// is selected. Fills an unspecified session selection with the
+    /// past 30 days capped at 20 sessions when no session selection
+    /// or dataset option is set.
     #[arg(short, long)]
     yes: bool,
 }
@@ -1610,10 +1605,6 @@ fn delete_outro(deleted: usize, counts: &CascadeCounts) -> String {
 }
 
 async fn run_scan(args: ScanRunArgs) -> Result<(), CliError> {
-    if args.list_scanners {
-        return list_scanners(&ScannerRegistry::load());
-    }
-
     let registry = ScannerRegistry::load();
     let store = open_store("gage scan")?;
     let config = Config::load_user().context("gage scan: reading config")?;
@@ -1705,9 +1696,9 @@ async fn prepare_scan_dialog(
     store: &Store,
     prep: &mut Option<ScanPrep>,
 ) -> Result<dialog::DialogResult, DialogError> {
-    // Scanner selection: -s (a registry name or a path), -g, the
-    // `default` group under -y, or an interactive multi-select when
-    // the user supplied nothing.
+    // Scanner selection: -s (a registry name or a path), -g, or an
+    // interactive multi-select when the user supplied neither. No
+    // scanner runs unless it is selected, so -y requires one of them.
     // The resolved specs borrow the values, which must outlive the
     // dataset prompt's mutable use of `args`
     let scanner_specs = args.scanners.clone();
@@ -1934,9 +1925,9 @@ async fn run_prepared(prep: ScanPrep, store: &Store) -> Result<(), CliError> {
     Ok(())
 }
 
-/// The registry scanners selected by group: `-g`, the `-y` default,
-/// or an interactive multi-select when the user supplied no scanner
-/// input at all. A scanner already selected by `-s` is left out.
+/// The registry scanners selected by group: `-g`, or an interactive
+/// multi-select when the user supplied no scanner input at all, which
+/// `-y` cannot answer. A scanner already selected by `-s` is left out.
 /// Returns `(names, prompted)` where `prompted` is true when the
 /// selection came from the multi-select so the caller can skip its
 /// own preview.
@@ -1974,21 +1965,11 @@ fn resolve_group_names(
     let no_scanner_input = args.scanners.is_empty() && args.groups.is_empty();
     let mut prompted = false;
     if no_scanner_input {
+        if registry.list_enabled(config).is_empty() {
+            return Err(DialogError::Failed(NO_SCANNERS.to_string()));
+        }
         if args.yes {
-            let members: Vec<&str> = registry
-                .group_members("default")
-                .into_iter()
-                .filter(|d| config.is_scanner_enabled(&d.name))
-                .map(|d| d.name.as_str())
-                .collect();
-            if members.is_empty() {
-                return Err(DialogError::Failed(
-                    "No scanners in the default group".to_string(),
-                ));
-            }
-            for name in members {
-                group_names.push(name.to_string());
-            }
+            return Err(DialogError::Failed(NO_SCANNER_SELECTED.to_string()));
         } else {
             let selected = prompt_scanner_multiselect(registry, config)?;
             if selected.is_empty() {
@@ -2009,9 +1990,16 @@ fn resolve_group_names(
     Ok((group_names, prompted))
 }
 
-/// Multi-select over enabled scanners with the
-/// `default` group pre-selected. The hint shown for each item is
-/// the first line of the scanner's description.
+/// The failure of a scan that names no scanner when Gage finds none
+const NO_SCANNERS: &str = "No scanners found. Install one with `gage scanner install`; \
+     `gage scanner list --available` shows what can be installed";
+
+/// The failure of a scan under `--yes` that names no scanner
+const NO_SCANNER_SELECTED: &str = "No scanner selected; use --scanner or --group";
+
+/// Multi-select over enabled scanners, none selected to begin with.
+/// The hint shown for each item is the first line of the scanner's
+/// description.
 fn prompt_scanner_multiselect(
     registry: &ScannerRegistry,
     config: &Config,
@@ -2019,18 +2007,7 @@ fn prompt_scanner_multiselect(
     let defs = registry.list_enabled(config);
     let mut names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
     names.sort();
-    let default_indices: Vec<usize> = names
-        .iter()
-        .enumerate()
-        .filter(|(_, n)| {
-            registry
-                .group_members("default")
-                .iter()
-                .any(|d| d.name == **n)
-        })
-        .map(|(i, _)| i)
-        .collect();
-    let mut prompt = cli::multiselect("Scanners").initial_values(default_indices);
+    let mut prompt = cli::multiselect("Scanners");
     for (i, name) in names.iter().enumerate() {
         let hint = registry
             .get_def(name)
@@ -2294,97 +2271,6 @@ fn open_store(command: &str) -> Result<Store, CliError> {
     Ok(store)
 }
 
-pub(crate) fn list_scanners(registry: &ScannerRegistry) -> Result<(), CliError> {
-    let header: Vec<String> = ["Scanner", "Source", "Groups", "Description"]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-
-    let config = Config::load_user().context("Error reading config")?;
-
-    let mut defs = registry.list_visible();
-    defs.sort_by(|a, b| {
-        let a_enabled = config.is_scanner_enabled(&a.name);
-        let b_enabled = config.is_scanner_enabled(&b.name);
-        b_enabled.cmp(&a_enabled).then_with(|| a.name.cmp(&b.name))
-    });
-
-    let rows: Vec<Vec<String>> = defs
-        .into_iter()
-        .map(|d| {
-            let groups = style(d.groups.join(", ")).dim().to_string();
-            let source = style(scanner_source(&d.path).to_string()).dim().to_string();
-            if config.is_scanner_enabled(&d.name) {
-                vec![
-                    style(&d.name).yellow().to_string(),
-                    source,
-                    groups,
-                    style(&d.description).dim().to_string(),
-                ]
-            } else {
-                vec![
-                    style(format!("{} (disabled)", d.name)).dim().to_string(),
-                    source,
-                    groups,
-                    style(&d.description).dim().to_string(),
-                ]
-            }
-        })
-        .collect();
-
-    let mut table = Table::from_iter(std::iter::once(header).chain(rows));
-    table.with(Style::rounded());
-    if let Some(width) = s::stdout_width() {
-        table.with(
-            Width::wrap(width)
-                .keep_words(true)
-                .priority(Priority::max(true)),
-        );
-    }
-    table.modify(Rows::first(), s::tty(Color::FG_BRIGHT_YELLOW));
-    println!("{table}");
-
-    let errors: Vec<_> = registry.parse_errors().collect();
-    if !errors.is_empty() {
-        println!();
-        eprintln!(
-            "{}",
-            style(format!("{} scanner file(s) failed to parse:", errors.len()))
-                .red()
-                .bold()
-        );
-        for (path, rendered) in errors {
-            eprintln!();
-            eprintln!("{}", style(path.display()).yellow());
-            eprintln!("{rendered}");
-        }
-    }
-
-    let invalid: Vec<&ScannerDef> = registry
-        .list()
-        .into_iter()
-        .filter(|d| !d.problems.is_empty())
-        .collect();
-    if !invalid.is_empty() {
-        println!();
-        eprintln!(
-            "{}",
-            style(format!(
-                "{} scanner(s) have an invalid SCANNER declaration:",
-                invalid.len()
-            ))
-            .red()
-            .bold()
-        );
-        for def in invalid {
-            eprintln!();
-            eprintln!("{}", style(def.path.display()).yellow());
-            eprintln!("{}", def.render_problems());
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -2402,6 +2288,55 @@ mod tests {
     /// is built from. Each excludes the other and the options that
     /// name an existing dataset or no dataset; the subcommands are
     /// unaffected.
+    /// No scanner runs unless it is selected: `--yes` with no scanner
+    /// option fails naming the options, and with no scanner to select
+    /// the failure names the command that installs one.
+    #[test]
+    fn a_scan_under_yes_requires_a_scanner_selection() {
+        let run_args = |argv: &[&str]| {
+            let cli = Cli::try_parse_from([&["gage", "scan"], argv].concat()).unwrap();
+            let Command::Scan(ScanArgs { run_args, .. }) = cli.command else {
+                panic!("expected a scan run");
+            };
+            run_args
+        };
+        let failure = |args: &ScanRunArgs, registry: &ScannerRegistry| match resolve_group_names(
+            args,
+            &[],
+            registry,
+            &Config::default(),
+        ) {
+            Err(DialogError::Failed(message)) => message,
+            _ => panic!("the scanner selection did not fail"),
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let installed = tmp.path().join("installed");
+        let none = ScannerRegistry::load_from_roots(&installed, vec![installed.clone()]);
+        assert_eq!(failure(&run_args(&["-y"]), &none), NO_SCANNERS);
+
+        let dir = installed.join("ns/one");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("scanner.rn"),
+            "pub const SCANNER = #{ name: \"one\", description: \"d\", \
+             groups: [\"default\", \"mine\"], tasks: #{} };",
+        )
+        .unwrap();
+        let registry = ScannerRegistry::load_from_roots(&installed, vec![installed.clone()]);
+        // The `default` group selects nothing by itself
+        assert_eq!(failure(&run_args(&["-y"]), &registry), NO_SCANNER_SELECTED);
+        let Ok((names, prompted)) = resolve_group_names(
+            &run_args(&["-y", "-g", "mine"]),
+            &[],
+            &registry,
+            &Config::default(),
+        ) else {
+            panic!("the group did not resolve");
+        };
+        assert_eq!(names, ["one"]);
+        assert!(!prompted);
+    }
+
     #[test]
     fn source_and_stored_scope_the_session_selection() {
         let run_args = |argv: &[&str]| {

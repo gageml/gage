@@ -1,9 +1,10 @@
-//! Cargo test target for the Rune tests in the scanner bundle. A
-//! libtest-mimic harness exposes each Rune `#[test]` function as its
-//! own trial, so cargo-native filtering and reporting apply:
+//! Cargo test target for the Rune tests of scanners. A libtest-mimic
+//! harness exposes each Rune `#[test]` function as its own trial, so
+//! cargo-native filtering and reporting apply. `GAGE_SCANNER_TESTS`
+//! names the directory of scanners to test:
 //!
 //! ```shell
-//! cargo test -p gage-scan --test rune -- test_stats_mean
+//! GAGE_SCANNER_TESTS=../gage-scanners cargo test -p gage-scan --test rune
 //! ```
 
 use libtest_mimic::{Arguments, Failed, Trial};

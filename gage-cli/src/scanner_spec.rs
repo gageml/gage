@@ -118,8 +118,8 @@ mod tests {
     #[test]
     fn registry_name_wins_then_a_directory_or_file_path() {
         let tmp = tempfile::tempdir().unwrap();
-        let builtin = tmp.path().join("builtin");
-        write_scanner(&builtin.join("reg"), "reg");
+        let installed = tmp.path().join("installed");
+        write_scanner(&installed.join("ns/reg"), "reg");
         // A file scanner that shares the registry name is shadowed
         let local = tmp.path().join("local");
         write_scanner(&local.join("reg"), "reg-from-file");
@@ -129,7 +129,7 @@ mod tests {
             "pub const SCANNER = #{ name: \"single\", description: \"d\", tasks: #{} };",
         )
         .unwrap();
-        let registry = ScannerRegistry::load_from_roots(&builtin, vec![builtin.clone()]);
+        let registry = ScannerRegistry::load_from_roots(&installed, vec![installed.clone()]);
 
         let specs = vec![
             "reg".to_string(),
@@ -151,14 +151,14 @@ mod tests {
     #[test]
     fn missing_paths_and_duplicates_are_reported_together() {
         let tmp = tempfile::tempdir().unwrap();
-        let builtin = tmp.path().join("builtin");
-        write_scanner(&builtin.join("reg"), "reg");
-        let registry = ScannerRegistry::load_from_roots(&builtin, vec![builtin.clone()]);
+        let installed = tmp.path().join("installed");
+        write_scanner(&installed.join("ns/reg"), "reg");
+        let registry = ScannerRegistry::load_from_roots(&installed, vec![installed.clone()]);
 
         let specs = vec![
             "reg".to_string(),
             "nope".to_string(),
-            builtin.join("reg").display().to_string(),
+            installed.join("ns/reg").display().to_string(),
         ];
         let Err(err) = resolve(&registry, &specs) else {
             panic!("a missing path and a duplicate resolved");

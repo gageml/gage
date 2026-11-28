@@ -43,6 +43,7 @@ drivers.pi.models.small = "anthropic/claude-haiku-4-5"
 issues.related_threshold = 0.2
 scanners.disable = []
 scanners.enable = []
+scanners.source = "https://github.com/gageml/gage-scanners.git"
 storage.max_session_size = "256MB"
 ```
 
@@ -74,6 +75,7 @@ is created with default values before the editor opens.
 | -------------------------------- | -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `scanners.enable`                | `[]`           | When non-empty, only these scanners run by default. Entries may contain `*` wildcards.                                                                                                  |
 | `scanners.disable`               | `[]`           | Scanners that never run by default. Takes precedence over `enable`. Entries may contain `*` wildcards.                                                                                  |
+| `scanners.source`                | gage-scanners on GitHub | Git repository that [`gage scanner`](/commands/scanner) installs scanners from. The value is a URL or the path of a local repository. |
 | `issues.related_threshold`       | `0.2`          | Similarity score at or above which `gage issue show` lists an issue as related.                                                                                                         |
 | `storage.max_session_size`       | `"256MB"`      | Largest total content a single session may write to the store. Accepts a byte count or a `KB`, `MB`, or `GB` suffix. `--max-size` overrides it for one command.                         |
 | `backup.native`                  | `[]`           | Session sources whose sessions `gage backup` adds to the store before each backup. Each entry is `SCHEME:PATH`, a scheme alone, or a name set under `native`. `gage backup --native` replaces the list for one run. |

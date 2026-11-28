@@ -63,6 +63,7 @@ mod cmd_query;
 mod cmd_remote;
 mod cmd_resolve;
 mod cmd_scan;
+mod cmd_scanner;
 mod cmd_session;
 mod cmd_share;
 mod cmd_status;
@@ -139,6 +140,16 @@ enum Command {
 
     /// Run scanners on sessions
     Scan(cmd_scan::ScanArgs),
+
+    /// Manage scanners
+    ///
+    /// A scanner is a program that a scan runs over sessions. Scanners
+    /// are installed from scanner source, a Git repository that config
+    /// names.
+    Scanner {
+        #[command(subcommand)]
+        command: cmd_scanner::ScannerCommand,
+    },
 
     /// Resolve issues in a coding agent session
     ///
@@ -400,6 +411,7 @@ async fn main() -> ExitCode {
             Command::Config { command } => cmd_config::run(command),
             Command::Store { command } => cmd_store::run(command),
             Command::Init(args) => cmd_init::run(args),
+            Command::Scanner { command } => cmd_scanner::run(command),
             Command::Status(args) => cmd_status::run(args).await,
             Command::Note { command } => match command {
                 cmd_note::NoteCommand::List(args) => cmd_note::list(args).await,

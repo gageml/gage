@@ -45,9 +45,9 @@ notes and reports issues from them.
 
 ## Running
 
-The scanner is in the `default` group. It runs when you run `gage scan`
-without selecting scanners. To run it explicitly:
+Install the scanner and run it:
 
 ```cli
+gage scanner install code-review
 gage scan -s code-review
 ```

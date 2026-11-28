@@ -2694,6 +2694,7 @@ dependencies = [
  "gage-session",
  "rune",
  "rust-embed",
+ "semver",
  "serde",
  "serde_json",
  "tempfile",

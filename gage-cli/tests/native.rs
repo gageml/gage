@@ -172,7 +172,7 @@ fn a_source_that_is_not_one_can_be_deleted() {
     let cwd = tempfile::tempdir().unwrap();
     let (home, cwd) = (home.path(), cwd.path());
     fs::write(home.join("config.toml"), "[native]\nbad = \"zzz:/x\"\n").unwrap();
-    refused(home, cwd, &["scan", "--list-scanners"]);
+    refused(home, cwd, &["scanner", "list"]);
     ok(home, cwd, &["native", "delete", "bad", "-y"]);
-    ok(home, cwd, &["scan", "--list-scanners"]);
+    ok(home, cwd, &["scanner", "list"]);
 }

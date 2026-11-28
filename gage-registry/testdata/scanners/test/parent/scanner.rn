@@ -1,0 +1,23 @@
+use gage::{scan, write_note};
+
+// A test scanner that requires `child`. Installing it installs
+// `child`. In a scan with both, its task runs after the `child` task
+// and counts the notes that task wrote.
+pub const SCANNER = #{
+    name: "parent",
+    description: "Test scanner that requires the child test scanner",
+    version: "1.0.0",
+    api: 1,
+    hidden: true,
+    requires: ["test/child"],
+    tasks: #{
+        count_child_notes: #{
+            notes: #{ writes: ["parent"], wants: ["child"] },
+        },
+    },
+};
+
+pub async fn count_child_notes() {
+    let notes = scan().notes().name("child").await?;
+    write_note("parent", notes.len()).await?;
+}

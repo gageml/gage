@@ -1,0 +1,1008 @@
+api 1
+agent.rs: #[rune(constructor)] Assistant
+agent.rs: #[rune(constructor)] Other
+agent.rs: #[rune(constructor)] ParseError
+agent.rs: #[rune(constructor)] Stop
+agent.rs: #[rune(constructor)] System
+agent.rs: #[rune(constructor)] Thinking
+agent.rs: #[rune(constructor)] ToolResult
+agent.rs: #[rune(constructor)] ToolUse
+agent.rs: #[rune(constructor)] TurnEnd
+agent.rs: #[rune(get)] id
+agent.rs: #[rune(get)] input
+agent.rs: #[rune(get)] name
+agent.rs: #[rune(get)] output
+agent.rs: #[rune(get)] pub model_usage
+agent.rs: #[rune(get)] pub permission_denials
+agent.rs: #[rune(get)] pub session_id
+agent.rs: #[rune(get)] pub stderr
+agent.rs: #[rune(get)] pub stop_reason
+agent.rs: #[rune(get)] pub structured_output
+agent.rs: #[rune(get)] pub text
+agent.rs: #[rune(get)] pub usage
+agent.rs: #[rune(get)] pub uuid
+agent.rs: #[rune(get, copy)] pub duration_api_ms
+agent.rs: #[rune(get, copy)] pub duration_ms
+agent.rs: #[rune(get, copy)] pub exit_code
+agent.rs: #[rune(get, copy)] pub is_error
+agent.rs: #[rune(get, copy)] pub turns
+agent.rs: #[rune(item = ::gage)] pub enum Event
+agent.rs: #[rune(item = ::gage)] pub struct Agent
+agent.rs: #[rune(item = ::gage)] pub struct AgentResult
+agent.rs: #[rune(item = ::gage)] pub struct AgentRunner
+agent.rs: #[rune(item = ::gage)] pub struct AgentRunnerResults
+agent.rs: #[rune(item = ::gage)] pub struct CallAgent
+agent.rs: #[rune(skip)] futures
+agent.rs: #[rune(skip)] inner
+agent.rs: #[rune(skip)] max_turns
+agent.rs: #[rune(skip)] model
+agent.rs: #[rune(skip)] queue
+agent.rs: #[rune(skip)] spec
+agent.rs: #[rune(skip)] tools
+agent.rs: #[rune::function(instance)] async fn kill
+agent.rs: #[rune::function(instance)] async fn poll
+agent.rs: #[rune::function(instance)] async fn send
+agent.rs: #[rune::function(instance)] async fn send_now
+agent.rs: #[rune::function(instance)] async fn stop
+agent.rs: #[rune::function(instance)] async fn wait
+agent.rs: #[rune::function(instance)] fn default_system_prompt
+agent.rs: #[rune::function(instance)] fn default_system_prompt_append
+agent.rs: #[rune::function(instance)] fn max_turns
+agent.rs: #[rune::function(instance)] fn metadata
+agent.rs: #[rune::function(instance)] fn model
+agent.rs: #[rune::function(instance)] fn name
+agent.rs: #[rune::function(instance)] fn result
+agent.rs: #[rune::function(instance)] fn running
+agent.rs: #[rune::function(instance)] fn system_prompt
+agent.rs: #[rune::function(instance)] fn timeout
+agent.rs: #[rune::function(instance)] fn tool
+agent.rs: #[rune::function(instance)] fn tools
+agent.rs: #[rune::function(instance, path = add)] fn runner_add
+agent.rs: #[rune::function(instance, path = next)] async fn runner_next
+agent.rs: #[rune::function(instance, path = start)] fn runner_start
+agent.rs: #[rune::function(path = Self::new)] fn new
+agent.rs: #[rune::function(protocol = DEBUG_FMT)] fn debug
+agent.rs: #[rune::function(protocol = DEBUG_FMT)] fn debug
+agent.rs: #[rune::function(protocol = DEBUG_FMT)] fn debug
+agent.rs: #[rune::function] fn call_agent
+agent.rs: let mut m = Module::with_crate("gage")?;
+agent.rs: m.associated_function(&Protocol::INTO_FUTURE, |c: CallAgent| async move {
+agent.rs: m.field_function(&Protocol::GET, "cost_usd", AgentResult::cost_usd_value)?;
+agent.rs: m.function_meta(Agent::debug)?;
+agent.rs: m.function_meta(AgentResult::debug)?;
+agent.rs: m.function_meta(AgentResult::metadata)?;
+agent.rs: m.function_meta(AgentRunner::new)?;
+agent.rs: m.function_meta(CallAgent::default_system_prompt)?;
+agent.rs: m.function_meta(CallAgent::default_system_prompt_append)?;
+agent.rs: m.function_meta(CallAgent::max_turns)?;
+agent.rs: m.function_meta(CallAgent::model)?;
+agent.rs: m.function_meta(CallAgent::name)?;
+agent.rs: m.function_meta(CallAgent::system_prompt)?;
+agent.rs: m.function_meta(CallAgent::timeout)?;
+agent.rs: m.function_meta(CallAgent::tool)?;
+agent.rs: m.function_meta(CallAgent::tools)?;
+agent.rs: m.function_meta(Event::debug)?;
+agent.rs: m.function_meta(call_agent)?;
+agent.rs: m.function_meta(kill)?;
+agent.rs: m.function_meta(poll)?;
+agent.rs: m.function_meta(result)?;
+agent.rs: m.function_meta(runner_add)?;
+agent.rs: m.function_meta(runner_next)?;
+agent.rs: m.function_meta(runner_start)?;
+agent.rs: m.function_meta(running)?;
+agent.rs: m.function_meta(send)?;
+agent.rs: m.function_meta(send_now)?;
+agent.rs: m.function_meta(stop)?;
+agent.rs: m.function_meta(wait)?;
+agent.rs: m.ty::<Agent>()?;
+agent.rs: m.ty::<AgentResult>()?;
+agent.rs: m.ty::<AgentRunner>()?;
+agent.rs: m.ty::<AgentRunnerResults>()?;
+agent.rs: m.ty::<CallAgent>()?;
+agent.rs: m.ty::<Event>()?;
+attach.rs: #[rune(get)] pub id
+attach.rs: #[rune(get)] pub id
+attach.rs: #[rune(get)] pub key
+attach.rs: #[rune(get)] pub name
+attach.rs: #[rune(get)] pub outcome
+attach.rs: #[rune(item = ::gage)] pub struct AttachWriter
+attach.rs: #[rune(item = ::gage)] pub struct Attached
+attach.rs: #[rune(item = ::gage)] pub struct Dataset
+attach.rs: #[rune(item = ::gage)] pub struct Files
+attach.rs: #[rune(skip)] excludes
+attach.rs: #[rune(skip)] files
+attach.rs: #[rune(skip)] includes
+attach.rs: #[rune(skip)] key
+attach.rs: #[rune(skip)] name
+attach.rs: #[rune(skip)] pub targets
+attach.rs: #[rune(skip)] root
+attach.rs: #[rune(skip)] targets
+attach.rs: #[rune::function(instance)] fn exclude
+attach.rs: #[rune::function(instance)] fn key
+attach.rs: #[rune::function(instance)] fn key_part
+attach.rs: #[rune::function(instance)] fn name
+attach.rs: #[rune::function(instance)] fn root
+attach.rs: #[rune::function(instance)] fn sessions
+attach.rs: #[rune::function(instance)] fn target
+attach.rs: #[rune::function(instance)] fn targets
+attach.rs: #[rune::function(keep, instance)] fn targets
+attach.rs: #[rune::function(keep, path = Self::include)] fn include
+attach.rs: #[rune::function(protocol = DEBUG_FMT)] fn debug
+attach.rs: #[rune::function(protocol = DEBUG_FMT)] fn debug
+attach.rs: #[rune::function(protocol = DEBUG_FMT)] fn debug
+attach.rs: let mut m = Module::with_crate("gage")?;
+attach.rs: m.associated_function(&Protocol::INTO_FUTURE, |w: AttachWriter| async move {
+attach.rs: m.function("attach", attach).build()?;
+attach.rs: m.function("dataset", dataset).build()?;
+attach.rs: m.function_meta(AttachWriter::key)?;
+attach.rs: m.function_meta(AttachWriter::name)?;
+attach.rs: m.function_meta(AttachWriter::target)?;
+attach.rs: m.function_meta(AttachWriter::targets__meta)?;
+attach.rs: m.function_meta(Attached::debug)?;
+attach.rs: m.function_meta(Attached::targets)?;
+attach.rs: m.function_meta(Dataset::debug)?;
+attach.rs: m.function_meta(Dataset::sessions)?;
+attach.rs: m.function_meta(Files::debug)?;
+attach.rs: m.function_meta(Files::exclude)?;
+attach.rs: m.function_meta(Files::include__meta)?;
+attach.rs: m.function_meta(Files::key_part)?;
+attach.rs: m.function_meta(Files::root)?;
+attach.rs: m.ty::<AttachWriter>()?;
+attach.rs: m.ty::<Attached>()?;
+attach.rs: m.ty::<Dataset>()?;
+attach.rs: m.ty::<Files>()?;
+attachment.rs: #[rune(get)] pub digest
+attachment.rs: #[rune(get)] pub id
+attachment.rs: #[rune(get)] pub key
+attachment.rs: #[rune(get)] pub name
+attachment.rs: #[rune(get)] pub path
+attachment.rs: #[rune(get)] pub root
+attachment.rs: #[rune(get)] pub targets
+attachment.rs: #[rune(item = ::gage)] pub struct Attachment
+attachment.rs: #[rune(item = ::gage)] pub struct AttachmentFile
+attachment.rs: #[rune(item = ::gage)] pub struct AttachmentFileQuery
+attachment.rs: #[rune(item = ::gage)] pub struct AttachmentFilesQuery
+attachment.rs: #[rune(item = ::gage)] pub struct Attachments
+attachment.rs: #[rune(item = ::gage)] pub struct AttachmentsQuery
+attachment.rs: #[rune(item = ::gage)] pub struct FilteredAttachmentsQuery
+attachment.rs: #[rune(skip)] back
+attachment.rs: #[rune(skip)] commit
+attachment.rs: #[rune(skip)] commit
+attachment.rs: #[rune(skip)] front
+attachment.rs: #[rune(skip)] items
+attachment.rs: #[rune(skip)] path
+attachment.rs: #[rune(skip)] pub
+attachment.rs: #[rune(skip)] pub bytes
+attachment.rs: #[rune(skip)] pub commit
+attachment.rs: #[rune(skip)] target_url
+attachment.rs: #[rune::function(instance)] fn attachments
+attachment.rs: #[rune::function(instance)] fn attachments
+attachment.rs: #[rune::function(instance)] fn bytes
+attachment.rs: #[rune::function(instance)] fn file
+attachment.rs: #[rune::function(instance)] fn files
+attachment.rs: #[rune::function(instance)] fn json
+attachment.rs: #[rune::function(instance)] fn name
+attachment.rs: #[rune::function(instance)] fn name
+attachment.rs: #[rune::function(instance)] fn names
+attachment.rs: #[rune::function(instance)] fn names
+attachment.rs: #[rune::function(instance)] fn target
+attachment.rs: #[rune::function(instance)] fn target
+attachment.rs: #[rune::function(instance)] fn text
+attachment.rs: #[rune::function(instance, keep, protocol = LEN)] fn len
+attachment.rs: #[rune::function(instance, keep, protocol = NEXT)] fn next
+attachment.rs: #[rune::function(instance, keep, protocol = NEXT_BACK)] fn next_back
+attachment.rs: #[rune::function(instance, keep, protocol = NTH)] fn nth
+attachment.rs: #[rune::function(instance, keep, protocol = SIZE_HINT)] fn size_hint
+attachment.rs: #[rune::function(protocol = DEBUG_FMT)] fn debug
+attachment.rs: #[rune::function(protocol = DEBUG_FMT)] fn debug
+attachment.rs: m.associated_function(
+attachment.rs: m.associated_function(
+attachment.rs: m.associated_function(
+attachment.rs: m.associated_function(&Protocol::INTO_FUTURE, |q: AttachmentsQuery| async move {
+attachment.rs: m.function_meta(Attachment::debug)?;
+attachment.rs: m.function_meta(Attachment::file)?;
+attachment.rs: m.function_meta(Attachment::files)?;
+attachment.rs: m.function_meta(AttachmentFile::bytes)?;
+attachment.rs: m.function_meta(AttachmentFile::debug)?;
+attachment.rs: m.function_meta(AttachmentFile::json)?;
+attachment.rs: m.function_meta(AttachmentFile::text)?;
+attachment.rs: m.function_meta(Attachments::len__meta)?;
+attachment.rs: m.function_meta(Attachments::next__meta)?;
+attachment.rs: m.function_meta(Attachments::next_back__meta)?;
+attachment.rs: m.function_meta(Attachments::nth__meta)?;
+attachment.rs: m.function_meta(Attachments::size_hint__meta)?;
+attachment.rs: m.function_meta(AttachmentsQuery::name)?;
+attachment.rs: m.function_meta(AttachmentsQuery::names)?;
+attachment.rs: m.function_meta(AttachmentsQuery::target)?;
+attachment.rs: m.function_meta(FilteredAttachmentsQuery::name)?;
+attachment.rs: m.function_meta(FilteredAttachmentsQuery::names)?;
+attachment.rs: m.function_meta(FilteredAttachmentsQuery::target)?;
+attachment.rs: m.function_meta(Scan::attachments)?;
+attachment.rs: m.function_meta(Session::attachments)?;
+attachment.rs: m.function_meta(crate::validate::attachments_hwm)?;
+attachment.rs: m.function_meta(crate::validate::attachments_unseen)?;
+attachment.rs: m.function_meta(crate::validate::filtered_attachments_hwm)?;
+attachment.rs: m.function_meta(crate::validate::filtered_attachments_unseen)?;
+attachment.rs: m.ty::<Attachment>()?;
+attachment.rs: m.ty::<AttachmentFile>()?;
+attachment.rs: m.ty::<AttachmentFileQuery>()?;
+attachment.rs: m.ty::<AttachmentFilesQuery>()?;
+attachment.rs: m.ty::<Attachments>()?;
+attachment.rs: m.ty::<AttachmentsQuery>()?;
+attachment.rs: m.ty::<FilteredAttachmentsQuery>()?;
+compress.rs: #[rune(item = ::gage)] pub struct SessionCompress
+compress.rs: #[rune(skip)] budget
+compress.rs: #[rune(skip)] lines
+compress.rs: #[rune(skip)] rules
+compress.rs: #[rune(skip)] session_id
+compress.rs: #[rune::function(instance)] fn compress
+compress.rs: #[rune::function(instance)] fn range
+compress.rs: m.associated_function(&Protocol::INTO_FUTURE, |q: SessionCompress| async move {
+compress.rs: m.function_meta(SessionCompress::range)?;
+compress.rs: m.function_meta(compress)?;
+compress.rs: m.ty::<SessionCompress>()?;
+datetime.rs: #[rune(item = ::gage)] pub struct DateTime
+datetime.rs: #[rune(item = ::gage)] pub struct Duration
+datetime.rs: #[rune(skip)] inner
+datetime.rs: #[rune(skip)] inner
+datetime.rs: #[rune::function(keep, instance)] fn add
+datetime.rs: #[rune::function(keep, instance)] fn as_days
+datetime.rs: #[rune::function(keep, instance)] fn as_hours
+datetime.rs: #[rune::function(keep, instance)] fn as_millis
+datetime.rs: #[rune::function(keep, instance)] fn as_minutes
+datetime.rs: #[rune::function(keep, instance)] fn as_seconds
+datetime.rs: #[rune::function(keep, instance)] fn day
+datetime.rs: #[rune::function(keep, instance)] fn duration_since
+datetime.rs: #[rune::function(keep, instance)] fn format
+datetime.rs: #[rune::function(keep, instance)] fn hour
+datetime.rs: #[rune::function(keep, instance)] fn millis
+datetime.rs: #[rune::function(keep, instance)] fn minute
+datetime.rs: #[rune::function(keep, instance)] fn month
+datetime.rs: #[rune::function(keep, instance)] fn ordinal
+datetime.rs: #[rune::function(keep, instance)] fn second
+datetime.rs: #[rune::function(keep, instance)] fn sub
+datetime.rs: #[rune::function(keep, instance)] fn timestamp
+datetime.rs: #[rune::function(keep, instance)] fn to_rfc2822
+datetime.rs: #[rune::function(keep, instance)] fn weekday
+datetime.rs: #[rune::function(keep, instance)] fn weekday_name
+datetime.rs: #[rune::function(keep, instance)] fn year
+datetime.rs: #[rune::function(keep, instance)] pub fn to_rfc3339
+datetime.rs: #[rune::function(keep, instance, protocol = ADD)] fn proto_add
+datetime.rs: #[rune::function(keep, instance, protocol = CMP)] fn cmp
+datetime.rs: #[rune::function(keep, instance, protocol = CMP)] fn cmp
+datetime.rs: #[rune::function(keep, instance, protocol = DEBUG_FMT)] fn debug_fmt
+datetime.rs: #[rune::function(keep, instance, protocol = DEBUG_FMT)] fn debug_fmt
+datetime.rs: #[rune::function(keep, instance, protocol = DISPLAY_FMT)] fn display_fmt
+datetime.rs: #[rune::function(keep, instance, protocol = DISPLAY_FMT)] fn display_fmt
+datetime.rs: #[rune::function(keep, instance, protocol = EQ)] fn eq
+datetime.rs: #[rune::function(keep, instance, protocol = EQ)] fn eq
+datetime.rs: #[rune::function(keep, instance, protocol = PARTIAL_CMP)] fn partial_cmp
+datetime.rs: #[rune::function(keep, instance, protocol = PARTIAL_CMP)] fn partial_cmp
+datetime.rs: #[rune::function(keep, instance, protocol = PARTIAL_EQ)] fn partial_eq
+datetime.rs: #[rune::function(keep, instance, protocol = PARTIAL_EQ)] fn partial_eq
+datetime.rs: #[rune::function(keep, instance, protocol = SUB)] fn proto_sub
+datetime.rs: #[rune::function(keep, path = Self::days)] fn days
+datetime.rs: #[rune::function(keep, path = Self::from_millis)] pub fn from_millis
+datetime.rs: #[rune::function(keep, path = Self::from_rfc3339)] fn from_rfc3339
+datetime.rs: #[rune::function(keep, path = Self::hours)] fn hours
+datetime.rs: #[rune::function(keep, path = Self::milliseconds)] fn milliseconds
+datetime.rs: #[rune::function(keep, path = Self::minutes)] fn minutes
+datetime.rs: #[rune::function(keep, path = Self::now)] pub
+datetime.rs: #[rune::function(keep, path = Self::parse)] fn parse
+datetime.rs: #[rune::function(keep, path = Self::seconds)] fn seconds
+datetime.rs: #[rune::function(keep, path = Self::weeks)] fn weeks
+datetime.rs: m.function_meta(DateTime::add__meta)?;
+datetime.rs: m.function_meta(DateTime::cmp__meta)?;
+datetime.rs: m.function_meta(DateTime::day__meta)?;
+datetime.rs: m.function_meta(DateTime::debug_fmt__meta)?;
+datetime.rs: m.function_meta(DateTime::display_fmt__meta)?;
+datetime.rs: m.function_meta(DateTime::duration_since__meta)?;
+datetime.rs: m.function_meta(DateTime::eq__meta)?;
+datetime.rs: m.function_meta(DateTime::format__meta)?;
+datetime.rs: m.function_meta(DateTime::from_millis__meta)?;
+datetime.rs: m.function_meta(DateTime::from_rfc3339__meta)?;
+datetime.rs: m.function_meta(DateTime::hour__meta)?;
+datetime.rs: m.function_meta(DateTime::millis__meta)?;
+datetime.rs: m.function_meta(DateTime::minute__meta)?;
+datetime.rs: m.function_meta(DateTime::month__meta)?;
+datetime.rs: m.function_meta(DateTime::now__meta)?;
+datetime.rs: m.function_meta(DateTime::ordinal__meta)?;
+datetime.rs: m.function_meta(DateTime::parse__meta)?;
+datetime.rs: m.function_meta(DateTime::partial_cmp__meta)?;
+datetime.rs: m.function_meta(DateTime::partial_eq__meta)?;
+datetime.rs: m.function_meta(DateTime::proto_add__meta)?;
+datetime.rs: m.function_meta(DateTime::proto_sub__meta)?;
+datetime.rs: m.function_meta(DateTime::second__meta)?;
+datetime.rs: m.function_meta(DateTime::sub__meta)?;
+datetime.rs: m.function_meta(DateTime::timestamp__meta)?;
+datetime.rs: m.function_meta(DateTime::to_rfc2822__meta)?;
+datetime.rs: m.function_meta(DateTime::to_rfc3339__meta)?;
+datetime.rs: m.function_meta(DateTime::weekday__meta)?;
+datetime.rs: m.function_meta(DateTime::weekday_name__meta)?;
+datetime.rs: m.function_meta(DateTime::year__meta)?;
+datetime.rs: m.function_meta(Duration::as_days__meta)?;
+datetime.rs: m.function_meta(Duration::as_hours__meta)?;
+datetime.rs: m.function_meta(Duration::as_millis__meta)?;
+datetime.rs: m.function_meta(Duration::as_minutes__meta)?;
+datetime.rs: m.function_meta(Duration::as_seconds__meta)?;
+datetime.rs: m.function_meta(Duration::cmp__meta)?;
+datetime.rs: m.function_meta(Duration::days__meta)?;
+datetime.rs: m.function_meta(Duration::debug_fmt__meta)?;
+datetime.rs: m.function_meta(Duration::display_fmt__meta)?;
+datetime.rs: m.function_meta(Duration::eq__meta)?;
+datetime.rs: m.function_meta(Duration::hours__meta)?;
+datetime.rs: m.function_meta(Duration::milliseconds__meta)?;
+datetime.rs: m.function_meta(Duration::minutes__meta)?;
+datetime.rs: m.function_meta(Duration::partial_cmp__meta)?;
+datetime.rs: m.function_meta(Duration::partial_eq__meta)?;
+datetime.rs: m.function_meta(Duration::seconds__meta)?;
+datetime.rs: m.function_meta(Duration::weeks__meta)?;
+datetime.rs: m.ty::<DateTime>()?;
+datetime.rs: m.ty::<Duration>()?;
+error.rs: #[rune(constructor)] Agent
+error.rs: #[rune(constructor)] Args
+error.rs: #[rune(constructor)] Config
+error.rs: #[rune(constructor)] Db
+error.rs: #[rune(constructor)] Decode
+error.rs: #[rune(constructor)] Driver
+error.rs: #[rune(constructor)] General
+error.rs: #[rune(constructor)] Http
+error.rs: #[rune(constructor)] Network
+error.rs: #[rune(constructor)] Stopped,
+error.rs: #[rune(constructor)] Template
+error.rs: #[rune(get)] body
+error.rs: #[rune(get)] status
+error.rs: #[rune(item = ::gage)] pub enum AgentError
+error.rs: #[rune(item = ::gage)] pub enum Error
+error.rs: #[rune::function(protocol = DEBUG_FMT)] fn debug
+error.rs: #[rune::function(protocol = DEBUG_FMT)] fn debug
+error.rs: m.function_meta(AgentError::debug)?;
+error.rs: m.function_meta(Error::debug)?;
+error.rs: m.ty::<AgentError>()?;
+error.rs: m.ty::<Error>()?;
+fail.rs: #[rune(item = ::gage, constructor)] pub struct Fail
+fail.rs: #[rune::function(instance, path = Self::message)] fn rune_message
+fail.rs: m.function_meta(Fail::rune_message)?;
+fail.rs: m.ty::<Fail>()?;
+fail.rs: m.ty::<Ignore>()?;
+ignore.rs: #[rune(item = ::gage, constructor)] pub struct Ignore
+init.rs: #[rune(item = ::gage)] pub struct QueryView
+init.rs: #[rune(item = ::gage)] pub struct ScannerContext
+init.rs: #[rune(skip)] name
+init.rs: #[rune(skip)] scanner
+init.rs: #[rune(skip)] views
+init.rs: #[rune(skip)] views
+init.rs: #[rune::function(instance)] fn description
+init.rs: #[rune::function(instance)] fn query_view
+init.rs: let mut m = Module::with_crate("gage")?;
+init.rs: m.function("context", context).build()?;
+init.rs: m.function_meta(QueryView::description)?;
+init.rs: m.function_meta(ScannerContext::query_view)?;
+init.rs: m.ty::<QueryView>()?;
+init.rs: m.ty::<ScannerContext>()?;
+io.rs: let mut m = Module::with_crate_item("std", ["io"])?;
+io.rs: m.function("print", print).build()?;
+io.rs: m.function("println", println).build()?;
+issue.rs: #[rune(get)] pub author
+issue.rs: #[rune(get)] pub created
+issue.rs: #[rune(get)] pub description
+issue.rs: #[rune(get)] pub evidence
+issue.rs: #[rune(get)] pub id
+issue.rs: #[rune(get)] pub key
+issue.rs: #[rune(get)] pub name
+issue.rs: #[rune(get)] pub scan
+issue.rs: #[rune(get)] pub status
+issue.rs: #[rune(get)] pub status_reason
+issue.rs: #[rune(get)] pub title
+issue.rs: #[rune(item = ::gage)] pub struct Issue
+issue.rs: #[rune(item = ::gage)] pub struct IssueWrite
+issue.rs: #[rune(item = ::gage)] pub struct IssuesQuery
+issue.rs: #[rune(skip)] description
+issue.rs: #[rune(skip)] error
+issue.rs: #[rune(skip)] evidence
+issue.rs: #[rune(skip)] evidence_error
+issue.rs: #[rune(skip)] key
+issue.rs: #[rune(skip)] name
+issue.rs: #[rune(skip)] names
+issue.rs: #[rune(skip)] policy
+issue.rs: #[rune(skip)] status
+issue.rs: #[rune(skip)] statuses
+issue.rs: #[rune(skip)] title
+issue.rs: #[rune::function(instance)] fn evidence
+issue.rs: #[rune::function(instance)] fn issues
+issue.rs: #[rune::function(instance)] fn key
+issue.rs: #[rune::function(instance)] fn name
+issue.rs: #[rune::function(instance)] fn once
+issue.rs: #[rune::function(instance)] fn pending
+issue.rs: #[rune::function(instance)] fn status
+issue.rs: #[rune::function(protocol = DEBUG_FMT)] fn debug
+issue.rs: let mut m = Module::with_crate("gage")?;
+issue.rs: m.associated_function(&Protocol::INTO_FUTURE, |q: IssuesQuery| async move {
+issue.rs: m.associated_function(&Protocol::INTO_FUTURE, |w: IssueWrite| async move {
+issue.rs: m.function("write_issue", write_issue).build()?;
+issue.rs: m.function_meta(Issue::debug)?;
+issue.rs: m.function_meta(IssueWrite::evidence)?;
+issue.rs: m.function_meta(IssueWrite::key)?;
+issue.rs: m.function_meta(IssueWrite::once)?;
+issue.rs: m.function_meta(IssueWrite::pending)?;
+issue.rs: m.function_meta(IssuesQuery::name)?;
+issue.rs: m.function_meta(IssuesQuery::status)?;
+issue.rs: m.function_meta(Scan::issues)?;
+issue.rs: m.ty::<Issue>()?;
+issue.rs: m.ty::<IssueWrite>()?;
+issue.rs: m.ty::<IssuesQuery>()?;
+json.rs: #[rune(item = ::json, constructor)] pub
+json.rs: #[rune::function(protocol = DEBUG_FMT)] fn debug
+json.rs: #[rune::function(protocol = DISPLAY_FMT)] fn display
+json.rs: #[rune::function(protocol = EQ)] fn eq
+json.rs: #[rune::function(protocol = PARTIAL_EQ)] fn partial_eq
+json.rs: let mut m = Module::with_crate("json")?;
+json.rs: m.function("parse", parse).build()?;
+json.rs: m.function("to_string", to_string).build()?;
+json.rs: m.function("to_string_pretty", to_string_pretty).build()?;
+json.rs: m.function_meta(Null::debug)?;
+json.rs: m.function_meta(Null::display)?;
+json.rs: m.function_meta(Null::eq)?;
+json.rs: m.function_meta(Null::partial_eq)?;
+json.rs: m.ty::<Null>()?;
+log.rs: let mut m = Module::with_crate("log")?;
+log.rs: m.function("__write", __write).build()?;
+note.rs: #[rune(get)] pub author
+note.rs: #[rune(get)] pub created
+note.rs: #[rune(get)] pub id
+note.rs: #[rune(get)] pub metadata
+note.rs: #[rune(get)] pub name
+note.rs: #[rune(get)] pub target
+note.rs: #[rune(get)] pub value
+note.rs: #[rune(item = ::gage)] pub struct FilteredNotesQuery
+note.rs: #[rune(item = ::gage)] pub struct Note
+note.rs: #[rune(item = ::gage)] pub struct NoteWrite
+note.rs: #[rune(item = ::gage)] pub struct NotesQuery
+note.rs: #[rune(skip)] carry_forward
+note.rs: #[rune(skip)] metadata
+note.rs: #[rune(skip)] name
+note.rs: #[rune(skip)] pub
+note.rs: #[rune(skip)] pub
+note.rs: #[rune(skip)] pub
+note.rs: #[rune(skip)] target
+note.rs: #[rune(skip)] value
+note.rs: #[rune::function(instance)] fn carry_forward
+note.rs: #[rune::function(instance)] fn metadata
+note.rs: #[rune::function(instance)] fn name
+note.rs: #[rune::function(instance)] fn name
+note.rs: #[rune::function(instance)] fn names
+note.rs: #[rune::function(instance)] fn names
+note.rs: #[rune::function(instance)] fn notes
+note.rs: #[rune::function(instance)] fn target
+note.rs: #[rune::function(protocol = DEBUG_FMT)] fn debug
+note.rs: let mut m = Module::with_crate("gage")?;
+note.rs: m.associated_function(&Protocol::INTO_FUTURE, |q: FilteredNotesQuery| async move {
+note.rs: m.associated_function(&Protocol::INTO_FUTURE, |q: NotesQuery| async move {
+note.rs: m.associated_function(&Protocol::INTO_FUTURE, |w: NoteWrite| async move {
+note.rs: m.function("write_note", write_note).build()?;
+note.rs: m.function_meta(FilteredNotesQuery::name)?;
+note.rs: m.function_meta(FilteredNotesQuery::names)?;
+note.rs: m.function_meta(Note::debug)?;
+note.rs: m.function_meta(NoteWrite::carry_forward)?;
+note.rs: m.function_meta(NoteWrite::metadata)?;
+note.rs: m.function_meta(NoteWrite::target)?;
+note.rs: m.function_meta(NotesQuery::name)?;
+note.rs: m.function_meta(NotesQuery::names)?;
+note.rs: m.function_meta(crate::validate::filtered_notes_hwm)?;
+note.rs: m.function_meta(crate::validate::filtered_notes_unseen)?;
+note.rs: m.function_meta(crate::validate::notes_hwm)?;
+note.rs: m.function_meta(crate::validate::notes_unseen)?;
+note.rs: m.function_meta(notes)?;
+note.rs: m.ty::<FilteredNotesQuery>()?;
+note.rs: m.ty::<Note>()?;
+note.rs: m.ty::<NoteWrite>()?;
+note.rs: m.ty::<NotesQuery>()?;
+patterns.rs: #[rune(item = ::gage)] pub struct Patterns
+patterns.rs: #[rune(skip)] inner
+patterns.rs: #[rune::function(path = Self::from_gitleaks)] fn rune_from_gitleaks
+patterns.rs: m.function_meta(Patterns::rune_from_gitleaks)?;
+patterns.rs: m.ty::<Patterns>()?;
+progress.rs: #[rune(item = ::gage)] pub struct Progress
+progress.rs: #[rune(skip)] inner
+progress.rs: #[rune(skip)] pos
+progress.rs: #[rune(skip)] total
+progress.rs: #[rune::function(keep, instance)] fn inc
+progress.rs: #[rune::function(keep, instance)] fn reset
+progress.rs: #[rune::function(keep, instance)] fn set
+progress.rs: #[rune::function(keep, instance)] fn tick
+progress.rs: #[rune::function(keep, instance, protocol = NEXT)] fn next
+progress.rs: #[rune::function(keep, instance, protocol = SIZE_HINT)] fn size_hint
+progress.rs: #[rune::function(keep, path = Self::iter)] fn iter
+progress.rs: #[rune::function(keep, path = Self::new)] fn new
+progress.rs: m.function_meta(Progress::inc__meta)?;
+progress.rs: m.function_meta(Progress::iter__meta)?;
+progress.rs: m.function_meta(Progress::new__meta)?;
+progress.rs: m.function_meta(Progress::next__meta)?;
+progress.rs: m.function_meta(Progress::reset__meta)?;
+progress.rs: m.function_meta(Progress::set__meta)?;
+progress.rs: m.function_meta(Progress::size_hint__meta)?;
+progress.rs: m.function_meta(Progress::tick__meta)?;
+progress.rs: m.ty::<Progress>()?;
+publish.rs: #[rune(constructor)] Confidential,
+publish.rs: #[rune(constructor)] Custom,
+publish.rs: #[rune(constructor)] Language,
+publish.rs: #[rune(constructor)] Pii,
+publish.rs: #[rune(constructor)] Policy,
+publish.rs: #[rune(constructor)] Privacy,
+publish.rs: #[rune(constructor)] Safety,
+publish.rs: #[rune(constructor)] Scope,
+publish.rs: #[rune(constructor)] Secret,
+publish.rs: #[rune(constructor)] Statute,
+publish.rs: #[rune(constructor)] System,
+publish.rs: #[rune(item = ::gage)] pub struct TaskPublishDef
+publish.rs: #[rune(item = ::gage::filter)] pub enum Reason
+publish.rs: #[rune(item = ::gage::filter, name = Entry)] pub struct EntrySet
+publish.rs: #[rune(item = ::gage::filter, name = Literal)] pub struct LiteralSet
+publish.rs: #[rune(item = ::gage::filter, name = Span)] pub struct SpanSet
+publish.rs: #[rune(item = ::gage::filter, name = Value)] pub struct ValueSet
+publish.rs: #[rune(skip)] inner
+publish.rs: #[rune::function(instance)] fn agent_redact
+publish.rs: #[rune::function(instance)] fn literal_redact
+publish.rs: #[rune::function(instance)] fn pattern_redact
+publish.rs: #[rune::function(instance)] fn remove_entries
+publish.rs: #[rune::function(instance)] fn remove_spans
+publish.rs: #[rune::function(instance)] fn remove_values
+publish.rs: #[rune::function(keep)] pub fn code
+publish.rs: #[rune::function(path = Self::harness_context)] fn harness_context
+publish.rs: #[rune::function(path = Self::harness_record)] fn harness_record
+publish.rs: #[rune::function(path = Self::harness_record)] fn harness_record
+publish.rs: #[rune::function(path = Self::harness_record)] fn harness_record
+publish.rs: #[rune::function(path = Self::pii)] fn pii
+publish.rs: #[rune::function(path = Self::pii)] fn pii
+publish.rs: #[rune::function(path = Self::system)] fn system
+publish.rs: #[rune::function(path = Self::system)] fn system
+publish.rs: #[rune::function(protocol = DEBUG_FMT)] fn debug
+publish.rs: #[rune::function(protocol = DEBUG_FMT)] fn debug
+publish.rs: let mut m = Module::with_crate("gage")?;
+publish.rs: let mut m = Module::with_crate_item("gage", ["filter"])?;
+publish.rs: m.function("publish", publish).build()?;
+publish.rs: m.function_meta(EntrySet::harness_context)?;
+publish.rs: m.function_meta(EntrySet::harness_record)?;
+publish.rs: m.function_meta(LiteralSet::pii)?;
+publish.rs: m.function_meta(LiteralSet::system)?;
+publish.rs: m.function_meta(Reason::code__meta)?;
+publish.rs: m.function_meta(Reason::debug)?;
+publish.rs: m.function_meta(SpanSet::harness_record)?;
+publish.rs: m.function_meta(TaskPublishDef::agent_redact)?;
+publish.rs: m.function_meta(TaskPublishDef::debug)?;
+publish.rs: m.function_meta(TaskPublishDef::literal_redact)?;
+publish.rs: m.function_meta(TaskPublishDef::pattern_redact)?;
+publish.rs: m.function_meta(TaskPublishDef::remove_entries)?;
+publish.rs: m.function_meta(TaskPublishDef::remove_spans)?;
+publish.rs: m.function_meta(TaskPublishDef::remove_values)?;
+publish.rs: m.function_meta(ValueSet::harness_record)?;
+publish.rs: m.function_meta(ValueSet::pii)?;
+publish.rs: m.function_meta(ValueSet::system)?;
+publish.rs: m.ty::<EntrySet>()?;
+publish.rs: m.ty::<LiteralSet>()?;
+publish.rs: m.ty::<Reason>()?;
+publish.rs: m.ty::<SpanSet>()?;
+publish.rs: m.ty::<TaskPublishDef>()?;
+publish.rs: m.ty::<ValueSet>()?;
+query.rs: #[rune(item = ::gage)] pub struct EntryQuery
+query.rs: #[rune(item = ::gage)] pub struct FilteredEntryQuery
+query.rs: #[rune(item = ::gage)] pub struct FilteredMessageQuery
+query.rs: #[rune(item = ::gage)] pub struct FilteredToolUseQuery
+query.rs: #[rune(item = ::gage)] pub struct MessageQuery
+query.rs: #[rune(item = ::gage)] pub struct ToolUseQuery
+query.rs: #[rune(skip)] limit
+query.rs: #[rune(skip)] limit
+query.rs: #[rune(skip)] limit
+query.rs: #[rune(skip)] lines
+query.rs: #[rune(skip)] lines
+query.rs: #[rune(skip)] name
+query.rs: #[rune(skip)] query
+query.rs: #[rune(skip)] query
+query.rs: #[rune(skip)] query
+query.rs: #[rune(skip)] reverse
+query.rs: #[rune(skip)] reverse
+query.rs: #[rune(skip)] session_id
+query.rs: #[rune(skip)] session_id
+query.rs: #[rune(skip)] session_id
+query.rs: #[rune(skip)] type_
+query.rs: #[rune(skip)] type_
+query.rs: #[rune::function(instance)] fn entries
+query.rs: #[rune::function(instance)] fn latest_first
+query.rs: #[rune::function(instance)] fn latest_first
+query.rs: #[rune::function(instance)] fn latest_first
+query.rs: #[rune::function(instance)] fn latest_first
+query.rs: #[rune::function(instance)] fn limit
+query.rs: #[rune::function(instance)] fn limit
+query.rs: #[rune::function(instance)] fn limit
+query.rs: #[rune::function(instance)] fn limit
+query.rs: #[rune::function(instance)] fn limit
+query.rs: #[rune::function(instance)] fn limit
+query.rs: #[rune::function(instance)] fn messages
+query.rs: #[rune::function(instance)] fn name
+query.rs: #[rune::function(instance)] fn range
+query.rs: #[rune::function(instance)] fn range
+query.rs: #[rune::function(instance)] fn range
+query.rs: #[rune::function(instance)] fn range
+query.rs: #[rune::function(instance)] fn tool_uses
+query.rs: m.associated_function(
+query.rs: m.associated_function(
+query.rs: m.associated_function("type", EntryQuery::type_)?;
+query.rs: m.associated_function("type", MessageQuery::type_)?;
+query.rs: m.associated_function(&Protocol::INTO_FUTURE, |q: EntryQuery| async move {
+query.rs: m.associated_function(&Protocol::INTO_FUTURE, |q: FilteredEntryQuery| async move {
+query.rs: m.associated_function(&Protocol::INTO_FUTURE, |q: MessageQuery| async move {
+query.rs: m.associated_function(&Protocol::INTO_FUTURE, |q: ToolUseQuery| async move {
+query.rs: m.function_meta(EntryQuery::limit)?;
+query.rs: m.function_meta(FilteredEntryQuery::limit)?;
+query.rs: m.function_meta(FilteredMessageQuery::latest_first)?;
+query.rs: m.function_meta(FilteredMessageQuery::limit)?;
+query.rs: m.function_meta(FilteredMessageQuery::range)?;
+query.rs: m.function_meta(FilteredToolUseQuery::latest_first)?;
+query.rs: m.function_meta(FilteredToolUseQuery::limit)?;
+query.rs: m.function_meta(FilteredToolUseQuery::range)?;
+query.rs: m.function_meta(MessageQuery::latest_first)?;
+query.rs: m.function_meta(MessageQuery::limit)?;
+query.rs: m.function_meta(MessageQuery::range)?;
+query.rs: m.function_meta(ToolUseQuery::latest_first)?;
+query.rs: m.function_meta(ToolUseQuery::limit)?;
+query.rs: m.function_meta(ToolUseQuery::name)?;
+query.rs: m.function_meta(ToolUseQuery::range)?;
+query.rs: m.function_meta(entries)?;
+query.rs: m.function_meta(messages)?;
+query.rs: m.function_meta(tool_uses)?;
+query.rs: m.ty::<EntryQuery>()?;
+query.rs: m.ty::<FilteredEntryQuery>()?;
+query.rs: m.ty::<FilteredMessageQuery>()?;
+query.rs: m.ty::<FilteredToolUseQuery>()?;
+query.rs: m.ty::<MessageQuery>()?;
+query.rs: m.ty::<ToolUseQuery>()?;
+row.rs: #[rune(skip)] pub files
+row.rs: #[rune(skip)] pub object
+row.rs: #[rune(skip)] pub object
+row.rs: #[rune::function(protocol = DEBUG_FMT)] fn debug
+row.rs: #[rune::function(protocol = DEBUG_FMT)] fn debug
+row.rs: #[rune::function(protocol = DEBUG_FMT)] fn debug
+row.rs: #[rune::function] pub fn as_object
+row.rs: #[rune::function] pub fn as_object
+row.rs: #[rune::function] pub fn files
+row.rs: #[rune::function] pub fn input
+row.rs: #[rune::function] pub fn model
+row.rs: #[rune::function] pub fn result
+row.rs: #[rune::function] pub fn to_json
+row.rs: #[rune::function] pub fn to_json
+row.rs: #[rune::function] pub fn to_json
+row.rs: m.field_function(&Protocol::GET, "attachments", |m: &Message| {
+row.rs: m.field_function(&Protocol::GET, "ide_tags", |m: &Message| m.get("ide_tags"))?;
+row.rs: m.field_function(&Protocol::GET, "line", |e: &Entry| e.get("line"))?;
+row.rs: m.field_function(&Protocol::GET, "line", |m: &Message| m.get("line"))?;
+row.rs: m.field_function(&Protocol::GET, "raw", |e: &Entry| e.get("raw"))?;
+row.rs: m.field_function(&Protocol::GET, "raw", |m: &Message| m.get("raw"))?;
+row.rs: m.field_function(&Protocol::GET, "session_id", |e: &Entry| {
+row.rs: m.field_function(&Protocol::GET, "session_id", |m: &Message| {
+row.rs: m.field_function(&Protocol::GET, "subtype", |e: &Entry| e.get("subtype"))?;
+row.rs: m.field_function(&Protocol::GET, "subtype", |m: &Message| m.get("subtype"))?;
+row.rs: m.field_function(&Protocol::GET, "text", |m: &Message| m.get("text"))?;
+row.rs: m.field_function(&Protocol::GET, "timestamp", |e: &Entry| e.get("timestamp"))?;
+row.rs: m.field_function(&Protocol::GET, "timestamp", |m: &Message| {
+row.rs: m.field_function(&Protocol::GET, "type", |e: &Entry| e.get("type"))?;
+row.rs: m.field_function(&Protocol::GET, "type", |m: &Message| m.get("type"))?;
+row.rs: m.field_function(&Protocol::GET, "uuid", |e: &Entry| e.get("uuid"))?;
+row.rs: m.field_function(&Protocol::GET, "uuid", |m: &Message| m.get("uuid"))?;
+row.rs: m.field_function(&Protocol::GET, attr, move |t: &ToolUse| t.get(attr))?;
+row.rs: m.function_meta(Entry::as_object)?;
+row.rs: m.function_meta(Entry::debug)?;
+row.rs: m.function_meta(Entry::to_json)?;
+row.rs: m.function_meta(Message::as_object)?;
+row.rs: m.function_meta(Message::debug)?;
+row.rs: m.function_meta(Message::model)?;
+row.rs: m.function_meta(Message::to_json)?;
+row.rs: m.function_meta(ToolUse::debug)?;
+row.rs: m.function_meta(ToolUse::files)?;
+row.rs: m.function_meta(ToolUse::input)?;
+row.rs: m.function_meta(ToolUse::result)?;
+row.rs: m.function_meta(ToolUse::to_json)?;
+row.rs: m.ty::<Entry>()?;
+row.rs: m.ty::<Message>()?;
+row.rs: m.ty::<ToolUse>()?;
+scan.rs: #[rune(get)] pub created
+scan.rs: #[rune(get)] pub dataset
+scan.rs: #[rune(get)] pub driver
+scan.rs: #[rune(get)] pub id
+scan.rs: #[rune(get)] pub id
+scan.rs: #[rune(get)] pub id
+scan.rs: #[rune(get)] pub id
+scan.rs: #[rune(get)] pub is_empty
+scan.rs: #[rune(get)] pub line_count
+scan.rs: #[rune(get)] pub line_count
+scan.rs: #[rune(get)] pub message_count
+scan.rs: #[rune(get)] pub model
+scan.rs: #[rune(get)] pub modified
+scan.rs: #[rune(get)] pub origin
+scan.rs: #[rune(get)] pub project
+scan.rs: #[rune(get)] pub project_dir
+scan.rs: #[rune(get)] pub session_type
+scan.rs: #[rune(get)] pub size
+scan.rs: #[rune(get)] pub source
+scan.rs: #[rune(get)] pub title
+scan.rs: #[rune(item = ::gage)] pub struct Native
+scan.rs: #[rune(item = ::gage)] pub struct NativeQuery
+scan.rs: #[rune(item = ::gage)] pub struct Scan
+scan.rs: #[rune(item = ::gage)] pub struct ScanDataset
+scan.rs: #[rune(item = ::gage)] pub struct Session
+scan.rs: #[rune(item = ::gage)] pub struct SessionAttrs
+scan.rs: #[rune(item = ::gage)] pub struct SessionAttrsQuery
+scan.rs: #[rune(item = ::gage)] pub struct Sessions
+scan.rs: #[rune(item = ::gage)] pub struct SessionsNative
+scan.rs: #[rune(item = ::gage)] pub struct SessionsQuery
+scan.rs: #[rune(skip)] back
+scan.rs: #[rune(skip)] front
+scan.rs: #[rune(skip)] id
+scan.rs: #[rune(skip)] id
+scan.rs: #[rune(skip)] items
+scan.rs: #[rune(skip)] newest_first
+scan.rs: #[rune(skip)] pub
+scan.rs: #[rune(skip)] pub commit
+scan.rs: #[rune::function(instance)] fn attrs
+scan.rs: #[rune::function(instance)] fn native
+scan.rs: #[rune::function(instance)] fn newest_first
+scan.rs: #[rune::function(instance)] fn sessions
+scan.rs: #[rune::function(instance, keep, protocol = LEN)] fn len
+scan.rs: #[rune::function(instance, keep, protocol = NEXT)] fn next
+scan.rs: #[rune::function(instance, keep, protocol = NEXT_BACK)] fn next_back
+scan.rs: #[rune::function(instance, keep, protocol = NTH)] fn nth
+scan.rs: #[rune::function(instance, keep, protocol = SIZE_HINT)] fn size_hint
+scan.rs: #[rune::function(instance, path = native)] fn sessions_native
+scan.rs: #[rune::function(protocol = DEBUG_FMT)] fn debug
+scan.rs: #[rune::function(protocol = DEBUG_FMT)] fn debug
+scan.rs: #[rune::function(protocol = DEBUG_FMT)] fn debug
+scan.rs: #[rune::function(protocol = DEBUG_FMT)] fn debug
+scan.rs: #[rune::function(protocol = DEBUG_FMT)] fn debug
+scan.rs: let mut m = Module::with_crate("gage")?;
+scan.rs: m.associated_function(&Protocol::INTO_FUTURE, |q: NativeQuery| async move {
+scan.rs: m.associated_function(&Protocol::INTO_FUTURE, |q: SessionAttrsQuery| async move {
+scan.rs: m.associated_function(&Protocol::INTO_FUTURE, |q: SessionsNative| async move {
+scan.rs: m.associated_function(&Protocol::INTO_FUTURE, |q: SessionsQuery| async move {
+scan.rs: m.function("params", params).build()?;
+scan.rs: m.function("scan", scan).build()?;
+scan.rs: m.function_meta(Native::debug)?;
+scan.rs: m.function_meta(Scan::debug)?;
+scan.rs: m.function_meta(Scan::sessions)?;
+scan.rs: m.function_meta(ScanDataset::debug)?;
+scan.rs: m.function_meta(Session::attrs)?;
+scan.rs: m.function_meta(Session::debug)?;
+scan.rs: m.function_meta(Session::native)?;
+scan.rs: m.function_meta(SessionAttrs::debug)?;
+scan.rs: m.function_meta(Sessions::len__meta)?;
+scan.rs: m.function_meta(Sessions::next__meta)?;
+scan.rs: m.function_meta(Sessions::next_back__meta)?;
+scan.rs: m.function_meta(Sessions::nth__meta)?;
+scan.rs: m.function_meta(Sessions::size_hint__meta)?;
+scan.rs: m.function_meta(SessionsQuery::newest_first)?;
+scan.rs: m.function_meta(crate::validate::sessions_hwm)?;
+scan.rs: m.function_meta(crate::validate::sessions_unseen)?;
+scan.rs: m.function_meta(sessions_native)?;
+scan.rs: m.ty::<Native>()?;
+scan.rs: m.ty::<NativeQuery>()?;
+scan.rs: m.ty::<Scan>()?;
+scan.rs: m.ty::<ScanDataset>()?;
+scan.rs: m.ty::<Session>()?;
+scan.rs: m.ty::<SessionAttrs>()?;
+scan.rs: m.ty::<SessionAttrsQuery>()?;
+scan.rs: m.ty::<Sessions>()?;
+scan.rs: m.ty::<SessionsNative>()?;
+scan.rs: m.ty::<SessionsQuery>()?;
+stats.rs: let mut m = Module::with_crate("stats")?;
+stats.rs: m.function("count", count).build()?;
+stats.rs: m.function("max", max).build()?;
+stats.rs: m.function("mean", mean).build()?;
+stats.rs: m.function("median", median).build()?;
+stats.rs: m.function("min", min).build()?;
+stats.rs: m.function("percentile", percentile).build()?;
+stats.rs: m.function("sample_stddev", sample_stddev).build()?;
+stats.rs: m.function("sample_variance", sample_variance).build()?;
+stats.rs: m.function("stddev", stddev).build()?;
+stats.rs: m.function("sum", sum).build()?;
+stats.rs: m.function("variance", variance).build()?;
+target.rs: #[rune(item = ::gage)] pub enum Target
+target.rs: #[rune::function(instance, keep)] pub
+target.rs: #[rune::function(instance, keep)] pub
+target.rs: #[rune::function(path = Self::attachment)] fn attachment
+target.rs: #[rune::function(path = Self::session)] fn session
+target.rs: #[rune::function(path = Self::session_line)] fn session_line
+target.rs: #[rune::function(path = Self::session_lines)] fn session_lines
+target.rs: #[rune::function(path = Self::session_range)] fn session_range
+target.rs: #[rune::function(protocol = DEBUG_FMT)] fn debug
+target.rs: m.function_meta(Target::attachment)?;
+target.rs: m.function_meta(Target::debug)?;
+target.rs: m.function_meta(Target::id__meta)?;
+target.rs: m.function_meta(Target::session)?;
+target.rs: m.function_meta(Target::session_line)?;
+target.rs: m.function_meta(Target::session_lines)?;
+target.rs: m.function_meta(Target::session_range)?;
+target.rs: m.function_meta(Target::to_url__meta)?;
+target.rs: m.ty::<Target>()?;
+template.rs: #[rune(item = ::gage)] pub struct Template
+template.rs: #[rune(skip)] env
+template.rs: #[rune::function(instance)] fn render
+template.rs: #[rune::function(path = Self::new)] fn new
+template.rs: let mut m = Module::with_crate("gage")?;
+template.rs: m.function_meta(Template::new)?;
+template.rs: m.function_meta(render)?;
+template.rs: m.ty::<Template>()?;
+tool.rs: #[rune(item = ::gage)] pub struct Input
+tool.rs: #[rune(item = ::gage)] pub struct Tool
+tool.rs: #[rune(item = ::gage::tools)] pub struct Builtin
+tool.rs: #[rune(item = ::gage::tools)] pub struct IssueWrite
+tool.rs: #[rune(item = ::gage::tools)] pub struct NoteWrite
+tool.rs: #[rune(item = ::gage::tools)] pub struct Query
+tool.rs: #[rune(item = ::gage::tools)] pub struct SessionQuery
+tool.rs: #[rune(skip)] conflict
+tool.rs: #[rune(skip)] id
+tool.rs: #[rune(skip)] kind
+tool.rs: #[rune(skip)] kind
+tool.rs: #[rune(skip)] name
+tool.rs: #[rune(skip)] name
+tool.rs: #[rune(skip)] name
+tool.rs: #[rune(skip)] names
+tool.rs: #[rune(skip)] range
+tool.rs: #[rune(skip)] required
+tool.rs: #[rune(skip)] status
+tool.rs: #[rune::function(instance)] fn additive
+tool.rs: #[rune::function(instance)] fn closed_world
+tool.rs: #[rune::function(instance)] fn description
+tool.rs: #[rune::function(instance)] fn description
+tool.rs: #[rune::function(instance)] fn idempotent
+tool.rs: #[rune::function(instance)] fn input
+tool.rs: #[rune::function(instance)] fn inputs
+tool.rs: #[rune::function(instance)] fn meta_arg
+tool.rs: #[rune::function(instance)] fn name
+tool.rs: #[rune::function(instance)] fn names
+tool.rs: #[rune::function(instance)] fn pending
+tool.rs: #[rune::function(instance)] fn range
+tool.rs: #[rune::function(instance)] fn read_only
+tool.rs: #[rune::function(instance)] fn required
+tool.rs: #[rune::function(instance)] fn session
+tool.rs: #[rune::function(path = Self::boolean)] fn boolean
+tool.rs: #[rune::function(path = Self::from_schema)] fn from_schema
+tool.rs: #[rune::function(path = Self::integer)] fn integer
+tool.rs: #[rune::function(path = Self::new)] fn new
+tool.rs: #[rune::function(path = Self::new)] fn new
+tool.rs: #[rune::function(path = Self::new)] fn new
+tool.rs: #[rune::function(path = Self::new)] fn new
+tool.rs: #[rune::function(path = Self::new)] fn new
+tool.rs: #[rune::function(path = Self::number)] fn number
+tool.rs: #[rune::function(path = Self::string)] fn string
+tool.rs: #[rune::function(protocol = DEBUG_FMT)] fn debug
+tool.rs: #[rune::function(protocol = DEBUG_FMT)] fn debug
+tool.rs: #[rune::function(protocol = DEBUG_FMT)] fn debug
+tool.rs: #[rune::function(protocol = DEBUG_FMT)] fn debug
+tool.rs: #[rune::function(protocol = DEBUG_FMT)] fn debug
+tool.rs: #[rune::function(protocol = DEBUG_FMT)] fn debug
+tool.rs: #[rune::function(protocol = DEBUG_FMT)] fn debug
+tool.rs: let mut m = Module::with_crate("gage")?;
+tool.rs: let mut m = Module::with_crate_item("gage", ["tools"])?;
+tool.rs: m.function_meta(Builtin::debug)?;
+tool.rs: m.function_meta(Builtin::new)?;
+tool.rs: m.function_meta(Input::boolean)?;
+tool.rs: m.function_meta(Input::debug)?;
+tool.rs: m.function_meta(Input::description)?;
+tool.rs: m.function_meta(Input::from_schema)?;
+tool.rs: m.function_meta(Input::integer)?;
+tool.rs: m.function_meta(Input::number)?;
+tool.rs: m.function_meta(Input::required)?;
+tool.rs: m.function_meta(Input::string)?;
+tool.rs: m.function_meta(IssueWrite::debug)?;
+tool.rs: m.function_meta(IssueWrite::name)?;
+tool.rs: m.function_meta(IssueWrite::new)?;
+tool.rs: m.function_meta(IssueWrite::pending)?;
+tool.rs: m.function_meta(NoteWrite::debug)?;
+tool.rs: m.function_meta(NoteWrite::names)?;
+tool.rs: m.function_meta(NoteWrite::new)?;
+tool.rs: m.function_meta(Query::debug)?;
+tool.rs: m.function_meta(Query::new)?;
+tool.rs: m.function_meta(Query::session)?;
+tool.rs: m.function_meta(SessionQuery::debug)?;
+tool.rs: m.function_meta(SessionQuery::range)?;
+tool.rs: m.function_meta(Tool::additive)?;
+tool.rs: m.function_meta(Tool::closed_world)?;
+tool.rs: m.function_meta(Tool::debug)?;
+tool.rs: m.function_meta(Tool::description)?;
+tool.rs: m.function_meta(Tool::idempotent)?;
+tool.rs: m.function_meta(Tool::input)?;
+tool.rs: m.function_meta(Tool::inputs)?;
+tool.rs: m.function_meta(Tool::meta_arg)?;
+tool.rs: m.function_meta(Tool::new)?;
+tool.rs: m.function_meta(Tool::read_only)?;
+tool.rs: m.ty::<Builtin>()?;
+tool.rs: m.ty::<Input>()?;
+tool.rs: m.ty::<IssueWrite>()?;
+tool.rs: m.ty::<NoteWrite>()?;
+tool.rs: m.ty::<Query>()?;
+tool.rs: m.ty::<SessionQuery>()?;
+tool.rs: m.ty::<Tool>()?;
+tool_meta.rs: #[rune(item = ::gage)] pub struct ToolMeta
+tool_meta.rs: #[rune(item = ::gage)] pub struct ToolMetaIter
+tool_meta.rs: #[rune(skip)] entries
+tool_meta.rs: #[rune(skip)] items
+tool_meta.rs: #[rune(skip)] scanner_name
+tool_meta.rs: #[rune(skip)] tool_use_entry
+tool_meta.rs: #[rune::function(instance)] fn agent_tool_use
+tool_meta.rs: #[rune::function(instance)] fn contains_key
+tool_meta.rs: #[rune::function(instance)] fn get
+tool_meta.rs: #[rune::function(instance)] fn keys
+tool_meta.rs: #[rune::function(instance)] fn len
+tool_meta.rs: #[rune::function(instance)] fn tool_use_entry
+tool_meta.rs: #[rune::function(instance)] fn values
+tool_meta.rs: #[rune::function(instance, protocol = DEBUG_FMT)] fn debug
+tool_meta.rs: #[rune::function(instance, protocol = INDEX_GET)] fn index_get
+tool_meta.rs: #[rune::function(instance, protocol = INTO_ITER)] fn into_iter
+tool_meta.rs: #[rune::function(instance, protocol = LEN)] fn len_protocol
+tool_meta.rs: #[rune::function(instance, protocol = NEXT)] fn next
+tool_meta.rs: #[rune::function(instance, protocol = SIZE_HINT)] fn size_hint
+tool_meta.rs: m.function_meta(ToolMeta::agent_tool_use)?;
+tool_meta.rs: m.function_meta(ToolMeta::contains_key)?;
+tool_meta.rs: m.function_meta(ToolMeta::debug)?;
+tool_meta.rs: m.function_meta(ToolMeta::get)?;
+tool_meta.rs: m.function_meta(ToolMeta::index_get)?;
+tool_meta.rs: m.function_meta(ToolMeta::into_iter)?;
+tool_meta.rs: m.function_meta(ToolMeta::keys)?;
+tool_meta.rs: m.function_meta(ToolMeta::len)?;
+tool_meta.rs: m.function_meta(ToolMeta::len_protocol)?;
+tool_meta.rs: m.function_meta(ToolMeta::tool_use_entry)?;
+tool_meta.rs: m.function_meta(ToolMeta::values)?;
+tool_meta.rs: m.function_meta(ToolMetaIter::next)?;
+tool_meta.rs: m.function_meta(ToolMetaIter::size_hint)?;
+tool_meta.rs: m.ty::<ToolMeta>()?;
+tool_meta.rs: m.ty::<ToolMetaIter>()?;
+validate.rs: #[rune(item = ::gage)] pub struct AttachmentsHwm
+validate.rs: #[rune(item = ::gage)] pub struct CarryForwardNotes
+validate.rs: #[rune(item = ::gage)] pub struct Mark
+validate.rs: #[rune(item = ::gage)] pub struct NotesHwm
+validate.rs: #[rune(item = ::gage)] pub struct SessionsHwm
+validate.rs: #[rune(item = ::gage)] pub struct WatermarkWrite
+validate.rs: #[rune(skip)] key
+validate.rs: #[rune(skip)] key
+validate.rs: #[rune(skip)] key
+validate.rs: #[rune(skip)] key
+validate.rs: #[rune(skip)] mark
+validate.rs: #[rune(skip)] newest_first
+validate.rs: #[rune(skip)] select
+validate.rs: #[rune(skip)] select
+validate.rs: #[rune(skip)] select
+validate.rs: #[rune(skip)] shape
+validate.rs: #[rune(skip)] shape
+validate.rs: #[rune(skip)] shape
+validate.rs: #[rune(skip)] target
+validate.rs: #[rune::function(instance, path = hwm)] pub
+validate.rs: #[rune::function(instance, path = hwm)] pub
+validate.rs: #[rune::function(instance, path = hwm)] pub
+validate.rs: #[rune::function(instance, path = hwm)] pub
+validate.rs: #[rune::function(instance, path = hwm)] pub
+validate.rs: #[rune::function(instance, path = unseen)] pub
+validate.rs: #[rune::function(instance, path = unseen)] pub
+validate.rs: #[rune::function(instance, path = unseen)] pub
+validate.rs: #[rune::function(instance, path = unseen)] pub
+validate.rs: #[rune::function(instance, path = unseen)] pub
+validate.rs: #[rune::function(path = Self::attachment)] fn attachment
+validate.rs: #[rune::function(path = Self::note)] fn note
+validate.rs: #[rune::function(path = Self::session)] fn session
+validate.rs: #[rune::function(protocol = DEBUG_FMT)] fn debug
+validate.rs: let mut m = Module::with_crate("gage")?;
+validate.rs: m.associated_function(&Protocol::INTO_FUTURE, |q: AttachmentsHwm| async move {
+validate.rs: m.associated_function(&Protocol::INTO_FUTURE, |q: CarryForwardNotes| async move {
+validate.rs: m.associated_function(&Protocol::INTO_FUTURE, |q: NotesHwm| async move {
+validate.rs: m.associated_function(&Protocol::INTO_FUTURE, |q: SessionsHwm| async move {
+validate.rs: m.associated_function(&Protocol::INTO_FUTURE, |w: WatermarkWrite| async move {
+validate.rs: m.function("carry_forward_notes", carry_forward_notes)
+validate.rs: m.function("carry_forward_notes_named", carry_forward_notes_named)
+validate.rs: m.function("watermark", watermark).build()?;
+validate.rs: m.function_meta(Mark::attachment)?;
+validate.rs: m.function_meta(Mark::debug)?;
+validate.rs: m.function_meta(Mark::note)?;
+validate.rs: m.function_meta(Mark::session)?;
+validate.rs: m.ty::<AttachmentsHwm>()?;
+validate.rs: m.ty::<CarryForwardNotes>()?;
+validate.rs: m.ty::<Mark>()?;
+validate.rs: m.ty::<NotesHwm>()?;
+validate.rs: m.ty::<SessionsHwm>()?;
+validate.rs: m.ty::<WatermarkWrite>()?;

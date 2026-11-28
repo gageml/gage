@@ -365,22 +365,29 @@ mod tests {
         ));
     }
 
-    /// The guard on the closed-runtime contract: every builtin scanner
-    /// compiles in a directory holding only its enumerated files, with
-    /// the full context. A file the compiler reads that the enumerator
-    /// missed fails this compile.
+    /// The guard on the closed-runtime contract: every scanner of this
+    /// repository, the examples and the project's own, compiles in a
+    /// directory holding only its enumerated files, with the full
+    /// context. A file the compiler reads that the enumerator missed
+    /// fails this compile.
     #[test]
     fn enumerated_files_are_all_the_compiler_reads() {
-        let scanners_dir: PathBuf = [env!("CARGO_MANIFEST_DIR"), "..", "scanners"]
-            .iter()
-            .collect();
-        let mut checked = 0;
-        for entry in fs::read_dir(&scanners_dir).unwrap() {
-            let dir = entry.unwrap().path();
-            let scanner = dir.join("scanner.rn");
-            if !scanner.is_file() {
-                continue;
+        let repo: PathBuf = [env!("CARGO_MANIFEST_DIR"), ".."].iter().collect();
+        let mut scanners: Vec<PathBuf> = Vec::new();
+        for entry in fs::read_dir(repo.join("examples/scanners")).unwrap() {
+            let file = entry.unwrap().path();
+            if file.extension().is_some_and(|ext| ext == "rn") {
+                scanners.push(file);
             }
+        }
+        for entry in fs::read_dir(repo.join(".gage/scanners")).unwrap() {
+            let scanner = entry.unwrap().path().join("scanner.rn");
+            if scanner.is_file() {
+                scanners.push(scanner);
+            }
+        }
+        let mut checked = 0;
+        for scanner in scanners {
             let files = source_files(&scanner).unwrap();
             // A scanner with no includes has nothing to guard
             if files.len() == 1 {
@@ -417,6 +424,6 @@ mod tests {
             );
             checked += 1;
         }
-        assert!(checked >= 4, "checked {checked} builtin scanners");
+        assert!(checked >= 4, "checked {checked} scanners");
     }
 }

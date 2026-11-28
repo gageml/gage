@@ -32,6 +32,7 @@ description: Index of the Gage documentation
 - [init](/commands/init)
 - [status](/commands/status)
 - [scan](/commands/scan)
+- [scanner](/commands/scanner)
 - [resolve](/commands/resolve)
 - [session](/commands/session)
 - [dataset](/commands/dataset)

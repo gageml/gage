@@ -194,6 +194,7 @@ mod tests {
                 "issues.related_threshold",
                 "scanners.disable",
                 "scanners.enable",
+                "scanners.source",
                 "storage.max_session_size",
             ]
         );

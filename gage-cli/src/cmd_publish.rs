@@ -1357,7 +1357,7 @@ fn edit_author(explicit: Option<&str>) -> String {
     }
 }
 
-/// Print the filters as a table, the way `gage scan --list-scanners`
+/// Print the filters as a table, the way `gage scanner list`
 /// prints scanners, then the files that failed to parse and the
 /// declarations with problems.
 fn list_filters(registry: &FilterRegistry) {

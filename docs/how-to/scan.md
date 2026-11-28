@@ -20,8 +20,8 @@ Install Gage and run `gage init`. See [Quick start](/start).
    gage session list
    ```
 
-2. Scan the session. Gage asks which scanners to run. Press Enter to accept
-   the defaults.
+2. Scan the session. Gage asks which scanners to run. Select the scanners
+   you want and press Enter.
 
    ```cli
    gage scan 113509cd

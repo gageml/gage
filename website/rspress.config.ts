@@ -148,6 +148,7 @@ const SIDEBAR: SidebarItem[] = [
       { text: "init", link: "/commands/init" },
       { text: "status", link: "/commands/status" },
       { text: "scan", link: "/commands/scan" },
+      { text: "scanner", link: "/commands/scanner" },
       { text: "resolve", link: "/commands/resolve" },
       { text: "session", link: "/commands/session" },
       { text: "dataset", link: "/commands/dataset" },

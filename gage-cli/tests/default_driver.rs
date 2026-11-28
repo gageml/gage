@@ -36,7 +36,7 @@ fn unknown_default_driver_stops_commands_and_leaves_config_usable() {
     let config = home.path().join("config.toml");
     fs::write(&config, "[drivers]\ndefault = \"nope\"\n").unwrap();
 
-    let (code, _stdout, stderr) = run(home.path(), &["scan", "--list-scanners"]);
+    let (code, _stdout, stderr) = run(home.path(), &["scanner", "list"]);
     assert_eq!(code, 1, "{stderr}");
     assert_eq!(
         stderr.trim_end(),
@@ -59,7 +59,7 @@ fn named_default_driver_lets_commands_run() {
         "[drivers]\ndefault = \"claude\"\n",
     )
     .unwrap();
-    let (code, _stdout, stderr) = run(home.path(), &["scan", "--list-scanners"]);
+    let (code, _stdout, stderr) = run(home.path(), &["scanner", "list"]);
     assert_eq!(code, 0, "{stderr}");
 }
 
@@ -92,7 +92,7 @@ fn model_sizes_list_the_driver_default_until_config_sets_one() {
             "drivers.claude.models.small = \"claude-haiku-4-5\"",
         ]
     );
-    let (code, _stdout, stderr) = run(home.path(), &["scan", "--list-scanners"]);
+    let (code, _stdout, stderr) = run(home.path(), &["scanner", "list"]);
     assert_eq!(code, 0, "{stderr}");
 }
 
@@ -104,7 +104,7 @@ fn unknown_model_size_stops_commands() {
         "[drivers.claude.models]\nhuge = \"x\"\n",
     )
     .unwrap();
-    let (code, _stdout, stderr) = run(home.path(), &["scan", "--list-scanners"]);
+    let (code, _stdout, stderr) = run(home.path(), &["scanner", "list"]);
     assert_eq!(code, 1, "{stderr}");
     assert!(stderr.contains("huge"), "{stderr}");
 }

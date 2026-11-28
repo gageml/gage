@@ -9,7 +9,8 @@ The `gage init` command sets up Gage. It creates the store when there is none
 and installs the Gage plugin, an MCP server and skills, in each coding agent
 it can be set up in: Claude Code (`claude`), Codex (`codex`), and Pi (`pi`).
 Run it again after upgrading Gage so each agent gets the plugin of the new
-version.
+version. When no scanner is installed, it also offers to install the scanners
+that Gage publishes.
 
 ```cli
 gage init [OPTIONS]
@@ -20,6 +21,7 @@ gage init [OPTIONS]
 | `-d, --driver NAME` | Driver to set up (repeatable)  |
 | `--default NAME`    | Default driver                 |
 | `-r, --remove`      | Remove Gage from coding agents |
+| `--no-scanners`     | Leave scanners uninstalled     |
 | `-y, --yes`         | Skip prompts                   |
 
 Without `--driver`, Gage is set up in every installed agent it has a driver for.
@@ -55,6 +57,20 @@ it again asks nothing. When the file names none:
 `--default` names the default driver, and replaces one the config file already
 names. The driver's agent must be installed. It need not be one of the drivers
 this run sets up.
+
+## Scanners
+
+When no scanner is installed, `gage init` asks whether to install scanners. A
+yes installs every scanner in the `gage` namespace of the scanner source, with
+the scanners they require. With `--yes`, the scanners are installed without
+the question. `--no-scanners` skips the question and installs nothing.
+
+When one or more scanners are installed, `gage init` leaves them as they are.
+To upgrade them, run [`gage scanner upgrade`](/commands/scanner#scanner-upgrade).
+
+Installing reads the scanner source with Git. If that fails, the rest of the
+setup still completes and `gage init` reports why the scanners were not
+installed. See [`gage scanner`](/commands/scanner).
 
 ## Remove
 

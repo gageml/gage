@@ -8,8 +8,35 @@ conventions in _[Keep a Changelog]_. Release versions use [semantic versioning].
 
 ## [unreleased]
 
+### Breaking changes
+
+- Gage no longer includes scanners. Scanners are installed from the
+  [gage-scanners](https://github.com/gageml/gage-scanners) repository with
+  `gage scanner install`, and `gage init` offers to install them. An installed
+  scanner is the directory `~/.gage/lib/scanners/NAMESPACE/NAME`. Delete
+  `~/.gage/lib/scanners/` from an earlier release, since the scanners it holds
+  are no longer read
+- `gage scan` runs no scanner unless one is selected. With no `--scanner` or
+  `--group`, it asks which scanners to run with none selected, and with `--yes`
+  it stops with an error. The `default` group has no special meaning
+- `gage scan --list-scanners` is removed. Use `gage scanner list`
+
 ### Enhancements
 
+- `gage scanner` manages scanners: `list`, `show`, `install`, `uninstall`, and
+  `upgrade`. `gage scanner list --available` shows the scanners that can be
+  installed, and `gage scanner list --upgradable` shows the installed scanners
+  that have a newer version
+- The `scanners.source` setting names the Git repository that scanners are
+  installed from
+- A scanner declares `api`, the scanner API level it was written for. Gage
+  refuses to install or run a scanner whose level it does not support, and says
+  whether to upgrade Gage or the scanner
+- A scanner declares `requires`, the scanners installed with it
+- `gage init` installs the scanners that Gage publishes when none is
+  installed. `--no-scanners` leaves them out
+- A scan records the version of each scanner it ran, as `scanner_version` on
+  each task of the scan's plan
 - A project config names a store of the project's own: `path` in a `store`
   table of `.gage/config.toml`, as a path under the project's `.gage` directory.
   Commands run in the project use that store. `GAGE_STORE` takes precedence

@@ -1,5 +1,6 @@
 use std::fmt;
 
+pub mod catalog;
 pub mod driver;
 pub mod filter;
 pub mod scanner;
@@ -8,8 +9,10 @@ pub mod scheme;
 /// Where a scanner's or a filter's source file lives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DefSource {
-    /// The extracted builtin bundle
+    /// The bundle extracted from the Gage binary
     Builtin,
+    /// A scanner installed by `gage scanner install`
+    Installed,
     /// The user's own root under Gage home
     User,
     /// A project root, or an ad hoc file named on the command line
@@ -20,6 +23,7 @@ impl DefSource {
     pub fn as_str(&self) -> &'static str {
         match self {
             DefSource::Builtin => "builtin",
+            DefSource::Installed => "installed",
             DefSource::User => "user",
             DefSource::Project => "project",
         }

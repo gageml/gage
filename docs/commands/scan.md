@@ -18,9 +18,13 @@ the selected sessions to the store, creates a dataset holding them, and scans
 it. With `--dataset`, the command scans an existing dataset. Session arguments
 accept unique ID prefixes.
 
-With no scanner or session options, the command prompts for scanners and
-sessions. With `--yes`, unspecified selections take defaults: the `default`
-scanner group, and sessions from the past 30 days capped at 20.
+No scanner runs unless it is selected. `--scanner` and `--group` select
+scanners. With neither, the command prompts for scanners, and with `--yes` it
+stops with an error. To list the scanners you can run, use
+[`gage scanner list`](/commands/scanner#scanner-list).
+
+With no session options, the command prompts for sessions. With `--yes`, it
+scans sessions from the past 30 days capped at 20.
 
 | Option                          | Description                                                         |
 | ------------------------------- | ------------------------------------------------------------------- |
@@ -45,7 +49,6 @@ scanner group, and sessions from the past 30 days capped at 20.
 | `--force-tag`                   | Move the tag if it exists                                           |
 | `--no-progress`                 | Print task output as it happens instead of the progress view        |
 | `--no-dataset`                  | Run with no dataset; scanners see no sessions                       |
-| `--list-scanners`               | Show available scanners and exit                                    |
 | `-y, --yes`                     | Skip prompts and confirmation                                       |
 
 `--scanner` takes a scanner name. When no scanner has that name, the value is a

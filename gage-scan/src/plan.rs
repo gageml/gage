@@ -34,6 +34,8 @@ pub struct PlannedScanner<'a> {
     pub name: &'a str,
     pub tasks: &'a BTreeMap<String, TaskDef>,
     pub selection: Selection,
+    /// The version the scanner declares; empty when it declares none
+    pub version: &'a str,
     /// The scanner's resolved params; `None` when it declares none
     pub params: Option<&'a Value>,
 }
@@ -85,6 +87,10 @@ pub struct PlanTask {
     /// holds; the `note_doc` table of the scan's scope reads them
     /// from here.
     pub note_writes: BTreeMap<String, String>,
+    /// The version the task's scanner declares; empty when it
+    /// declares none. The plan records it so a scan shows which
+    /// version of a scanner wrote its notes.
+    pub scanner_version: String,
     /// The resolved params of the task's scanner: the declared
     /// defaults with the config and command-line values applied, as
     /// `params()` returns them. An empty object for a scanner that
@@ -206,6 +212,7 @@ pub fn plan(scanners: &[PlannedScanner<'_>]) -> Result<Plan, PlanError> {
             after,
             unmatched_note_wants,
             note_writes: def.notes.writes.clone(),
+            scanner_version: scanner.version.to_string(),
             params: scanner
                 .params
                 .cloned()
@@ -312,6 +319,7 @@ impl Plan {
                     .collect(),
                 unmatched_note_wants: t.unmatched_note_wants.clone(),
                 note_writes: t.note_writes.clone(),
+                scanner_version: t.scanner_version.clone(),
                 params: t.params.clone(),
             })
             .collect();
@@ -331,6 +339,8 @@ struct TaskJson {
     after: Vec<EdgeJson>,
     unmatched_note_wants: Vec<String>,
     note_writes: BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    scanner_version: String,
     params: Value,
 }
 
@@ -401,12 +411,14 @@ mod tests {
                 name: "b",
                 tasks: &b,
                 selection: Selection::Explicit,
+                version: "",
                 params: None,
             },
             PlannedScanner {
                 name: "a",
                 tasks: &a,
                 selection: Selection::Explicit,
+                version: "",
                 params: None,
             },
         ])
@@ -432,6 +444,7 @@ mod tests {
             name: "a",
             tasks: &a,
             selection: Selection::Explicit,
+            version: "",
             params: None,
         }])
         .unwrap();
@@ -446,6 +459,7 @@ mod tests {
             name: "a",
             tasks: &a,
             selection: Selection::Explicit,
+            version: "",
             params: None,
         }]);
         // The want is matched by its own write, so it is not unmatched,
@@ -466,18 +480,21 @@ mod tests {
                 name: "a",
                 tasks: &a,
                 selection: Selection::Explicit,
+                version: "",
                 params: None,
             },
             PlannedScanner {
                 name: "b",
                 tasks: &b,
                 selection: Selection::Explicit,
+                version: "",
                 params: None,
             },
             PlannedScanner {
                 name: "c",
                 tasks: &c,
                 selection: Selection::Explicit,
+                version: "",
                 params: None,
             },
         ])
@@ -507,12 +524,14 @@ mod tests {
                 name: "a",
                 tasks: &a,
                 selection: Selection::Group("default".into()),
+                version: "1.2.0",
                 params: None,
             },
             PlannedScanner {
                 name: "c",
                 tasks: &c,
                 selection: Selection::Explicit,
+                version: "",
                 params: Some(&c_params),
             },
         ])
@@ -529,6 +548,7 @@ mod tests {
                         ],
                         "unmatched_note_wants": ["missing"],
                         "note_writes": { "finding.code": "" },
+                        "scanner_version": "1.2.0",
                         "params": {}
                     },
                     {
@@ -537,6 +557,7 @@ mod tests {
                         "after": [],
                         "unmatched_note_wants": [],
                         "note_writes": { "project-summary.rules": "" },
+                        "scanner_version": "1.2.0",
                         "params": {}
                     },
                     {

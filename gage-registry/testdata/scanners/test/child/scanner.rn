@@ -1,0 +1,20 @@
+use gage::{scan, write_note};
+
+// A test scanner that `parent` requires. In a scan with both, its
+// task runs before the `parent` task, which reads the notes it writes.
+pub const SCANNER = #{
+    name: "child",
+    description: "Test scanner that the parent test scanner requires",
+    version: "1.0.0",
+    api: 1,
+    hidden: true,
+    tasks: #{
+        note_sessions: #{ notes: #{ writes: ["child"] } },
+    },
+};
+
+pub async fn note_sessions() {
+    for s in scan().sessions().await {
+        write_note("child", "seen").target(s).await?;
+    }
+}

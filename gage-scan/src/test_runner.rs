@@ -1,13 +1,17 @@
-//! Runner for the Rune tests in the scanner bundle: `#[test]`
-//! functions in `.rn` files under `scanners/`. The cargo test target
+//! Runner for the Rune tests of scanners: `#[test]` functions in the
+//! `.rn` files under one directory. The cargo test target
 //! `tests/rune.rs` (a libtest-mimic harness) collects the tests with
 //! [`collect_tests`] and runs each with [`run_test`].
+//!
+//! The directory is the one `GAGE_SCANNER_TESTS` names, such as a
+//! checkout of the published scanners, and otherwise the test
+//! scanners of this repository.
 
+use std::env;
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use gage_registry::scanner::{extract_scanners, scanners_dir};
 use rune::alloc::prelude::TryToOwned;
 use rune::runtime::Vm;
 use rune::sync::Arc as RuneArc;
@@ -48,13 +52,28 @@ struct FileSource {
     path: PathBuf,
 }
 
-/// Extract the scanner bundle and compile every `.rn` file, returning
-/// a case per `#[test]` function. A file that fails to compile yields
-/// a single `<module>::build` case carrying its diagnostics; warnings
-/// on a successful build go to stderr.
+/// The directory whose scanners are tested.
+fn tests_dir() -> PathBuf {
+    match env::var_os("GAGE_SCANNER_TESTS") {
+        Some(dir) => PathBuf::from(dir),
+        None => [
+            env!("CARGO_MANIFEST_DIR"),
+            "..",
+            "gage-registry",
+            "testdata",
+            "scanners",
+        ]
+        .iter()
+        .collect(),
+    }
+}
+
+/// Compile every `.rn` file of the tested directory, returning a case
+/// per `#[test]` function. A file that fails to compile yields a
+/// single `<module>::build` case carrying its diagnostics; warnings on
+/// a successful build go to stderr.
 pub fn collect_tests() -> io::Result<Vec<TestCase>> {
-    extract_scanners().unwrap();
-    let dir = scanners_dir();
+    let dir = tests_dir();
 
     let context = gage_runtime::context().unwrap();
     let rt = RuneArc::try_new(context.runtime().unwrap()).unwrap();

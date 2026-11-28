@@ -73,11 +73,7 @@ fn a_project_config_replaces_the_default_native_source_of_the_user_config() {
     assert_eq!(get(&project.join("sub"), "native.work"), "pi:~/work");
     assert_eq!(get(root.path(), "native.default"), "codex");
 
-    let (code, _stdout, stderr) = run(
-        home.path(),
-        &project.join("sub"),
-        &["scan", "--list-scanners"],
-    );
+    let (code, _stdout, stderr) = run(home.path(), &project.join("sub"), &["scanner", "list"]);
     assert_eq!(code, 0, "{stderr}");
 }
 
@@ -86,7 +82,7 @@ fn a_project_config_that_sets_anything_but_native_stops_commands() {
     let home = tempfile::tempdir().unwrap();
     let root = tempfile::tempdir().unwrap();
     let project = project(root.path(), "[drivers]\ndefault = \"pi\"\n");
-    let (code, _stdout, stderr) = run(home.path(), &project, &["scan", "--list-scanners"]);
+    let (code, _stdout, stderr) = run(home.path(), &project, &["scanner", "list"]);
     assert_eq!(code, 1, "{stderr}");
     let config = project.join(".gage/config.toml");
     assert!(
@@ -101,7 +97,7 @@ fn a_default_native_source_that_is_not_a_source_stops_commands() {
     let home = tempfile::tempdir().unwrap();
     let root = tempfile::tempdir().unwrap();
     let project = project(root.path(), "[native]\ndefault = \"work\"\n");
-    let (code, _stdout, stderr) = run(home.path(), &project, &["scan", "--list-scanners"]);
+    let (code, _stdout, stderr) = run(home.path(), &project, &["scanner", "list"]);
     assert_eq!(code, 1, "{stderr}");
     assert_eq!(
         stderr.trim_end(),
@@ -119,7 +115,7 @@ fn a_relative_path_in_the_user_config_stops_commands() {
     let config = home.path().join("config.toml");
     fs::write(&config, "[native]\ndefault = \"pi:sessions\"\n").unwrap();
     let cwd = tempfile::tempdir().unwrap();
-    let (code, _stdout, stderr) = run(home.path(), cwd.path(), &["scan", "--list-scanners"]);
+    let (code, _stdout, stderr) = run(home.path(), cwd.path(), &["scanner", "list"]);
     assert_eq!(code, 1, "{stderr}");
     assert_eq!(
         stderr.trim_end(),

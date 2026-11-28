@@ -33,9 +33,9 @@ refers to.
 
 ## Running
 
-The scanner is in the `default` group, so it runs when you run `gage
-scan` without selecting scanners. To run it alone:
+Install the scanner and run it:
 
 ```cli
+gage scanner install general
 gage scan -s general
 ```

@@ -41,11 +41,10 @@ first phase of `gage resolve` reconciles them against existing issues. See
 
 ## Running
 
-The scanner is in the `default` group. It runs when you run `gage scan`
-without selecting scanners. It only reports when the same scan includes a
-scanner that writes finding notes, such as
-[`code-review`](/scanners/code-review) and
-[`general`](/scanners/general). To run it with them explicitly:
+The scanner only reports when the same scan includes a scanner that writes
+finding notes, such as [`code-review`](/scanners/code-review) and
+[`general`](/scanners/general). Install it with `gage scanner install
+findings`. To run it with a scanner that writes finding notes:
 
 ```cli
 gage scan -s general -s findings

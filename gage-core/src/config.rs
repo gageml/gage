@@ -544,7 +544,14 @@ impl Default for IssuesConfig {
     }
 }
 
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+/// The Git repository `gage scanner` reads when the config names none.
+pub const DEFAULT_SCANNER_SOURCE: &str = "https://github.com/gageml/gage-scanners.git";
+
+fn default_scanner_source() -> String {
+    DEFAULT_SCANNER_SOURCE.to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScannerConfig {
     /// When non-empty, only these scanners are enabled. Otherwise all
     /// scanners not in `disable` are enabled.
@@ -555,6 +562,11 @@ pub struct ScannerConfig {
     /// `enable`.
     #[serde(default)]
     pub disable: Vec<String>,
+
+    /// The Git repository scanners are installed from: a URL or the
+    /// path of a local repository.
+    #[serde(default = "default_scanner_source")]
+    pub source: String,
 
     /// Per-scanner settings, one `[scanners.<name>]` table each.
     #[serde(default, flatten)]
@@ -569,6 +581,17 @@ pub struct ScannerEntry {
     /// the scanner declares; a `--scanner` override replaces both.
     #[serde(default, skip_serializing_if = "json::Map::is_empty")]
     pub params: json::Map<String, json::Value>,
+}
+
+impl Default for ScannerConfig {
+    fn default() -> Self {
+        ScannerConfig {
+            enable: Vec::new(),
+            disable: Vec::new(),
+            source: default_scanner_source(),
+            entries: BTreeMap::new(),
+        }
+    }
 }
 
 impl ScannerConfig {
@@ -1108,6 +1131,18 @@ medium = "claude-sonnet-5-5"
     }
 
     #[test]
+    fn scanner_source_is_read_from_the_scanners_table() {
+        assert_eq!(
+            Config::default().scanners.source,
+            super::DEFAULT_SCANNER_SOURCE
+        );
+        let config: Config = toml::from_str("[scanners]\nsource = \"/repos/scanners\"\n").unwrap();
+        assert_eq!(config.scanners.source, "/repos/scanners");
+        // The setting is not taken for a scanner's own table
+        assert!(config.scanners.params("source").is_none());
+    }
+
+    #[test]
     fn scanner_params_are_read_from_a_per_scanner_table() {
         let config: Config = toml::from_str(
             r#"
@@ -1121,6 +1156,7 @@ budget = 3
         )
         .unwrap();
         assert_eq!(config.scanners.disable, ["hidden-*"]);
+        assert_eq!(config.scanners.source, super::DEFAULT_SCANNER_SOURCE);
         let params = config.scanners.params("findings").unwrap();
         assert_eq!(
             params["wontfix"],

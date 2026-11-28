@@ -7,8 +7,7 @@ description:
 
 :::note
 
-This scanner is experimental. It is not in the `default` group and runs only
-when you select it.
+This scanner is experimental.
 
 :::
 

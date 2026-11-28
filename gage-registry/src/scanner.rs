@@ -11,27 +11,76 @@ use rune::alloc::prelude::TryClone;
 use rune::ast::{self, Spanned};
 use rune::parse;
 use rune::runtime::{Object, Value};
-use rust_embed::{Embed, RustEmbed};
+use rust_embed::RustEmbed;
 use serde::Serialize;
 use serde_json as json;
 
 use crate::DefSource;
 
-#[derive(Embed)]
-#[folder = "../scanners/"]
-struct Scanners;
+/// The scanner API level of this build. A change to what a scanner
+/// can name or call raises it by one: an item added to, removed from,
+/// or renamed in the Rune context, or a field of `SCANNER` whose
+/// meaning changes.
+pub const API_LEVEL: u32 = 1;
 
+/// The oldest scanner API level this build still runs. A change that
+/// breaks scanners written for an earlier level raises it to
+/// [`API_LEVEL`].
+pub const API_LEVEL_OLDEST: u32 = 1;
+
+/// Why a scanner's declared API level does not suit this build.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApiMismatch {
+    /// The scanner was written for a level above [`API_LEVEL`]
+    NeedsNewerGage { level: u32 },
+    /// The scanner was written for a level below [`API_LEVEL_OLDEST`]
+    NeedsNewerScanner { level: u32 },
+}
+
+impl fmt::Display for ApiMismatch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ApiMismatch::NeedsNewerGage { level } => write!(
+                f,
+                "it needs scanner API {level} and this Gage provides {API_LEVEL}; upgrade Gage"
+            ),
+            ApiMismatch::NeedsNewerScanner { level } => write!(
+                f,
+                "it was written for scanner API {level} and this Gage supports \
+                 {API_LEVEL_OLDEST} and later; run `gage scanner upgrade`"
+            ),
+        }
+    }
+}
+
+/// Check a scanner's declared API level against this build.
+pub fn check_api(level: u32) -> Result<(), ApiMismatch> {
+    check_api_in(level, API_LEVEL_OLDEST, API_LEVEL)
+}
+
+fn check_api_in(level: u32, oldest: u32, current: u32) -> Result<(), ApiMismatch> {
+    if level > current {
+        Err(ApiMismatch::NeedsNewerGage { level })
+    } else if level < oldest {
+        Err(ApiMismatch::NeedsNewerScanner { level })
+    } else {
+        Ok(())
+    }
+}
+
+/// The root of installed scanners: `<gage_home>/lib/scanners`. An
+/// installed scanner is the directory `<namespace>/<name>` under it.
 pub fn scanners_dir() -> PathBuf {
     gage_core::config::gage_home().join("lib/scanners")
 }
 
 /// Classify a scanner file by its filesystem location. Paths under
-/// the extracted builtin bundle are `Builtin`; paths under the user
+/// the installed root are `Installed`; paths under the user
 /// custom-scanner root are `User`; everything else (any project
 /// `.gage/scanners` root, or an ad-hoc `-f` file) is `Project`.
 pub fn scanner_source(path: &Path) -> DefSource {
     if path.starts_with(scanners_dir()) {
-        DefSource::Builtin
+        DefSource::Installed
     } else if path.starts_with(user_scanners_dir()) {
         DefSource::User
     } else {
@@ -41,7 +90,7 @@ pub fn scanner_source(path: &Path) -> DefSource {
 
 /// Ordered list of "scanner home" directories, most-specific first:
 /// project `.gage/scanners` (innermost → outermost), then
-/// `~/.gage/local/scanners`, then the embedded `<gage_home>/lib/scanners`.
+/// `~/.gage/local/scanners`, then the installed `<gage_home>/lib/scanners`.
 /// Used both for absolute `scanner:/…` URI resolution (first hit wins)
 /// and for registry loading (traversed in reverse so more-specific
 /// scanners shadow less-specific ones on name collision).
@@ -73,28 +122,21 @@ pub(crate) fn discover_project_dirs(start: &Path, leaf: &str) -> Vec<PathBuf> {
         .collect()
 }
 
-/// User-level custom scanner root: `<gage_home>/local/scanners`. Unlike
-/// `scanners_dir()`, this directory is never wiped by the embedded
-/// extraction — it exists for user-authored scanners.
+/// User-level custom scanner root: `<gage_home>/local/scanners`. The
+/// scanner commands never write here; it exists for user-authored
+/// scanners.
 pub fn user_scanners_dir() -> PathBuf {
     gage_core::config::gage_home().join("local/scanners")
-}
-
-/// Extract the embedded scanner bundle to `scanners_dir()`.
-///
-/// Safe under concurrency: extraction serializes on an advisory file
-/// lock (concurrent gage processes and parallel test threads both
-/// reach here), and a digest marker skips the delete/rewrite when the
-/// extracted tree already matches the embedded content.
-pub fn extract_scanners() -> std::io::Result<()> {
-    let dir = scanners_dir();
-    assert!(dir.ends_with("lib/scanners"));
-    extract_embedded::<Scanners>(&dir)
 }
 
 /// Extract the embedded bundle `E` to `dir`, `<lib>/<name>`. The lock
 /// and digest marker sit beside it as `<lib>/<name>.lock` and
 /// `<lib>/<name>.digest`.
+///
+/// Safe under concurrency: extraction serializes on an advisory file
+/// lock (concurrent gage processes and parallel test threads both
+/// reach here), and a digest marker skips the delete/rewrite when the
+/// extracted tree already matches the embedded content.
 pub(crate) fn extract_embedded<E: RustEmbed>(dir: &Path) -> std::io::Result<()> {
     let lib = dir.parent().expect("bundle dir is under lib");
     let name = dir
@@ -218,15 +260,22 @@ pub struct Problem {
 pub struct ScannerDef {
     pub name: String,
     pub description: String,
+    /// `SCANNER.version`; empty when the scanner declares none
     pub version: String,
+    /// `SCANNER.api`: the scanner API level the scanner was written
+    /// for. `None` when it declares none, and such a scanner is run
+    /// without a check.
+    pub api: Option<u32>,
+    /// `SCANNER.requires`: the scanners installed with this one, each
+    /// as `<namespace>/<name>`
+    pub requires: Vec<String>,
     pub hidden: bool,
     /// Library scanners are infrastructure: excluded from listings and
     /// the default run set, not explicitly selectable, and scheduled
     /// only when a task's `required_by` pulls it into a plan.
     pub library: bool,
-    /// Group memberships declared via `SCANNER.groups`. The
-    /// distinguished group `default` marks scanners run when none are
-    /// specified; `-g --group` selects by any group name.
+    /// Group memberships declared via `SCANNER.groups`; `-g --group`
+    /// selects by any group name.
     pub groups: Vec<String>,
     pub tasks: BTreeMap<String, TaskDef>,
     /// Defects in the `SCANNER` declaration, in source order. A def
@@ -587,16 +636,14 @@ pub struct ScannerRegistry {
 
 impl ScannerRegistry {
     pub fn load() -> Self {
-        extract_scanners().unwrap();
         Self::load_from_roots(&scanners_dir(), scanner_home_paths())
     }
 
     /// Load scanners from an explicit ordered list of roots (most
-    /// specific first). Files under `builtin` use a relative embed
-    /// key; files under any other root use an absolute embed key so
-    /// the runner and include resolver locate them without joining
-    /// against `scanners_dir()`.
-    pub fn load_from_roots(builtin: &Path, roots: Vec<PathBuf>) -> Self {
+    /// specific first). The root `installed` holds one scanner per
+    /// `<namespace>/<name>/scanner.rn` and nothing else there is read;
+    /// any other root is searched at every depth.
+    pub fn load_from_roots(installed: &Path, roots: Vec<PathBuf>) -> Self {
         let mut defs: Vec<ScannerDef> = Vec::new();
         let mut errors: Vec<(PathBuf, String)> = Vec::new();
         let mut by_name: HashMap<String, Vec<usize>> = HashMap::new();
@@ -606,16 +653,13 @@ impl ScannerRegistry {
         // same name are still stored and appended to the by_name entry
         // for shadowing diagnostics.
         for root in roots {
-            for path in walk_rn_files(&root) {
-                let is_builtin = root.as_path() == builtin;
-                let key = if is_builtin {
-                    path.strip_prefix(&root)
-                        .unwrap()
-                        .to_string_lossy()
-                        .to_string()
-                } else {
-                    path.to_string_lossy().to_string()
-                };
+            let paths = if root.as_path() == installed {
+                installed_scanner_files(&root)
+            } else {
+                walk_rn_files(&root)
+            };
+            for path in paths {
+                let key = path.to_string_lossy().to_string();
                 let code = match std::fs::read_to_string(&path) {
                     Ok(c) => c,
                     Err(e) => {
@@ -873,6 +917,8 @@ fn parse_scanner(source: &str, embed_key: &str, path: &Path) -> Result<ScannerDe
     let mut scanner_name = None;
     let mut description = None;
     let mut version = String::new();
+    let mut api = None;
+    let mut requires: Vec<String> = Vec::new();
     let mut hidden = false;
     let mut library = false;
     let mut groups: Vec<String> = Vec::new();
@@ -921,6 +967,25 @@ fn parse_scanner(source: &str, embed_key: &str, path: &Path) -> Result<ScannerDe
                     Some("version") => {
                         version = expr_str(source, expr).unwrap_or_default();
                     }
+                    Some("api") => match expr_text(source, expr).parse::<u32>() {
+                        Ok(level) => api = Some(level),
+                        Err(_) => problems
+                            .push(problem(expr, "SCANNER field 'api' must be a whole number")),
+                    },
+                    Some("requires") => {
+                        requires = expr_str_vec(source, expr);
+                        for name in &requires {
+                            if split_qualified(name).is_none() {
+                                problems.push(problem(
+                                    expr,
+                                    format!(
+                                        "SCANNER field 'requires' entry '{name}' must be \
+                                         <namespace>/<name>"
+                                    ),
+                                ));
+                            }
+                        }
+                    }
                     Some("hidden") => hidden = expr_bool(source, expr),
                     Some("library") => library = expr_bool(source, expr),
                     Some("groups") => groups = expr_str_vec(source, expr),
@@ -956,6 +1021,8 @@ fn parse_scanner(source: &str, embed_key: &str, path: &Path) -> Result<ScannerDe
         name,
         description: description.unwrap_or_default(),
         version,
+        api,
+        requires,
         hidden,
         library,
         groups,
@@ -1376,20 +1443,14 @@ fn field_problem(expr: &ast::Expr, task: &str, field: &str) -> Problem {
     )
 }
 
-/// Directory `include_str!` paths in `notes.writes` resolve against.
-/// Mirrors `ScannerDef::module_dir`: absolute `embed_key` (a `--file`
-/// scanner) → its parent; relative `embed_key` (embedded scanner) →
-/// `scanners_dir()` + the leading subdirectory.
+/// Directory `include_str!` paths in `notes.writes` resolve against:
+/// the directory of the scanner's file, as `ScannerDef::module_dir`
+/// gives it. `embed_key` is the file's absolute path.
 fn include_base_dir(embed_key: &str) -> PathBuf {
-    let p = Path::new(embed_key);
-    if p.is_absolute() {
-        return p
-            .parent()
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("/"));
-    }
-    let rel = embed_key.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("");
-    scanners_dir().join(rel)
+    Path::new(embed_key)
+        .parent()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/"))
 }
 
 pub(crate) fn parse_params_def(source: &str, obj: &ast::ExprObject) -> Object {
@@ -1536,6 +1597,54 @@ fn strip_quotes(s: &str) -> String {
     } else {
         s.to_string()
     }
+}
+
+/// The parts of a qualified scanner name `<namespace>/<name>`, when
+/// `name` is one.
+pub fn split_qualified(name: &str) -> Option<(&str, &str)> {
+    let (namespace, scanner) = name.split_once('/')?;
+    let part_ok = |part: &str| !part.is_empty() && !part.contains('/') && !part.starts_with('.');
+    (part_ok(namespace) && part_ok(scanner)).then_some((namespace, scanner))
+}
+
+/// The source text of an expression.
+fn expr_text<'a>(source: &'a str, expr: &ast::Expr) -> &'a str {
+    let span = expr.span();
+    source[span.start.0 as usize..span.end.0 as usize].trim()
+}
+
+/// The scanner files of an installed root: each
+/// `<namespace>/<name>/scanner.rn` under `root`, sorted. A directory
+/// whose name starts with `.` is skipped.
+pub fn installed_scanner_files(root: &Path) -> Vec<PathBuf> {
+    let mut result = Vec::new();
+    for namespace in visible_subdirs(root) {
+        for scanner in visible_subdirs(&namespace) {
+            let file = scanner.join("scanner.rn");
+            if file.is_file() {
+                result.push(file);
+            }
+        }
+    }
+    result.sort();
+    result
+}
+
+/// The directories directly under `dir` whose names do not start with
+/// `.`. A directory that cannot be read has none.
+fn visible_subdirs(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .filter(|path| {
+            path.file_name()
+                .is_some_and(|name| !name.to_string_lossy().starts_with('.'))
+        })
+        .collect()
 }
 
 pub(crate) fn walk_rn_files(dir: &Path) -> Vec<PathBuf> {
@@ -1892,46 +2001,117 @@ unknown = 1
     #[test]
     fn load_from_roots_shadows_by_precedence() {
         let tmp = tempfile::tempdir().unwrap();
-        let builtin = tmp.path().join("builtin");
+        let installed = tmp.path().join("installed");
         let user = tmp.path().join("user");
         let project = tmp.path().join("project");
 
-        write_scanner(&builtin, "shared", "shared", "from-builtin");
-        write_scanner(&builtin, "only-builtin", "only-builtin", "b");
+        write_scanner(&installed, "gage/shared", "shared", "from-installed");
+        write_scanner(&installed, "gage/only-installed", "only-installed", "i");
         write_scanner(&user, "shared", "shared", "from-user");
         write_scanner(&user, "only-user", "only-user", "u");
         write_scanner(&project, "shared", "shared", "from-project");
         write_scanner(&project, "only-project", "only-project", "p");
 
-        let roots = vec![project.clone(), user.clone(), builtin.clone()];
-        let reg = ScannerRegistry::load_from_roots(&builtin, roots);
+        let roots = vec![project.clone(), user.clone(), installed.clone()];
+        let reg = ScannerRegistry::load_from_roots(&installed, roots);
 
         assert_eq!(
             reg.get_def("shared").unwrap().description,
             "from-project",
-            "project must shadow user and built-in"
+            "project must shadow user and installed"
         );
         assert_eq!(reg.get_def("only-user").unwrap().description, "u");
         assert_eq!(reg.get_def("only-project").unwrap().description, "p");
-        assert_eq!(reg.get_def("only-builtin").unwrap().description, "b");
+        assert_eq!(reg.get_def("only-installed").unwrap().description, "i");
 
-        let shared = reg.get_def("shared").unwrap();
-        assert!(shared.path.is_absolute(), "def path is absolute");
-        assert!(
-            Path::new(&shared.embed_key).is_absolute(),
-            "custom-root embed_key is absolute"
+        for name in ["shared", "only-installed"] {
+            let def = reg.get_def(name).unwrap();
+            assert!(def.path.is_absolute(), "def path is absolute");
+            assert!(Path::new(&def.embed_key).is_absolute());
+        }
+    }
+
+    #[test]
+    fn the_installed_root_holds_scanners_under_a_namespace_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let installed = tmp.path().join("installed");
+        write_scanner(&installed, "gage/kept", "kept", "k");
+        // A scanner directly under the root, a file beside a scanner
+        // directory, a deeper directory, and a hidden directory
+        write_scanner(&installed, "flat", "flat", "f");
+        std::fs::write(
+            installed.join("gage/loose.rn"),
+            "pub const SCANNER = #{ name: \"loose\", description: \"l\" };\n",
+        )
+        .unwrap();
+        write_scanner(&installed, "gage/kept/nested", "nested", "n");
+        write_scanner(&installed, "gage/.kept.installing", "staged", "s");
+
+        let reg = ScannerRegistry::load_from_roots(&installed, vec![installed.clone()]);
+        assert_eq!(reg.names(), ["kept"]);
+    }
+
+    #[test]
+    fn parse_version_api_and_requires() {
+        let source = r#"
+            pub const SCANNER = #{
+                name: "s",
+                description: "d",
+                version: "1.2.0",
+                api: 3,
+                requires: ["test/child", "bare"],
+            };
+        "#;
+        let def = parse_scanner(source, "/s/scanner.rn", Path::new("/s/scanner.rn")).unwrap();
+        assert_eq!(def.version, "1.2.0");
+        assert_eq!(def.api, Some(3));
+        assert_eq!(def.requires, ["test/child", "bare"]);
+        let messages: Vec<&str> = def.problems.iter().map(|p| p.message.as_str()).collect();
+        assert_eq!(
+            messages,
+            ["SCANNER field 'requires' entry 'bare' must be <namespace>/<name>"]
         );
-        let only_builtin = reg.get_def("only-builtin").unwrap();
-        assert!(
-            !Path::new(&only_builtin.embed_key).is_absolute(),
-            "built-in embed_key stays relative"
+
+        let source = r#"pub const SCANNER = #{ name: "s", description: "d", api: "one" };"#;
+        let def = parse_scanner(source, "/s/scanner.rn", Path::new("/s/scanner.rn")).unwrap();
+        assert_eq!(def.api, None);
+        assert_eq!(def.version, "");
+        assert_eq!(
+            def.problems[0].message,
+            "SCANNER field 'api' must be a whole number"
         );
+    }
+
+    #[test]
+    fn an_api_level_outside_the_supported_range_names_the_remedy() {
+        assert_eq!(check_api_in(4, 3, 5), Ok(()));
+        assert_eq!(check_api_in(3, 3, 5), Ok(()));
+        assert_eq!(check_api_in(5, 3, 5), Ok(()));
+        assert_eq!(
+            check_api_in(6, 3, 5),
+            Err(ApiMismatch::NeedsNewerGage { level: 6 })
+        );
+        assert_eq!(
+            check_api_in(2, 3, 5),
+            Err(ApiMismatch::NeedsNewerScanner { level: 2 })
+        );
+        assert!(
+            ApiMismatch::NeedsNewerGage { level: 6 }
+                .to_string()
+                .ends_with("upgrade Gage")
+        );
+        assert!(
+            ApiMismatch::NeedsNewerScanner { level: 2 }
+                .to_string()
+                .ends_with("run `gage scanner upgrade`")
+        );
+        assert_eq!(check_api(API_LEVEL), Ok(()));
     }
 
     #[test]
     fn load_from_roots_surfaces_all_parse_failures_by_path() {
         let tmp = tempfile::tempdir().unwrap();
-        let builtin = tmp.path().join("builtin");
+        let installed = tmp.path().join("installed");
         let user = tmp.path().join("user");
         // Two failing scanners under different custom-root subdirs. Both
         // land at `<dir>/scanner.rn`, so a name-keyed errors map would
@@ -1942,10 +2122,10 @@ unknown = 1
         std::fs::create_dir_all(&b_dir).unwrap();
         std::fs::write(a_dir.join("scanner.rn"), "not valid rune!!!").unwrap();
         std::fs::write(b_dir.join("scanner.rn"), "also not valid!!!").unwrap();
-        std::fs::create_dir_all(&builtin).unwrap();
+        std::fs::create_dir_all(&installed).unwrap();
 
-        let roots = vec![user.clone(), builtin.clone()];
-        let reg = ScannerRegistry::load_from_roots(&builtin, roots);
+        let roots = vec![user.clone(), installed.clone()];
+        let reg = ScannerRegistry::load_from_roots(&installed, roots);
 
         let paths: Vec<PathBuf> = reg.parse_errors().map(|(p, _)| p.to_path_buf()).collect();
         assert_eq!(paths.len(), 2, "both failing custom scanners must surface");

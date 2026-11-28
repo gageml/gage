@@ -67,6 +67,7 @@ CLI.
 Requirements:
 
 - Linux (x86_64) or macOS (Apple Silicon)
+- Git
 - Claude Code, Codex, or Pi with an active login
 
 Gage uses your coding agent to scan sessions and resolve issues. Token usage is
@@ -76,10 +77,10 @@ handled through that agent according to your plan.
 # Install Gage
 curl -fsSL https://gage.io/install.sh | sh
 
-# Set up Gage in each coding agent that is installed
+# Set up Gage in each coding agent that is installed, and install scanners
 gage init
 
-# Scan your recent sessions
+# Scan your recent sessions with the scanners you select
 gage scan
 
 # List the open issues
@@ -163,8 +164,22 @@ people you trust. See [PRIVACY.md](PRIVACY.md).
 
 ## Scanners
 
-Gage ships these scanners in the `default` group. Their source is under
-[scanners](/scanners) in this repository.
+Gage does not include scanners. You install the ones you want from the
+[gage-scanners](https://github.com/gageml/gage-scanners) repository, and
+`gage init` offers to install them all.
+
+```shell
+# List the scanners you can install
+gage scanner list --available
+
+# Install a scanner
+gage scanner install general
+
+# Install newer versions of the scanners you have
+gage scanner upgrade
+```
+
+Gage publishes these scanners.
 
 <table>
   <tr>
@@ -287,6 +302,9 @@ Gage writes all of its data to files under `~/.gage/`. These include:
 No. Gage runs locally and writes all state under `~/.gage/`. Gage sends data to
 another location only when you run a command that does so, such as `gage push`
 or `gage backup`.
+
+Gage downloads scanners from GitHub with Git, and only when you run a command
+that installs, upgrades, or lists available scanners.
 
 Gage provides tools to your coding agent over a local MCP server. The agent is
 free to use these tools within the constraints of user-defined permissions

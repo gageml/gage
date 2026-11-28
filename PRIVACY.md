@@ -36,6 +36,24 @@ reach.
 The install script downloads a release of Gage from GitHub. It sends no
 information about you or your machine beyond what any download request carries.
 
+## Scanners
+
+Gage downloads scanners with a Git fetch from the scanner source. The default
+source is the `gageml/gage-scanners` repository on GitHub, and the
+`scanners.source` setting names another. The fetch sends no information about
+you or your machine beyond what any Git fetch carries.
+
+Gage fetches from the scanner source only when you run one of these commands:
+
+- `gage scanner install` and `gage scanner upgrade`
+- `gage scanner list` with `--available` or `--upgradable`
+- `gage scanner show` for a scanner that is not installed
+- `gage init`, when no scanner is installed and you agree to install scanners
+  or pass `--yes`
+
+No other command reads the scanner source, and Gage never checks it without
+being asked.
+
 ## Verify these claims
 
 Gage is open source. Every claim in this file can be checked against the code in
