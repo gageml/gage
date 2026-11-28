@@ -411,6 +411,7 @@ async fn main() -> ExitCode {
             Command::Tag { command } => match command {
                 cmd_tag::TagCommand::Add(args) => cmd_tag::add(args),
                 cmd_tag::TagCommand::List(args) => cmd_tag::list(args),
+                cmd_tag::TagCommand::Rename(args) => cmd_tag::rename(args),
                 cmd_tag::TagCommand::Delete(args) => cmd_tag::delete(args),
             },
             Command::Remote { command } => match command {

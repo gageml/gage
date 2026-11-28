@@ -1,8 +1,8 @@
 ---
 title: gage tag
 description:
-  Command reference for gage tag, including subcommands to add, list, and
-  delete tags
+  Command reference for gage tag, including subcommands to add, list, rename,
+  and delete tags
 ---
 
 The `gage tag` command manages tags. A tag is a name for a stored object of any
@@ -47,6 +47,21 @@ gage tag list [OPTIONS]
 | `-a, --all`           | Show all items                                |
 | `-n, --limit <LIMIT>` | Limit the number of items shown (default: 20) |
 | `--full-id`           | Show the full object ID                       |
+
+## tag rename
+
+Rename a tag. The object the tag names is not changed.
+
+```cli
+gage tag rename [OPTIONS] <NAME> <NEW_NAME>
+```
+
+`NEW_NAME` follows Git ref naming rules. A name that another tag has is an
+error.
+
+| Option      | Description              |
+| ----------- | ------------------------ |
+| `-y, --yes` | Skip confirmation prompt |
 
 ## tag delete
 

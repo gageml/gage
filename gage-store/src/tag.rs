@@ -7,7 +7,7 @@
 //! names a tombstoned object, still resolves. Which commit the ref
 //! points at is not part of the tag's meaning.
 
-use crate::git::{git_in, run};
+use crate::git::{git_in, run, run_with_stdin};
 use crate::index::IdMatch;
 use crate::refs::tag_ref;
 use crate::{Store, StoreError};
@@ -144,6 +144,35 @@ impl TagStore<'_> {
             object_type: found.object_type,
             commit_sha: found.tip_sha,
             previous_id,
+        })
+    }
+
+    /// Give the tag `<name>` the name `<new_name>`. The tag keeps the
+    /// commit it points at, so a dangling tag can be renamed. A name
+    /// no tag has is [`StoreError::TagNotFound`], and a new name that
+    /// a tag has is [`StoreError::TagExists`]. Returns the ref under
+    /// its new name.
+    pub fn rename(&self, name: &str, new_name: &str) -> Result<TagRef, StoreError> {
+        self.store.require_local()?;
+        let old_ref = tag_ref(name);
+        let sha = self
+            .store
+            .rev_parse(&old_ref)?
+            .ok_or_else(|| StoreError::TagNotFound(name.to_string()))?;
+        self.check_available(new_name, false)?;
+        let new_ref = tag_ref(new_name);
+        // One transaction, so a failure leaves the tag under its old
+        // name. `create` fails when a concurrent add took the new
+        // name, and the expected old value fails the delete when the
+        // tag moved.
+        run_with_stdin(
+            git_in(self.store.path(), ["update-ref", "--stdin"]),
+            format!("create {new_ref} {sha}\ndelete {old_ref} {sha}\n").as_bytes(),
+        )?;
+        Ok(TagRef {
+            name: new_name.to_string(),
+            ref_name: new_ref,
+            commit_sha: sha,
         })
     }
 
@@ -524,6 +553,72 @@ mod tests {
             StoreError::TagNotFound(name) => assert_eq!(name, "t"),
             other => panic!("unexpected error: {other}"),
         }
+    }
+
+    #[test]
+    fn rename_moves_the_ref_and_keeps_its_commit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let tags = TagStore::from(&store);
+        let id = note(&store, "v1");
+        let added = tags.add("old", &id, false).unwrap();
+
+        let renamed = tags.rename("old", "group/new").unwrap();
+
+        assert_eq!(renamed.name, "group/new");
+        assert_eq!(renamed.ref_name, "refs/gage/1/tag/group/new");
+        assert_eq!(renamed.commit_sha, added.commit_sha);
+        assert_eq!(tags.resolve("old").unwrap(), None);
+        assert_eq!(tags.resolve("group/new").unwrap().unwrap().id, id);
+    }
+
+    #[test]
+    fn rename_refuses_a_missing_tag_a_taken_name_and_a_bad_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let tags = TagStore::from(&store);
+        let a = note(&store, "a");
+        let b = note(&store, "b");
+        tags.add("a", &a, false).unwrap();
+        tags.add("b", &b, false).unwrap();
+
+        match tags.rename("missing", "c").unwrap_err() {
+            StoreError::TagNotFound(name) => assert_eq!(name, "missing"),
+            other => panic!("unexpected error: {other}"),
+        }
+        match tags.rename("a", "b").unwrap_err() {
+            StoreError::TagExists { name, id } => {
+                assert_eq!(name, "b");
+                assert_eq!(id, b);
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+        match tags.rename("a", "a").unwrap_err() {
+            StoreError::TagExists { name, .. } => assert_eq!(name, "a"),
+            other => panic!("unexpected error: {other}"),
+        }
+        match tags.rename("a", "a b").unwrap_err() {
+            StoreError::TagName(name) => assert_eq!(name, "a b"),
+            other => panic!("unexpected error: {other}"),
+        }
+        assert_eq!(tags.resolve("a").unwrap().unwrap().id, a);
+        assert_eq!(tags.resolve("b").unwrap().unwrap().id, b);
+    }
+
+    #[test]
+    fn rename_keeps_a_dangling_tag() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _fsck) = open_store(tmp.path());
+        let tags = TagStore::from(&store);
+        let id = note(&store, "v1");
+        tags.add("old", &id, false).unwrap();
+        NoteStore::from(&store).delete(&id).unwrap();
+
+        tags.rename("old", "new").unwrap();
+
+        let found = tags.resolve("new").unwrap().unwrap();
+        assert_eq!(found.id, id);
+        assert!(found.deleted);
     }
 
     #[test]

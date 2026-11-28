@@ -15,6 +15,7 @@ conventions in _[Keep a Changelog]_. Release versions use [semantic versioning].
   Commands run in the project use that store. `GAGE_STORE` takes precedence
   over it
 - `gage status` marks a store that `GAGE_STORE` or a project config selected
+- `gage tag rename` gives a tag a new name
 
 ### Other changes
 

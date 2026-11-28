@@ -38,6 +38,11 @@ pub enum TagCommand {
     /// List tags
     List(TagListArgs),
 
+    /// Rename a tag
+    ///
+    /// Changes the name only. The object the tag names is not changed.
+    Rename(TagRenameArgs),
+
     /// Delete tags
     ///
     /// Removes the tags only. The objects they named are not changed.
@@ -78,6 +83,21 @@ pub struct TagListArgs {
     /// Show full object ID
     #[arg(long)]
     full_id: bool,
+}
+
+#[derive(Args)]
+pub struct TagRenameArgs {
+    /// Tag to rename
+    name: String,
+
+    /// New tag name
+    ///
+    /// Follows Git ref naming rules. An existing tag is an error.
+    new_name: String,
+
+    /// Skip confirmation prompt
+    #[arg(short, long)]
+    yes: bool,
 }
 
 #[derive(Args)]
@@ -207,6 +227,37 @@ pub fn list(args: TagListArgs) -> Result<(), CliError> {
 
     args.limit.print_summary(shown, total, "tag");
     Ok(())
+}
+
+pub fn rename(args: TagRenameArgs) -> Result<(), CliError> {
+    let store = open_store("gage tag rename")?;
+    dialog::run("Rename tag", || {
+        let tags = TagStore::from(&store);
+        let found = tags
+            .resolve(&args.name)
+            .map_err(|e| DialogError::Failed(e.to_string()))?
+            .ok_or_else(|| {
+                DialogError::Failed(StoreError::TagNotFound(args.name.clone()).to_string())
+            })?;
+        // The new name is checked before the prompt, so a name that
+        // cannot be used is reported without asking for confirmation
+        tags.check_available(&args.new_name, false)
+            .map_err(|e| DialogError::Failed(e.to_string()))?;
+        let state = if found.deleted { " (deleted)" } else { "" };
+        let object = format!(
+            "{} {}{state}",
+            type_name(&found.object_type),
+            short_uuid(&found.id)
+        );
+        dialog::step_value("Tag", &args.name)?;
+        dialog::step_value("New name", &args.new_name)?;
+        dialog::step_value("Object", &object)?;
+        dialog::confirm(args.yes, true)?;
+        let renamed = tags
+            .rename(&args.name, &args.new_name)
+            .map_err(|e| DialogError::Failed(e.to_string()))?;
+        Ok(format!("Renamed tag {} to {}", args.name, renamed.name).into())
+    })
 }
 
 pub fn delete(args: TagDeleteArgs) -> Result<(), CliError> {
