@@ -63,9 +63,10 @@ conventions in _[Keep a Changelog]_. Release versions use [semantic versioning].
 
 ### Other changes
 
-- The `large` model size of the Claude driver defaults to `opus`, which is the
-  latest Opus, where it was `claude-opus-4-8`. Set
-  `drivers.claude.models.large` to keep a fixed model
+- The model sizes of the Claude driver default to `haiku`, `sonnet`, and `opus`,
+  which are the latest release of each family. They were `claude-haiku-4-5`,
+  `claude-sonnet-4-6`, and `claude-opus-4-8`. Set
+  `drivers.claude.models.small`, `medium`, or `large` to keep a fixed model
 
 ## [0.6.0]
 

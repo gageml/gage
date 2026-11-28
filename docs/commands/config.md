@@ -31,8 +31,8 @@ with its full path.
 ```toml
 backup.native = []
 drivers.claude.models.large = "opus"
-drivers.claude.models.medium = "claude-sonnet-4-6"
-drivers.claude.models.small = "claude-haiku-4-5"
+drivers.claude.models.medium = "sonnet"
+drivers.claude.models.small = "haiku"
 drivers.codex.models.large = "gpt-6.1-sol"
 drivers.codex.models.medium = "gpt-6.1-terra"
 drivers.codex.models.small = "gpt-6-luna"

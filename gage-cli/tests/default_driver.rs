@@ -71,7 +71,7 @@ fn model_sizes_list_the_driver_default_until_config_sets_one() {
         &["config", "get", "drivers.claude.models.medium"],
     );
     assert_eq!(code, 0, "{stderr}");
-    assert_eq!(stdout.trim_end(), "claude-sonnet-4-6");
+    assert_eq!(stdout.trim_end(), "sonnet");
 
     fs::write(
         home.path().join("config.toml"),
@@ -89,7 +89,7 @@ fn model_sizes_list_the_driver_default_until_config_sets_one() {
         [
             "drivers.claude.models.large = \"opus\"",
             "drivers.claude.models.medium = \"claude-sonnet-5-5\"",
-            "drivers.claude.models.small = \"claude-haiku-4-5\"",
+            "drivers.claude.models.small = \"haiku\"",
         ]
     );
     let (code, _stdout, stderr) = run(home.path(), &["scanner", "list"]);

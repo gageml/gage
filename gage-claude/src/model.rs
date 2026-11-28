@@ -1,12 +1,9 @@
 //! Model resolution for values passed to `claude --model`. A size
 //! name (`small`/`medium`/`large`) resolves to a model. The family
 //! aliases claude documents (`haiku`/`sonnet`/`opus`) track the latest
-//! release of each family. The `large` size defaults to the `opus`
-//! alias, so it follows the latest Opus. The 5.x releases refuse
-//! routine Gage prompts through the reasoning_extraction safety
-//! classifier, so `small` and `medium` default to the latest 4.x
-//! release of their family. Family aliases and concrete model ids
-//! pass through unchanged.
+//! release of each family. Each size defaults to the alias of one
+//! family, so it follows the latest release of that family. Family
+//! aliases and concrete model ids pass through unchanged.
 
 use gage_session::{ModelChoice, ModelChoices, ModelSizes};
 
@@ -18,8 +15,8 @@ pub const DEFAULT_MODEL: &str = "medium";
 /// The model each size resolves to when the user's config sets none.
 pub fn default_sizes() -> ModelSizes {
     ModelSizes {
-        small: Some("claude-haiku-4-5".to_string()),
-        medium: Some("claude-sonnet-4-6".to_string()),
+        small: Some("haiku".to_string()),
+        medium: Some("sonnet".to_string()),
         large: Some("opus".to_string()),
     }
 }
@@ -88,8 +85,8 @@ mod tests {
     fn resolves_sizes_to_their_defaults() {
         let sizes = default_sizes();
         assert_eq!(resolve_model("large", &sizes), "opus");
-        assert_eq!(resolve_model("medium", &sizes), "claude-sonnet-4-6");
-        assert_eq!(resolve_model("small", &sizes), "claude-haiku-4-5");
+        assert_eq!(resolve_model("medium", &sizes), "sonnet");
+        assert_eq!(resolve_model("small", &sizes), "haiku");
     }
 
     #[test]
@@ -109,7 +106,7 @@ mod tests {
     #[test]
     fn default_model_when_unset() {
         let sizes = default_sizes();
-        assert_eq!(resolved_model(None, &sizes), "claude-sonnet-4-6");
+        assert_eq!(resolved_model(None, &sizes), "sonnet");
         assert_eq!(resolved_model(Some("large"), &sizes), "opus");
         assert_eq!(
             resolved_model(Some("claude-haiku-4-5"), &sizes),
@@ -125,7 +122,7 @@ mod tests {
         });
         assert_eq!(resolved_model(None, &sizes), "claude-sonnet-5-5");
         assert_eq!(resolved_model(Some("medium"), &sizes), "claude-sonnet-5-5");
-        assert_eq!(resolved_model(Some("small"), &sizes), "claude-haiku-4-5");
+        assert_eq!(resolved_model(Some("small"), &sizes), "haiku");
         assert_eq!(resolved_model(Some("sonnet"), &sizes), "sonnet");
     }
 }
