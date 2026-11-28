@@ -41,8 +41,8 @@ to one of the other locations below and edit the copy.
 
 ## Scanner locations
 
-Gage loads scanners from three places. A scanner in a more specific place
-shadows one with the same name in a less specific place.
+Gage loads scanners from three places. A scanner in the first place shadows
+one with the same name in the second.
 
 1. `.gage/scanners/` in the current project directory or any directory above it
 2. `~/.gage/local/scanners/`, for scanners you write for yourself
@@ -50,7 +50,10 @@ shadows one with the same name in a less specific place.
 
 A scanner in the first two places is a directory holding a `scanner.rn` file,
 or a single `.rn` file. An installed scanner is the directory
-`NAMESPACE/NAME` under the third place. `gage scanner list` shows every scanner
+`NAMESPACE/NAME` under the third place, and that is also its full name. A
+scanner in the first two places has the full name `local/NAME`. A name without a
+namespace selects the local scanner before the installed one, and the full name
+selects either. `gage scanner list` shows every scanner
 Gage finds and where it came from. To run a scanner that is not in one of
 these places, pass its path to `gage scan -s`.
 

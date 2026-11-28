@@ -65,14 +65,13 @@ use datafusion::datasource::{MemTable, TableProvider, ViewTable};
 use datafusion::execution::session_state::SessionStateBuilder;
 use datafusion::prelude::{SessionConfig, SessionContext};
 use gage_registry::driver::DriverRegistry;
-use gage_registry::scanner::ScannerRegistry;
 use gage_session::{ContentSchema, DriverError, content_schema_batch, content_schema_schema};
 use gage_store::{
-    ExternalSession, LinkKind, NoteDocRow, Store, StoredNoteTable, StoredSessionTable,
-    attachment_file_table, attachment_table, dataset_table, issue_event_table, issue_report_fn,
-    issue_table, link_table, note_doc_rows, note_doc_schema, object_key_table, related_issue_fn,
-    scan_log_table, scan_scope_tables, scan_table, scan_task_agent_table, scan_task_table,
-    scan_watermark_table, share_table, tag_table,
+    ExternalSession, LinkKind, Store, StoredNoteTable, StoredSessionTable, attachment_file_table,
+    attachment_table, dataset_table, issue_event_table, issue_report_fn, issue_table, link_table,
+    note_doc_table, object_key_table, related_issue_fn, scan_log_table, scan_scope_tables,
+    scan_table, scan_task_agent_table, scan_task_table, scan_watermark_table, share_table,
+    tag_table,
 };
 
 use crate::age::age_udf;
@@ -260,7 +259,7 @@ impl ContextBuilder {
         }
         ctx.register_table(SCAN_WATERMARK, scan_watermark_table(Arc::clone(&store)))
             .expect("register the watermark table on a fresh context");
-        ctx.register_table("note_doc", registry_note_doc_table())
+        ctx.register_table("note_doc", note_doc_table(Arc::clone(&store)))
             .expect("register the note doc table on a fresh context");
         register_issue_functions(&ctx, &store);
         ctx.register_udtf("blame", blame_fn(Arc::clone(&store), cache_root));
@@ -481,29 +480,6 @@ fn build_scan_scope(
 fn register_issue_functions(ctx: &SessionContext, store: &Arc<Mutex<Store>>) {
     ctx.register_udtf("issue_report", issue_report_fn(Arc::clone(store)));
     ctx.register_udtf("related_issue", related_issue_fn(Arc::clone(store)));
-}
-
-/// The `note_doc` table of the store scope: every `writes` declaration
-/// of every registered scanner, read once when the context is built.
-fn registry_note_doc_table() -> Arc<dyn TableProvider> {
-    let registry = ScannerRegistry::load();
-    let mut rows = Vec::new();
-    for def in registry.list() {
-        for (task, def_task) in &def.tasks {
-            for (name, doc) in &def_task.notes.writes {
-                rows.push(NoteDocRow {
-                    note_name: name.clone(),
-                    doc: doc.clone(),
-                    written_by: format!("{}:{task}", def.name),
-                });
-            }
-        }
-    }
-    let batch = note_doc_rows(&rows).expect("note doc rows are plain strings");
-    Arc::new(
-        MemTable::try_new(note_doc_schema(), vec![vec![batch]])
-            .expect("a batch of its own schema is a valid table"),
-    )
 }
 
 /// The system-tier table of watermarks
@@ -2073,31 +2049,37 @@ mod tests {
         write(
             "plan.json",
             r#"{"tasks":[
-                {"task":"hello:greet","selected":"explicit","after":[],"unmatched_note_wants":[],"scanner_ns":"gage","scanner_version":"0.1.0","params":{"x":41}},
-                {"task":"hello:fail","selected":"group:default","after":[],"unmatched_note_wants":[]},
-                {"task":"hello:after","selected":"group:eval","after":[],"unmatched_note_wants":[]}
+                {"task":"gage/hello:greet","selected":"explicit","after":[],"unmatched_note_wants":[],"note_writes":{"greeting":"A greeting"},"scanner_version":"0.1.0","params":{"x":41}},
+                {"task":"gage/hello:fail","selected":"group:default","after":[],"unmatched_note_wants":[]},
+                {"task":"gage/hello:after","selected":"group:eval","after":[],"unmatched_note_wants":[]}
             ]}"#,
         );
         write(
-            "tasks/hello/greet/attrs.json",
+            "tasks/gage/hello/greet/attrs.json",
             r#"{"status":"completed","started":1000,"stopped":1200}"#,
         );
         write(
-            "tasks/hello/fail/attrs.json",
+            "tasks/gage/hello/fail/attrs.json",
             r#"{"status":"failed","started":1200,"stopped":1500}"#,
         );
-        write("tasks/hello/after/attrs.json", r#"{"status":"canceled"}"#);
         write(
-            "tasks/hello/greet/agents/AGENT1/attrs.json",
+            "tasks/gage/hello/after/attrs.json",
+            r#"{"status":"canceled"}"#,
+        );
+        write(
+            "tasks/gage/hello/greet/agents/AGENT1/attrs.json",
             r#"{"exit_code":0,"is_error":false,"stop_reason":"end_turn","turns":2,"duration_ms":1500,"cost_usd":0.5}"#,
         );
-        write("tasks/hello/greet/agents/AGENT1/stderr", "");
+        write("tasks/gage/hello/greet/agents/AGENT1/stderr", "");
         write(
-            "tasks/hello/greet/agents/AGENT1/result",
+            "tasks/gage/hello/greet/agents/AGENT1/result",
             r#"{"is_error":false,"total_cost_usd":0.5}"#,
         );
         // An agent still running: its record is the native id alone
-        write("tasks/hello/greet/agents/AGENT2/native_id", "native-2\n");
+        write(
+            "tasks/gage/hello/greet/agents/AGENT2/native_id",
+            "native-2\n",
+        );
         write("logs/out", "hello, world\n");
         write("logs/err", "task hello:fail failed\nboom\n");
         root
@@ -2132,30 +2114,42 @@ mod tests {
             strings(&ctx, "SELECT selected FROM scan_task ORDER BY num").await,
             ["explicit", "group:default", "group:eval"]
         );
-        // The plan records a namespace and a version for `greet`
-        // alone, as for a scanner that was installed beside ones that
-        // were not
+        // The scanner is named with its namespace. The plan records a
+        // version for `greet` alone, as a plan written before versions
+        // were recorded has none
         assert_eq!(
             strings(
                 &ctx,
-                "SELECT concat(scanner_ns, '/', scanner_name, ':', scanner_version) \
-                 FROM scan_task WHERE scanner_ns IS NOT NULL"
+                "SELECT concat(scanner, ' ', scanner_version) FROM scan_task \
+                 WHERE scanner_version IS NOT NULL"
             )
             .await,
-            ["gage/hello:0.1.0"]
+            ["gage/hello 0.1.0"]
         );
         assert_eq!(
             strings(
                 &ctx,
-                "SELECT task FROM scan_task \
-                 WHERE scanner_ns IS NULL AND scanner_version IS NULL ORDER BY num"
+                "SELECT task FROM scan_task WHERE scanner_version IS NULL ORDER BY num"
             )
             .await,
             ["fail", "after"]
         );
         assert_eq!(
-            strings(&ctx, "SELECT DISTINCT scanner_name FROM scan_task_agent").await,
-            ["hello"]
+            strings(&ctx, "SELECT DISTINCT scanner FROM scan_task_agent").await,
+            ["gage/hello"]
+        );
+        // `note_doc` holds the doc a task of this scan declared, with
+        // the scan and the task
+        assert_eq!(
+            strings(
+                &ctx,
+                &format!(
+                    "SELECT concat(note_name, '|', doc, '|', scanner, '|', task) \
+                     FROM note_doc WHERE scan_id = '{id}'"
+                )
+            )
+            .await,
+            ["greeting|A greeting|gage/hello|greet"]
         );
         // The plan records params for `greet` alone, as a plan written
         // before params were recorded has none

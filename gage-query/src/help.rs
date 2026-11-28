@@ -259,8 +259,15 @@ null for a structured note. target names the object the note is on as
 session:<id>#<lines>, or attachment:<id>; the note_write tool writes the two
 session forms; gage note add --target writes any stored object, as in
 note:<id>, issue:<id>, scan:<id>, or dataset:<id>. scan is the scan the note was
-written during. Each name has a row in note_doc (note_name, doc, written_by) describing
-what notes of that name hold. session_note (session_id, note_id, lines) is the
+written during. A scanner task that wrote the note is its author, as
+task:<scanner>:<task>. note_doc (scan_id, note_name, doc, scanner, task) is one
+row per note name a task of a scan declared, with the doc that says what notes of
+that name hold. The doc is the one in force when the scan ran. A note written
+outside a scan has no row. The doc of each note of a scan:
+SELECT n.id, d.doc FROM note n JOIN note_doc d ON d.scan_id = n.scan
+AND d.note_name = n.name AND concat('task:', d.scanner, ':', d.task) = n.author
+WHERE n.scan = '<SCAN_ID>'; the docs of one note name across scans: SELECT DISTINCT
+doc FROM note_doc WHERE note_name = '<NAME>'. session_note (session_id, note_id, lines) is the
 session-targeted notes; lines is the cited line ranges as text, for example
 831-838 or 211-282,317, null when the note cites no lines."#,
     },
@@ -289,19 +296,20 @@ WHERE sc.scan_id = '<SCAN_ID>' AND NOT sc.carried;
 
 scan_issue (scan_id, issue_id) links a scan to the issues it wrote.
 
-scan_task (scan_id, num, scanner_ns, scanner_name, scanner_version, task, status,
-started, stopped, worked_ms, selected, params) is one row per task of a scan; num
-is the task's position in the plan; status is pending, started, completed, failed,
-or canceled. scanner_ns is the namespace the scanner was installed under, null
-for a scanner that was not installed. scanner_version is the version the scanner
-declares, null when it declares none. Both are null for a scan made before they
-were recorded. params is
+scan_task (scan_id, num, scanner, scanner_version, task, status, started, stopped,
+worked_ms, selected, params) is one row per task of a scan; num is the task's
+position in the plan; status is pending, started, completed, failed, or canceled.
+scanner is the scanner's full name, <namespace>/<name>: the namespace is the one
+the scanner was installed under, and local for a scanner that was not installed.
+A scan made before scanners had namespaces holds the name alone. scanner_version
+is the version the scanner declares, null when it declares none and for a scan
+made before it was recorded. params is
 the resolved params the task's scanner ran with, a JSON object: the declared
 defaults with the configured and command-line values applied. It is {} for a
 scanner that declares none and null for a scan made before params were recorded.
-Read one value: SELECT DISTINCT scanner_name, json_extract(params, '$.x') FROM
+Read one value: SELECT DISTINCT scanner, json_extract(params, '$.x') FROM
 scan_task WHERE scan_id = '<SCAN_ID>'; scan_task_agent
-(scan_id, scanner_name, task, session_id, native_id, exit_code, is_error, stop_reason,
+(scan_id, scanner, task, session_id, native_id, exit_code, is_error, stop_reason,
 turns, duration_ms, cost_usd, result) is one row per agent a task ran; session_id
 is the agent's stored session, native_id its native UUID, result the harness's
 result message verbatim. An agent still running has null result columns, and

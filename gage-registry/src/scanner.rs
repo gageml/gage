@@ -255,9 +255,6 @@ pub struct Problem {
 pub struct ScannerDef {
     pub name: String,
     pub description: String,
-    /// The namespace an installed scanner was installed under; empty
-    /// for a scanner of any other root, which has none
-    pub namespace: String,
     /// `SCANNER.version`; empty when the scanner declares none
     pub version: String,
     /// `SCANNER.api`: the scanner API level the scanner was written
@@ -283,6 +280,19 @@ pub struct ScannerDef {
 }
 
 impl ScannerDef {
+    /// The namespace of the scanner: the one it was installed under,
+    /// or [`LOCAL_NAMESPACE`].
+    pub fn namespace(&self) -> &str {
+        self.name
+            .split_once('/')
+            .map_or("", |(namespace, _)| namespace)
+    }
+
+    /// The name the scanner declares, without its namespace.
+    pub fn short_name(&self) -> &str {
+        short_name(&self.name)
+    }
+
     pub fn params_def(&self) -> Object {
         match const_field(&self.ast, &self.source, "SCANNER", "params") {
             Some(ast::Expr::Object(obj)) => parse_params_def(&self.source, obj),
@@ -601,12 +611,44 @@ fn display_path_impl(abs: &Path, manifest_name: &str, home: Option<&str>) -> Str
     }
 }
 
+/// The namespace of a scanner that was not installed: one of a
+/// project, of the user's own directory, or given as a file. No
+/// scanner source can publish under it.
+pub const LOCAL_NAMESPACE: &str = "local";
+
+/// Why a name selects no one scanner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolveError {
+    Unknown(String),
+    /// A name without a namespace that more than one installed
+    /// scanner has; `matches` are their full names
+    Ambiguous {
+        name: String,
+        matches: Vec<String>,
+    },
+}
+
+impl fmt::Display for ResolveError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ResolveError::Unknown(name) => write!(f, "Unknown scanner: {name}"),
+            ResolveError::Ambiguous { name, matches } => write!(
+                f,
+                "More than one scanner is named {name}: {}",
+                matches.join(", ")
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ResolveError {}
+
 pub struct ScannerRegistry {
     defs: Vec<ScannerDef>,
     errors: Vec<(PathBuf, String)>,
-    // Short declared name -> ordered indices into `defs`, highest
-    // precedence first. Same-name entries beyond the first are
-    // shadowed and surfaced only through diagnostics.
+    // Full name -> ordered indices into `defs`, highest precedence
+    // first. Same-name entries beyond the first are shadowed and
+    // surfaced only through diagnostics.
     by_name: HashMap<String, Vec<usize>>,
 }
 
@@ -645,11 +687,13 @@ impl ScannerRegistry {
                     }
                 };
 
-                match parse_scanner(&code, &key, &path) {
-                    Ok(mut def) => {
-                        if is_installed {
-                            def.namespace = installed_namespace(&path);
-                        }
+                let namespace = if is_installed {
+                    installed_namespace(&path)
+                } else {
+                    LOCAL_NAMESPACE.to_string()
+                };
+                match parse_scanner(&code, &key, &path, &namespace) {
+                    Ok(def) => {
                         let idx = defs.len();
                         let name = def.name.clone();
                         defs.push(def);
@@ -694,7 +738,40 @@ impl ScannerRegistry {
         }
     }
 
+    /// The scanner `name` selects. A full name, `<namespace>/<name>`,
+    /// selects that scanner. A name without a namespace selects the
+    /// local scanner of that name, and otherwise the installed one,
+    /// which must be the only installed scanner of that name.
+    pub fn resolve(&self, name: &str) -> Result<&ScannerDef, ResolveError> {
+        if name.contains('/') {
+            return self
+                .by_full_name(name)
+                .ok_or_else(|| ResolveError::Unknown(name.to_string()));
+        }
+        if let Some(def) = self.by_full_name(&format!("{LOCAL_NAMESPACE}/{name}")) {
+            return Ok(def);
+        }
+        let matches: Vec<&ScannerDef> = self
+            .list()
+            .into_iter()
+            .filter(|def| def.short_name() == name)
+            .collect();
+        match matches.as_slice() {
+            [] => Err(ResolveError::Unknown(name.to_string())),
+            [def] => Ok(def),
+            _ => Err(ResolveError::Ambiguous {
+                name: name.to_string(),
+                matches: matches.iter().map(|def| def.name.clone()).collect(),
+            }),
+        }
+    }
+
+    /// The scanner `name` selects, when it selects exactly one.
     pub fn get_def(&self, name: &str) -> Option<&ScannerDef> {
+        self.resolve(name).ok()
+    }
+
+    fn by_full_name(&self, name: &str) -> Option<&ScannerDef> {
         let idx = *self.by_name.get(name)?.first()?;
         Some(
             self.defs
@@ -703,12 +780,12 @@ impl ScannerRegistry {
         )
     }
 
-    /// True if `name` maps to a parsed scanner in the registry. A
+    /// True if `name` selects a parsed scanner in the registry. A
     /// scanner file that failed to parse has no reliable declared
     /// name and is not reachable through this predicate. Surface
     /// parse failures via `parse_errors()`.
     pub fn is_known(&self, name: &str) -> bool {
-        self.by_name.contains_key(name)
+        self.get_def(name).is_some()
     }
 
     /// All parse failures discovered during load, as `(path,
@@ -778,26 +855,16 @@ impl ScannerRegistry {
         defs.sort_by(|a, b| a.name.cmp(&b.name));
         defs
     }
-
-    /// Docstring for `note_name` from any scanner's `notes.writes`.
-    /// Resolution order is by scanner name then task name (both ascending);
-    /// last write wins for deterministic behaviour on duplicates. Returns
-    /// `None` if no scanner declares the note, or declares it without
-    /// a doc.
-    pub fn note_doc(&self, note_name: &str) -> Option<String> {
-        let mut found: Option<String> = None;
-        for def in self.list() {
-            for task in def.tasks.values() {
-                if let Some(doc) = task.notes.writes.get(note_name).filter(|d| !d.is_empty()) {
-                    found = Some(doc.clone());
-                }
-            }
-        }
-        found
-    }
 }
 
-fn parse_scanner(source: &str, embed_key: &str, path: &Path) -> Result<ScannerDef, ParseError> {
+/// Parse a scanner's source. The scanner's name is the name its
+/// `SCANNER` declares under `namespace`.
+fn parse_scanner(
+    source: &str,
+    embed_key: &str,
+    path: &Path,
+    namespace: &str,
+) -> Result<ScannerDef, ParseError> {
     let file = parse::parse_all::<ast::File>(source, SourceId::empty(), false)
         .map_err(ParseError::Syntax)?;
 
@@ -842,7 +909,16 @@ fn parse_scanner(source: &str, embed_key: &str, path: &Path) -> Result<ScannerDe
                     continue;
                 };
                 match key.as_deref() {
-                    Some("name") => scanner_name = expr_str(source, expr),
+                    Some("name") => {
+                        scanner_name = expr_str(source, expr);
+                        if scanner_name.as_deref().is_some_and(|name| !name_ok(name)) {
+                            problems.push(problem(
+                                expr,
+                                "SCANNER field 'name' must not be empty, start with '.', \
+                                 or contain '/' or ':'",
+                            ));
+                        }
+                    }
                     Some("description") => {
                         description = expr_str(source, expr).and_then(|s| {
                             s.lines()
@@ -903,9 +979,8 @@ fn parse_scanner(source: &str, embed_key: &str, path: &Path) -> Result<ScannerDe
     problems.sort_by_key(|p| p.start);
 
     Ok(ScannerDef {
-        name,
+        name: format!("{namespace}/{name}"),
         description: description.unwrap_or_default(),
-        namespace: String::new(),
         version,
         api,
         requires,
@@ -925,7 +1000,18 @@ fn parse_scanner(source: &str, embed_key: &str, path: &Path) -> Result<ScannerDe
 /// which do not enter the registry.
 pub fn parse_scanner_file(path: &Path) -> Result<ScannerDef, ParseDefFileError> {
     let (abs, embed_key, code) = read_def_file("scanner", path)?;
-    parse_scanner(&code, &embed_key, &abs)
+    parse_scanner(&code, &embed_key, &abs, LOCAL_NAMESPACE)
+        .map_err(|e| ParseDefFileError::Parse(e.render(&embed_key, &code)))
+}
+
+/// Parse a scanner file of a scanner source or of the installed
+/// root, which holds it under `namespace`.
+pub fn parse_scanner_file_in(
+    path: &Path,
+    namespace: &str,
+) -> Result<ScannerDef, ParseDefFileError> {
+    let (abs, embed_key, code) = read_def_file("scanner", path)?;
+    parse_scanner(&code, &embed_key, &abs, namespace)
         .map_err(|e| ParseDefFileError::Parse(e.render(&embed_key, &code)))
 }
 
@@ -1473,12 +1559,24 @@ fn strip_quotes(s: &str) -> String {
     }
 }
 
-/// The parts of a qualified scanner name `<namespace>/<name>`, when
+/// The parts of a full scanner name `<namespace>/<name>`, when
 /// `name` is one.
 pub fn split_qualified(name: &str) -> Option<(&str, &str)> {
     let (namespace, scanner) = name.split_once('/')?;
-    let part_ok = |part: &str| !part.is_empty() && !part.contains('/') && !part.starts_with('.');
-    (part_ok(namespace) && part_ok(scanner)).then_some((namespace, scanner))
+    (name_ok(namespace) && name_ok(scanner)).then_some((namespace, scanner))
+}
+
+/// The part of a scanner name after its namespace, or all of a name
+/// that has none.
+pub fn short_name(name: &str) -> &str {
+    name.rsplit_once('/').map_or(name, |(_, short)| short)
+}
+
+/// Whether `part` can be a namespace or the name a scanner declares.
+/// Each is one directory name in a stored scan, and `:` separates a
+/// scanner from its task.
+fn name_ok(part: &str) -> bool {
+    !part.is_empty() && !part.starts_with('.') && !part.contains(['/', ':'])
 }
 
 /// The source text of an expression.
@@ -1574,7 +1672,13 @@ pub const SCANNER = #{
     },
 };
 "#;
-        let def = parse_scanner(source, "demo", Path::new("/tmp/demo/scanner.rn")).unwrap();
+        let def = parse_scanner(
+            source,
+            "demo",
+            Path::new("/tmp/demo/scanner.rn"),
+            LOCAL_NAMESPACE,
+        )
+        .unwrap();
         assert!(def.problems.is_empty(), "{:?}", def.problems);
         let cfg = &def.tasks["claude_config"];
         assert_eq!(cfg.kind(), TaskKind::Attach);
@@ -1618,6 +1722,7 @@ pub const SCANNER = #{
             source,
             "/tmp/demo/scanner.rn",
             Path::new("/tmp/demo/scanner.rn"),
+            LOCAL_NAMESPACE,
         )
         .unwrap();
         let messages: Vec<&str> = def.problems.iter().map(|p| p.message.as_str()).collect();
@@ -1667,7 +1772,13 @@ pub const SCANNER = #{
     },
 };
 "#;
-        let def = parse_scanner(source, "demo", Path::new("/tmp/demo/scanner.rn")).unwrap();
+        let def = parse_scanner(
+            source,
+            "demo",
+            Path::new("/tmp/demo/scanner.rn"),
+            LOCAL_NAMESPACE,
+        )
+        .unwrap();
         let a = def.tasks.get("a").unwrap();
         assert_eq!(
             a.notes.writes,
@@ -1698,7 +1809,13 @@ pub const SCANNER = #{
     },
 };
 "#;
-        let def = parse_scanner(source, "demo", Path::new("/tmp/demo/scanner.rn")).unwrap();
+        let def = parse_scanner(
+            source,
+            "demo",
+            Path::new("/tmp/demo/scanner.rn"),
+            LOCAL_NAMESPACE,
+        )
+        .unwrap();
         let write = def.tasks.get("write").unwrap();
         assert_eq!(write.notes.writes.get("finding").unwrap(), "A finding");
         assert_eq!(
@@ -1723,7 +1840,13 @@ pub const SCANNER = #{
     },
 };
 "#;
-        let def = parse_scanner(source, "demo", Path::new("/tmp/demo/scanner.rn")).unwrap();
+        let def = parse_scanner(
+            source,
+            "demo",
+            Path::new("/tmp/demo/scanner.rn"),
+            LOCAL_NAMESPACE,
+        )
+        .unwrap();
         let params = resolve_params(&def.params_def()).unwrap();
         assert_eq!(
             params,
@@ -1749,7 +1872,13 @@ pub const SCANNER = #{
     },
 };
 "#;
-        let def = parse_scanner(source, "demo", Path::new("/tmp/demo/scanner.rn")).unwrap();
+        let def = parse_scanner(
+            source,
+            "demo",
+            Path::new("/tmp/demo/scanner.rn"),
+            LOCAL_NAMESPACE,
+        )
+        .unwrap();
         let params = resolve_params(&def.params_def()).unwrap();
         assert_eq!(
             params,
@@ -1769,7 +1898,13 @@ pub const SCANNER = #{
     params: #{ wontfix: #{ value: [] }, mode: "roadmap", budget: 0 },
 };
 "#;
-        let def = parse_scanner(source, "demo", Path::new("/tmp/demo/scanner.rn")).unwrap();
+        let def = parse_scanner(
+            source,
+            "demo",
+            Path::new("/tmp/demo/scanner.rn"),
+            LOCAL_NAMESPACE,
+        )
+        .unwrap();
         let config: ScannerConfig = toml::from_str(
             r#"
 [demo.params]
@@ -1917,9 +2052,39 @@ unknown = 1
 
         // An installed scanner carries its namespace, and a scanner of
         // another root has none
-        assert_eq!(reg.get_def("only-installed").unwrap().namespace, "gage");
-        assert_eq!(reg.get_def("shared").unwrap().namespace, "");
-        assert_eq!(reg.get_def("only-user").unwrap().namespace, "");
+        assert_eq!(
+            reg.get_def("only-installed").unwrap().name,
+            "gage/only-installed"
+        );
+        assert_eq!(reg.get_def("only-user").unwrap().name, "local/only-user");
+        // A name without a namespace selects the local scanner before
+        // the installed one, and a full name selects either
+        assert_eq!(reg.get_def("shared").unwrap().name, "local/shared");
+        assert_eq!(
+            reg.get_def("gage/shared").unwrap().description,
+            "from-installed"
+        );
+        assert_eq!(
+            reg.resolve("missing").err(),
+            Some(ResolveError::Unknown("missing".to_string()))
+        );
+    }
+
+    #[test]
+    fn a_name_two_installed_scanners_have_selects_neither() {
+        let tmp = tempfile::tempdir().unwrap();
+        let installed = tmp.path().join("installed");
+        write_scanner(&installed, "a/same", "same", "from a");
+        write_scanner(&installed, "b/same", "same", "from b");
+        let reg = ScannerRegistry::load_from_roots(&installed, vec![installed.clone()]);
+
+        assert_eq!(reg.names(), ["a/same", "b/same"]);
+        assert_eq!(reg.get_def("b/same").unwrap().description, "from b");
+        let err = reg.resolve("same").err().unwrap();
+        assert_eq!(
+            err.to_string(),
+            "More than one scanner is named same: a/same, b/same"
+        );
     }
 
     #[test]
@@ -1939,7 +2104,7 @@ unknown = 1
         write_scanner(&installed, "gage/.kept.installing", "staged", "s");
 
         let reg = ScannerRegistry::load_from_roots(&installed, vec![installed.clone()]);
-        assert_eq!(reg.names(), ["kept"]);
+        assert_eq!(reg.names(), ["gage/kept"]);
     }
 
     #[test]
@@ -1953,7 +2118,13 @@ unknown = 1
                 requires: ["test/child", "bare"],
             };
         "#;
-        let def = parse_scanner(source, "/s/scanner.rn", Path::new("/s/scanner.rn")).unwrap();
+        let def = parse_scanner(
+            source,
+            "/s/scanner.rn",
+            Path::new("/s/scanner.rn"),
+            LOCAL_NAMESPACE,
+        )
+        .unwrap();
         assert_eq!(def.version, "1.2.0");
         assert_eq!(def.api, Some(3));
         assert_eq!(def.requires, ["test/child", "bare"]);
@@ -1964,7 +2135,13 @@ unknown = 1
         );
 
         let source = r#"pub const SCANNER = #{ name: "s", description: "d", api: "one" };"#;
-        let def = parse_scanner(source, "/s/scanner.rn", Path::new("/s/scanner.rn")).unwrap();
+        let def = parse_scanner(
+            source,
+            "/s/scanner.rn",
+            Path::new("/s/scanner.rn"),
+            LOCAL_NAMESPACE,
+        )
+        .unwrap();
         assert_eq!(def.api, None);
         assert_eq!(def.version, "");
         assert_eq!(

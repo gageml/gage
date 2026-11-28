@@ -257,7 +257,7 @@ fn write_generation_1_fixture() {
         r#"{"runtime":"gage fixture","started":1000,"stopped":2000,"canceled":false,"tasks":{"total":1,"completed":1,"failed":0}}"#,
     );
     write(
-        &scan.join("tasks/fixture/run/attrs.json"),
+        &scan.join("tasks/local/fixture/run/attrs.json"),
         r#"{"status":"completed","started":1000,"stopped":2000,"worked_ms":1000}"#,
     );
     write(&scan.join("logs/out"), "fixture\n");

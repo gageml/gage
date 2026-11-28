@@ -9,7 +9,6 @@ use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::prelude::SessionContext;
 use gage_core::uuid::short_uuid;
 use gage_query::ContextBuilder;
-use gage_registry::scanner::ScannerRegistry;
 use gage_store::{NOTE_TYPE, NoteEdit, NoteFull, NoteInput, NoteStore, NoteValue, Store, url};
 use tabled::{
     Table,
@@ -401,6 +400,23 @@ fn parse_metadata(raw: &str) -> Result<serde_json::Value, String> {
     Ok(value)
 }
 
+/// The doc that the task that wrote the note `id` declared for the
+/// note's name, in the scan the note was written during. `None` for a
+/// note that no scan wrote and for a declaration without a doc.
+async fn declared_doc(ctx: &SessionContext, id: &str) -> Result<Option<String>, CliError> {
+    let sql = format!(
+        "SELECT d.doc FROM note n JOIN note_doc d \
+         ON d.scan_id = n.scan AND d.note_name = n.name \
+         AND concat('task:', d.scanner, ':', d.task) = n.author \
+         WHERE n.id = '{id}' AND d.doc <> ''"
+    );
+    let batches = run_query(ctx, &sql).await.context("gage note show")?;
+    Ok(batches
+        .iter()
+        .find(|b| b.num_rows() > 0)
+        .map(|batch| column::<StringArray>(batch, 0).value(0).to_string()))
+}
+
 /// `$USER` when set and non-empty
 fn env_user() -> Option<String> {
     std::env::var_os("USER")
@@ -475,10 +491,9 @@ pub async fn show(args: NoteShowArgs) -> Result<(), CliError> {
         ("modified", iso(7)),
     ];
     if args.doc {
-        let registry = ScannerRegistry::load();
-        let doc = registry
-            .note_doc(&name)
-            .unwrap_or_else(|| "(no scanner declares this note)".to_string());
+        let doc = declared_doc(&ctx, &id)
+            .await?
+            .unwrap_or_else(|| "(no scan declares this note)".to_string());
         attrs.push(("doc", doc));
     }
 

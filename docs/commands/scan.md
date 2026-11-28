@@ -51,8 +51,10 @@ scans sessions from the past 30 days capped at 20.
 | `--no-dataset`                  | Run with no dataset; scanners see no sessions                       |
 | `-y, --yes`                     | Skip prompts and confirmation                                       |
 
-`--scanner` takes a scanner name. When no scanner has that name, the value is a
-path to a directory holding a `scanner.rn` or to a scanner file. A `#{...}`
+`--scanner` takes a scanner name, with or without its namespace. A name without
+one selects the local scanner of that name, and otherwise the installed one.
+When no scanner has that name, the value is a path to a directory holding a
+`scanner.rn` or to a scanner file. A `#{...}`
 suffix overrides the scanner's params.
 
 A session touches a directory when it wrote or read a file in the directory or

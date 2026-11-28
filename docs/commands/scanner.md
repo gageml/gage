@@ -21,9 +21,15 @@ The source holds each scanner in a directory named `NAMESPACE/NAME`. The
 `gage` namespace holds the scanners that Gage publishes. A scanner is installed
 to `~/.gage/lib/scanners/NAMESPACE/NAME`.
 
-A `SCANNER` argument is a scanner name such as `general`. When more than one
-namespace has a scanner of that name, give `NAMESPACE/NAME`, as in
-`gage/general`.
+A scanner's full name is `NAMESPACE/NAME`, as in `gage/general`. A scanner that
+was not installed is in the `local` namespace, as in `local/mine`. These are the
+scanners of a project, the scanners under `~/.gage/local/scanners/`, and a
+scanner given to `gage scan` as a path. The source cannot hold a `local`
+namespace.
+
+A `SCANNER` argument is a full name or the name alone, such as `general`. The
+name alone selects the local scanner of that name, and otherwise the installed
+one. When two installed scanners have the name, give the full name.
 
 Gage reads the source with Git when you run `gage scanner install`,
 `gage scanner upgrade`, `gage scanner search`, `gage scanner list --outdated`,

@@ -207,9 +207,6 @@ pub struct CompiledScanner {
     /// the scan tasks; the attach phase runs the attach tasks
     tasks: BTreeMap<String, TaskDef>,
     selection: Selection,
-    /// The namespace the scanner was installed under; empty when it
-    /// was not installed
-    namespace: String,
     /// The version the scanner declares; empty when it declares none
     version: String,
     /// The scanner's resolved params, read by `params()` in its tasks
@@ -360,7 +357,6 @@ pub fn compile(scanner: &Scanner<'_>) -> Result<CompiledScanner, Error> {
         dir: def.path.parent().map(Path::to_path_buf).unwrap_or_default(),
         tasks: def.tasks.clone(),
         selection: Selection::Explicit,
-        namespace: def.namespace.clone(),
         version: def.version.clone(),
         params: scanner.params.clone(),
         source_files: files,
@@ -554,7 +550,6 @@ pub async fn scan(
             name: &s.name,
             tasks: &s.tasks,
             selection: s.selection.clone(),
-            namespace: &s.namespace,
             version: &s.version,
             params: s.params.as_ref(),
         })
@@ -2411,7 +2406,7 @@ mod tests {
         let session = SessionStore::from(&store).get(&session_id).unwrap();
         assert_eq!(
             session.attrs.origin,
-            format!("session+task:{}/agentic:main/native-1", outcome.id)
+            format!("session+task:{}/local/agentic:main/native-1", outcome.id)
         );
         assert_eq!(session.attrs.project.as_deref(), Some("greeter"));
 
@@ -2420,7 +2415,7 @@ mod tests {
         let task = &record.content.tasks[0];
         assert_eq!(
             (task.scanner.as_str(), task.task.as_str()),
-            ("agentic", "main")
+            ("local/agentic", "main")
         );
         assert_eq!(task.agent_sessions, slice::from_ref(&session.commit_sha));
         assert_eq!(
@@ -2442,7 +2437,7 @@ mod tests {
             scans
                 .agent_file(
                     &outcome.commit_sha,
-                    "agentic",
+                    "local/agentic",
                     "main",
                     &session_id,
                     "result"
@@ -2454,7 +2449,7 @@ mod tests {
             scans
                 .agent_file(
                     &outcome.commit_sha,
-                    "agentic",
+                    "local/agentic",
                     "main",
                     &session_id,
                     "stderr"
@@ -2560,7 +2555,7 @@ mod tests {
                 .unwrap();
             assert_eq!(
                 session.attrs.origin,
-                format!("session+task:{}/runner:main/native-{p}", outcome.id)
+                format!("session+task:{}/local/runner:main/native-{p}", outcome.id)
             );
             assert_eq!(
                 session.attrs.project.as_deref(),
@@ -2866,37 +2861,40 @@ mod tests {
             } => message.clone(),
             other => panic!("expected the failure of task a, got {other:?}"),
         };
-        let notice = format!("task fail:a failed\n{failure}");
+        let notice = format!("task local/fail:a failed\n{failure}");
         let summary = summary_line(short_uuid(&outcome.id), &outcome.attrs);
         assert_eq!(
             events,
             [
                 Event::Started {
                     id: outcome.id.clone(),
-                    tasks: vec![("fail".into(), "a".into()), ("fail".into(), "b".into()),],
+                    tasks: vec![
+                        ("local/fail".into(), "a".into()),
+                        ("local/fail".into(), "b".into()),
+                    ],
                 },
                 Event::TaskStarted {
-                    scanner: "fail".into(),
+                    scanner: "local/fail".into(),
                     task: "a".into(),
                 },
                 Event::Scan(ScanOutput::Err(notice.clone())),
                 Event::TaskFinished {
-                    scanner: "fail".into(),
+                    scanner: "local/fail".into(),
                     task: "a".into(),
                     status: TaskStatus::Failed,
                     error: Some(failure.clone()),
                 },
                 Event::TaskStarted {
-                    scanner: "fail".into(),
+                    scanner: "local/fail".into(),
                     task: "b".into(),
                 },
                 Event::Output(TaskOutput {
-                    scanner: "fail".into(),
+                    scanner: "local/fail".into(),
                     task: "b".into(),
                     output: Output::Println("b ran".into()),
                 }),
                 Event::TaskFinished {
-                    scanner: "fail".into(),
+                    scanner: "local/fail".into(),
                     task: "b".into(),
                     status: TaskStatus::Completed,
                     error: None,
@@ -2959,13 +2957,13 @@ mod tests {
         assert_eq!(
             record.content.scanners,
             std::collections::BTreeMap::from([(
-                "fail".to_string(),
+                "local/fail".to_string(),
                 vec!["scanner.rn".to_string()]
             )])
         );
         assert_eq!(
             ScanStore::from(&store)
-                .source_file(&outcome.commit_sha, "fail", "scanner.rn")
+                .source_file(&outcome.commit_sha, "local/fail", "scanner.rn")
                 .unwrap()
                 .as_deref(),
             Some(FAIL_THEN_RUN.as_bytes()),
@@ -3019,7 +3017,7 @@ mod tests {
         .await;
         let outcome = outcome.unwrap();
         assert!(events.contains(&Event::Output(TaskOutput {
-            scanner: "logs".into(),
+            scanner: "local/logs".into(),
             task: "loud".into(),
             output: Output::Log {
                 level: gage_runtime::Level::Warn,
@@ -3044,17 +3042,24 @@ mod tests {
         // events do not, since the sink's copy is the one written
         let lines: Vec<&str> = records
             .lines()
-            .filter(|l| l.contains(" logs:loud: "))
+            .filter(|l| l.contains(" local/logs:loud: "))
             .collect();
         assert_eq!(lines.len(), 2, "{records}");
-        assert!(lines[0].ends_with("Z INFO logs:loud: count 3"), "{records}");
-        assert!(lines[1].ends_with("Z WARN logs:loud: careful"), "{records}");
+        assert!(
+            lines[0].ends_with("Z INFO local/logs:loud: count 3"),
+            "{records}"
+        );
+        assert!(
+            lines[1].ends_with("Z WARN local/logs:loud: careful"),
+            "{records}"
+        );
         assert!(!records.contains(" scanner::"), "{records}");
         let scanner_events = scanner_events.lock().unwrap();
         assert!(
-            scanner_events.contains(&"INFO scanner: count 3 scanner=logs task=loud".to_string())
+            scanner_events
+                .contains(&"INFO scanner: count 3 scanner=local/logs task=loud".to_string())
                 && scanner_events
-                    .contains(&"WARN scanner: careful scanner=logs task=loud".to_string()),
+                    .contains(&"WARN scanner: careful scanner=local/logs task=loud".to_string()),
             "{scanner_events:?}"
         );
     }
@@ -3155,12 +3160,12 @@ mod tests {
         let scans = ScanStore::from(&store);
         let record = scans.get(&outcome.id).unwrap();
         assert_eq!(
-            record.content.scanners["inc"],
+            record.content.scanners["local/inc"],
             ["..%2Fshared%2Fmsg.txt", "local.txt", "scanner.rn"]
         );
         assert_eq!(
             scans
-                .source_file(&outcome.commit_sha, "inc", "..%2Fshared%2Fmsg.txt")
+                .source_file(&outcome.commit_sha, "local/inc", "..%2Fshared%2Fmsg.txt")
                 .unwrap()
                 .as_deref(),
             Some(b"from shared\n".as_slice())
@@ -3345,7 +3350,7 @@ mod tests {
             records
                 .lines()
                 .any(|l| l.contains(" DEBUG gage_runtime::note: write_note")
-                    && l.ends_with(" task=notes:main")),
+                    && l.ends_with(" task=local/notes:main")),
             "{records}"
         );
     }
@@ -3382,7 +3387,7 @@ mod tests {
         assert_eq!(
             compiled.init().unwrap(),
             [QueryViewDef {
-                scanner: "viewer".into(),
+                scanner: "local/viewer".into(),
                 name: "tool_call".into(),
                 sql: "SELECT line FROM tool_use WHERE name = 'Read'".into(),
                 description: Some("Calls to one tool".into()),
@@ -3418,15 +3423,15 @@ mod tests {
         for (init, message) in [
             (
                 r#"pub fn init() { gage::context().query_view("v", "SELECT nope FROM tool_use"); }"#,
-                "initializing the scan: scanner viewer: view `v`:",
+                "initializing the scan: scanner local/viewer: view `v`:",
             ),
             (
                 r#"pub fn init() { gage::context().query_view("tool_use", "SELECT 1"); }"#,
-                "scanner viewer: view `tool_use`: a table or view already has that name",
+                "scanner local/viewer: view `tool_use`: a table or view already has that name",
             ),
             (
                 r#"pub fn init() { gage::context().query_view("v", "DROP TABLE tool_use"); }"#,
-                "scanner viewer: view `v`: the SQL is not a SELECT",
+                "scanner local/viewer: view `v`: the SQL is not a SELECT",
             ),
             (
                 r#"pub fn init() { gage::context().query_view("Bad Name", "SELECT 1"); }"#,
@@ -3434,11 +3439,11 @@ mod tests {
             ),
             (
                 r#"pub fn init() { Err("no") }"#,
-                "scanner viewer: init returned Err:",
+                "scanner local/viewer: init returned Err:",
             ),
             (
                 r#"pub fn init() { gage::scan(); }"#,
-                "initializing the scan: scanner viewer:",
+                "initializing the scan: scanner local/viewer:",
             ),
         ] {
             let (_dir, compiled) = compile_source(&format!("{TASK}\n{init}"));
@@ -3495,7 +3500,7 @@ mod tests {
         .await;
         assert_eq!(
             outcome.unwrap_err().to_string(),
-            "initializing the scan: scanners one and two both define the query view `shared`"
+            "initializing the scan: scanners local/one and local/two both define the query view `shared`"
         );
         assert!(!root.exists());
     }
@@ -3515,7 +3520,7 @@ mod tests {
         );
         let err = compiled.err().unwrap().to_string();
         assert!(
-            err.starts_with("scanner viewer declares task init to run init"),
+            err.starts_with("scanner local/viewer declares task init to run init"),
             "{err}"
         );
     }
@@ -3555,7 +3560,7 @@ mod tests {
             &CancellationToken::new(),
         )
         .await;
-        assert!(matches!(outcome, Err(ScanError::DuplicateScanner(ref n)) if n == "hello"));
+        assert!(matches!(outcome, Err(ScanError::DuplicateScanner(ref n)) if n == "local/hello"));
         assert!(!root.exists());
     }
 
@@ -3572,7 +3577,7 @@ mod tests {
         );
         let err = compiled.err().unwrap();
         assert!(
-            matches!(&err, Error::MissingTask { scanner, task, .. } if scanner == "missing" && task == "nope"),
+            matches!(&err, Error::MissingTask { scanner, task, .. } if scanner == "local/missing" && task == "nope"),
             "{err}"
         );
     }
@@ -3816,7 +3821,7 @@ mod tests {
         assert_eq!(attached[1].targets, [format!("session:{session_id}")]);
         assert!(
             events.contains(&AttachEvent::Output(TaskOutput {
-                scanner: "attacher".into(),
+                scanner: "local/attacher".into(),
                 task: "cfg".into(),
                 output: Output::Println("claude-config added".into()),
             })),
@@ -3832,7 +3837,7 @@ mod tests {
         );
         assert!(
             events.contains(&AttachEvent::Output(TaskOutput {
-                scanner: "attacher".into(),
+                scanner: "local/attacher".into(),
                 task: "stack".into(),
                 output: Output::Println(format!("native Some({:?})", work.display().to_string())),
             })),
@@ -3840,7 +3845,7 @@ mod tests {
         );
         assert!(
             events.contains(&AttachEvent::Output(TaskOutput {
-                scanner: "attacher".into(),
+                scanner: "local/attacher".into(),
                 task: "stack".into(),
                 output: Output::Println(format!(
                     "natives {session_id} Some({:?})",
@@ -3851,7 +3856,7 @@ mod tests {
         );
         assert!(
             events.contains(&AttachEvent::Started {
-                scanner: "attacher".into(),
+                scanner: "local/attacher".into(),
                 task: "cfg".into(),
             }),
             "{events:?}"
@@ -3988,7 +3993,7 @@ mod tests {
                 task,
                 message,
             } => {
-                assert_eq!((scanner.as_str(), task.as_str()), ("broken", "bad"));
+                assert_eq!((scanner.as_str(), task.as_str()), ("local/broken", "bad"));
                 assert!(message.contains("/nonexistent/dir"), "{message}");
             }
             other => panic!("expected a task failure, got {other}"),
@@ -4022,7 +4027,7 @@ mod tests {
         let Error::Invalid { name, diagnostics } = &err else {
             panic!("expected Error::Invalid, got {err}");
         };
-        assert_eq!(name, "bad");
+        assert_eq!(name, "local/bad");
         assert!(
             diagnostics.contains("task 'main' field 'call' has unexpected type"),
             "{diagnostics}"
@@ -4059,7 +4064,7 @@ mod tests {
                 Error::Api {
                     name,
                     mismatch: ApiMismatch::NeedsNewerGage { level },
-                } if name == "ahead" && *level == newer
+                } if name == "local/ahead" && *level == newer
             ),
             "{err}"
         );
@@ -4309,7 +4314,7 @@ mod tests {
             outputs(&events),
             [
                 &Output::Println(format!(
-                    "thinking.empty task:notes:main Some(\"session:{session_id}#2\")"
+                    "thinking.empty task:local/notes:main Some(\"session:{session_id}#2\")"
                 )),
                 &Output::Println(format!("Some(\"session:{session_id}\")")),
                 &Output::Println(format!("Some(\"session:{session_id}#1-3\")")),
@@ -4335,7 +4340,7 @@ mod tests {
             .find(|n| n.name == "thinking.empty")
             .expect("the scanner wrote thinking.empty");
         assert_eq!(first.scan.as_deref(), Some(outcome.id.as_str()));
-        assert_eq!(first.author, "task:notes:main");
+        assert_eq!(first.author, "task:local/notes:main");
         assert_eq!(
             first.target_commit,
             Some(member_sha),
@@ -4514,7 +4519,7 @@ mod tests {
         let findings = &written[0];
         assert_eq!(findings.name, "findings");
         assert_eq!(findings.status, IssueStatus::Pending);
-        assert_eq!(findings.author, "task:issues:main");
+        assert_eq!(findings.author, "task:local/issues:main");
         assert_eq!(findings.scan.as_deref(), Some(outcome.id.as_str()));
         assert_eq!(
             findings.evidence,
@@ -4543,7 +4548,7 @@ mod tests {
             [
                 &Output::Println("before 0".into()),
                 &Output::Println(format!(
-                    "findings pending task:issues:main [\"{note_id}\"] Some(\"## Summary\\n\\nRetries.\")"
+                    "findings pending task:local/issues:main [\"{note_id}\"] Some(\"## Summary\\n\\nRetries.\")"
                 )),
                 &Output::Println("session-retention open 1 None".into()),
                 &Output::Println("args: write_issue evidence: object not found: nosuchnote".into()),
@@ -4642,7 +4647,10 @@ mod tests {
             "a stored scan's notes have commits"
         );
         let docs = scoped
-            .sql("SELECT doc, written_by FROM note_doc WHERE note_name = 'finding.code'")
+            .sql(
+                "SELECT doc, concat(scanner, ':', task) FROM note_doc \
+                 WHERE note_name = 'finding.code'",
+            )
             .await
             .unwrap()
             .collect()
@@ -4659,8 +4667,23 @@ mod tests {
         };
         assert_eq!(
             (text(0), text(1)),
-            ("A code finding".to_string(), "issues:main".to_string()),
+            (
+                "A code finding".to_string(),
+                "local/issues:main".to_string()
+            ),
             "the scan's plan carries the docs of the notes its tasks declare"
+        );
+        // A note joins to the doc its writing task declared, on the
+        // scan, the note name, and the task its author names
+        assert_eq!(
+            count(
+                "SELECT COUNT(*) FROM note n JOIN note_doc d \
+                 ON d.scan_id = n.scan AND d.note_name = n.name \
+                 AND concat('task:', d.scanner, ':', d.task) = n.author \
+                 WHERE d.doc = 'A code finding'"
+            )
+            .await,
+            1
         );
     }
 
@@ -5063,7 +5086,7 @@ mod tests {
         .unwrap_err();
         assert_eq!(
             err.to_string(),
-            "the dataset has no attachment for: needy:main needs 'claude-config'"
+            "the dataset has no attachment for: local/needy:main needs 'claude-config'"
         );
         assert!(!scans_dir.exists(), "nothing is written before the check");
         assert!(events.is_empty(), "{events:?}");
@@ -6548,7 +6571,7 @@ mod tests {
         assert_eq!(
             events[1],
             Event::Warning {
-                scanner: "deps".into(),
+                scanner: "local/deps".into(),
                 task: "wanty".into(),
                 message: "wants note 'nobody' but no task writes it".into(),
             },
@@ -6571,12 +6594,12 @@ mod tests {
             "release is in order: the failure releases wanty, and wanty releases chained"
         );
         assert!(events.contains(&Event::Output(TaskOutput {
-            scanner: "deps".into(),
+            scanner: "local/deps".into(),
             task: "wanty".into(),
             output: Output::Println("wanty ran".into()),
         })));
         assert!(events.contains(&Event::Output(TaskOutput {
-            scanner: "deps".into(),
+            scanner: "local/deps".into(),
             task: "chained".into(),
             output: Output::Println("chained ran".into()),
         })));
@@ -6616,7 +6639,7 @@ mod tests {
         )
         .unwrap();
         assert!(
-            records.contains(" WARN deps:wanty: wants note 'nobody' but no task writes it\n"),
+            records.contains(" WARN local/deps:wanty: wants note 'nobody' but no task writes it\n"),
             "{records}"
         );
         let plan: serde_json::Value =
@@ -6625,9 +6648,9 @@ mod tests {
         assert_eq!(
             plan["tasks"][1],
             serde_json::json!({
-                "task": "deps:wanty",
+                "task": "local/deps:wanty",
                 "selected": "explicit",
-                "after": [{ "task": "deps:write", "pattern": "x" }],
+                "after": [{ "task": "local/deps:write", "pattern": "x" }],
                 "unmatched_note_wants": ["nobody"],
                 "note_writes": { "y": "the y note" },
                 "params": {}
@@ -6635,7 +6658,7 @@ mod tests {
         );
         assert_eq!(
             plan["tasks"][0]["after"],
-            serde_json::json!([{ "task": "deps:wanty", "pattern": "y" }])
+            serde_json::json!([{ "task": "local/deps:wanty", "pattern": "y" }])
         );
     }
 

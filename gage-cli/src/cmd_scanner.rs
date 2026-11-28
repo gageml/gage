@@ -11,7 +11,9 @@ use gage_registry::DefSource;
 use gage_registry::catalog::{
     self, CatalogError, Entry, ScannerSet, Step, plan_install, plan_uninstall, plan_upgrade,
 };
-use gage_registry::scanner::{ScannerDef, ScannerRegistry, check_api, scanner_source};
+use gage_registry::scanner::{
+    ResolveError, ScannerDef, ScannerRegistry, check_api, scanner_source,
+};
 use tabled::{
     Table,
     settings::{
@@ -356,27 +358,23 @@ fn read_source(command: &str, config: &Config) -> Result<ScannerSet, CliError> {
 fn show(args: ScannerShowArgs) -> Result<(), CliError> {
     let config = Config::load_user().context("gage scanner show")?;
     let registry = ScannerRegistry::load();
-    let installed = ScannerSet::installed();
     // A registry name first, so the scanner shown is the one a scan
     // of that name runs
-    if let Some(def) = registry.get_def(&args.scanner) {
-        let namespace = installed
-            .iter()
-            .find(|e| e.def.path == def.path)
-            .map(|e| e.namespace.as_str());
-        println!("{}", attrs_table(&attrs(def, namespace, Shown::Found)));
-        return Ok(());
-    }
-    if let Ok(entry) = installed.resolve(&args.scanner) {
-        let attrs = attrs(&entry.def, Some(&entry.namespace), Shown::Found);
-        println!("{}", attrs_table(&attrs));
-        return Ok(());
+    match registry.resolve(&args.scanner) {
+        Ok(def) => {
+            println!("{}", attrs_table(&attrs(def, Shown::Found)));
+            return Ok(());
+        }
+        Err(e @ ResolveError::Ambiguous { .. }) => {
+            return Err(CliError::message(format!("gage scanner show: {e}")));
+        }
+        Err(ResolveError::Unknown(_)) => {}
     }
     let catalog = read_source("gage scanner show", &config)?;
     let entry = catalog
         .resolve(&args.scanner)
         .map_err(|e| CliError::message(format!("gage scanner show: {e}")))?;
-    let attrs = attrs(&entry.def, Some(&entry.namespace), Shown::Available);
+    let attrs = attrs(&entry.def, Shown::Available);
     println!("{}", attrs_table(&attrs));
     Ok(())
 }
@@ -390,7 +388,7 @@ enum Shown {
 
 /// The attributes `gage scanner show` prints, in order. An attribute
 /// the scanner does not declare is left out.
-fn attrs(def: &ScannerDef, namespace: Option<&str>, shown: Shown) -> Vec<(&'static str, String)> {
+fn attrs(def: &ScannerDef, shown: Shown) -> Vec<(&'static str, String)> {
     let source = match shown {
         Shown::Found => scanner_source(&def.path).to_string(),
         Shown::Available => "available".to_string(),
@@ -427,7 +425,6 @@ fn attrs(def: &ScannerDef, namespace: Option<&str>, shown: Shown) -> Vec<(&'stat
     };
     let all = [
         ("name", def.name.clone()),
-        ("namespace", namespace.unwrap_or_default().to_string()),
         ("version", def.version.clone()),
         ("api", api),
         ("source", source),
@@ -676,9 +673,9 @@ mod tests {
         assert_eq!(
             cells,
             [
-                ["alpha", "2.0.0", "project", "About alpha"],
-                ["beta", "1.0.0", "project", "About beta"],
-                ["off (disabled)", "", "project", "About off"],
+                ["ns/alpha", "2.0.0", "project", "About alpha"],
+                ["ns/beta", "1.0.0", "project", "About beta"],
+                ["ns/off (disabled)", "", "project", "About off"],
             ]
         );
     }
@@ -709,17 +706,12 @@ mod tests {
         write_scanner(tmp.path(), "ns/bare", "");
         let set = ScannerSet::read_installed(tmp.path());
 
-        let full = attrs(
-            &set.get("ns/full").unwrap().def,
-            Some("ns"),
-            Shown::Available,
-        );
+        let full = attrs(&set.get("ns/full").unwrap().def, Shown::Available);
         let labels: Vec<&str> = full.iter().map(|(label, _)| *label).collect();
         assert_eq!(
             labels,
             [
                 "name",
-                "namespace",
                 "version",
                 "api",
                 "source",
@@ -732,7 +724,7 @@ mod tests {
         assert!(full.contains(&("source", "available".to_string())));
         assert!(full.contains(&("requires", "ns/dep".to_string())));
 
-        let bare = attrs(&set.get("ns/bare").unwrap().def, None, Shown::Found);
+        let bare = attrs(&set.get("ns/bare").unwrap().def, Shown::Found);
         let labels: Vec<&str> = bare.iter().map(|(label, _)| *label).collect();
         assert_eq!(
             labels,

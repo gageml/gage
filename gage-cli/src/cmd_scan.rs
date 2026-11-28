@@ -765,7 +765,7 @@ impl StoreHost {
         let mut tasks = Vec::new();
         for batch in &query(
             &ctx,
-            "SELECT scanner_name, task, status, started, stopped, worked_ms \
+            "SELECT scanner, task, status, started, stopped, worked_ms \
              FROM scan_task ORDER BY num",
         )
         .await?
@@ -894,7 +894,7 @@ impl StoreHost {
         let mut agent_ids = Vec::new();
         for batch in &query(
             ctx,
-            "SELECT scanner_name, task, session_id, native_id, is_error, cost_usd \
+            "SELECT scanner, task, session_id, native_id, is_error, cost_usd \
              FROM scan_task_agent",
         )
         .await?
@@ -2333,7 +2333,7 @@ mod tests {
         ) else {
             panic!("the group did not resolve");
         };
-        assert_eq!(names, ["one"]);
+        assert_eq!(names, ["ns/one"]);
         assert!(!prompted);
     }
 
@@ -2498,10 +2498,10 @@ mod tests {
         );
         write(
             "plan.json",
-            r#"{"tasks":[{"task":"hello:greet","selected":"explicit","after":[],"unmatched_note_wants":[]}]}"#,
+            r#"{"tasks":[{"task":"local/hello:greet","selected":"explicit","after":[],"unmatched_note_wants":[]}]}"#,
         );
         write(
-            "tasks/hello/greet/attrs.json",
+            "tasks/local/hello/greet/attrs.json",
             r#"{"status":"completed","started":1000,"stopped":1200}"#,
         );
         for (agent, cost) in agents {
@@ -2510,7 +2510,7 @@ mod tests {
                 None => String::new(),
             };
             write(
-                &format!("tasks/hello/greet/agents/{agent}/attrs.json"),
+                &format!("tasks/local/hello/greet/agents/{agent}/attrs.json"),
                 &format!(
                     r#"{{"exit_code":0,"is_error":false,"stop_reason":"end_turn","turns":1,"duration_ms":10{cost}}}"#
                 ),
@@ -2610,7 +2610,7 @@ mod tests {
         let task = &model.tasks[0];
         assert_eq!(
             (task.id.scanner.as_str(), task.id.task.as_str()),
-            ("hello", "greet")
+            ("local/hello", "greet")
         );
         assert!(task.state == TaskState::Completed);
         assert_eq!(task.elapsed, Some(Duration::from_millis(200)));

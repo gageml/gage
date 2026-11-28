@@ -34,11 +34,9 @@ pub(crate) fn scan_task_schema() -> SchemaRef {
         Field::new("scan_id", DataType::Utf8, false),
         // Position in the plan, from 1
         Field::new("num", DataType::Int64, false),
-        // The namespace the scanner was installed under; null for a
-        // scanner that was not installed and for a scan whose plan
-        // does not record it
-        Field::new("scanner_ns", DataType::Utf8, true),
-        Field::new("scanner_name", DataType::Utf8, false),
+        // `<namespace>/<name>`; a scan of type version 1 holds the
+        // name without a namespace
+        Field::new("scanner", DataType::Utf8, false),
         // The version the scanner declares; null when it declares
         // none and for a scan whose plan does not record it
         Field::new("scanner_version", DataType::Utf8, true),
@@ -64,7 +62,7 @@ pub(crate) fn scan_task_schema() -> SchemaRef {
 pub(crate) fn scan_task_agent_schema() -> SchemaRef {
     Arc::new(Schema::new(vec![
         Field::new("scan_id", DataType::Utf8, false),
-        Field::new("scanner_name", DataType::Utf8, false),
+        Field::new("scanner", DataType::Utf8, false),
         Field::new("task", DataType::Utf8, false),
         // The agent session's object id
         Field::new("session_id", DataType::Utf8, false),
@@ -98,8 +96,7 @@ pub(crate) fn scan_task_agent_schema() -> SchemaRef {
 pub(crate) struct ScanTaskRow {
     pub scan_id: String,
     pub num: i64,
-    pub scanner_ns: Option<String>,
-    pub scanner_name: String,
+    pub scanner: String,
     pub scanner_version: Option<String>,
     pub task: String,
     pub status: &'static str,
@@ -114,7 +111,7 @@ pub(crate) struct ScanTaskRow {
 /// One `scan_task_agent` row from either scope.
 pub(crate) struct ScanTaskAgentRow {
     pub scan_id: String,
-    pub scanner_name: String,
+    pub scanner: String,
     pub task: String,
     pub session_id: String,
     pub native_id: Option<String>,
@@ -152,8 +149,7 @@ pub(crate) fn task_rows_of(
             ScanTaskRow {
                 scan_id: scan_id.to_string(),
                 num,
-                scanner_ns: entry.and_then(|e| e.scanner_ns.clone()),
-                scanner_name: t.scanner.clone(),
+                scanner: t.scanner.clone(),
                 scanner_version: entry.and_then(|e| e.scanner_version.clone()),
                 task: t.task.clone(),
                 status: t.attrs.status.as_str(),
@@ -184,7 +180,6 @@ fn plan_index(plan: Option<&Value>) -> HashMap<String, PlanEntry> {
                 label.to_string(),
                 PlanEntry {
                     num: i as i64 + 1,
-                    scanner_ns: text("scanner_ns"),
                     scanner_version: text("scanner_version"),
                     selected: text("selected"),
                     params: entry.get("params").map(Value::to_string),
@@ -199,8 +194,6 @@ fn plan_index(plan: Option<&Value>) -> HashMap<String, PlanEntry> {
 struct PlanEntry {
     /// Position in the plan, from 1
     num: i64,
-    /// `None` for a scanner that was not installed
-    scanner_ns: Option<String>,
     /// `None` for a scanner that declares no version
     scanner_version: Option<String>,
     selected: Option<String>,
@@ -223,7 +216,7 @@ pub(crate) fn agent_rows_of(
         for a in &t.agents {
             let mut row = ScanTaskAgentRow {
                 scan_id: scan_id.to_string(),
-                scanner_name: t.scanner.clone(),
+                scanner: t.scanner.clone(),
                 task: t.task.clone(),
                 session_id: a.id.clone(),
                 native_id: None,
@@ -260,7 +253,6 @@ pub(crate) fn scan_task_rows(rows: &[ScanTaskRow]) -> Result<RecordBatch> {
     let len = rows.len();
     let mut scan_ids = StringBuilder::with_capacity(len, len * 26);
     let mut nums = Int64Builder::with_capacity(len);
-    let mut scanner_nss = StringBuilder::new();
     let mut scanners = StringBuilder::new();
     let mut scanner_versions = StringBuilder::new();
     let mut tasks = StringBuilder::new();
@@ -274,8 +266,7 @@ pub(crate) fn scan_task_rows(rows: &[ScanTaskRow]) -> Result<RecordBatch> {
     for row in rows {
         scan_ids.append_value(&row.scan_id);
         nums.append_value(row.num);
-        scanner_nss.append_option(row.scanner_ns.as_deref());
-        scanners.append_value(&row.scanner_name);
+        scanners.append_value(&row.scanner);
         scanner_versions.append_option(row.scanner_version.as_deref());
         tasks.append_value(&row.task);
         statuses.append_value(row.status);
@@ -291,7 +282,6 @@ pub(crate) fn scan_task_rows(rows: &[ScanTaskRow]) -> Result<RecordBatch> {
         vec![
             Arc::new(scan_ids.finish()),
             Arc::new(nums.finish()),
-            Arc::new(scanner_nss.finish()),
             Arc::new(scanners.finish()),
             Arc::new(scanner_versions.finish()),
             Arc::new(tasks.finish()),
@@ -324,7 +314,7 @@ pub(crate) fn scan_task_agent_rows(rows: &[ScanTaskAgentRow]) -> Result<RecordBa
     let mut commits = StringBuilder::new();
     for row in rows {
         scan_ids.append_value(&row.scan_id);
-        scanners.append_value(&row.scanner_name);
+        scanners.append_value(&row.scanner);
         tasks.append_value(&row.task);
         sessions.append_value(&row.session_id);
         native_ids.append_option(row.native_id.as_deref());

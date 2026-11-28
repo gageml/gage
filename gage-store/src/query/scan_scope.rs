@@ -605,8 +605,9 @@ pub fn scan_scope_tables(
     tables.push((
         "note_doc",
         table(store, note_doc_schema(), move |store| {
+            let id = s.scan_id(store)?;
             let rows = match s.plan(store)? {
-                Some(plan) => note_doc_rows_from_plan(&plan),
+                Some(plan) => note_doc_rows_from_plan(&id, &plan),
                 None => Vec::new(),
             };
             note_doc_rows(&rows)

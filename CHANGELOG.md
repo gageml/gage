@@ -20,8 +20,20 @@ conventions in _[Keep a Changelog]_. Release versions use [semantic versioning].
   `--group`, it asks which scanners to run with none selected, and with `--yes`
   it stops with an error. The `default` group has no special meaning
 - `gage scan --list-scanners` is removed. Use `gage scanner list`
-- The `scanner` column of the `scan_task` and `scan_task_agent` tables is
-  renamed `scanner_name`. A query that names `scanner` on either table fails
+- A scanner's name includes its namespace, as in `gage/general`. A scanner that
+  was not installed is in the `local` namespace, as in `local/mine`. Scans,
+  notes, and the `scanner` column of `scan_task` and `scan_task_agent` record the
+  full name. `--scanner` and the config still accept the name alone
+- Two installed scanners can have the same name in different namespaces. The
+  name alone then selects neither, and Gage lists both full names
+- The scan object type is version 2, which stores each scanner under a
+  namespace directory. An earlier release of Gage cannot read a scan that this
+  release writes. This release reads scans of both versions
+- The `note_doc` table has the columns `scan_id`, `note_name`, `doc`, `scanner`,
+  and `task`, and `written_by` is removed. Its rows come from the scans in the
+  store and no longer from the scanners on the machine. A note name that no scan
+  has declared has no row
+- `gage note show --doc` shows the doc that the note's own scan declared
 - The `library` field of `SCANNER` and the `required_by` field of a task are
   no longer read. A scanner that set `library: true` now appears in listings.
   Set `hidden: true` to keep it out of them
@@ -40,10 +52,8 @@ conventions in _[Keep a Changelog]_. Release versions use [semantic versioning].
 - A scanner declares `requires`, the scanners installed with it
 - `gage init` installs the scanners that Gage publishes when none is
   installed. `--no-scanners` leaves them out
-- A scan records the namespace and the version of each scanner it ran. The
-  `scan_task` table holds them as `scanner_ns` and `scanner_version`. Both are
-  null for a scan made before this, and `scanner_ns` is null for a scanner
-  that was not installed
+- A scan records the version of each scanner it ran. The `scan_task` table
+  holds it as `scanner_version`, which is null for a scan made before this
 - A project config names a store of the project's own: `path` in a `store`
   table of `.gage/config.toml`, as a path under the project's `.gage` directory.
   Commands run in the project use that store. `GAGE_STORE` takes precedence

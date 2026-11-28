@@ -1,11 +1,18 @@
-//! Scan objects: `gage::scan 1`, reached through [`ScanStore`].
+//! Scan objects: `gage::scan 2`, reached through [`ScanStore`].
 //!
 //! Content is `attrs.json`; `dataset.link`, the scanned dataset's
 //! commit, when the scan had one; under `logs/`, the scan's `out`,
 //! `err`, and `records`; under `tasks/<scanner>/<task>/`, each task's
-//! `attrs.json`; and under `scanners/<name>/sourcecode.d/`, the
+//! `attrs.json`; and under `scanners/<scanner>/sourcecode.d/`, the
 //! scanner's source files as run, opaque to the store. Tasks have no
-//! logs of their own. The layout is the same in a active scan's
+//! logs of their own.
+//!
+//! A scanner's name is `<namespace>/<name>`, so `<scanner>` is two
+//! directory levels. Version 1 named a scanner without a namespace,
+//! and its `<scanner>` is one level. A scanner name read from a
+//! version 1 scan has no namespace.
+//!
+//! The layout is the same in a active scan's
 //! directory and in the store, so one decoder serves both through
 //! [`ScanFiles`]: [`DirFiles`] over a directory and the store's own
 //! view over a commit. [`ScanStore::create`] imports a scan
@@ -38,7 +45,9 @@ use crate::writer::{TreeInput, mktree, write_blob};
 use crate::{Store, StoreError};
 
 pub const OBJECT_TYPE: &str = "gage::scan";
-pub(crate) const OBJECT_VERSION: &str = "1";
+pub(crate) const OBJECT_VERSION: &str = "2";
+/// The layout version of a scan directory this build writes
+const CURRENT_LAYOUT: u32 = 2;
 pub(crate) const INDEXED_ATTRS: &[&str] = &[];
 const TASKS_DIR: &str = "tasks";
 const SCANNERS_DIR: &str = "scanners";
@@ -311,6 +320,8 @@ pub trait ScanFiles {
     /// The names of the files directly under `path`, sorted. Empty
     /// when `path` does not exist.
     fn list_files(&self, path: &str) -> Result<Vec<String>, StoreError>;
+    /// The scan type version whose layout the files follow.
+    fn layout(&self) -> Result<u32, StoreError>;
 }
 
 impl ScanStore<'_> {
@@ -688,7 +699,7 @@ impl ScanContent {
         let logs = files.list_files(LOGS_DIR)?;
         let tasks = read_tasks(files)?;
         let mut scanners = BTreeMap::new();
-        for scanner in files.list_dirs(SCANNERS_DIR)? {
+        for scanner in scanner_names(files, SCANNERS_DIR)? {
             let source = format!("{SCANNERS_DIR}/{scanner}/{SOURCE_DIR}");
             let mut paths = Vec::new();
             walk_files(files, &source, "", &mut paths)?;
@@ -738,7 +749,7 @@ fn read_plan(files: &dyn ScanFiles) -> Result<Option<serde_json::Value>, StoreEr
 /// yet, as well as a stored scan.
 pub fn read_tasks(files: &dyn ScanFiles) -> Result<Vec<ScanTask>, StoreError> {
     let mut tasks = Vec::new();
-    for scanner in files.list_dirs(TASKS_DIR)? {
+    for scanner in scanner_names(files, TASKS_DIR)? {
         let scanner_path = format!("{TASKS_DIR}/{scanner}");
         for task in files.list_dirs(&scanner_path)? {
             let task_path = format!("{scanner_path}/{task}");
@@ -761,6 +772,23 @@ pub fn read_tasks(files: &dyn ScanFiles) -> Result<Vec<ScanTask>, StoreError> {
         }
     }
     Ok(tasks)
+}
+
+/// The scanner names under `root`, which is `tasks` or `scanners`, in
+/// tree order. A version 1 scan holds each scanner in one directory.
+/// Later versions hold it in `<namespace>/<name>`.
+fn scanner_names(files: &dyn ScanFiles, root: &str) -> Result<Vec<String>, StoreError> {
+    let top = files.list_dirs(root)?;
+    if files.layout()? < 2 {
+        return Ok(top);
+    }
+    let mut names = Vec::new();
+    for namespace in top {
+        for name in files.list_dirs(&format!("{root}/{namespace}"))? {
+            names.push(format!("{namespace}/{name}"));
+        }
+    }
+    Ok(names)
 }
 
 /// The path of one file of a task's agent record, relative to the
@@ -921,29 +949,51 @@ fn parse_json<T: for<'de> Deserialize<'de>>(bytes: &[u8], path: &str) -> Result<
     serde_json::from_slice(bytes).map_err(|e| StoreError::Parse(format!("scan file {path}: {e}")))
 }
 
-/// Build the `tasks/` tree from a scan directory's `tasks/`. Returns
-/// `None` when the directory is absent or holds no scanner.
+/// Build the `tasks/` tree from a scan directory's `tasks/`:
+/// `<namespace>/<name>/<task>/`. Returns `None` when the directory is
+/// absent or holds no scanner.
 fn import_tasks_tree(store_path: &Path, tasks_dir: &Path) -> Result<Option<String>, StoreError> {
-    let mut scanner_trees: Vec<(String, String)> = Vec::new();
-    require_dirs_only(tasks_dir)?;
-    for scanner_dir in subdirs(tasks_dir)? {
+    import_namespaced_tree(store_path, tasks_dir, |scanner_dir| {
         let mut task_trees: Vec<(String, String)> = Vec::new();
-        require_dirs_only(&scanner_dir)?;
-        for task_dir in subdirs(&scanner_dir)? {
+        require_dirs_only(scanner_dir)?;
+        for task_dir in subdirs(scanner_dir)? {
             task_trees.push((
                 dir_name(&task_dir),
                 import_task_tree(store_path, &task_dir)?,
             ));
         }
-        scanner_trees.push((
-            dir_name(&scanner_dir),
-            tree_of_trees(store_path, &task_trees)?,
-        ));
+        tree_of_trees(store_path, &task_trees)
+    })
+}
+
+/// Build the tree of `root`, which holds one directory per namespace
+/// and under each one directory per scanner. `scanner_tree` builds a
+/// scanner's tree from its directory. Returns `None` when `root` is
+/// absent or holds no scanner.
+fn import_namespaced_tree(
+    store_path: &Path,
+    root: &Path,
+    scanner_tree: impl Fn(&Path) -> Result<String, StoreError>,
+) -> Result<Option<String>, StoreError> {
+    let mut namespace_trees: Vec<(String, String)> = Vec::new();
+    require_dirs_only(root)?;
+    for namespace_dir in subdirs(root)? {
+        let mut scanner_trees: Vec<(String, String)> = Vec::new();
+        require_dirs_only(&namespace_dir)?;
+        for scanner_dir in subdirs(&namespace_dir)? {
+            scanner_trees.push((dir_name(&scanner_dir), scanner_tree(&scanner_dir)?));
+        }
+        if !scanner_trees.is_empty() {
+            namespace_trees.push((
+                dir_name(&namespace_dir),
+                tree_of_trees(store_path, &scanner_trees)?,
+            ));
+        }
     }
-    if scanner_trees.is_empty() {
+    if namespace_trees.is_empty() {
         return Ok(None);
     }
-    Ok(Some(tree_of_trees(store_path, &scanner_trees)?))
+    Ok(Some(tree_of_trees(store_path, &namespace_trees)?))
 }
 
 /// Build one task's tree: the `attrs.json` and `agents.link` blobs
@@ -1039,18 +1089,16 @@ fn import_fixed_blobs(
 }
 
 /// Build the `scanners/` tree from a scan directory's `scanners/`:
-/// one subtree per scanner holding its opaque `sourcecode.d/` tree,
-/// imported as it is. Returns `None` when the directory is absent or
-/// holds no scanner.
+/// under `<namespace>/<name>/`, one subtree per scanner holding its
+/// opaque `sourcecode.d/` tree, imported as it is. Returns `None`
+/// when the directory is absent or holds no scanner.
 fn import_scanners_tree(
     store_path: &Path,
     scanners_dir: &Path,
 ) -> Result<Option<String>, StoreError> {
-    let mut scanner_trees: Vec<(String, String)> = Vec::new();
-    require_dirs_only(scanners_dir)?;
-    for scanner_dir in subdirs(scanners_dir)? {
-        for entry in fs::read_dir(&scanner_dir).map_err(|e| read_error(&scanner_dir, e))? {
-            let path = entry.map_err(|e| read_error(&scanner_dir, e))?.path();
+    import_namespaced_tree(store_path, scanners_dir, |scanner_dir| {
+        for entry in fs::read_dir(scanner_dir).map_err(|e| read_error(scanner_dir, e))? {
+            let path = entry.map_err(|e| read_error(scanner_dir, e))?.path();
             if !path.is_dir() || path.file_name().is_none_or(|n| n != SOURCE_DIR) {
                 return Err(StoreError::InvalidPath {
                     path: path.display().to_string(),
@@ -1067,12 +1115,8 @@ fn import_scanners_tree(
                 name: SOURCE_DIR,
             });
         }
-        scanner_trees.push((dir_name(&scanner_dir), mktree(store_path, &entries)?));
-    }
-    if scanner_trees.is_empty() {
-        return Ok(None);
-    }
-    Ok(Some(tree_of_trees(store_path, &scanner_trees)?))
+        mktree(store_path, &entries)
+    })
 }
 
 /// Import a directory as an opaque tree: every file beneath it, at its
@@ -1237,6 +1281,10 @@ impl ScanFiles for DirFiles {
         names.sort();
         Ok(names)
     }
+
+    fn layout(&self) -> Result<u32, StoreError> {
+        Ok(CURRENT_LAYOUT)
+    }
 }
 
 /// [`ScanFiles`] over a commit's tree.
@@ -1264,6 +1312,16 @@ impl ScanFiles for CommitFiles<'_> {
 
     fn list_files(&self, path: &str) -> Result<Vec<String>, StoreError> {
         self.list_kind(path, EntryKind::Blob)
+    }
+
+    fn layout(&self) -> Result<u32, StoreError> {
+        let header = self.store.read_header(self.commit)?;
+        header.version.parse().map_err(|e| {
+            StoreError::Parse(format!(
+                "object {}: type version {:?}: {e}",
+                header.id, header.version
+            ))
+        })
     }
 }
 
@@ -1316,19 +1374,19 @@ mod tests {
             r#"{"runtime":"gage git-abc123","started":1000,"stopped":1500,"canceled":false,"tasks":{"total":2,"completed":1,"failed":1,"skipped":0}}"#,
         );
         write(
-            &scan.join("scanners/hello/sourcecode.d/hello.rn"),
+            &scan.join("scanners/local/hello/sourcecode.d/hello.rn"),
             "pub fn greet() {}\n",
         );
         write(
-            &scan.join("scanners/hello/sourcecode.d/..%2Fshared%2Fdoc.md"),
+            &scan.join("scanners/local/hello/sourcecode.d/..%2Fshared%2Fdoc.md"),
             "shared\n",
         );
         write(
-            &scan.join("tasks/hello/greet/attrs.json"),
+            &scan.join("tasks/local/hello/greet/attrs.json"),
             r#"{"status":"completed","started":1000,"stopped":1200}"#,
         );
         write(
-            &scan.join("tasks/hello/fail/attrs.json"),
+            &scan.join("tasks/local/hello/fail/attrs.json"),
             r#"{"status":"failed","started":1200,"stopped":1500}"#,
         );
         write(&scan.join("logs/err"), "task hello:fail failed\nboom\n");
@@ -1370,16 +1428,18 @@ mod tests {
                 "logs/records",
                 "modified",
                 "scanners",
-                "scanners/hello",
-                "scanners/hello/sourcecode.d",
-                "scanners/hello/sourcecode.d/..%2Fshared%2Fdoc.md",
-                "scanners/hello/sourcecode.d/hello.rn",
+                "scanners/local",
+                "scanners/local/hello",
+                "scanners/local/hello/sourcecode.d",
+                "scanners/local/hello/sourcecode.d/..%2Fshared%2Fdoc.md",
+                "scanners/local/hello/sourcecode.d/hello.rn",
                 "tasks",
-                "tasks/hello",
-                "tasks/hello/fail",
-                "tasks/hello/fail/attrs.json",
-                "tasks/hello/greet",
-                "tasks/hello/greet/attrs.json",
+                "tasks/local",
+                "tasks/local/hello",
+                "tasks/local/hello/fail",
+                "tasks/local/hello/fail/attrs.json",
+                "tasks/local/hello/greet",
+                "tasks/local/hello/greet/attrs.json",
                 "type",
             ]
         );
@@ -1411,16 +1471,20 @@ mod tests {
         assert_eq!(
             record.content.scanners,
             BTreeMap::from([(
-                "hello".to_string(),
+                "local/hello".to_string(),
                 vec!["..%2Fshared%2Fdoc.md".to_string(), "hello.rn".to_string()]
             )])
         );
         assert_eq!(
-            scans.source_file(&commit, "hello", "hello.rn").unwrap(),
+            scans
+                .source_file(&commit, "local/hello", "hello.rn")
+                .unwrap(),
             Some(b"pub fn greet() {}\n".to_vec())
         );
         assert_eq!(
-            scans.source_file(&commit, "hello", "nope.rn").unwrap(),
+            scans
+                .source_file(&commit, "local/hello", "nope.rn")
+                .unwrap(),
             None
         );
         assert_eq!(record.content.logs, ["err", "out", "records"]);
@@ -1435,7 +1499,7 @@ mod tests {
         let failed = &record.content.tasks[0];
         assert_eq!(
             (failed.scanner.as_str(), failed.task.as_str()),
-            ("hello", "fail")
+            ("local/hello", "fail")
         );
         assert_eq!(failed.attrs.status, TaskStatus::Failed);
         let greet = &record.content.tasks[1];
@@ -1571,7 +1635,7 @@ mod tests {
         let id = new_uuid();
 
         let scan_dir = new_scan_dir(tmp.path(), &id);
-        let agent_dir = scan_dir.join(format!("scan/tasks/hello/greet/agents/{}", added.id));
+        let agent_dir = scan_dir.join(format!("scan/tasks/local/hello/greet/agents/{}", added.id));
         write(&agent_dir.join("attrs.json"), r#"{"exit_code":0}"#);
         write(&agent_dir.join("stderr"), "warn: x\n");
         write(
@@ -1579,17 +1643,17 @@ mod tests {
             r#"{"type":"result","result":"ok"}"#,
         );
         write(
-            &scan_dir.join("scan/tasks/hello/greet/agents.link"),
+            &scan_dir.join("scan/tasks/local/hello/greet/agents.link"),
             &format!("{}\n", added.commit_sha),
         );
         // An agent still running when the scan ends: its record is
         // the native id alone, read live and left out of the store
         write(
-            &scan_dir.join("scan/tasks/hello/greet/agents/zzz-running/native_id"),
+            &scan_dir.join("scan/tasks/local/hello/greet/agents/zzz-running/native_id"),
             "native-2\n",
         );
         write(
-            &scan_dir.join("scan/tasks/hello/greet/agents/zzz-running/driver"),
+            &scan_dir.join("scan/tasks/local/hello/greet/agents/zzz-running/driver"),
             "fake\n",
         );
         let ended = TaskAgent {
@@ -1628,13 +1692,13 @@ mod tests {
         assert_eq!(greet.agents, [ended]);
         assert_eq!(
             scans
-                .agent_file(&commit, "hello", "greet", &added.id, "stderr")
+                .agent_file(&commit, "local/hello", "greet", &added.id, "stderr")
                 .unwrap(),
             Some(b"warn: x\n".to_vec())
         );
         assert_eq!(
             scans
-                .agent_file(&commit, "hello", "greet", &added.id, "result")
+                .agent_file(&commit, "local/hello", "greet", &added.id, "result")
                 .unwrap(),
             Some(br#"{"type":"result","result":"ok"}"#.to_vec())
         );
@@ -1720,14 +1784,15 @@ mod tests {
         let id = new_uuid();
         let scan_dir = new_scan_dir(tmp.path(), &id);
         write(
-            &scan_dir.join("scan/tasks/hello/greet/attrs.json"),
+            &scan_dir.join("scan/tasks/local/hello/greet/attrs.json"),
             r#"{"status":"started","started":1000}"#,
         );
         let err = ScanStore::from(&store)
             .create_from_dir(&scan_dir)
             .unwrap_err();
         assert!(
-            err.to_string().contains("hello:greet has status started"),
+            err.to_string()
+                .contains("local/hello:greet has status started"),
             "{err}"
         );
         assert!(store.list_object_refs().unwrap().is_empty());
@@ -1739,7 +1804,7 @@ mod tests {
         let (store, _fsck) = open_store(tmp.path());
         let id = new_uuid();
         let scan_dir = new_scan_dir(tmp.path(), &id);
-        write(&scan_dir.join("scan/scanners/hello/notes.txt"), "x");
+        write(&scan_dir.join("scan/scanners/local/hello/notes.txt"), "x");
         let err = ScanStore::from(&store)
             .create_from_dir(&scan_dir)
             .unwrap_err();
@@ -1748,7 +1813,7 @@ mod tests {
 
     #[test]
     fn create_rejects_an_unknown_log_name() {
-        for path in ["tasks/hello/greet/logs/out", "logs/trace"] {
+        for path in ["tasks/local/hello/greet/logs/out", "logs/trace"] {
             let tmp = tempfile::tempdir().unwrap();
             let (store, _fsck) = open_store(tmp.path());
             let id = new_uuid();
@@ -1770,7 +1835,10 @@ mod tests {
         let (store, _fsck) = open_store(tmp.path());
         let id = new_uuid();
         let scan_dir = new_scan_dir(tmp.path(), &id);
-        write(&scan_dir.join("scan/tasks/hello/greet/notes.txt"), "x");
+        write(
+            &scan_dir.join("scan/tasks/local/hello/greet/notes.txt"),
+            "x",
+        );
         let err = ScanStore::from(&store)
             .create_from_dir(&scan_dir)
             .unwrap_err();

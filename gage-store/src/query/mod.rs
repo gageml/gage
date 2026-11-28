@@ -36,7 +36,7 @@ pub use issue_report::issue_report_fn;
 pub use key::object_key_table;
 pub use links::{LinkKind, link_table};
 pub use note::StoredNoteTable;
-pub use note_doc::{NoteDocRow, note_doc_rows, note_doc_schema};
+pub use note_doc::note_doc_table;
 pub use related_issue::related_issue_fn;
 pub use scan::scan_table;
 pub use scan_log::scan_log_table;

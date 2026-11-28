@@ -595,9 +595,31 @@ impl Default for ScannerConfig {
 }
 
 impl ScannerConfig {
-    /// The params the config sets for the named scanner.
+    /// The params the config sets for the scanner with the full name
+    /// `name`: those of the table under the full name, and otherwise
+    /// those of the table under the name without its namespace.
     pub fn params(&self, name: &str) -> Option<&json::Map<String, json::Value>> {
-        self.entries.get(name).map(|e| &e.params)
+        self.entries
+            .get(name)
+            .or_else(|| self.entries.get(scanner_short_name(name)))
+            .map(|e| &e.params)
+    }
+}
+
+/// The part of a scanner's full name after its namespace.
+fn scanner_short_name(name: &str) -> &str {
+    name.rsplit_once('/').map_or(name, |(_, short)| short)
+}
+
+/// Whether a config pattern names the scanner with the full name
+/// `name`. A pattern with a `/` is matched against the full name, and
+/// a pattern without one against the name without its namespace, so
+/// it names that scanner in any namespace.
+fn scanner_pattern_matches(pattern: &str, name: &str) -> bool {
+    if pattern.contains('/') {
+        glob_match(pattern, name)
+    } else {
+        glob_match(pattern, scanner_short_name(name))
     }
 }
 
@@ -745,9 +767,10 @@ impl Config {
         }
     }
 
-    /// True if the named scanner is enabled per this config. Entries
-    /// in `enable` / `disable` may contain `*` wildcards that match any
-    /// run of characters.
+    /// True if the scanner with the full name `name` is enabled per
+    /// this config. Entries in `enable` / `disable` may contain `*`
+    /// wildcards that match any run of characters. An entry without a
+    /// `/` names a scanner in any namespace.
     pub fn is_scanner_enabled(&self, name: &str) -> bool {
         if self.is_scanner_disabled(name) {
             return false;
@@ -755,14 +778,20 @@ impl Config {
         if self.scanners.enable.is_empty() {
             return true;
         }
-        self.scanners.enable.iter().any(|p| glob_match(p, name))
+        self.scanners
+            .enable
+            .iter()
+            .any(|p| scanner_pattern_matches(p, name))
     }
 
     /// True if the named scanner is explicitly disabled. Unlike
     /// `is_scanner_enabled`, absence from a non-empty `enable` list
     /// does not count — this consults the `disable` list only.
     pub fn is_scanner_disabled(&self, name: &str) -> bool {
-        self.scanners.disable.iter().any(|p| glob_match(p, name))
+        self.scanners
+            .disable
+            .iter()
+            .any(|p| scanner_pattern_matches(p, name))
     }
 }
 
@@ -1126,8 +1155,15 @@ medium = "claude-sonnet-5-5"
     fn scanner_enable_disable_globs() {
         let mut config = Config::default();
         config.scanners.disable.push("hidden-*".to_string());
-        assert!(!config.is_scanner_enabled("hidden-thinking"));
-        assert!(config.is_scanner_enabled("general"));
+        assert!(!config.is_scanner_enabled("gage/hidden-thinking"));
+        assert!(!config.is_scanner_enabled("local/hidden-thinking"));
+        assert!(config.is_scanner_enabled("gage/general"));
+
+        // A pattern with a namespace names the scanner of that
+        // namespace alone
+        config.scanners.disable = vec!["gage/gen*".to_string()];
+        assert!(!config.is_scanner_enabled("gage/general"));
+        assert!(config.is_scanner_enabled("local/general"));
     }
 
     #[test]

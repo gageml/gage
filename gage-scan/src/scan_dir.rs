@@ -513,7 +513,7 @@ mod tests {
         let sources = gage_runtime::source::source_files(&scanner_file).unwrap();
         let tasks = vec!["greet".to_string(), "fail".to_string()];
         let plan = [ScannerPlan {
-            name: "hello",
+            name: "local/hello",
             tasks: &tasks,
             sources: &sources,
         }];
@@ -524,7 +524,7 @@ mod tests {
             fs::read_to_string(
                 scan_dir
                     .object_dir()
-                    .join("scanners/hello/sourcecode.d/hello.rn")
+                    .join("scanners/local/hello/sourcecode.d/hello.rn")
             )
             .unwrap(),
             "pub fn greet() {}\n"
@@ -540,7 +540,7 @@ mod tests {
 
         scan_dir
             .write_task(
-                "hello",
+                "local/hello",
                 "fail",
                 &TaskAttrs {
                     status: TaskStatus::Failed,
@@ -554,7 +554,8 @@ mod tests {
         logs.err("boom").unwrap();
         logs.out("hello, ").unwrap();
         logs.out("world\n").unwrap();
-        logs.record(Level::Info, "hello:greet", "started").unwrap();
+        logs.record(Level::Info, "local/hello:greet", "started")
+            .unwrap();
         drop(logs);
         assert_eq!(
             fs::read_to_string(scan_dir.object_dir().join("logs/out")).unwrap(),
@@ -562,7 +563,7 @@ mod tests {
         );
         let records = fs::read_to_string(scan_dir.object_dir().join("logs/records")).unwrap();
         assert!(
-            records.ends_with("Z INFO hello:greet: started\n"),
+            records.ends_with("Z INFO local/hello:greet: started\n"),
             "{records}"
         );
         assert_eq!(
@@ -594,7 +595,7 @@ mod tests {
         assert_eq!(content.logs, ["err", "out", "records"]);
         assert_eq!(
             content.scanners,
-            BTreeMap::from([("hello".to_string(), vec!["hello.rn".to_string()])])
+            BTreeMap::from([("local/hello".to_string(), vec!["hello.rn".to_string()])])
         );
         assert!(
             !scan_dir.object_dir().join("attrs.json.tmp").exists(),

@@ -70,6 +70,9 @@ gage note show [OPTIONS] <ID>
 | ------------ | -------------- |
 | `-d, --doc`  | Show note docs |
 
+`--doc` shows the doc that the scanner task declared for the note's name in the
+scan that wrote the note. A note that no scan wrote has no doc.
+
 ## note edit
 
 Edit a note.

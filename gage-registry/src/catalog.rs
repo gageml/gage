@@ -23,8 +23,8 @@ use gage_core::fs::remove_checked_dir_all;
 use semver::Version;
 
 use crate::scanner::{
-    ApiMismatch, ScannerDef, check_api, installed_scanner_files, parse_scanner_file, scanners_dir,
-    split_qualified,
+    ApiMismatch, LOCAL_NAMESPACE, ScannerDef, check_api, installed_scanner_files,
+    parse_scanner_file_in, scanners_dir,
 };
 
 /// The namespace of the scanners Gage itself publishes.
@@ -51,12 +51,6 @@ pub enum CatalogError {
     Ambiguous {
         name: String,
         candidates: Vec<String>,
-    },
-    /// A scanner of another namespace with the same bare name is
-    /// installed, or is installed by the same plan
-    NameTaken {
-        scanner: String,
-        holder: String,
     },
     Api {
         scanner: String,
@@ -85,10 +79,6 @@ impl fmt::Display for CatalogError {
                 f,
                 "Scanner name '{name}' is ambiguous; use one of {}",
                 candidates.join(", ")
-            ),
-            CatalogError::NameTaken { scanner, holder } => write!(
-                f,
-                "Cannot install {scanner}: {holder} has the same scanner name"
             ),
             CatalogError::Api { scanner, mismatch } => {
                 write!(f, "Cannot install {scanner}: {mismatch}")
@@ -145,9 +135,9 @@ pub struct Entry {
 }
 
 impl Entry {
-    /// `<namespace>/<name>`
+    /// The scanner's full name, `<namespace>/<name>`
     pub fn qualified(&self) -> String {
-        format!("{}/{}", self.namespace, self.def.name)
+        self.def.name.clone()
     }
 
     /// Whether the scanner appears in a listing.
@@ -198,7 +188,7 @@ impl ScannerSet {
                 .expect("a scanner directory is under a namespace")
                 .to_string_lossy()
                 .to_string();
-            let def = match parse_scanner_file(&file) {
+            let def = match parse_scanner_file_in(&file, &namespace) {
                 Ok(def) => def,
                 Err(e) => {
                     problems.push((file, e.to_string()));
@@ -228,10 +218,7 @@ impl ScannerSet {
 
     /// The scanner with the qualified name `<namespace>/<name>`.
     pub fn get(&self, qualified: &str) -> Option<&Entry> {
-        let (namespace, name) = split_qualified(qualified)?;
-        self.entries
-            .iter()
-            .find(|e| e.namespace == namespace && e.def.name == name)
+        self.entries.iter().find(|e| e.def.name == qualified)
     }
 
     /// The scanner a user names: a qualified name, or a bare name
@@ -242,7 +229,11 @@ impl ScannerSet {
                 .get(name)
                 .ok_or_else(|| CatalogError::Unknown(name.to_string()));
         }
-        let found: Vec<&Entry> = self.entries.iter().filter(|e| e.def.name == name).collect();
+        let found: Vec<&Entry> = self
+            .entries
+            .iter()
+            .filter(|e| e.def.short_name() == name)
+            .collect();
         match found.as_slice() {
             [] => Err(CatalogError::Unknown(name.to_string())),
             [entry] => Ok(entry),
@@ -259,7 +250,12 @@ fn check_published(def: &ScannerDef, dir: &Path) -> Result<(), String> {
     if !def.problems.is_empty() {
         return Err(def.render_problems());
     }
-    if dir.file_name().is_none_or(|name| name != def.name.as_str()) {
+    if def.namespace() == LOCAL_NAMESPACE {
+        return Err(format!(
+            "the namespace '{LOCAL_NAMESPACE}' is for scanners that are not installed"
+        ));
+    }
+    if dir.file_name().is_none_or(|name| name != def.short_name()) {
         return Err(format!(
             "scanner '{}' is not in a directory of its own name",
             def.name
@@ -484,7 +480,6 @@ impl<'a, 'i> Planner<'a, 'i> {
                 mismatch,
             });
         }
-        self.check_name_free(entry)?;
         for requirement in &entry.def.requires {
             if self.installed.get(requirement).is_some() {
                 continue;
@@ -507,25 +502,6 @@ impl<'a, 'i> Planner<'a, 'i> {
             required_by,
         });
         Ok(())
-    }
-
-    /// A scan names a scanner by its bare name, so two namespaces
-    /// cannot both install one.
-    fn check_name_free(&self, entry: &Entry) -> Result<(), CatalogError> {
-        let other_namespace =
-            |e: &&Entry| e.def.name == entry.def.name && e.namespace != entry.namespace;
-        let holder = self
-            .installed
-            .iter()
-            .find(other_namespace)
-            .or_else(|| self.steps.iter().map(|s| s.entry).find(other_namespace));
-        match holder {
-            Some(holder) => Err(CatalogError::NameTaken {
-                scanner: entry.qualified(),
-                holder: holder.qualified(),
-            }),
-            None => Ok(()),
-        }
     }
 }
 
@@ -571,9 +547,9 @@ pub fn install(entry: &Entry) -> Result<(), CatalogError> {
 /// failed copy leaves the installed scanner as it was.
 pub fn install_in(entry: &Entry, root: &Path) -> Result<(), CatalogError> {
     let namespace_dir = root.join(&entry.namespace);
-    let target = namespace_dir.join(&entry.def.name);
+    let target = namespace_dir.join(entry.def.short_name());
     // The registry skips a directory whose name starts with a dot
-    let staging = namespace_dir.join(format!(".{}.installing", entry.def.name));
+    let staging = namespace_dir.join(format!(".{}.installing", entry.def.short_name()));
     remove_checked_dir_all(&staging).map_err(|e| CatalogError::Io(staging.clone(), e))?;
     copy_dir(&entry.dir, &staging)?;
     remove_checked_dir_all(&target).map_err(|e| CatalogError::Io(target.clone(), e))?;
@@ -677,7 +653,7 @@ mod tests {
     }
 
     fn write_scanner(root: &Path, qualified: &str, fields: &str) {
-        let (_, name) = split_qualified(qualified).unwrap();
+        let name = crate::scanner::short_name(qualified);
         let dir = root.join(qualified);
         fs::create_dir_all(&dir).unwrap();
         fs::write(
@@ -763,16 +739,16 @@ mod tests {
             .map(|(_, reason)| format!("{reason}\n"))
             .collect();
         assert!(
-            reasons.contains("'no-version' declares no semantic version"),
+            reasons.contains("'ns/no-version' declares no semantic version"),
             "{reasons}"
         );
         assert!(
-            reasons.contains("'bad-version' declares no semantic version"),
+            reasons.contains("'ns/bad-version' declares no semantic version"),
             "{reasons}"
         );
-        assert!(reasons.contains("'no-api' declares no api"), "{reasons}");
+        assert!(reasons.contains("'ns/no-api' declares no api"), "{reasons}");
         assert!(
-            reasons.contains("'good' is not in a directory of its own name"),
+            reasons.contains("'ns/good' is not in a directory of its own name"),
             "{reasons}"
         );
 
@@ -926,7 +902,7 @@ mod tests {
     }
 
     #[test]
-    fn one_scanner_name_installs_from_one_namespace() {
+    fn one_scanner_name_installs_from_two_namespaces() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("lib/scanners");
         write_scanner(&root, "a/same", "version: \"1.0.0\", api: 1,");
@@ -935,11 +911,23 @@ mod tests {
         let catalog = ScannerSet::read_source(&source);
         let installed = ScannerSet::read_installed(&root);
 
-        assert!(matches!(
-            plan_install(&catalog, &installed, &["b/same".to_string()]),
-            Err(CatalogError::NameTaken { scanner, holder })
-                if scanner == "b/same" && holder == "a/same"
-        ));
+        let plan = plan_install(&catalog, &installed, &["b/same".to_string()]).unwrap();
+        install_in(plan.steps[0].entry, &root).unwrap();
+        let installed = ScannerSet::read_installed(&root);
+        assert_eq!(names(installed.iter()), ["a/same", "b/same"]);
+    }
+
+    #[test]
+    fn a_source_cannot_publish_under_the_local_namespace() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_scanner(tmp.path(), "local/mine", "version: \"1.0.0\", api: 1,");
+        let catalog = ScannerSet::read_source(tmp.path());
+        assert!(catalog.is_empty());
+        assert!(
+            catalog.problems[0].1.contains("local"),
+            "{:?}",
+            catalog.problems
+        );
     }
 
     #[test]

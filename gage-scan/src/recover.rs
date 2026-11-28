@@ -203,7 +203,7 @@ mod tests {
             id,
             None,
             &[ScannerPlan {
-                name: "hello",
+                name: "local/hello",
                 tasks: &tasks,
                 sources: &[],
             }],
@@ -249,7 +249,7 @@ mod tests {
         // One task had started when the process died
         scan_dir
             .write_task(
-                "hello",
+                "local/hello",
                 "one",
                 &TaskAttrs {
                     status: TaskStatus::Started,
@@ -327,7 +327,7 @@ mod tests {
         for task in ["one", "two"] {
             scan_dir
                 .write_task(
-                    "hello",
+                    "local/hello",
                     task,
                     &TaskAttrs {
                         status: TaskStatus::Completed,

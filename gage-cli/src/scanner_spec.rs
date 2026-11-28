@@ -11,7 +11,9 @@
 use std::path::{Path, PathBuf};
 
 use gage_core::config::ScannerConfig;
-use gage_registry::scanner::{Scanner, ScannerDef, ScannerRegistry, parse_scanner_file};
+use gage_registry::scanner::{
+    ResolveError, Scanner, ScannerDef, ScannerRegistry, parse_scanner_file,
+};
 
 /// Where a resolved `--scanner` value's definition lives.
 pub(crate) enum ScannerSource<'a> {
@@ -57,9 +59,14 @@ pub(crate) fn resolve<'a>(
     let mut errors: Vec<String> = Vec::new();
     for spec in specs {
         let (name, params) = gage_registry::scanner::split_scanner_spec(spec);
-        let source = match registry.get_def(name) {
-            Some(def) => ScannerSource::Registry(def),
-            None => match parse_path(Path::new(name)) {
+        let source = match registry.resolve(name) {
+            Ok(def) => ScannerSource::Registry(def),
+            Err(e @ ResolveError::Ambiguous { .. }) => {
+                errors.push(e.to_string());
+                continue;
+            }
+            // A value that names no scanner is the path of one
+            Err(ResolveError::Unknown(_)) => match parse_path(Path::new(name)) {
                 Ok(def) => ScannerSource::File(Box::new(def)),
                 Err(e) => {
                     errors.push(e);
@@ -67,10 +74,16 @@ pub(crate) fn resolve<'a>(
                 }
             },
         };
-        let resolved_name = &source.def().name;
-        if out.iter().any(|r| &r.source.def().name == resolved_name) {
+        // A scanner given by name and again by its path is one
+        // scanner, though the path gives it the local namespace
+        let def = source.def();
+        let same = |r: &ResolvedSpec<'_>| {
+            r.source.def().name == def.name || r.source.def().path == def.path
+        };
+        if let Some(first) = out.iter().find(|r| same(r)) {
             errors.push(format!(
-                "Scanner '{resolved_name}' specified more than once"
+                "Scanner '{}' specified more than once",
+                first.source.def().name
             ));
             continue;
         }
@@ -141,7 +154,7 @@ mod tests {
             .iter()
             .map(|r| r.source.def().name.as_str())
             .collect();
-        assert_eq!(names, ["reg", "bundled", "single"]);
+        assert_eq!(names, ["ns/reg", "local/bundled", "local/single"]);
         assert!(matches!(resolved[0].source, ScannerSource::Registry(_)));
         assert!(matches!(resolved[1].source, ScannerSource::File(_)));
         assert_eq!(resolved[1].params, Some("#{ a: 1 }"));
@@ -163,9 +176,9 @@ mod tests {
         let Err(err) = resolve(&registry, &specs) else {
             panic!("a missing path and a duplicate resolved");
         };
-        assert!(err.contains("Unknown scanner: nope"), "{err}");
+        assert!(err.contains("nope"), "{err}");
         assert!(
-            err.contains("Scanner 'reg' specified more than once"),
+            err.contains("Scanner 'ns/reg' specified more than once"),
             "{err}"
         );
     }
