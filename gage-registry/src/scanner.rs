@@ -293,6 +293,18 @@ impl ScannerDef {
         short_name(&self.name)
     }
 
+    /// The name shown in a listing: the full name of an installed
+    /// scanner, and the name alone for a local one, whose namespace
+    /// says only that it was not installed. A record holds the full
+    /// name in both cases.
+    pub fn display_name(&self) -> &str {
+        if self.namespace() == LOCAL_NAMESPACE {
+            self.short_name()
+        } else {
+            &self.name
+        }
+    }
+
     pub fn params_def(&self) -> Object {
         match const_field(&self.ast, &self.source, "SCANNER", "params") {
             Some(ast::Expr::Object(obj)) => parse_params_def(&self.source, obj),
@@ -2057,6 +2069,14 @@ unknown = 1
             "gage/only-installed"
         );
         assert_eq!(reg.get_def("only-user").unwrap().name, "local/only-user");
+        assert_eq!(
+            reg.get_def("only-user").unwrap().display_name(),
+            "only-user"
+        );
+        assert_eq!(
+            reg.get_def("only-installed").unwrap().display_name(),
+            "gage/only-installed"
+        );
         // A name without a namespace selects the local scanner before
         // the installed one, and a full name selects either
         assert_eq!(reg.get_def("shared").unwrap().name, "local/shared");

@@ -25,7 +25,8 @@ A scanner's full name is `NAMESPACE/NAME`, as in `gage/general`. A scanner that
 was not installed is in the `local` namespace, as in `local/mine`. These are the
 scanners of a project, the scanners under `~/.gage/local/scanners/`, and a
 scanner given to `gage scan` as a path. The source cannot hold a `local`
-namespace.
+namespace. Listings show a local scanner by its name alone, as in `mine`, and
+records hold `local/mine`.
 
 A `SCANNER` argument is a full name or the name alone, such as `general`. The
 name alone selects the local scanner of that name, and otherwise the installed

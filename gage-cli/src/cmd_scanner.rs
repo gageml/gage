@@ -199,7 +199,7 @@ impl Row {
     /// A scanner the registry found.
     fn found(def: &ScannerDef, config: &Config) -> Self {
         Row {
-            name: def.name.clone(),
+            name: def.display_name().to_string(),
             version: def.version.clone(),
             source: scanner_source(&def.path).to_string(),
             description: def.description.clone(),
@@ -424,7 +424,7 @@ fn attrs(def: &ScannerDef, shown: Shown) -> Vec<(&'static str, String)> {
         (Shown::Found, _) => shorten_home(&def.path),
     };
     let all = [
-        ("name", def.name.clone()),
+        ("name", def.display_name().to_string()),
         ("version", def.version.clone()),
         ("api", api),
         ("source", source),

@@ -2004,25 +2004,21 @@ fn prompt_scanner_multiselect(
     registry: &ScannerRegistry,
     config: &Config,
 ) -> Result<Vec<String>, DialogError> {
-    let defs = registry.list_enabled(config);
-    let mut names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
-    names.sort();
+    let mut defs = registry.list_enabled(config);
+    defs.sort_by_key(|def| def.display_name());
     let mut prompt = cli::multiselect("Scanners");
-    for (i, name) in names.iter().enumerate() {
-        let hint = registry
-            .get_def(name)
-            .map(|d| d.description.lines().next().unwrap_or("").to_string())
-            .unwrap_or_default();
-        prompt = prompt.item(i, (*name).to_string(), hint);
+    for (i, def) in defs.iter().enumerate() {
+        let hint = def.description.lines().next().unwrap_or("").to_string();
+        prompt = prompt.item(i, def.display_name().to_string(), hint);
     }
     let indices: Vec<usize> = prompt.interact()?;
     Ok(indices
         .into_iter()
         .map(|i| {
-            names
-                .get(i)
-                .expect("selected index points into names")
-                .to_string()
+            defs.get(i)
+                .expect("selected index points into defs")
+                .name
+                .clone()
         })
         .collect())
 }
@@ -2030,7 +2026,7 @@ fn prompt_scanner_multiselect(
 fn preview_scanners(scanners: &[Scanner<'_>]) -> Result<(), DialogError> {
     let lines: String = scanners
         .iter()
-        .map(|s| format!("\n{}", style(&s.def.name).dim()))
+        .map(|s| format!("\n{}", style(s.def.display_name()).dim()))
         .collect();
     cli::log::step(format!("Scanners{lines}"))?;
     Ok(())
