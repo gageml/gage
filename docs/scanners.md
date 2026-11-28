@@ -23,7 +23,7 @@ their source code is available for review at any time. To see what you can
 install, run:
 
 ```cli
-gage scanner list --available
+gage scanner search
 ```
 
 To install a scanner, run:

@@ -1,3 +1,5 @@
+scanners := env("GAGE_SCANNER_TESTS", justfile_directory() / ".." / "gage-scanners")
+
 # Show this help and exit
 help:
     @just -l
@@ -10,11 +12,14 @@ build:
 clippy:
     cargo clippy
 
-# Full verification gate: clippy, fmt, tests
+# Full verification gate: clippy, fmt, tests. The tests include the
+# published scanners, read from the checkout that GAGE_SCANNER_TESTS
+# names or from ../gage-scanners.
 check:
+    @test -d "{{ scanners }}" || { echo "check needs the published scanners: clone gage-scanners to {{ scanners }} or set GAGE_SCANNER_TESTS"; exit 1; }
     cargo clippy --all-targets -- -D warnings
     cargo fmt
-    cargo test
+    GAGE_SCANNER_TESTS="{{ scanners }}" cargo test
 
 # Run tests
 test:

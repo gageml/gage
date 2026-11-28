@@ -170,7 +170,7 @@ Gage does not include scanners. You install the ones you want from the
 
 ```shell
 # List the scanners you can install
-gage scanner list --available
+gage scanner search
 
 # Install a scanner
 gage scanner install general

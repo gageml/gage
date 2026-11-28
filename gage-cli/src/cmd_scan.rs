@@ -765,7 +765,7 @@ impl StoreHost {
         let mut tasks = Vec::new();
         for batch in &query(
             &ctx,
-            "SELECT scanner, task, status, started, stopped, worked_ms \
+            "SELECT scanner_name, task, status, started, stopped, worked_ms \
              FROM scan_task ORDER BY num",
         )
         .await?
@@ -894,7 +894,7 @@ impl StoreHost {
         let mut agent_ids = Vec::new();
         for batch in &query(
             ctx,
-            "SELECT scanner, task, session_id, native_id, is_error, cost_usd \
+            "SELECT scanner_name, task, session_id, native_id, is_error, cost_usd \
              FROM scan_task_agent",
         )
         .await?
@@ -1992,7 +1992,7 @@ fn resolve_group_names(
 
 /// The failure of a scan that names no scanner when Gage finds none
 const NO_SCANNERS: &str = "No scanners found. Install one with `gage scanner install`; \
-     `gage scanner list --available` shows what can be installed";
+     `gage scanner search` shows what can be installed";
 
 /// The failure of a scan under `--yes` that names no scanner
 const NO_SCANNER_SELECTED: &str = "No scanner selected; use --scanner or --group";

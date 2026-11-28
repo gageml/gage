@@ -2073,7 +2073,7 @@ mod tests {
         write(
             "plan.json",
             r#"{"tasks":[
-                {"task":"hello:greet","selected":"explicit","after":[],"unmatched_note_wants":[],"params":{"x":41}},
+                {"task":"hello:greet","selected":"explicit","after":[],"unmatched_note_wants":[],"scanner_ns":"gage","scanner_version":"0.1.0","params":{"x":41}},
                 {"task":"hello:fail","selected":"group:default","after":[],"unmatched_note_wants":[]},
                 {"task":"hello:after","selected":"group:eval","after":[],"unmatched_note_wants":[]}
             ]}"#,
@@ -2131,6 +2131,31 @@ mod tests {
         assert_eq!(
             strings(&ctx, "SELECT selected FROM scan_task ORDER BY num").await,
             ["explicit", "group:default", "group:eval"]
+        );
+        // The plan records a namespace and a version for `greet`
+        // alone, as for a scanner that was installed beside ones that
+        // were not
+        assert_eq!(
+            strings(
+                &ctx,
+                "SELECT concat(scanner_ns, '/', scanner_name, ':', scanner_version) \
+                 FROM scan_task WHERE scanner_ns IS NOT NULL"
+            )
+            .await,
+            ["gage/hello:0.1.0"]
+        );
+        assert_eq!(
+            strings(
+                &ctx,
+                "SELECT task FROM scan_task \
+                 WHERE scanner_ns IS NULL AND scanner_version IS NULL ORDER BY num"
+            )
+            .await,
+            ["fail", "after"]
+        );
+        assert_eq!(
+            strings(&ctx, "SELECT DISTINCT scanner_name FROM scan_task_agent").await,
+            ["hello"]
         );
         // The plan records params for `greet` alone, as a plan written
         // before params were recorded has none

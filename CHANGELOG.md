@@ -20,12 +20,17 @@ conventions in _[Keep a Changelog]_. Release versions use [semantic versioning].
   `--group`, it asks which scanners to run with none selected, and with `--yes`
   it stops with an error. The `default` group has no special meaning
 - `gage scan --list-scanners` is removed. Use `gage scanner list`
+- The `scanner` column of the `scan_task` and `scan_task_agent` tables is
+  renamed `scanner_name`. A query that names `scanner` on either table fails
+- The `library` field of `SCANNER` and the `required_by` field of a task are
+  no longer read. A scanner that set `library: true` now appears in listings.
+  Set `hidden: true` to keep it out of them
 
 ### Enhancements
 
-- `gage scanner` manages scanners: `list`, `show`, `install`, `uninstall`, and
-  `upgrade`. `gage scanner list --available` shows the scanners that can be
-  installed, and `gage scanner list --upgradable` shows the installed scanners
+- `gage scanner` manages scanners: `list`, `search`, `show`, `install`,
+  `uninstall`, and `upgrade`. `gage scanner search` shows the scanners that can
+  be installed, and `gage scanner list --outdated` shows the installed scanners
   that have a newer version
 - The `scanners.source` setting names the Git repository that scanners are
   installed from
@@ -35,8 +40,10 @@ conventions in _[Keep a Changelog]_. Release versions use [semantic versioning].
 - A scanner declares `requires`, the scanners installed with it
 - `gage init` installs the scanners that Gage publishes when none is
   installed. `--no-scanners` leaves them out
-- A scan records the version of each scanner it ran, as `scanner_version` on
-  each task of the scan's plan
+- A scan records the namespace and the version of each scanner it ran. The
+  `scan_task` table holds them as `scanner_ns` and `scanner_version`. Both are
+  null for a scan made before this, and `scanner_ns` is null for a scanner
+  that was not installed
 - A project config names a store of the project's own: `path` in a `store`
   table of `.gage/config.toml`, as a path under the project's `.gage` directory.
   Commands run in the project use that store. `GAGE_STORE` takes precedence

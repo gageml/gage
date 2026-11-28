@@ -1,9 +1,8 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
 use gage_core::config::{ScannerConfig, project_gage_dirs};
-use gage_core::glob::glob_match;
 use gage_core::path::shorten_home_in;
 use rune::SourceId;
 use rune::alloc;
@@ -189,17 +188,13 @@ fn embedded_digest<E: RustEmbed>() -> String {
 /// A task's declared dependencies for one item kind (notes or issues):
 /// `wants` lists `*`-glob patterns over item names the task consumes;
 /// `writes` maps each item name the task produces to its
-/// docstring; `required_by` lists `*`-glob patterns over item names
-/// whose writers require this task — a planned task writing a matching
-/// name schedules this task even when its scanner is not selected.
-/// `writes` is declared as a map of name to docstring, or as a list of
+/// docstring. `writes` is declared as a map of name to docstring, or as a list of
 /// names when the items have no docs; a listed name has an empty
 /// docstring.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct TaskDepsDef {
     pub wants: Vec<String>,
     pub writes: BTreeMap<String, String>,
-    pub required_by: Vec<String>,
 }
 
 /// The attachment names a task declares: `needs` must be present in
@@ -260,6 +255,9 @@ pub struct Problem {
 pub struct ScannerDef {
     pub name: String,
     pub description: String,
+    /// The namespace an installed scanner was installed under; empty
+    /// for a scanner of any other root, which has none
+    pub namespace: String,
     /// `SCANNER.version`; empty when the scanner declares none
     pub version: String,
     /// `SCANNER.api`: the scanner API level the scanner was written
@@ -270,10 +268,6 @@ pub struct ScannerDef {
     /// as `<namespace>/<name>`
     pub requires: Vec<String>,
     pub hidden: bool,
-    /// Library scanners are infrastructure: excluded from listings and
-    /// the default run set, not explicitly selectable, and scheduled
-    /// only when a task's `required_by` pulls it into a plan.
-    pub library: bool,
     /// Group memberships declared via `SCANNER.groups`; `-g --group`
     /// selects by any group name.
     pub groups: Vec<String>,
@@ -437,10 +431,6 @@ impl fmt::Display for ParseError {
 pub struct Scanner<'a> {
     pub def: &'a ScannerDef,
     pub params: Option<json::Value>,
-    /// When set, only these tasks participate in the plan. Set for
-    /// scanners pulled in via `required_by`; `None` (explicit
-    /// selection) plans every declared task.
-    pub only_tasks: Option<Vec<String>>,
 }
 
 impl fmt::Debug for Scanner<'_> {
@@ -477,16 +467,6 @@ pub fn split_scanner_spec(spec: &str) -> (&str, Option<&str>) {
 }
 
 impl<'a> Scanner<'a> {
-    /// Scanner pulled into a plan by `required_by`, restricted to the
-    /// pulled tasks.
-    pub fn with_tasks(def: &'a ScannerDef, tasks: Vec<String>) -> Self {
-        Scanner {
-            def,
-            params: resolve_params(&def.params_def()),
-            only_tasks: Some(tasks),
-        }
-    }
-
     /// Build a `Scanner` from an already-resolved `ScannerDef`, the
     /// user config, and an optional params override string. Params
     /// resolve in layers: the declared default, then the config's
@@ -511,11 +491,7 @@ impl<'a> Scanner<'a> {
             apply_params(&mut params, overrides, &def.name, "override");
         }
 
-        Ok(Scanner {
-            def,
-            params,
-            only_tasks: None,
-        })
+        Ok(Scanner { def, params })
     }
 }
 
@@ -653,7 +629,8 @@ impl ScannerRegistry {
         // same name are still stored and appended to the by_name entry
         // for shadowing diagnostics.
         for root in roots {
-            let paths = if root.as_path() == installed {
+            let is_installed = root.as_path() == installed;
+            let paths = if is_installed {
                 installed_scanner_files(&root)
             } else {
                 walk_rn_files(&root)
@@ -669,7 +646,10 @@ impl ScannerRegistry {
                 };
 
                 match parse_scanner(&code, &key, &path) {
-                    Ok(def) => {
+                    Ok(mut def) => {
+                        if is_installed {
+                            def.namespace = installed_namespace(&path);
+                        }
                         let idx = defs.len();
                         let name = def.name.clone();
                         defs.push(def);
@@ -770,11 +750,7 @@ impl ScannerRegistry {
     }
 
     pub fn list_visible(&self) -> Vec<&ScannerDef> {
-        let mut defs: Vec<_> = self
-            .list()
-            .into_iter()
-            .filter(|d| !d.hidden && !d.library)
-            .collect();
+        let mut defs: Vec<_> = self.list().into_iter().filter(|d| !d.hidden).collect();
         defs.sort_by(|a, b| a.name.cmp(&b.name));
         defs
     }
@@ -792,97 +768,15 @@ impl ScannerRegistry {
 
     /// Scanners declaring membership in `group`, sorted by name.
     /// Hidden scanners are included — `hidden` affects listing only,
-    /// not group expansion. Library scanners are excluded.
+    /// not group expansion.
     pub fn group_members(&self, group: &str) -> Vec<&ScannerDef> {
         let mut defs: Vec<_> = self
             .list()
             .into_iter()
-            .filter(|d| !d.library)
             .filter(|d| d.groups.iter().any(|g| g == group))
             .collect();
         defs.sort_by(|a, b| a.name.cmp(&b.name));
         defs
-    }
-
-    /// True if `name` is a known library scanner. Library scanners are
-    /// not explicitly selectable — selection treats them as unknown.
-    pub fn is_library(&self, name: &str) -> bool {
-        self.get_def(name).is_some_and(|d| d.library)
-    }
-
-    /// Tasks pulled into a plan via `required_by`: tasks of scanners
-    /// outside `selected` whose `required_by` patterns match an item
-    /// name a planned task writes. Matching runs to fixpoint, so a
-    /// pulled-in task's own `writes` can pull further tasks. Scanners
-    /// in the config `disable` list are never pulled — explicit
-    /// disable wins over `required_by`. Returns `(def, task_names)`
-    /// pairs in scanner-name order.
-    pub fn required_tasks(
-        &self,
-        selected: &[&ScannerDef],
-        config: &gage_core::config::Config,
-    ) -> Vec<(&ScannerDef, Vec<String>)> {
-        let selected_names: HashSet<&str> = selected.iter().map(|d| d.name.as_str()).collect();
-
-        let mut note_names: HashSet<String> = HashSet::new();
-        let mut issue_names: HashSet<String> = HashSet::new();
-        for def in selected {
-            for task in def.tasks.values() {
-                if task.kind() == TaskKind::Attach {
-                    continue;
-                }
-                note_names.extend(task.notes.writes.keys().cloned());
-                issue_names.extend(task.issues.writes.keys().cloned());
-            }
-        }
-
-        let candidates: Vec<&ScannerDef> = self
-            .list()
-            .into_iter()
-            .filter(|d| !selected_names.contains(d.name.as_str()))
-            .filter(|d| !config.is_scanner_disabled(&d.name))
-            .collect();
-
-        let mut pulled: BTreeMap<&str, Vec<String>> = BTreeMap::new();
-        loop {
-            let mut changed = false;
-            for def in &candidates {
-                for task in def.tasks.values() {
-                    if task.kind() == TaskKind::Attach {
-                        continue;
-                    }
-                    let already = pulled
-                        .get(def.name.as_str())
-                        .is_some_and(|tasks| tasks.contains(&task.name));
-                    if already {
-                        continue;
-                    }
-                    let matched = patterns_match(&task.notes.required_by, &note_names)
-                        || patterns_match(&task.issues.required_by, &issue_names);
-                    if !matched {
-                        continue;
-                    }
-                    note_names.extend(task.notes.writes.keys().cloned());
-                    issue_names.extend(task.issues.writes.keys().cloned());
-                    pulled
-                        .entry(def.name.as_str())
-                        .or_default()
-                        .push(task.name.clone());
-                    changed = true;
-                }
-            }
-            if !changed {
-                break;
-            }
-        }
-
-        pulled
-            .into_iter()
-            .map(|(name, mut tasks)| {
-                tasks.sort();
-                (self.get_def(name).unwrap(), tasks)
-            })
-            .collect()
     }
 
     /// Docstring for `note_name` from any scanner's `notes.writes`.
@@ -903,13 +797,6 @@ impl ScannerRegistry {
     }
 }
 
-/// True when any `*`-glob pattern matches any name in the set.
-fn patterns_match(patterns: &[String], names: &HashSet<String>) -> bool {
-    patterns
-        .iter()
-        .any(|p| names.iter().any(|n| glob_match(p, n)))
-}
-
 fn parse_scanner(source: &str, embed_key: &str, path: &Path) -> Result<ScannerDef, ParseError> {
     let file = parse::parse_all::<ast::File>(source, SourceId::empty(), false)
         .map_err(ParseError::Syntax)?;
@@ -920,7 +807,6 @@ fn parse_scanner(source: &str, embed_key: &str, path: &Path) -> Result<ScannerDe
     let mut api = None;
     let mut requires: Vec<String> = Vec::new();
     let mut hidden = false;
-    let mut library = false;
     let mut groups: Vec<String> = Vec::new();
     let mut tasks_obj: Option<&ast::ExprObject> = None;
     let mut problems: Vec<Problem> = Vec::new();
@@ -987,7 +873,6 @@ fn parse_scanner(source: &str, embed_key: &str, path: &Path) -> Result<ScannerDe
                         }
                     }
                     Some("hidden") => hidden = expr_bool(source, expr),
-                    Some("library") => library = expr_bool(source, expr),
                     Some("groups") => groups = expr_str_vec(source, expr),
                     Some("tasks") => match expr {
                         ast::Expr::Object(obj) => tasks_obj = Some(obj),
@@ -1020,11 +905,11 @@ fn parse_scanner(source: &str, embed_key: &str, path: &Path) -> Result<ScannerDe
     Ok(ScannerDef {
         name,
         description: description.unwrap_or_default(),
+        namespace: String::new(),
         version,
         api,
         requires,
         hidden,
-        library,
         groups,
         tasks,
         problems,
@@ -1264,13 +1149,6 @@ impl DepsKind {
         }
     }
 
-    fn required_by_field(self) -> &'static str {
-        match self {
-            DepsKind::Notes => "notes.required_by",
-            DepsKind::Issues => "issues.required_by",
-        }
-    }
-
     fn writes_field(self) -> &'static str {
         match self {
             DepsKind::Notes => "notes.writes",
@@ -1303,10 +1181,6 @@ fn parse_task_deps(
             "wants" => {
                 deps.wants = parse_patterns(source, expr, task, kind.wants_field(), problems);
             }
-            "required_by" => {
-                deps.required_by =
-                    parse_patterns(source, expr, task, kind.required_by_field(), problems);
-            }
             "writes" => {
                 deps.writes = match expr {
                     ast::Expr::Object(writes_obj) => {
@@ -1331,7 +1205,7 @@ fn parse_task_deps(
     deps
 }
 
-/// Parse a `*`-glob pattern list field (`wants`, `required_by`). A
+/// Parse a `*`-glob pattern list field such as `wants`. A
 /// non-list is a problem yielding no patterns; a non-string item is a
 /// problem and is left out.
 fn parse_patterns(
@@ -1628,6 +1502,17 @@ pub fn installed_scanner_files(root: &Path) -> Vec<PathBuf> {
     }
     result.sort();
     result
+}
+
+/// The namespace of an installed scanner file,
+/// `<namespace>/<name>/scanner.rn`: the name of the directory two
+/// levels above the file. Empty when the path has none.
+fn installed_namespace(file: &Path) -> String {
+    file.parent()
+        .and_then(Path::parent)
+        .and_then(Path::file_name)
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 /// The directories directly under `dir` whose names do not start with
@@ -2029,6 +1914,12 @@ unknown = 1
             assert!(def.path.is_absolute(), "def path is absolute");
             assert!(Path::new(&def.embed_key).is_absolute());
         }
+
+        // An installed scanner carries its namespace, and a scanner of
+        // another root has none
+        assert_eq!(reg.get_def("only-installed").unwrap().namespace, "gage");
+        assert_eq!(reg.get_def("shared").unwrap().namespace, "");
+        assert_eq!(reg.get_def("only-user").unwrap().namespace, "");
     }
 
     #[test]

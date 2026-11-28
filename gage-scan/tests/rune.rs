@@ -1,7 +1,9 @@
 //! Cargo test target for the Rune tests of scanners. A libtest-mimic
 //! harness exposes each Rune `#[test]` function as its own trial, so
-//! cargo-native filtering and reporting apply. `GAGE_SCANNER_TESTS`
-//! names the directory of scanners to test:
+//! cargo-native filtering and reporting apply. The test scanners of
+//! this repository are always tested. `GAGE_SCANNER_TESTS` names a
+//! directory of scanners to test with them, relative to the
+//! repository root:
 //!
 //! ```shell
 //! GAGE_SCANNER_TESTS=../gage-scanners cargo test -p gage-scan --test rune

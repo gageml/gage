@@ -46,10 +46,10 @@ you or your machine beyond what any Git fetch carries.
 Gage fetches from the scanner source only when you run one of these commands:
 
 - `gage scanner install` and `gage scanner upgrade`
-- `gage scanner list` with `--available` or `--upgradable`
+- `gage scanner search` and `gage scanner list --outdated`
 - `gage scanner show` for a scanner that is not installed
-- `gage init`, when no scanner is installed and you agree to install scanners
-  or pass `--yes`
+- `gage init`, when no scanner is installed and you agree to install scanners or
+  pass `--yes`
 
 No other command reads the scanner source, and Gage never checks it without
 being asked.

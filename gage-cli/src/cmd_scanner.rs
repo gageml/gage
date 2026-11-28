@@ -35,6 +35,12 @@ pub enum ScannerCommand {
     /// scanners, and project scanners.
     List(ScannerListArgs),
 
+    /// Search scanner source
+    ///
+    /// Shows the scanners that scanner source holds, with the version
+    /// of each one that is installed.
+    Search(ScannerSearchArgs),
+
     /// Show a scanner
     ///
     /// A scanner that is not installed is read from scanner source.
@@ -61,21 +67,27 @@ pub enum ScannerCommand {
     Upgrade(ScannerUpgradeArgs),
 }
 
+/// Shown under an empty listing of the scanners Gage finds
+const SEARCH_HINT: &str = "Use 'gage scanner search' to show scanners to install";
+
 #[derive(Args)]
 pub struct ScannerListArgs {
-    /// Include scanners that are not installed
-    ///
-    /// Reads scanner source and adds each scanner it holds that is
-    /// not installed.
-    #[arg(long)]
-    available: bool,
-
     /// Show installed scanners that have a newer version
     ///
     /// Reads scanner source and shows each installed scanner it holds
     /// a newer version of.
-    #[arg(long, conflicts_with = "available")]
-    upgradable: bool,
+    #[arg(short, long)]
+    outdated: bool,
+}
+
+#[derive(Args)]
+pub struct ScannerSearchArgs {
+    /// Words to search for
+    ///
+    /// Shows the scanners whose name or description has every word.
+    /// Without a word, shows every scanner.
+    #[arg(value_name = "TERM")]
+    terms: Vec<String>,
 }
 
 #[derive(Args)]
@@ -128,6 +140,7 @@ pub struct ScannerUpgradeArgs {
 pub fn run(command: ScannerCommand) -> Result<(), CliError> {
     match command {
         ScannerCommand::List(args) => list(args),
+        ScannerCommand::Search(args) => search(args),
         ScannerCommand::Show(args) => show(args),
         ScannerCommand::Install(args) => install(args),
         ScannerCommand::Uninstall(args) => uninstall(args),
@@ -137,8 +150,8 @@ pub fn run(command: ScannerCommand) -> Result<(), CliError> {
 
 fn list(args: ScannerListArgs) -> Result<(), CliError> {
     let config = Config::load_user().context("gage scanner list")?;
-    if args.upgradable {
-        return list_upgradable(&config);
+    if args.outdated {
+        return list_outdated(&config);
     }
     let registry = ScannerRegistry::load();
     for (path, error) in registry.parse_errors() {
@@ -149,18 +162,9 @@ fn list(args: ScannerListArgs) -> Result<(), CliError> {
         .into_iter()
         .map(|def| Row::found(def, &config))
         .collect();
-    if args.available {
-        let catalog = read_source("gage scanner list", &config)?;
-        let installed = ScannerSet::installed();
-        rows.extend(
-            catalog
-                .iter()
-                .filter(|e| e.visible() && installed.get(&e.qualified()).is_none())
-                .map(Row::available),
-        );
-    }
     if rows.is_empty() {
         println!("No scanners found");
+        println!("{}", style(SEARCH_HINT).dim());
         return Ok(());
     }
     rows.sort_by(|a, b| a.order().cmp(&b.order()));
@@ -173,8 +177,7 @@ fn list(args: ScannerListArgs) -> Result<(), CliError> {
 struct Row {
     name: String,
     version: String,
-    /// Where the scanner is: `installed`, `user`, `project`, or
-    /// `available` for a scanner of the source that is not installed
+    /// Where the scanner is: `installed`, `user`, or `project`
     source: String,
     description: String,
     state: RowState,
@@ -186,8 +189,6 @@ struct Row {
 enum RowState {
     /// Found, and the config enables it
     Enabled,
-    /// In the source and not installed
-    Available,
     /// Found, and the config disables it
     Disabled,
 }
@@ -208,17 +209,6 @@ impl Row {
         }
     }
 
-    /// A scanner of the source that is not installed.
-    fn available(entry: &Entry) -> Self {
-        Row {
-            name: entry.def.name.clone(),
-            version: entry.def.version.clone(),
-            source: "available".to_string(),
-            description: entry.def.description.clone(),
-            state: RowState::Available,
-        }
-    }
-
     /// Scanners that can be run first, then the rest, each by name.
     fn order(&self) -> (RowState, &str) {
         (self.state, &self.name)
@@ -226,8 +216,7 @@ impl Row {
 
     fn cells(&self) -> Vec<String> {
         let name = match self.state {
-            RowState::Enabled => style(&self.name).yellow().to_string(),
-            RowState::Available => self.name.clone(),
+            RowState::Enabled => self.name.clone(),
             RowState::Disabled => style(format!("{} (disabled)", self.name)).dim().to_string(),
         };
         vec![
@@ -255,7 +244,61 @@ fn scanner_table(rows: &[Row]) -> Table {
     table
 }
 
-fn list_upgradable(config: &Config) -> Result<(), CliError> {
+/// The scanners of scanner source that match every term, with the
+/// installed version of each.
+fn search(args: ScannerSearchArgs) -> Result<(), CliError> {
+    let config = Config::load_user().context("gage scanner search")?;
+    let catalog = read_source("gage scanner search", &config)?;
+    let installed = ScannerSet::installed();
+    let rows: Vec<[String; 4]> = catalog
+        .iter()
+        .filter(|entry| entry.visible() && matches_terms(entry, &args.terms))
+        .map(|entry| {
+            let installed_version = installed
+                .get(&entry.qualified())
+                .map(|found| found.def.version.clone())
+                .unwrap_or_default();
+            [
+                entry.qualified(),
+                entry.def.version.clone(),
+                installed_version,
+                entry.def.description.clone(),
+            ]
+        })
+        .collect();
+    if rows.is_empty() {
+        println!("No scanners found");
+        return Ok(());
+    }
+    println!("{}", search_table(rows));
+    Ok(())
+}
+
+/// Whether the scanner's qualified name or description has every
+/// term, whatever the case. No term matches every scanner.
+fn matches_terms(entry: &Entry, terms: &[String]) -> bool {
+    let text = format!("{} {}", entry.qualified(), entry.def.description).to_lowercase();
+    terms.iter().all(|term| text.contains(&term.to_lowercase()))
+}
+
+fn search_table(rows: Vec<[String; 4]>) -> Table {
+    let header = ["Scanner", "Version", "Installed", "Description"].map(String::from);
+    let mut table = Table::from_iter(std::iter::once(header).chain(rows));
+    table.with(Style::rounded());
+    if let Some(width) = s::stdout_width() {
+        table.with(
+            Width::wrap(width)
+                .keep_words(true)
+                .priority(Priority::max(true)),
+        );
+    }
+    table
+        .modify(Rows::first(), s::tty(Color::FG_BRIGHT_YELLOW))
+        .modify(Columns::one(3).not(Rows::first()), s::dim());
+    table
+}
+
+fn list_outdated(config: &Config) -> Result<(), CliError> {
     let catalog = read_source("gage scanner list", config)?;
     let installed = ScannerSet::installed();
     let plan = plan_upgrade(&catalog, &installed, &[])
@@ -288,10 +331,6 @@ fn list_upgradable(config: &Config) -> Result<(), CliError> {
     let table = Table::from_iter(std::iter::once(header).chain(rows))
         .with(Style::rounded())
         .modify(Rows::first(), s::tty(Color::FG_BRIGHT_YELLOW))
-        .modify(
-            Columns::one(0).not(Rows::first()),
-            s::tty(Color::FG_BRIGHT_CYAN),
-        )
         .modify(Columns::one(3).not(Rows::first()), s::dim())
         .to_string();
     println!("{table}");
@@ -622,12 +661,7 @@ mod tests {
         let mut config = Config::default();
         config.scanners.disable.push("off".to_string());
 
-        let mut rows: Vec<Row> = set
-            .iter()
-            .filter(|e| e.def.name != "alpha")
-            .map(|e| Row::found(&e.def, &config))
-            .collect();
-        rows.push(Row::available(set.get("ns/alpha").unwrap()));
+        let mut rows: Vec<Row> = set.iter().map(|e| Row::found(&e.def, &config)).collect();
         rows.sort_by(|a, b| a.order().cmp(&b.order()));
 
         let cells: Vec<Vec<String>> = rows
@@ -642,11 +676,26 @@ mod tests {
         assert_eq!(
             cells,
             [
+                ["alpha", "2.0.0", "project", "About alpha"],
                 ["beta", "1.0.0", "project", "About beta"],
-                ["alpha", "2.0.0", "available", "About alpha"],
                 ["off (disabled)", "", "project", "About off"],
             ]
         );
+    }
+
+    #[test]
+    fn a_search_matches_every_term_in_the_name_or_description() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_scanner(tmp.path(), "ns/code-review", "version: \"1.0.0\", api: 1,");
+        let set = ScannerSet::read_installed(tmp.path());
+        let entry = set.get("ns/code-review").unwrap();
+        let terms = |words: &[&str]| words.iter().map(|w| w.to_string()).collect::<Vec<_>>();
+
+        assert!(matches_terms(entry, &[]));
+        // The description is `About code-review`
+        assert!(matches_terms(entry, &terms(&["REVIEW"])));
+        assert!(matches_terms(entry, &terms(&["ns/code", "about"])));
+        assert!(!matches_terms(entry, &terms(&["review", "missing"])));
     }
 
     #[test]

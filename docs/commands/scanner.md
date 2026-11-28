@@ -1,8 +1,8 @@
 ---
 title: gage scanner
 description:
-  Command reference for gage scanner, including subcommands to list, show,
-  install, uninstall, and upgrade scanners
+  Command reference for gage scanner, including subcommands to list, search,
+  show, install, uninstall, and upgrade scanners
 ---
 
 The `gage scanner` command manages scanners. For background, see
@@ -26,9 +26,9 @@ namespace has a scanner of that name, give `NAMESPACE/NAME`, as in
 `gage/general`.
 
 Gage reads the source with Git when you run `gage scanner install`,
-`gage scanner upgrade`, `gage scanner list` with `--available` or
-`--upgradable`, or `gage scanner show` for a scanner that is not installed.
-No other command reads it.
+`gage scanner upgrade`, `gage scanner search`, `gage scanner list --outdated`,
+or `gage scanner show` for a scanner that is not installed. No other command
+reads it.
 
 ## scanner list
 
@@ -39,18 +39,31 @@ project scanners.
 gage scanner list [OPTIONS]
 ```
 
-| Option         | Description                                         |
-| -------------- | --------------------------------------------------- |
-| `--available`  | Include scanners that are not installed             |
-| `--upgradable` | Show installed scanners that have a newer version   |
+| Option           | Description                                       |
+| ---------------- | ------------------------------------------------- |
+| `-o, --outdated` | Show installed scanners that have a newer version |
 
-The `Source` column says where a scanner is. It is `installed`, `user`,
-`project`, or `available` for a scanner of the source that is not installed. A
-scanner that the config disables is marked `(disabled)`.
+The `Source` column says where a scanner is. It is `installed`, `user`, or
+`project`. A scanner that the config disables is marked `(disabled)`.
 
-`--upgradable` shows each installed scanner with its installed version and the
+`--outdated` shows each installed scanner with its installed version and the
 newer version in the source. A note says when the newer version needs a newer
 Gage.
+
+## scanner search
+
+Search the scanner source for scanners to install.
+
+```cli
+gage scanner search [TERM]...
+```
+
+The command shows the scanners whose name or description has every `TERM`.
+Letter case does not matter. Without a `TERM`, it shows every scanner in the
+source.
+
+The `Installed` column holds the version that is installed. It is empty for a
+scanner that is not installed.
 
 ## scanner show
 
@@ -126,7 +139,7 @@ constant.
 pub const SCANNER = #{
     name: "general",
     description: "General findings",
-    version: "1.0.0",
+    version: "0.1.0",
     api: 1,
     // ...
 };
@@ -146,8 +159,8 @@ A scanner names the scanners it needs with `requires`. Each entry is
 
 ```rust (rune)
 pub const SCANNER = #{
-    name: "parent",
-    requires: ["test/child"],
+    name: "code-review",
+    requires: ["gage/project-summary"],
     // ...
 };
 ```

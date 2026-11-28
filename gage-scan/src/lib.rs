@@ -207,6 +207,9 @@ pub struct CompiledScanner {
     /// the scan tasks; the attach phase runs the attach tasks
     tasks: BTreeMap<String, TaskDef>,
     selection: Selection,
+    /// The namespace the scanner was installed under; empty when it
+    /// was not installed
+    namespace: String,
     /// The version the scanner declares; empty when it declares none
     version: String,
     /// The scanner's resolved params, read by `params()` in its tasks
@@ -357,6 +360,7 @@ pub fn compile(scanner: &Scanner<'_>) -> Result<CompiledScanner, Error> {
         dir: def.path.parent().map(Path::to_path_buf).unwrap_or_default(),
         tasks: def.tasks.clone(),
         selection: Selection::Explicit,
+        namespace: def.namespace.clone(),
         version: def.version.clone(),
         params: scanner.params.clone(),
         source_files: files,
@@ -550,6 +554,7 @@ pub async fn scan(
             name: &s.name,
             tasks: &s.tasks,
             selection: s.selection.clone(),
+            namespace: &s.namespace,
             version: &s.version,
             params: s.params.as_ref(),
         })

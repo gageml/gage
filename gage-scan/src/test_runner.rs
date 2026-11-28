@@ -3,13 +3,15 @@
 //! `tests/rune.rs` (a libtest-mimic harness) collects the tests with
 //! [`collect_tests`] and runs each with [`run_test`].
 //!
-//! The directory is the one `GAGE_SCANNER_TESTS` names, such as a
-//! checkout of the published scanners, and otherwise the test
-//! scanners of this repository.
+//! The test scanners of this repository are always collected. The
+//! scanners under the directory `GAGE_SCANNER_TESTS` names, such as a
+//! checkout of the published scanners, are collected with them. A
+//! relative directory is read from the repository root, and a missing
+//! one is an error.
 
 use std::env;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use rune::alloc::prelude::TryToOwned;
@@ -52,36 +54,45 @@ struct FileSource {
     path: PathBuf,
 }
 
-/// The directory whose scanners are tested.
-fn tests_dir() -> PathBuf {
-    match env::var_os("GAGE_SCANNER_TESTS") {
-        Some(dir) => PathBuf::from(dir),
-        None => [
-            env!("CARGO_MANIFEST_DIR"),
-            "..",
-            "gage-registry",
-            "testdata",
-            "scanners",
-        ]
-        .iter()
-        .collect(),
-    }
-}
-
-/// Compile every `.rn` file of the tested directory, returning a case
-/// per `#[test]` function. A file that fails to compile yields a
+/// Compile every `.rn` file of the tested directories, returning a
+/// case per `#[test]` function. A file that fails to compile yields a
 /// single `<module>::build` case carrying its diagnostics; warnings on
 /// a successful build go to stderr.
 pub fn collect_tests() -> io::Result<Vec<TestCase>> {
-    let dir = tests_dir();
+    let mut cases = Vec::new();
+    for dir in tests_dirs()? {
+        collect_dir(&dir, &mut cases)?;
+    }
+    Ok(cases)
+}
 
+/// The directories whose scanners are tested: the test scanners of
+/// this repository, then the directory `GAGE_SCANNER_TESTS` names.
+fn tests_dirs() -> io::Result<Vec<PathBuf>> {
+    let repo: PathBuf = [env!("CARGO_MANIFEST_DIR"), ".."].iter().collect();
+    let mut dirs = vec![repo.join("gage-registry/testdata/scanners")];
+    if let Some(named) = env::var_os("GAGE_SCANNER_TESTS") {
+        // A test binary runs in its package directory, so a relative
+        // directory is read from the repository root
+        let dir = repo.join(named);
+        if !dir.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("GAGE_SCANNER_TESTS: {} is not a directory", dir.display()),
+            ));
+        }
+        dirs.push(dir);
+    }
+    Ok(dirs)
+}
+
+fn collect_dir(dir: &Path, cases: &mut Vec<TestCase>) -> io::Result<()> {
     let context = gage_runtime::context().unwrap();
     let rt = RuneArc::try_new(context.runtime().unwrap()).unwrap();
 
-    let mut cases = Vec::new();
-    for path in walk_rn_files(&dir) {
+    for path in walk_rn_files(dir) {
         let rel = path
-            .strip_prefix(&dir)
+            .strip_prefix(dir)
             .expect("path under dir via walk_rn_files")
             .to_string_lossy()
             .to_string();
@@ -133,12 +144,12 @@ pub fn collect_tests() -> io::Result<Vec<TestCase>> {
             });
         }
     }
-    Ok(cases)
+    Ok(())
 }
 
 /// A `scanner.rn` test is named for its scanner directory; any other
 /// file is named for its stem.
-fn module_name(path: &std::path::Path) -> String {
+fn module_name(path: &Path) -> String {
     let stem = path.file_stem().unwrap().to_string_lossy();
     if stem == "scanner" {
         path.parent()
@@ -229,14 +240,14 @@ fn format_error(
     }
 }
 
-fn walk_rn_files(dir: &std::path::Path) -> Vec<PathBuf> {
+fn walk_rn_files(dir: &Path) -> Vec<PathBuf> {
     let mut result = Vec::new();
     walk_rn_files_rec(dir, &mut result);
     result.sort();
     result
 }
 
-fn walk_rn_files_rec(dir: &std::path::Path, result: &mut Vec<PathBuf>) {
+fn walk_rn_files_rec(dir: &Path, result: &mut Vec<PathBuf>) {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(_) => return,

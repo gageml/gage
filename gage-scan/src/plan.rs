@@ -1,8 +1,8 @@
 //! The plan: one DAG over every task of the scan.
 //!
 //! Tasks are the nodes. An edge runs from an upstream task to a
-//! downstream task when a `wants` or `required_by` pattern of the
-//! downstream task matches a name under the upstream task's `writes`.
+//! downstream task when a `wants` pattern of the downstream task
+//! matches a name under the upstream task's `writes`.
 //! Patterns are `*`-globs matched across every planned scanner, so a
 //! task in one scanner is ordered after a task in another without
 //! naming it. An edge is ordering only: the downstream task runs
@@ -34,6 +34,9 @@ pub struct PlannedScanner<'a> {
     pub name: &'a str,
     pub tasks: &'a BTreeMap<String, TaskDef>,
     pub selection: Selection,
+    /// The namespace the scanner was installed under; empty when it
+    /// was not installed
+    pub namespace: &'a str,
     /// The version the scanner declares; empty when it declares none
     pub version: &'a str,
     /// The scanner's resolved params; `None` when it declares none
@@ -87,9 +90,12 @@ pub struct PlanTask {
     /// holds; the `note_doc` table of the scan's scope reads them
     /// from here.
     pub note_writes: BTreeMap<String, String>,
+    /// The namespace the task's scanner was installed under; empty
+    /// when it was not installed
+    pub scanner_ns: String,
     /// The version the task's scanner declares; empty when it
-    /// declares none. The plan records it so a scan shows which
-    /// version of a scanner wrote its notes.
+    /// declares none. The plan records the namespace and the version
+    /// so a scan shows which scanner wrote its notes.
     pub scanner_version: String,
     /// The resolved params of the task's scanner: the declared
     /// defaults with the config and command-line values applied, as
@@ -212,6 +218,7 @@ pub fn plan(scanners: &[PlannedScanner<'_>]) -> Result<Plan, PlanError> {
             after,
             unmatched_note_wants,
             note_writes: def.notes.writes.clone(),
+            scanner_ns: scanner.namespace.to_string(),
             scanner_version: scanner.version.to_string(),
             params: scanner
                 .params
@@ -319,6 +326,7 @@ impl Plan {
                     .collect(),
                 unmatched_note_wants: t.unmatched_note_wants.clone(),
                 note_writes: t.note_writes.clone(),
+                scanner_ns: t.scanner_ns.clone(),
                 scanner_version: t.scanner_version.clone(),
                 params: t.params.clone(),
             })
@@ -339,6 +347,8 @@ struct TaskJson {
     after: Vec<EdgeJson>,
     unmatched_note_wants: Vec<String>,
     note_writes: BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    scanner_ns: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     scanner_version: String,
     params: Value,
@@ -376,7 +386,6 @@ mod tests {
                                 .iter()
                                 .map(|w| (w.to_string(), String::new()))
                                 .collect(),
-                            ..TaskDepsDef::default()
                         },
                         issues: TaskDepsDef::default(),
                     },
@@ -411,6 +420,7 @@ mod tests {
                 name: "b",
                 tasks: &b,
                 selection: Selection::Explicit,
+                namespace: "",
                 version: "",
                 params: None,
             },
@@ -418,6 +428,7 @@ mod tests {
                 name: "a",
                 tasks: &a,
                 selection: Selection::Explicit,
+                namespace: "",
                 version: "",
                 params: None,
             },
@@ -444,6 +455,7 @@ mod tests {
             name: "a",
             tasks: &a,
             selection: Selection::Explicit,
+            namespace: "",
             version: "",
             params: None,
         }])
@@ -459,6 +471,7 @@ mod tests {
             name: "a",
             tasks: &a,
             selection: Selection::Explicit,
+            namespace: "",
             version: "",
             params: None,
         }]);
@@ -480,6 +493,7 @@ mod tests {
                 name: "a",
                 tasks: &a,
                 selection: Selection::Explicit,
+                namespace: "",
                 version: "",
                 params: None,
             },
@@ -487,6 +501,7 @@ mod tests {
                 name: "b",
                 tasks: &b,
                 selection: Selection::Explicit,
+                namespace: "",
                 version: "",
                 params: None,
             },
@@ -494,6 +509,7 @@ mod tests {
                 name: "c",
                 tasks: &c,
                 selection: Selection::Explicit,
+                namespace: "",
                 version: "",
                 params: None,
             },
@@ -524,6 +540,7 @@ mod tests {
                 name: "a",
                 tasks: &a,
                 selection: Selection::Group("default".into()),
+                namespace: "gage",
                 version: "1.2.0",
                 params: None,
             },
@@ -531,6 +548,7 @@ mod tests {
                 name: "c",
                 tasks: &c,
                 selection: Selection::Explicit,
+                namespace: "",
                 version: "",
                 params: Some(&c_params),
             },
@@ -548,6 +566,7 @@ mod tests {
                         ],
                         "unmatched_note_wants": ["missing"],
                         "note_writes": { "finding.code": "" },
+                        "scanner_ns": "gage",
                         "scanner_version": "1.2.0",
                         "params": {}
                     },
@@ -557,6 +576,7 @@ mod tests {
                         "after": [],
                         "unmatched_note_wants": [],
                         "note_writes": { "project-summary.rules": "" },
+                        "scanner_ns": "gage",
                         "scanner_version": "1.2.0",
                         "params": {}
                     },

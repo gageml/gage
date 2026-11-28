@@ -28,6 +28,14 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Checkout scanners
+        # The tests compile the published scanners and run their tests
+        uses: actions/checkout@v6
+        with:
+          repository: gageml/gage-scanners
+          path: gage-scanners
+          persist-credentials: false
+
       - name: Rust
         # With no arguments, installs the toolchain rust-toolchain.toml names
         run: rustup toolchain install
@@ -49,3 +57,5 @@ jobs:
 
       - name: Test
         run: cargo test --locked
+        env:
+          GAGE_SCANNER_TESTS: gage-scanners

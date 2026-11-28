@@ -8,8 +8,8 @@
 //! scanner's source. A facility added to this runtime that reads a
 //! file at compile time extends [`source_files`] in the same change;
 //! the guard is `enumerated_files_are_all_the_compiler_reads`, which
-//! compiles every builtin scanner in a directory holding only the
-//! enumerated files.
+//! compiles a scanner that uses every include form in a directory
+//! holding only the enumerated files.
 //!
 //! Today the facilities are `include_str!` and `include_json!`, from
 //! `gage-runtime`. Each takes one string literal and reads it relative
@@ -365,65 +365,146 @@ mod tests {
         ));
     }
 
-    /// The guard on the closed-runtime contract: every scanner of this
-    /// repository, the examples and the project's own, compiles in a
-    /// directory holding only its enumerated files, with the full
+    /// The guard on the closed-runtime contract: a scanner compiles in
+    /// a directory holding only its enumerated files, with the full
     /// context. A file the compiler reads that the enumerator missed
-    /// fails this compile.
+    /// fails this compile. The scanner here uses every include form:
+    /// in the `SCANNER` declaration, in a function, across lines, as
+    /// JSON, from a subdirectory, and from a parent directory.
     #[test]
     fn enumerated_files_are_all_the_compiler_reads() {
+        let tmp = tempfile::tempdir().unwrap();
+        let scanner = write_scanner(
+            tmp.path(),
+            "guard/scanner.rn",
+            r#"
+            pub const SCANNER = #{
+                name: "guard",
+                description: "Include guard",
+                tasks: #{
+                    main: #{
+                        notes: #{
+                            writes: #{
+                                "guard": include_str!(
+                                    "note-doc.md"
+                                ),
+                            },
+                        },
+                    },
+                },
+            };
+
+            const DATA = include_json!("data/values.json");
+
+            pub async fn main() {
+                let prompt = include_str!("prompt.md.j2");
+                let shared = include_str!("../shared/doc.md");
+                let #{ greeting } = DATA;
+                (prompt, shared, greeting)
+            }
+            "#,
+        );
+        for (file, content) in [
+            ("guard/note-doc.md", "A guard note\n"),
+            ("guard/data/values.json", "{ \"greeting\": \"hello\" }\n"),
+            ("guard/prompt.md.j2", "Review {{ session }}\n"),
+            ("shared/doc.md", "Shared\n"),
+        ] {
+            write_scanner(tmp.path(), file, content);
+        }
+
+        let files = source_files(&scanner).unwrap();
+        assert_eq!(
+            literals(&files),
+            [
+                "scanner.rn",
+                "note-doc.md",
+                "data/values.json",
+                "prompt.md.j2",
+                "../shared/doc.md",
+            ]
+        );
+        assert_compiles_from_enumerated_files(&scanner);
+    }
+
+    /// The same guard over the scanners on hand: the examples and the
+    /// project scanners of this repository, and the scanners under
+    /// the directory `GAGE_SCANNER_TESTS` names, such as a checkout of
+    /// the published scanners. A relative directory is read from the
+    /// repository root, and a missing one fails the test.
+    #[test]
+    fn scanners_on_hand_compile_from_their_enumerated_files() {
         let repo: PathBuf = [env!("CARGO_MANIFEST_DIR"), ".."].iter().collect();
-        let mut scanners: Vec<PathBuf> = Vec::new();
-        for entry in fs::read_dir(repo.join("examples/scanners")).unwrap() {
-            let file = entry.unwrap().path();
-            if file.extension().is_some_and(|ext| ext == "rn") {
-                scanners.push(file);
-            }
+        let mut scanners = rn_files(&repo.join("examples/scanners"));
+        scanners.extend(rn_files(&repo.join(".gage/scanners")));
+        if let Some(dir) = std::env::var_os("GAGE_SCANNER_TESTS") {
+            let dir = repo.join(dir);
+            assert!(dir.is_dir(), "{} is not a directory", dir.display());
+            scanners.extend(rn_files(&dir));
         }
-        for entry in fs::read_dir(repo.join(".gage/scanners")).unwrap() {
-            let scanner = entry.unwrap().path().join("scanner.rn");
-            if scanner.is_file() {
-                scanners.push(scanner);
-            }
-        }
-        let mut checked = 0;
         for scanner in scanners {
-            let files = source_files(&scanner).unwrap();
             // A scanner with no includes has nothing to guard
-            if files.len() == 1 {
-                continue;
+            if source_files(&scanner).unwrap().len() > 1 {
+                assert_compiles_from_enumerated_files(&scanner);
             }
-
-            let tmp = tempfile::tempdir().unwrap();
-            let sandbox = tmp.path().join("sandbox");
-            for file in &files {
-                let dest = sandbox.join(&file.literal);
-                fs::create_dir_all(dest.parent().unwrap()).unwrap();
-                fs::copy(&file.path, &dest).unwrap();
-            }
-            let copied = sandbox.join(&files[0].literal);
-            let source = fs::read_to_string(&copied).unwrap();
-
-            let context = crate::context().unwrap();
-            let mut sources = rune::Sources::new();
-            sources
-                .insert(rune::Source::with_path("scanner", source, &copied).unwrap())
-                .unwrap();
-            let mut diagnostics = rune::Diagnostics::new();
-            let result = rune::prepare(&mut sources)
-                .with_context(&context)
-                .with_diagnostics(&mut diagnostics)
-                .build();
-            let mut buf = rune::termcolor::Buffer::no_color();
-            diagnostics.emit(&mut buf, &sources).unwrap();
-            assert!(
-                result.is_ok(),
-                "{} in a sandbox of its enumerated files:\n{}",
-                scanner.display(),
-                String::from_utf8(buf.into_inner()).unwrap()
-            );
-            checked += 1;
         }
-        assert!(checked >= 4, "checked {checked} scanners");
+    }
+
+    /// Copy the enumerated files of `scanner` to an empty directory
+    /// and compile the copy there.
+    fn assert_compiles_from_enumerated_files(scanner: &Path) {
+        let files = source_files(scanner).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        // The copy sits two levels down so that an include from a
+        // parent directory stays inside the temporary directory
+        let sandbox = tmp.path().join("up/sandbox");
+        for file in &files {
+            let dest = sandbox.join(&file.literal);
+            fs::create_dir_all(dest.parent().unwrap()).unwrap();
+            fs::copy(&file.path, &dest).unwrap();
+        }
+        let copied = sandbox.join(&files[0].literal);
+        let source = fs::read_to_string(&copied).unwrap();
+
+        let context = crate::context().unwrap();
+        let mut sources = rune::Sources::new();
+        sources
+            .insert(rune::Source::with_path("scanner", source, &copied).unwrap())
+            .unwrap();
+        let mut diagnostics = rune::Diagnostics::new();
+        let result = rune::prepare(&mut sources)
+            .with_context(&context)
+            .with_diagnostics(&mut diagnostics)
+            .build();
+        let mut buf = rune::termcolor::Buffer::no_color();
+        diagnostics.emit(&mut buf, &sources).unwrap();
+        assert!(
+            result.is_ok(),
+            "{} in a sandbox of its enumerated files:\n{}",
+            scanner.display(),
+            String::from_utf8(buf.into_inner()).unwrap()
+        );
+    }
+
+    /// Every `.rn` file under `dir`, sorted. A directory that cannot
+    /// be read has none.
+    fn rn_files(dir: &Path) -> Vec<PathBuf> {
+        let mut found = Vec::new();
+        let mut pending = vec![dir.to_path_buf()];
+        while let Some(dir) = pending.pop() {
+            let Ok(entries) = fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else if path.extension().is_some_and(|ext| ext == "rn") {
+                    found.push(path);
+                }
+            }
+        }
+        found.sort();
+        found
     }
 }

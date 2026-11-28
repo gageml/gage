@@ -152,7 +152,7 @@ impl Entry {
 
     /// Whether the scanner appears in a listing.
     pub fn visible(&self) -> bool {
-        !self.def.hidden && !self.def.library
+        !self.def.hidden
     }
 }
 
